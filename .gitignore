@@ -1,0 +1,22 @@
+# Swift
+.build/
+.swiftpm/
+*.xcodeproj
+DerivedData/
+
+# macOS
+.DS_Store
+
+# 索引與記憶資料一律不進 repo（它們住 ~/.claude-ltm/）
+*.sqlite
+*.sqlite-*
+vectors.bin
+state.json
+
+# 第三方逐字內容一律不進 remote（見 CLAUDE.md 隱私邊界）
+*.srt
+*.mp3
+*.m4a
+*.wav
+**/*_notes.md
+fixtures/real/
