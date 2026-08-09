@@ -1,41 +1,76 @@
-// probe-tokenizer.swift — #2 的一次性量測探針
+// probe-tokenizer.swift — #2 的一次性量測探針（v2，修 PR #8 verify 的 12 條 blocking）
 //
 // 目的：量出 SQLite FTS5 各 tokenizer 配置對中英混雜技術對話的 known-item Recall@20，
 // 並特徵化 NLTokenizer 的丟字條件。
 //
-// 隱私（CLAUDE.md 鐵律）：語料在執行期直接讀 ~/.claude/projects/，
-// 不複製任何片段到 repo；只有聚合數字被印出供寫入 docs/measurements/。
+// 隱私（CLAUDE.md 鐵律）：語料在執行期直接讀 ~/.claude/projects/，只讀不寫；
+// 任何語料片段都不得寫進本檔或任何提交物。本檔中所有字面字串皆為合成資料。
+// 只有聚合數字被印出供寫入 docs/measurements/。
 //
-// 用法：swift scripts/probe-tokenizer.swift [docs] [queriesPerBucket]
-//   swift scripts/probe-tokenizer.swift 600 120
+// 用法：swift scripts/probe-tokenizer.swift [docs] [queriesPerBucket] [seed]
+//   swift scripts/probe-tokenizer.swift 2000 120 42
 
 import Foundation
 import NaturalLanguage
 import SQLite3
 
+setvbuf(stdout, nil, _IONBF, 0)   // 不緩衝：崩潰時仍能看到進度，定位得到現場
+
 let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-let argDocs = CommandLine.arguments.count > 1 ? Int(CommandLine.arguments[1]) ?? 600 : 600
+let argDocs = CommandLine.arguments.count > 1 ? Int(CommandLine.arguments[1]) ?? 2000 : 2000
 let argQPB = CommandLine.arguments.count > 2 ? Int(CommandLine.arguments[2]) ?? 120 : 120
+let argSeed = CommandLine.arguments.count > 3 ? UInt64(CommandLine.arguments[3]) ?? 42 : 42
 
-// MARK: - 語料讀取
+func die(_ msg: String) -> Never { FileHandle.standardError.write(("✗ " + msg + "\n").data(using: .utf8)!); exit(1) }
 
-/// 從 ~/.claude/projects 抽樣對話 text block。只取 user/assistant 的 type=="text" 區塊。
+/// 可重現的 PRNG（SplitMix64）—— 取代 shuffle()/randomElement() 的系統亂數，讓數字可重跑。
+struct Seeded: RandomNumberGenerator {
+    var s: UInt64
+    init(_ seed: UInt64) { s = seed }
+    mutating func next() -> UInt64 {
+        s &+= 0x9E3779B97F4A7C15
+        var z = s
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
+    }
+}
+var rng = Seeded(argSeed)
+
+// MARK: - Script 判定（單一定義，供切段／查詢構造共用；修 finding 34 的不一致）
+
+func isCJKScalar(_ u: Unicode.Scalar) -> Bool {
+    (u.value >= 0x3400 && u.value <= 0x4DBF) || (u.value >= 0x4E00 && u.value <= 0x9FFF)
+        || (u.value >= 0xF900 && u.value <= 0xFAFF)
+}
+func isCJK(_ c: Character) -> Bool { c.unicodeScalars.contains(where: isCJKScalar) }
+func isLatinAlnum(_ c: Character) -> Bool { c.isASCII && (c.isLetter || c.isNumber) }
+
+// MARK: - 語料讀取（每檔設上限，避免少數長 session 主宰；下限放低以涵蓋短文本區間）
+
+let minDocChars = 20        // 修 finding 13/17：原本 80 排除了診斷失敗案例所在的長度區間
+let maxBlocksPerFile = 4    // 修 finding 19/27/32：原本抽乾每檔，樣本被長 session 主宰
+
 func loadCorpus(limit: Int) -> [String] {
     let root = ("~/.claude/projects" as NSString).expandingTildeInPath
     let fm = FileManager.default
-    guard let en = fm.enumerator(atPath: root) else { return [] }
+    guard let en = fm.enumerator(atPath: root) else { die("無法列舉 \(root)") }
     var files: [String] = []
     while let p = en.nextObject() as? String {
         if p.hasSuffix(".jsonl") { files.append(root + "/" + p) }
     }
-    files.shuffle()
+    files.sort()                    // 先排序再用 seeded shuffle → 完全可重現
+    files.shuffle(using: &rng)
 
     var docs: [String] = []
-    outer: for f in files {
+    for f in files {
+        if docs.count >= limit { break }
         guard let data = fm.contents(atPath: f),
               let text = String(data: data, encoding: .utf8) else { continue }
+        var takenFromFile = 0
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            if takenFromFile >= maxBlocksPerFile || docs.count >= limit { break }
             guard let ld = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: ld) as? [String: Any],
                   let type = obj["type"] as? String,
@@ -47,36 +82,18 @@ func loadCorpus(limit: Int) -> [String] {
             for b in blocks {
                 guard (b["type"] as? String) == "text",
                       let t = (b["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      t.count >= 80 else { continue }
+                      t.count >= minDocChars else { continue }
                 docs.append(String(t.prefix(600)))
-                if docs.count >= limit { break outer }
+                takenFromFile += 1
+                break                // 每行最多取一個 block，分散來源
             }
         }
     }
     return docs
 }
 
-// MARK: - NLTokenizer 斷詞 + 丟字特徵化
+// MARK: - 斷詞與丟字度量
 
-struct SegStat {
-    let inputChars: Int
-    let coveredChars: Int
-    let latinRuns: Int
-    let detectedLang: String
-    var lossRatio: Double { inputChars == 0 ? 0 : 1.0 - Double(coveredChars) / Double(inputChars) }
-}
-
-func latinRunCount(_ s: String) -> Int {
-    var runs = 0, inRun = false
-    for ch in s.unicodeScalars {
-        let isLatin = (ch.value >= 0x41 && ch.value <= 0x5A) || (ch.value >= 0x61 && ch.value <= 0x7A)
-        if isLatin && !inRun { runs += 1; inRun = true }
-        if !isLatin { inRun = false }
-    }
-    return runs
-}
-
-/// 直接用 NLTokenizer 斷詞（naive 版；用於量測其丟字行為）
 func segNaive(_ s: String) -> [String] {
     let tk = NLTokenizer(unit: .word); tk.string = s
     var w: [String] = []
@@ -84,203 +101,247 @@ func segNaive(_ s: String) -> [String] {
     return w
 }
 
-/// 依 script 先切段，只對 CJK 段做 NLTokenizer（規避語言偵測失準的候選修法）
+/// 先依 script 切段，只對 CJK 段呼叫 NLTokenizer（規避語言偵測失準）
 func segByScript(_ s: String) -> [String] {
-    func isCJK(_ u: Unicode.Scalar) -> Bool {
-        (u.value >= 0x3400 && u.value <= 0x9FFF) || (u.value >= 0xF900 && u.value <= 0xFAFF)
-    }
-    var out: [String] = []
-    var buf = ""
-    var bufIsCJK: Bool? = nil
+    var out: [String] = []; var buf = ""; var bufIsCJK: Bool? = nil
     func flush() {
         guard !buf.isEmpty else { return }
         if bufIsCJK == true { out.append(contentsOf: segNaive(buf)) }
-        else {
-            let parts = buf.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-            out.append(contentsOf: parts.map(String.init))
-        }
+        else { out.append(contentsOf: buf.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)) }
         buf = ""
     }
     for ch in s {
-        let cjk = ch.unicodeScalars.contains(where: isCJK)
-        if bufIsCJK == nil { bufIsCJK = cjk }
-        else if cjk != bufIsCJK { flush(); bufIsCJK = cjk }
+        let cjk = isCJK(ch)
+        if bufIsCJK == nil { bufIsCJK = cjk } else if cjk != bufIsCJK { flush(); bufIsCJK = cjk }
         buf.append(ch)
     }
     flush()
     return out.filter { !$0.isEmpty }
 }
 
-func segStat(_ s: String, tokens: [String]) -> SegStat {
-    let rec = NLLanguageRecognizer(); rec.processString(s)
-    return SegStat(inputChars: s.filter { $0.isLetter || $0.isNumber }.count,
-                   coveredChars: tokens.joined().count,
-                   latinRuns: latinRunCount(s),
-                   detectedLang: rec.dominantLanguage?.rawValue ?? "nil")
+/// 丟字度量：分子分母使用**同一個字元集合**（letter/number），並比對**多重集合**而非只比長度。
+/// 修 finding 9（分母不一致→負值抵銷）與 finding 16（只驗總數、不驗是否同一批字）。
+struct SegStat {
+    let inputCount: Int
+    let keptCount: Int          // token 中屬於 letter/number 的字元數
+    let missingCount: Int       // 多重集合差集大小：輸入有、token 沒有的字元數
+    let latinRuns: Int
+    let inputChars: Int
+    var lossRatio: Double { inputCount == 0 ? 0 : Double(missingCount) / Double(inputCount) }
 }
 
-// MARK: - SQLite 輔助
-
-final class DB {
-    var h: OpaquePointer?
-    init() { sqlite3_open(":memory:", &h) }
-    deinit { sqlite3_close(h) }
-    func exec(_ sql: String) { sqlite3_exec(h, sql, nil, nil, nil) }
-    func insert(_ table: String, _ rowid: Int, _ text: String) {
-        var st: OpaquePointer?
-        sqlite3_prepare_v2(h, "INSERT INTO \(table)(rowid,x) VALUES(?1,?2)", -1, &st, nil)
-        sqlite3_bind_int64(st, 1, sqlite3_int64(rowid))
-        sqlite3_bind_text(st, 2, text, -1, SQLITE_TRANSIENT)
-        sqlite3_step(st); sqlite3_finalize(st)
-    }
-    /// 回傳 BM25 排序的 top-k rowid
-    func search(_ table: String, _ match: String, k: Int) -> [Int] {
-        var st: OpaquePointer?
-        let sql = "SELECT rowid FROM \(table) WHERE \(table) MATCH ?1 ORDER BY bm25(\(table)) LIMIT \(k)"
-        guard sqlite3_prepare_v2(h, sql, -1, &st, nil) == SQLITE_OK else { return [] }
-        sqlite3_bind_text(st, 1, match, -1, SQLITE_TRANSIENT)
-        var out: [Int] = []
-        while sqlite3_step(st) == SQLITE_ROW { out.append(Int(sqlite3_column_int64(st, 0))) }
-        sqlite3_finalize(st)
-        return out
-    }
-}
-
-// MARK: - 查詢集（known-item）
-
-enum Bucket: String, CaseIterable { case cjk2 = "中文2字", cjk3 = "中文3字", cjk4 = "中文4字", latin = "英數" }
-
-struct Query { let bucket: Bucket; let text: String; let goldDoc: Int }
-
-func cjkRuns(_ s: String) -> [String] {
-    func isCJK(_ u: Unicode.Scalar) -> Bool { u.value >= 0x3400 && u.value <= 0x9FFF }
-    var runs: [String] = []; var buf = ""
-    for ch in s {
-        if ch.unicodeScalars.contains(where: isCJK) { buf.append(ch) }
-        else { if buf.count >= 2 { runs.append(buf) }; buf = "" }
-    }
-    if buf.count >= 2 { runs.append(buf) }
+func latinRunCount(_ s: String) -> Int {
+    var runs = 0, inRun = false
+    for c in s { if isLatinAlnum(c) { if !inRun { runs += 1; inRun = true } } else { inRun = false } }
     return runs
 }
 
-func latinTokens(_ s: String) -> [String] {
-    s.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
-        .map(String.init)
-        .filter { $0.count >= 4 && $0.allSatisfy { $0.isASCII } }
-}
-
-func buildQueries(_ docs: [String], perBucket: Int) -> [Query] {
-    var qs: [Query] = []
-    var counts: [Bucket: Int] = [:]
-    for (i, d) in docs.enumerated().shuffled() {
-        for (bucket, n) in [(Bucket.cjk2, 2), (.cjk3, 3), (.cjk4, 4)] {
-            guard (counts[bucket] ?? 0) < perBucket else { continue }
-            let runs = cjkRuns(d).filter { $0.count >= n }
-            guard let run = runs.randomElement() else { continue }
-            let start = Int.random(in: 0...(run.count - n))
-            let idx = run.index(run.startIndex, offsetBy: start)
-            let sub = String(run[idx..<run.index(idx, offsetBy: n)])
-            qs.append(Query(bucket: bucket, text: sub, goldDoc: i))
-            counts[bucket, default: 0] += 1
-        }
-        if (counts[.latin] ?? 0) < perBucket, let lt = latinTokens(d).randomElement() {
-            qs.append(Query(bucket: .latin, text: lt, goldDoc: i))
-            counts[.latin, default: 0] += 1
-        }
-        if Bucket.allCases.allSatisfy({ (counts[$0] ?? 0) >= perBucket }) { break }
+func segStat(_ s: String, tokens: [String]) -> SegStat {
+    func bag(_ x: String) -> [Character: Int] {
+        var m: [Character: Int] = [:]
+        for c in x where c.isLetter || c.isNumber { m[c, default: 0] += 1 }
+        return m
     }
-    return qs
+    let inBag = bag(s), outBag = bag(tokens.joined())
+    var missing = 0
+    for (c, n) in inBag { missing += max(0, n - (outBag[c] ?? 0)) }
+    return SegStat(inputCount: inBag.values.reduce(0, +),
+                   keptCount: outBag.values.reduce(0, +),
+                   missingCount: missing,
+                   latinRuns: latinRunCount(s),
+                   inputChars: s.count)
 }
 
-// MARK: - 主流程
+// MARK: - SQLite（每個呼叫檢查回傳碼；修 finding 4/25/31 的靜默吞錯）
 
-print("讀取語料…")
-let docs = loadCorpus(limit: argDocs)
-guard docs.count >= 50 else { print("語料不足（\(docs.count)），中止"); exit(1) }
-print("語料：\(docs.count) 份文件，平均 \(docs.map(\.count).reduce(0,+) / docs.count) 字元\n")
-
-// --- NLTokenizer 丟字特徵化 ---
-print("== NLTokenizer 丟字特徵化 ==")
-var naiveStats: [SegStat] = [], scriptStats: [SegStat] = []
-for d in docs {
-    naiveStats.append(segStat(d, tokens: segNaive(d)))
-    scriptStats.append(segStat(d, tokens: segByScript(d)))
+/// FTS5 phrase 字面值：整段包雙引號，內部雙引號以連續兩個跳脫。
+/// 不做這件事的話，含 `"` 的查詢會讓 FTS5 回 "unterminated string"——
+/// 而 v1 因為吞掉 prepare/step 錯誤，會把它靜默轉成 0 命中、汙染 recall。
+func ftsPhrase(_ s: String) -> String {
+    "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
 }
-func report(_ name: String, _ st: [SegStat]) {
-    let lossy = st.filter { $0.lossRatio > 0.05 }
-    let severe = st.filter { $0.lossRatio > 0.20 }
-    let avgLoss = st.map(\.lossRatio).reduce(0,+) / Double(st.count)
-    let maxLoss = st.map(\.lossRatio).max() ?? 0
-    print("  \(name): 平均丟字率 \(String(format: "%.1f%%", avgLoss * 100))，最大 \(String(format: "%.1f%%", maxLoss * 100))")
-    print("    丟字 >5%: \(lossy.count)/\(st.count)　>20%: \(severe.count)/\(st.count)")
-    if !lossy.isEmpty {
-        let avgRunsLossy = Double(lossy.map(\.latinRuns).reduce(0,+)) / Double(lossy.count)
-        let clean = st.filter { $0.lossRatio <= 0.05 }
-        let avgRunsClean = clean.isEmpty ? 0 : Double(clean.map(\.latinRuns).reduce(0,+)) / Double(clean.count)
-        print("    丟字組平均 Latin run 數 \(String(format: "%.1f", avgRunsLossy))；正常組 \(String(format: "%.1f", avgRunsClean))")
-        var langs: [String: Int] = [:]
-        for s in lossy { langs[s.detectedLang, default: 0] += 1 }
-        let top = langs.sorted { $0.value > $1.value }.prefix(4).map { "\($0.key)=\($0.value)" }.joined(separator: " ")
-        print("    丟字組偵測語言分布：\(top)")
+
+final class DB {
+    var h: OpaquePointer?
+    init() { if sqlite3_open(":memory:", &h) != SQLITE_OK { die("sqlite3_open 失敗: \(String(cString: sqlite3_errmsg(h)))") } }
+    deinit { sqlite3_close(h) }
+
+    func exec(_ sql: String) {
+        var err: UnsafeMutablePointer<CChar>?
+        if sqlite3_exec(h, sql, nil, nil, &err) != SQLITE_OK {
+            let m = err.map { String(cString: $0) } ?? "unknown"
+            die("sqlite3_exec 失敗: \(m)\n   SQL: \(sql)")
+        }
+    }
+    func insert(_ table: String, _ rowid: Int, _ text: String) {
+        var st: OpaquePointer?
+        guard sqlite3_prepare_v2(h, "INSERT INTO \(table)(rowid,x) VALUES(?1,?2)", -1, &st, nil) == SQLITE_OK
+        else { die("prepare insert \(table) 失敗: \(String(cString: sqlite3_errmsg(h)))") }
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_int64(st, 1, sqlite3_int64(rowid))
+        sqlite3_bind_text(st, 2, text, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(st) == SQLITE_DONE
+        else { die("insert \(table) rowid=\(rowid) 失敗: \(String(cString: sqlite3_errmsg(h)))") }
+    }
+    /// BM25 排序的 top-k rowid。查詢語法錯誤（非「查無結果」）會中止。
+    func search(_ table: String, _ match: String, k: Int) -> [Int] {
+        var st: OpaquePointer?
+        let sql = "SELECT rowid FROM \(table) WHERE \(table) MATCH ?1 ORDER BY bm25(\(table)) LIMIT \(k)"
+        guard sqlite3_prepare_v2(h, sql, -1, &st, nil) == SQLITE_OK
+        else { die("prepare search \(table) 失敗: \(String(cString: sqlite3_errmsg(h)))") }
+        defer { sqlite3_finalize(st) }
+        sqlite3_bind_text(st, 1, match, -1, SQLITE_TRANSIENT)
+        var out: [Int] = []
+        while true {
+            let rc = sqlite3_step(st)
+            if rc == SQLITE_ROW { out.append(Int(sqlite3_column_int64(st, 0))) }
+            else if rc == SQLITE_DONE { break }
+            else { die("search \(table) 執行失敗 (rc=\(rc)): \(String(cString: sqlite3_errmsg(h)))\n   MATCH: \(match)") }
+        }
+        return out
+    }
+    /// smoke test：確認該 tokenizer 真的可用（而非建表成功但比對永遠落空）
+    func smoke(_ table: String, _ probe: String, _ query: String) {
+        exec("CREATE VIRTUAL TABLE __smoke_\(table) USING fts5(x, tokenize='\(table)');")
+        insert("__smoke_\(table)", 1, probe)
+        let hit = search("__smoke_\(table)", ftsPhrase(query), k: 1)
+        exec("DROP TABLE __smoke_\(table);")
+        if hit.isEmpty { die("tokenizer '\(table)' smoke test 失敗：索引 [\(probe)] 後查 [\(query)] 無命中") }
     }
 }
-report("naive（整份直接斷詞）", naiveStats)
-report("by-script（先切 CJK/Latin 段）", scriptStats)
 
-// 與診斷時發現的短字串失敗案例對帳：丟字是否只發生在短文本？
-print("\n  -- 依輸入長度分層（naive）--")
-for (lo, hi) in [(0, 60), (60, 150), (150, 400), (400, 10_000)] {
-    let grp = zip(docs, naiveStats).filter { $0.0.count >= lo && $0.0.count < hi }.map(\.1)
-    guard !grp.isEmpty else { continue }
-    let avg = grp.map(\.lossRatio).reduce(0,+) / Double(grp.count)
-    print("    \(lo)–\(hi) 字元 (n=\(grp.count)): 平均丟字 \(String(format: "%.1f%%", avg * 100))")
-}
-let known = "釘選某個版本然後做比較，這是 gAB 手稿的 latexdiff baseline"
-let ks = segStat(known, tokens: segNaive(known))
-let kss = segStat(known, tokens: segByScript(known))
-print("    診斷時的失敗案例（\(known.count) 字元）：naive 丟字 \(String(format: "%.1f%%", ks.lossRatio * 100))" +
-      "，by-script 丟字 \(String(format: "%.1f%%", kss.lossRatio * 100))")
-print("")
+// MARK: - Embedding（依 script 選模型；統計成功率。修 finding 15/22/26）
 
-// --- 建四種 FTS5 配置 ---
-print("== 建索引 ==")
-let db = DB()
-db.exec("CREATE VIRTUAL TABLE u61 USING fts5(x, tokenize='unicode61');")
-db.exec("CREATE VIRTUAL TABLE tri USING fts5(x, tokenize='trigram');")
-db.exec("CREATE VIRTUAL TABLE seg USING fts5(x, tokenize='unicode61');")
-for (i, d) in docs.enumerated() {
-    db.insert("u61", i, d)
-    db.insert("tri", i, d)
-    db.insert("seg", i, segByScript(d).joined(separator: " "))
-}
-print("  u61 / tri / seg 建立完成\n")
+var embedders: [NLScript: NLContextualEmbedding] = [:]
+var embedOK = 0, embedFail = 0
+var failReasons: [String: Int] = [:]
 
-// --- 向量索引 ---
-print("== 建向量（NLContextualEmbedding）==")
-var docVecs: [[Float]] = []
-var embedder: NLContextualEmbedding? = nil
-if #available(macOS 14.0, *) {
-    embedder = NLContextualEmbedding(script: .traditionalChinese)
-    try? embedder?.load()
+@available(macOS 14.0, *)
+func loadEmbedders() {
+    for sc in [NLScript.traditionalChinese, .simplifiedChinese, .latin] {
+        guard let e = NLContextualEmbedding(script: sc) else { failReasons["init \(sc.rawValue) nil", default: 0] += 1; continue }
+        do { try e.load(); embedders[sc] = e }
+        catch { failReasons["load \(sc.rawValue): \(error)", default: 0] += 1 }
+    }
+    if embedders.isEmpty { die("NLContextualEmbedding 全部載入失敗——vector 軌無法量測: \(failReasons)") }
 }
+
+/// 依文字的主要 script 選 embedder + language（修 finding 15：原本無條件 .traditionalChinese）
+func pickScript(_ s: String) -> (NLScript, NLLanguage) {
+    var cjk = 0, latin = 0
+    for c in s { if isCJK(c) { cjk += 1 } else if isLatinAlnum(c) { latin += 1 } }
+    if cjk == 0 && latin > 0 { return (.latin, .english) }
+    return (.traditionalChinese, .traditionalChinese)
+}
+
 func embed(_ s: String) -> [Float]? {
-    guard #available(macOS 14.0, *), let e = embedder,
-          let r = try? e.embeddingResult(for: s, language: .traditionalChinese) else { return nil }
-    var sum: [Float] = Array(repeating: 0, count: e.dimension); var n = 0
+    guard #available(macOS 14.0, *) else { return nil }
+    let (script, lang) = pickScript(s)
+    guard let e = embedders[script] ?? embedders[.traditionalChinese] else {
+        embedFail += 1; failReasons["no embedder for \(script.rawValue)", default: 0] += 1; return nil
+    }
+    let r: NLContextualEmbeddingResult
+    do { r = try e.embeddingResult(for: s, language: lang) }
+    catch { embedFail += 1; failReasons["embeddingResult: \(error)", default: 0] += 1; return nil }
+    var sum = [Float](repeating: 0, count: e.dimension); var n = 0
     r.enumerateTokenVectors(in: s.startIndex..<s.endIndex) { vec, _ in
         for (i, v) in vec.enumerated() where i < sum.count { sum[i] += Float(v) }
         n += 1; return true
     }
-    guard n > 0 else { return nil }
+    guard n > 0 else { embedFail += 1; failReasons["zero token vectors", default: 0] += 1; return nil }
     var norm: Float = 0
     for i in 0..<sum.count { sum[i] /= Float(n); norm += sum[i] * sum[i] }
     norm = norm.squareRoot()
     if norm > 0 { for i in 0..<sum.count { sum[i] /= norm } }
+    embedOK += 1
     return sum
 }
+
+// MARK: - 融合
+
+/// RRF。tie 以 rowid 遞增打破，確保跑跑之間穩定（修 finding 35）
+func rrf(_ lists: [[Int]], k: Int) -> [Int] {
+    var score: [Int: Double] = [:]
+    for l in lists { for (rank, id) in l.enumerated() { score[id, default: 0] += 1.0 / Double(60 + rank + 1) } }
+    return score.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }.prefix(k).map(\.key)
+}
+
+/// issue #2 明文指定的 "OR"：兩路候選取聯集，依各自最佳名次排序（修 finding 14/33/37）
+func orMerge(_ a: [Int], _ b: [Int], k: Int) -> [Int] {
+    var best: [Int: Int] = [:]
+    for (r, id) in a.enumerated() { best[id] = min(best[id] ?? Int.max, r) }
+    for (r, id) in b.enumerated() { best[id] = min(best[id] ?? Int.max, r) }
+    return best.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value < $1.value }.prefix(k).map(\.key)
+}
+
+// MARK: - 主流程
+
+print("讀取語料（seed=\(argSeed)，每檔上限 \(maxBlocksPerFile) block，最短 \(minDocChars) 字元）…")
+let docs = loadCorpus(limit: argDocs)
+guard docs.count >= 200 else { die("語料不足（\(docs.count)）") }
+let lens = docs.map(\.count).sorted()
+print("語料：\(docs.count) 份，字元數 median \(lens[lens.count/2])、min \(lens.first!)、max \(lens.last!)\n")
+
+// --- 丟字特徵化：長度 × Latin run 兩軸網格（修 finding 10/12 的「缺控制實驗」）---
+print("== NLTokenizer 丟字特徵化 ==")
+let naive = docs.map { segStat($0, tokens: segNaive($0)) }
+let byScript = docs.map { segStat($0, tokens: segByScript($0)) }
+func summarize(_ name: String, _ st: [SegStat]) {
+    let avg = st.map(\.lossRatio).reduce(0,+) / Double(st.count)
+    let mx = st.map(\.lossRatio).max() ?? 0
+    print("  \(name): 平均 \(String(format: "%.2f%%", avg*100))，最大 \(String(format: "%.1f%%", mx*100))，" +
+          ">5% 的文件 \(st.filter{ $0.lossRatio > 0.05 }.count)/\(st.count)")
+}
+summarize("naive     ", naive)
+summarize("by-script ", byScript)
+
+print("\n  -- 控制網格（naive 平均丟字率）：列=字元長度，欄=Latin run 數 --")
+let lenBins = [(0,60),(60,150),(150,400),(400,10_000)]
+let runBins = [(0,1),(1,5),(5,20),(20,10_000)]
+// 注意：不要用 String(format:"%s") —— Swift 的 %s 期待 C 字串，傳 Swift String 會 segfault。
+func pad(_ s: String, _ w: Int) -> String { s.count >= w ? s : String(repeating: " ", count: w - s.count) + s }
+
+var header = "    長度\\Latin run |"
+for (a,b) in runBins { header += " " + pad(b > 9999 ? "20+" : "\(a)-\(b)", 5) + " |" }
+print(header)
+for (lo,hi) in lenBins {
+    var row = "    " + pad(hi > 9999 ? "400+" : "\(lo)-\(hi)", 12) + " |"
+    for (ra,rb) in runBins {
+        let g = zip(docs, naive).filter { $0.0.count >= lo && $0.0.count < hi && $0.1.latinRuns >= ra && $0.1.latinRuns < rb }.map(\.1)
+        row += g.isEmpty ? "   —   |" : String(format: " %4.1f%% |", g.map(\.lossRatio).reduce(0,+)/Double(g.count)*100)
+    }
+    print(row + "  n=\(zip(docs, naive).filter { $0.0.count >= lo && $0.0.count < hi }.count)")
+}
+
+// 合成的短混雜句（**非語料片段**，修 CRITICAL finding 1/2/3/11/24）：
+// 結構刻意模仿被測條件——短、CJK 與 Latin 交替、含兩段 Latin。
+let synthetic = "標記某個節點然後做對照，這是 zQ7 範例的difftool 基準"
+let sN = segStat(synthetic, tokens: segNaive(synthetic))
+let sS = segStat(synthetic, tokens: segByScript(synthetic))
+print("\n    合成短混雜句（\(synthetic.count) 字元、\(sN.latinRuns) 個 Latin run）：naive 丟字 " +
+      "\(String(format: "%.1f%%", sN.lossRatio*100))，by-script \(String(format: "%.1f%%", sS.lossRatio*100))")
+
+// --- 索引 ---
+print("\n== 建索引 ==")
+let db = DB()
+db.smoke("unicode61", "alpha bravo", "bravo")
+db.smoke("trigram", "alphabravo", "phabr")
+db.exec("CREATE VIRTUAL TABLE u61 USING fts5(x, tokenize='unicode61');")
+db.exec("CREATE VIRTUAL TABLE tri USING fts5(x, tokenize='trigram');")
+db.exec("CREATE VIRTUAL TABLE seg USING fts5(x, tokenize='unicode61');")
+for (i, d) in docs.enumerated() { db.insert("u61", i, d); db.insert("tri", i, d); db.insert("seg", i, segByScript(d).joined(separator: " ")) }
+print("  smoke test 通過；u61 / tri / seg 就緒")
+
+print("\n== 建向量 ==")
+if #available(macOS 14.0, *) { loadEmbedders() }
+print("  已載入 embedder: \(embedders.keys.map(\.rawValue).sorted().joined(separator: ", "))")
 let t0 = Date()
-for d in docs { docVecs.append(embed(d) ?? []) }
-print("  \(docs.count) 份文件耗時 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s\n")
+let docVecs = docs.map { embed($0) ?? [] }
+let emptyVecs = docVecs.filter(\.isEmpty).count
+print("  \(docs.count) 份耗時 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s；" +
+      "成功 \(embedOK)、失敗 \(embedFail)、空向量 \(emptyVecs)")
+if !failReasons.isEmpty { print("  失敗原因：\(failReasons)") }
+if emptyVecs > docs.count / 10 { print("  ⚠ 空向量超過 10% —— vector 軌數字不可信") }
 
 func vectorTop(_ q: String, k: Int) -> [Int] {
     guard let qv = embed(q), !qv.isEmpty else { return [] }
@@ -290,73 +351,142 @@ func vectorTop(_ q: String, k: Int) -> [Int] {
         for j in 0..<min(qv.count, dv.count) { s += qv[j] * dv[j] }
         scored.append((i, s))
     }
-    return scored.sorted { $0.1 > $1.1 }.prefix(k).map(\.0)
-}
-
-func rrf(_ lists: [[Int]], k: Int) -> [Int] {
-    var score: [Int: Double] = [:]
-    for l in lists { for (rank, id) in l.enumerated() { score[id, default: 0] += 1.0 / Double(60 + rank + 1) } }
-    return score.sorted { $0.value > $1.value }.prefix(k).map(\.key)
+    return scored.sorted { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }.prefix(k).map(\.0)
 }
 
 // --- 查詢集 ---
-let queries = buildQueries(docs, perBucket: argQPB)
-var byBucket: [Bucket: Int] = [:]
-for q in queries { byBucket[q.bucket, default: 0] += 1 }
-print("== 查詢集 ==")
-for b in Bucket.allCases { print("  \(b.rawValue): \(byBucket[b] ?? 0) 條") }
-print("")
+enum Bucket: String, CaseIterable {
+    case cjk2 = "中文2字", cjk3 = "中文3字", cjk4 = "中文4字"
+    case latin = "英數", mixed = "中英混雜", synonym = "跨語彙同義"
+}
+struct Query { let bucket: Bucket; let text: String; let gold: Int }
+
+/// document frequency：多少份文件含此子字串。只收 df==1 的查詢，保證 gold 唯一（修 finding 8）
+func df(_ needle: String) -> (count: Int, first: Int) {
+    var c = 0, first = -1
+    for (i, d) in docs.enumerated() where d.contains(needle) { c += 1; if first < 0 { first = i }; if c > 1 { break } }
+    return (c, first)
+}
+
+func cjkRuns(_ s: String) -> [String] {
+    var runs: [String] = []; var buf = ""
+    for ch in s { if isCJK(ch) { buf.append(ch) } else { if buf.count >= 2 { runs.append(buf) }; buf = "" } }
+    if buf.count >= 2 { runs.append(buf) }
+    return runs
+}
+
+/// 手寫的跨語彙同義詞對（**合成清單，非語料抽取**）
+let aliases: [(String, String)] = [
+    ("ANN", "近似"), ("embedding", "向量"), ("tokenizer", "斷詞"), ("recall", "召回"),
+    ("index", "索引"), ("query", "查詢"), ("cluster", "分群"), ("baseline", "基準"),
+    ("commit", "提交"), ("schema", "綱要"), ("cache", "快取"), ("branch", "分支"),
+]
+
+func buildQueries(perBucket: Int) -> [Query] {
+    var qs: [Query] = []; var n: [Bucket: Int] = [:]
+    var order = Array(docs.indices); order.shuffle(using: &rng)
+
+    for i in order {
+        let d = docs[i]
+        // CJK 長度桶：排除「整個 run」當查詢（修 finding 7），且要求 df==1（修 finding 8）
+        for (bucket, L) in [(Bucket.cjk2, 2), (.cjk3, 3), (.cjk4, 4)] where (n[bucket] ?? 0) < perBucket {
+            let runs = cjkRuns(d).filter { $0.count > L }          // 嚴格大於 → 子字串必為 interior
+            guard let run = runs.randomElement(using: &rng) else { continue }
+            let start = Int.random(in: 0...(run.count - L), using: &rng)
+            let idx = run.index(run.startIndex, offsetBy: start)
+            let sub = String(run[idx..<run.index(idx, offsetBy: L)])
+            let f = df(sub); guard f.count == 1 else { continue }
+            qs.append(Query(bucket: bucket, text: sub, gold: f.first)); n[bucket, default: 0] += 1
+        }
+        // 英數
+        if (n[.latin] ?? 0) < perBucket {
+            let toks = d.split(whereSeparator: { !isLatinAlnum($0) }).map(String.init).filter { $0.count >= 4 }
+            if let t = toks.randomElement(using: &rng) {
+                let f = df(t); if f.count == 1 { qs.append(Query(bucket: .latin, text: t, gold: f.first)); n[.latin, default: 0] += 1 }
+            }
+        }
+        // 中英混雜：跨 script 邊界的子字串（修 finding 12/18/29）
+        if (n[.mixed] ?? 0) < perBucket {
+            let chars = Array(d)
+            var cands: [String] = []
+            for j in 1..<max(1, chars.count) where j + 3 <= chars.count {
+                if isCJK(chars[j-1]) != isCJK(chars[j]) && (isCJK(chars[j-1]) || isLatinAlnum(chars[j-1])) {
+                    let lo = max(0, j-2), hi = min(chars.count, j+3)
+                    let sub = String(chars[lo..<hi]).trimmingCharacters(in: .whitespaces)
+                    if sub.count >= 4 && sub.contains(where: isCJK) && sub.contains(where: isLatinAlnum) { cands.append(sub) }
+                }
+            }
+            if let sub = cands.randomElement(using: &rng) {
+                let f = df(sub); if f.count == 1 { qs.append(Query(bucket: .mixed, text: sub, gold: f.first)); n[.mixed, default: 0] += 1 }
+            }
+        }
+        if Bucket.allCases.filter({ $0 != .synonym }).allSatisfy({ (n[$0] ?? 0) >= perBucket }) { break }
+    }
+
+    // 跨語彙同義：文件含 A 面，查詢用 B 面（修 finding 6/12/29）
+    for (en, zh) in aliases {
+        for (side, other) in [(en, zh), (zh, en)] {
+            guard (n[.synonym] ?? 0) < perBucket else { break }
+            let hits = docs.indices.filter { docs[$0].localizedCaseInsensitiveContains(side) && !docs[$0].contains(other) }
+            guard hits.count == 1 else { continue }        // 同樣要求 gold 唯一
+            qs.append(Query(bucket: .synonym, text: other, gold: hits[0])); n[.synonym, default: 0] += 1
+        }
+    }
+    return qs
+}
+
+let queries = buildQueries(perBucket: argQPB)
+print("\n== 查詢集（全部 df==1，gold 唯一；CJK 桶排除 whole-run）==")
+for b in Bucket.allCases { print("  \(b.rawValue): \(queries.filter { $0.bucket == b }.count) 條") }
 
 // --- 量測 ---
 let K = 20
 struct Acc { var hit = 0; var total = 0 }
-var results: [String: [Bucket: Acc]] = [:]
-func record(_ config: String, _ b: Bucket, _ hit: Bool) {
-    results[config, default: [:]][b, default: Acc()].total += 1
-    if hit { results[config, default: [:]][b, default: Acc()].hit += 1 }
+var res: [String: [Bucket: Acc]] = [:]
+func rec(_ cfg: String, _ b: Bucket, _ hit: Bool) {
+    res[cfg, default: [:]][b, default: Acc()].total += 1
+    if hit { res[cfg, default: [:]][b, default: Acc()].hit += 1 }
 }
 
-print("== 量測 Recall@\(K) ==")
-for q in queries {
-    let phrase = "\"\(q.text)\""
-    let ru = db.search("u61", phrase, k: K)
-    let rt = db.search("tri", phrase, k: K)
-    let segQ = segByScript(q.text).joined(separator: " ")
-    let rs = db.search("seg", "\"\(segQ)\"", k: K)
-    let rboth = rrf([rt, rs], k: K)
-    let rv = vectorTop(q.text, k: K)
-    let rfused = rrf([rs, rv], k: K)
-
-    record("unicode61", q.bucket, ru.contains(q.goldDoc))
-    record("trigram", q.bucket, rt.contains(q.goldDoc))
-    record("segment+unicode61", q.bucket, rs.contains(q.goldDoc))
-    record("trigram+segment (RRF)", q.bucket, rboth.contains(q.goldDoc))
-    record("vector-only", q.bucket, rv.contains(q.goldDoc))
-    record("fused (seg+vector RRF)", q.bucket, rfused.contains(q.goldDoc))
-}
-
-// 機率 baseline：隨機取 K 份時 gold doc 落在其中的機率 = K/N。
-// 低於此值的配置等同「不如亂猜」；語料太小時整張表都會被這個 floor 灌水。
+print("\n== 量測 Recall@\(K) ==")
 let chance = Double(K) / Double(docs.count) * 100
-print("機率 baseline（隨機 top-\(K) / \(docs.count) 份）：\(String(format: "%.1f%%", chance))")
-if chance > 10 { print("⚠ baseline 過高，語料規模不足以區辨配置差異——請加大 docs 參數") }
+print("機率 baseline（隨機 top-\(K) / \(docs.count)）：\(String(format: "%.1f%%", chance))")
+if chance > 5 { print("⚠ baseline 過高，語料規模不足") }
 print("")
 
-let order = ["unicode61", "trigram", "segment+unicode61", "trigram+segment (RRF)", "vector-only", "fused (seg+vector RRF)"]
-var header = "| 配置 |"
-var sep = "|---|"
-for b in Bucket.allCases { header += " \(b.rawValue) |"; sep += "---|" }
-header += " 全體 |"; sep += "---|"
-print(header); print(sep)
+for q in queries {
+    let phrase = ftsPhrase(q.text)
+    let ru = db.search("u61", phrase, k: K)
+    let rt = db.search("tri", phrase, k: K)
+    let rs = db.search("seg", ftsPhrase(segByScript(q.text).joined(separator: " ")), k: K)
+    let rv = vectorTop(q.text, k: K)
+    let lexOR  = orMerge(rt, rs, k: K)                 // issue 明文指定的 OR
+    let lexRRF = rrf([rt, rs], k: K)                   // 選定配置
+    rec("unicode61", q.bucket, ru.contains(q.gold))
+    rec("trigram", q.bucket, rt.contains(q.gold))
+    rec("segment+unicode61", q.bucket, rs.contains(q.gold))
+    rec("trigram+segment (OR)", q.bucket, lexOR.contains(q.gold))
+    rec("trigram+segment (RRF)", q.bucket, lexRRF.contains(q.gold))
+    rec("vector-only", q.bucket, rv.contains(q.gold))
+    rec("lexRRF + vector (RRF)", q.bucket, rrf([lexRRF, rv], k: K).contains(q.gold))   // 修 finding 5：真正的 fused
+    rec("三路 RRF (tri+seg+vec)", q.bucket, rrf([rt, rs, rv], k: K).contains(q.gold))
+}
+
+let order = ["unicode61", "trigram", "segment+unicode61", "trigram+segment (OR)", "trigram+segment (RRF)",
+             "vector-only", "lexRRF + vector (RRF)", "三路 RRF (tri+seg+vec)"]
+var head = "| 配置 |"; var sep = "|---|"
+for b in Bucket.allCases { head += " \(b.rawValue) |"; sep += "---|" }
+head += " 全體 |"; sep += "---|"
+print(head); print(sep)
 for cfg in order {
-    guard let m = results[cfg] else { continue }
-    var row = "| \(cfg) |"
-    var th = 0, tt = 0
+    guard let m = res[cfg] else { continue }
+    var row = "| \(cfg) |"; var th = 0, tt = 0
     for b in Bucket.allCases {
-        let a = m[b] ?? Acc()
-        th += a.hit; tt += a.total
+        let a = m[b] ?? Acc(); th += a.hit; tt += a.total
         row += a.total == 0 ? " — |" : " \(String(format: "%.0f%%", Double(a.hit)/Double(a.total)*100)) |"
     }
     row += tt == 0 ? " — |" : " **\(String(format: "%.0f%%", Double(th)/Double(tt)*100))** |"
     print(row)
 }
+print("\nembedding 成功率：\(embedOK)/\(embedOK + embedFail)" +
+      (embedFail > 0 ? "　失敗原因：\(failReasons)" : ""))
