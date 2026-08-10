@@ -22,7 +22,14 @@ An anchor SHALL identify a region of the read-only corpus by the tuple (source f
 
 ### Requirement: Event records carry pointers and statistics only
 
-An event SHALL consist of an event kind, an anchor, a timestamp, a generation identifier naming the index build that produced the result, and a ranking policy identifier naming the strategy in force. A pin event SHALL additionally carry an opaque note reference generated as a random identifier. No event field SHALL contain corpus text, query text, or pin note text. A note reference SHALL NOT be derived from note content by hashing or by any other content-dependent function.
+An event SHALL consist of an event kind, an anchor, a timestamp, a generation identifier naming the index build that produced the result, a ranking policy identifier naming the strategy in force, and an optional presentation identifier naming the presentation the interaction originated in. A pin event SHALL additionally carry an opaque note reference generated as a random identifier. No event field SHALL contain corpus text, query text, or pin note text. A note reference SHALL NOT be derived from note content by hashing or by any other content-dependent function, and neither SHALL a presentation identifier.
+
+The presentation identifier SHALL be absent for interactions that did not originate in a presented result list. It exists because attribution is otherwise ambiguous: one anchor appears across many presentations, so the anchor and generation together cannot determine which presentation an interaction belongs to, and therefore cannot determine which strategy earns the credit.
+
+#### Scenario: Presentation identifier is content-independent
+
+- **WHEN** two presentations are recorded for the same query and the same candidate list
+- **THEN** the two presentations carry different identifiers, and neither identifier is derived from the query or from any candidate text
 
 #### Scenario: Serialized event store contains no verbatim content
 

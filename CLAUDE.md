@@ -56,10 +56,19 @@ claude-LTM＝Claude Code 的長期記憶。在既有的 `~/.claude/projects/**/*
 `~/.claude-ltm/memory/ltm.sqlite`（retrieval history、strength、links、pins）記的是
 **jsonl 記不得的事**——使用歷史。它不適用第 2 條，但受一條獨立硬約束：
 
-> **只存指標與統計，不存 chunk 原文。**
+> **只存指標、統計、與封閉集合的類別標籤；不存 chunk 原文、query 原文、note 原文。**
 
 如此它即使被備份或同步也不含第三方逐字內容。**這條靠 schema 保證，不靠自律**；
 新增欄位時若要存文字，先問這條。
+
+「封閉集合的類別標籤」是刻意寫進來的一條窄例外，也是它的邊界：**query class label**
+（`cjk-2char` / `cjk-3char` / `cjk-4plus` / `latin-alnum` / `mixed`）可以存，query 原文
+不行。判準是資訊量——五值集合對查詢內容幾乎不帶資訊，而原文帶全部。標籤在呈現當下從
+query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是同一條線：從內容導出一個決定，
+但不把內容留下。
+
+例外只涵蓋**封閉且極小**的集合。要新增一個類別軸，先問它的值域有多大——值域一開，
+它就從統計變回內容。
 
 ## 隱私邊界
 

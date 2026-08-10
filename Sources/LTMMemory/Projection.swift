@@ -1,0 +1,107 @@
+import Foundation
+import LTMCore
+
+// `AnchorStatistics` 與 `Projection` 這兩個型別住在 LTMCore，見該檔的說明：
+// 那是為了讓 LTMQuery 收得下 projection 卻依賴不到事件存放。摺疊的動作
+// （下面的 `project`）留在這一層，因為它要讀事件。
+
+/// projection 的可調參數。
+///
+/// 全部是衍生層的東西，改了不影響任何既存事件——這就是把它們留成參數的理由。
+public struct ProjectionParameters: Sendable, Equatable {
+    /// 冪次衰減指數。`weight * (1 + ageDays)^(-exponent)`。
+    public let decayExponent: Double
+    public let openedWeight: Double
+    public let citedWeight: Double
+    public let pinnedWeight: Double
+    public let dismissedWeight: Double
+
+    public init(
+        decayExponent: Double = 0.5,
+        openedWeight: Double = 1.0,
+        citedWeight: Double = 2.0,
+        pinnedWeight: Double = 3.0,
+        dismissedWeight: Double = 2.0
+    ) {
+        self.decayExponent = decayExponent
+        self.openedWeight = openedWeight
+        self.citedWeight = citedWeight
+        self.pinnedWeight = pinnedWeight
+        self.dismissedWeight = dismissedWeight
+    }
+
+    public static let `default` = ProjectionParameters()
+}
+
+/// 把事件序列摺成 per-anchor 統計。
+///
+/// 三個輸入決定結果，沒有隱藏狀態、不寫入任何地方。需要 `corpus` 是因為
+/// orphan 過濾放在 projection 這一層：文字已經不是當初那段的 anchor 不該
+/// 貢獻任何強度，而要判斷這件事就得 dereference。
+///
+/// 這是函式不是模組：摺疊事件只有一種做法，沒有呼叫端需要替換它。真的長出
+/// 快取或增量更新的生命週期時，再讓它升格。
+public func project(
+    _ events: [Event],
+    at instant: Date,
+    resolvedBy corpus: some CorpusReader,
+    parameters: ProjectionParameters = .default
+) -> Projection {
+    var reinforcement: [Anchor: Double] = [:]
+    var suppression: [Anchor: Double] = [:]
+    var impressions: [Anchor: Int] = [:]
+    var lastDeliberate: [Anchor: Date] = [:]
+    var counts: [Anchor: [EventKind: Int]] = [:]
+    var orphanCache: [Anchor: Bool] = [:]
+
+    func isLive(_ anchor: Anchor) -> Bool {
+        if let cached = orphanCache[anchor] { return cached }
+        let live = anchor.dereference(in: corpus).resolvedText != nil
+        orphanCache[anchor] = live
+        return live
+    }
+
+    for event in events {
+        guard isLive(event.anchor) else { continue }
+
+        let ageDays = max(0, instant.timeIntervalSince(event.timestamp)) / 86_400
+        let decay = pow(1 + ageDays, -parameters.decayExponent)
+
+        if event.kind != .shown {
+            counts[event.anchor, default: [:]][event.kind, default: 0] += 1
+        }
+
+        switch event.kind {
+        case .shown:
+            // 曝光不增強。計數只為了當分母——把它算進增強會形成
+            // 「出現過就更容易再出現」的迴圈，與有沒有用無關。
+            impressions[event.anchor, default: 0] += 1
+        case .opened:
+            reinforcement[event.anchor, default: 0] += parameters.openedWeight * decay
+            lastDeliberate[event.anchor] = max(lastDeliberate[event.anchor] ?? .distantPast, event.timestamp)
+        case .cited:
+            reinforcement[event.anchor, default: 0] += parameters.citedWeight * decay
+            lastDeliberate[event.anchor] = max(lastDeliberate[event.anchor] ?? .distantPast, event.timestamp)
+        case .pinned:
+            reinforcement[event.anchor, default: 0] += parameters.pinnedWeight * decay
+            lastDeliberate[event.anchor] = max(lastDeliberate[event.anchor] ?? .distantPast, event.timestamp)
+        case .dismissed:
+            suppression[event.anchor, default: 0] += parameters.dismissedWeight * decay
+            lastDeliberate[event.anchor] = max(lastDeliberate[event.anchor] ?? .distantPast, event.timestamp)
+        }
+    }
+
+    var statistics: [Anchor: AnchorStatistics] = [:]
+    let touched = Set(reinforcement.keys)
+        .union(suppression.keys)
+        .union(impressions.keys)
+    for anchor in touched {
+        statistics[anchor] = AnchorStatistics(
+            reinforcement: reinforcement[anchor] ?? 0,
+            suppression: suppression[anchor] ?? 0,
+            impressions: impressions[anchor] ?? 0,
+            lastDeliberateInteraction: lastDeliberate[anchor],
+            deliberateCounts: counts[anchor] ?? [:])
+    }
+    return Projection(statistics: statistics, instant: instant)
+}

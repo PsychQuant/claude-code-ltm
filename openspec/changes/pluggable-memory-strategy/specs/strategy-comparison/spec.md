@@ -33,7 +33,7 @@ The harness SHALL produce a presentation record mapping each presented anchor to
 
 ### Requirement: Presentation records carry a query class label and no query text
 
-A presentation record SHALL carry a query class label drawn from a closed set, the pair of strategy identifiers being compared, the generation identifier of the index build, and the per-anchor attribution. The query class label SHALL be computed from the query at presentation time and the query text SHALL NOT be persisted. The closed set SHALL be: `cjk-2char`, `cjk-3char`, `cjk-4plus`, `latin-alnum`, `mixed`.
+A presentation record SHALL carry an opaque random presentation identifier, a query class label drawn from a closed set, the pair of strategy identifiers being compared, the generation identifier of the index build, and the per-anchor attribution. Interactions SHALL reference that presentation identifier so that scoring resolves credit exactly rather than by inference. The query class label SHALL be computed from the query at presentation time and the query text SHALL NOT be persisted. The closed set SHALL be: `cjk-2char`, `cjk-3char`, `cjk-4plus`, `latin-alnum`, `mixed`.
 
 #### Scenario: Serialized presentation records contain no query text
 

@@ -1,0 +1,208 @@
+import Foundation
+import Testing
+
+@testable import LTMCore
+@testable import LTMEval
+@testable import LTMQuery
+
+private let archival = RankingPolicyID("archival")
+private let humanLike = RankingPolicyID("human-like")
+
+/// 造一次呈現：兩個位置，一邊各一個。
+private func presentation(
+    _ queryClass: QueryClass,
+    a: Anchor,
+    b: Anchor,
+    generation: GenerationID = evalGeneration
+) -> PresentationRecord {
+    PresentationRecord(
+        id: .random(),
+        queryClass: queryClass,
+        strategyA: archival, strategyB: humanLike,
+        generation: generation,
+        attribution: [
+            AnchorAttribution(anchor: a, creditedTo: archival),
+            AnchorAttribution(anchor: b, creditedTo: humanLike),
+        ],
+        isNullComparison: false)
+}
+
+private func event(
+    _ kind: NonPinKind, _ anchor: Anchor, _ record: PresentationRecord,
+    generation: GenerationID = evalGeneration
+) -> Event {
+    .interaction(
+        kind, anchor: anchor, at: evalInstant, generation: generation,
+        policy: record.credit(for: anchor) ?? archival, presentation: record.id)
+}
+
+@Test func reportCarriesOneRowPerQueryClassWithObservationCounts() {
+    let a2 = evalAnchor("a2")
+    let b2 = evalAnchor("b2")
+    let a4 = evalAnchor("a4")
+    let b4 = evalAnchor("b4")
+    let aLatin = evalAnchor("aL")
+    let bLatin = evalAnchor("bL")
+
+    let r2 = presentation(.cjk2char, a: a2, b: b2)
+    let r4 = presentation(.cjk4plus, a: a4, b: b4)
+    let rLatin = presentation(.latinAlnum, a: aLatin, b: bLatin)
+
+    let events = [
+        event(.shown, a2, r2), event(.shown, b2, r2), event(.opened, b2, r2),
+        event(.shown, a4, r4), event(.shown, b4, r4), event(.cited, a4, r4),
+        event(.shown, aLatin, rLatin), event(.shown, bLatin, rLatin),
+    ]
+
+    let report = ComparisonScorer.report(records: [r2, r4, rLatin], events: events)
+
+    #expect(report.classRows.map(\.queryClass) == [.cjk2char, .cjk4plus, .latinAlnum])
+    #expect(report.classRows.first { $0.queryClass == .cjk2char }?.observations == 1)
+    #expect(report.classRows.first { $0.queryClass == .cjk4plus }?.observations == 1)
+    // 觀測數為 0 的桶仍然要出現——「這一類沒有資料」本身就是要被看見的事實。
+    #expect(report.classRows.first { $0.queryClass == .latinAlnum }?.observations == 0)
+}
+
+@Test func aggregateNeverAppearsWithoutPerClassRows() {
+    let a = evalAnchor("a")
+    let b = evalAnchor("b")
+    let r = presentation(.cjk2char, a: a, b: b)
+    let report = ComparisonScorer.report(
+        records: [r], events: [event(.shown, a, r), event(.shown, b, r), event(.opened, b, r)])
+
+    #expect(!report.classRows.isEmpty)
+    #expect(report.aggregate[humanLike]?.credits == 1)
+}
+
+@Test func aClassLocalEffectIsNotWashedOutByTheAggregate() {
+    // 一個桶裡 human-like 完勝，其餘桶全平手。整體看幾乎沒差，逐桶看很清楚。
+    var records: [PresentationRecord] = []
+    var events: [Event] = []
+
+    for i in 0..<10 {
+        let a = evalAnchor("t2a\(i)")
+        let b = evalAnchor("t2b\(i)")
+        let r = presentation(.cjk2char, a: a, b: b)
+        records.append(r)
+        events += [event(.shown, a, r), event(.shown, b, r), event(.opened, b, r)]
+    }
+    for i in 0..<90 {
+        let a = evalAnchor("t4a\(i)")
+        let b = evalAnchor("t4b\(i)")
+        let r = presentation(.cjk4plus, a: a, b: b)
+        records.append(r)
+        events += [event(.shown, a, r), event(.shown, b, r)]
+    }
+
+    let report = ComparisonScorer.report(records: records, events: events)
+
+    let 雙字 = report.classRows.first { $0.queryClass == .cjk2char }!
+    #expect(雙字.scores[humanLike]?.rate == 1.0)
+    #expect(雙字.scores[archival]?.rate == 0.0)
+
+    let 四字 = report.classRows.first { $0.queryClass == .cjk4plus }!
+    #expect(四字.scores[humanLike]?.net == 0)
+
+    // 整體被 90 個平手桶稀釋到 0.1——分桶那一列才看得見 1.0。
+    #expect(report.aggregate[humanLike]?.rate == 0.1)
+}
+
+@Test func impressionsFormTheDenominatorNotTheNumerator() {
+    let a = evalAnchor("a")
+    let b = evalAnchor("b")
+    let r = PresentationRecord(
+        id: .random(), queryClass: .cjk2char,
+        strategyA: archival, strategyB: humanLike, generation: evalGeneration,
+        attribution: [
+            AnchorAttribution(anchor: a, creditedTo: archival),
+            AnchorAttribution(anchor: b, creditedTo: humanLike),
+            AnchorAttribution(anchor: evalAnchor("c"), creditedTo: archival),
+        ],
+        isNullComparison: false)
+
+    // archival 貢獻兩個位置、human-like 一個；各自只有一次 credit。
+    let events = [
+        event(.shown, a, r), event(.shown, evalAnchor("c"), r), event(.shown, b, r),
+        event(.opened, a, r), event(.opened, b, r),
+    ]
+    let report = ComparisonScorer.report(records: [r], events: events)
+
+    #expect(report.aggregate[archival]?.presented == 2)
+    #expect(report.aggregate[humanLike]?.presented == 1)
+    #expect(report.aggregate[archival]?.rate == 0.5)  // 用自己的分母，不是互動總數
+    #expect(report.aggregate[humanLike]?.rate == 1.0)
+}
+
+@Test func dismissalCountsAgainstTheCreditingStrategy() {
+    let a = evalAnchor("a")
+    let b = evalAnchor("b")
+    let r = presentation(.cjk2char, a: a, b: b)
+    let report = ComparisonScorer.report(
+        records: [r],
+        events: [event(.shown, a, r), event(.shown, b, r), event(.dismissed, b, r)])
+
+    #expect(report.aggregate[humanLike]?.penalties == 1)
+    #expect(report.aggregate[humanLike]?.net == -1)
+    #expect(report.aggregate[archival]?.net == 0)
+}
+
+@Test func nullComparisonsAreExcludedFromScoring() {
+    let a = evalAnchor("a")
+    let b = evalAnchor("b")
+    let null = PresentationRecord(
+        id: .random(), queryClass: .cjk2char,
+        strategyA: archival, strategyB: humanLike, generation: evalGeneration,
+        attribution: [
+            AnchorAttribution(anchor: a, creditedTo: nil),
+            AnchorAttribution(anchor: b, creditedTo: nil),
+        ],
+        isNullComparison: true)
+
+    let report = ComparisonScorer.report(
+        records: [null],
+        events: [
+            .interaction(.opened, anchor: a, at: evalInstant, generation: evalGeneration,
+                policy: archival, presentation: null.id)
+        ])
+
+    #expect(report.classRows.isEmpty)
+    #expect(report.aggregate.isEmpty)
+}
+
+@Test func dataSpanningGenerationsIsFlaggedAndBrokenDown() {
+    let genA = GenerationID("build-1")
+    let genB = GenerationID("build-2")
+
+    let a1 = evalAnchor("a1")
+    let b1 = evalAnchor("b1")
+    let a2 = evalAnchor("a2")
+    let b2 = evalAnchor("b2")
+
+    let r1 = presentation(.cjk2char, a: a1, b: b1, generation: genA)
+    let r2 = presentation(.cjk2char, a: a2, b: b2, generation: genB)
+
+    let events = [
+        event(.shown, a1, r1, generation: genA), event(.shown, b1, r1, generation: genA),
+        event(.opened, b1, r1, generation: genA),
+        event(.shown, a2, r2, generation: genB), event(.shown, b2, r2, generation: genB),
+        event(.opened, a2, r2, generation: genB),
+    ]
+
+    let report = ComparisonScorer.report(records: [r1, r2], events: events)
+
+    #expect(report.spansGenerations)
+    #expect(report.generationRows.map(\.generation) == [genA, genB])
+    #expect(report.generationRows.first { $0.generation == genA }?.scores[humanLike]?.credits == 1)
+    #expect(report.generationRows.first { $0.generation == genB }?.scores[archival]?.credits == 1)
+}
+
+@Test func singleGenerationDataIsNotFlagged() {
+    let a = evalAnchor("a")
+    let b = evalAnchor("b")
+    let r = presentation(.cjk2char, a: a, b: b)
+    let report = ComparisonScorer.report(
+        records: [r], events: [event(.shown, a, r), event(.opened, b, r)])
+
+    #expect(!report.spansGenerations)
+    #expect(report.generationRows.isEmpty)
+}
