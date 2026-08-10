@@ -1,0 +1,50 @@
+## Why
+
+claude-LTM's retrieval layer currently has no way to express "should past usage influence ranking, and how much?" as a *choice*. The initial design hard-coded one answer (suppress usage effects to protect reproducibility), and that answer was smuggled in as a default rather than argued for. The properties it suppressed — rich-get-richer, availability bias, reconstructive drift — are exactly the properties of human memory, so suppressing them is not a bug fix but a selection of a different memory model. Making the strategy a parameter is what lets the two models be compared instead of assumed.
+
+A second forcing function: the canonical store must hold usage history, which is the one thing the source jsonl cannot record. Its schema therefore has to be settled before any strategy can be written, and settling it is a privacy decision as much as a data-modelling one.
+
+## What Changes
+
+- Introduce an append-only **event store** as the canonical record of usage history, holding only pointers and statistics — never chunk text, never query strings.
+- Introduce a stable **anchor** type addressing source turns by content, not by derived chunk identity, so the disposable index can be rebuilt without orphaning canonical records.
+- Introduce a **`MemoryStrategy` seam**: one protocol that takes retrieval candidates plus an event projection and returns a re-ranked list with per-item displacement provenance.
+- Ship two strategies: `archival` (identity — the null object and correctness oracle) and `human-like` (power-law decay, retrieval reinforcement, co-retrieval association).
+- Ship an **interleaving comparison harness** that compares two strategies on live usage rather than by replaying stored queries, since queries are deliberately not retained. It records a per-presentation **query class label** drawn from a closed five-value set — a statistic, not content — so results can be reported per class without storing a single query.
+- **BREAKING** relative to the pre-change design notes: the `conservative` tier is removed. Its defining rule ("strength acts only as a tie-breaker, capped at ±5%") is not expressible — reciprocal-rank-fusion scores carry no cross-query semantics, so a percentage cap has no stable referent. Its surviving constraint (reorder only inside a relevance band, bounded displacement) becomes a property of `human-like`, not a separate tier.
+
+## Capabilities
+
+### New Capabilities
+
+- `memory-events`: append-only canonical record of retrieval interactions, addressed by stable anchors, storing pointers and statistics only.
+- `memory-strategy`: the pluggable re-ranking seam plus its two shipped implementations, including displacement provenance on every returned item.
+- `strategy-comparison`: interleaved evaluation of two strategies over live usage, reported per query-class rather than in aggregate.
+
+### Modified Capabilities
+
+(none)
+
+## Impact
+
+- Affected specs: memory-events, memory-strategy, strategy-comparison
+- Affected code:
+  - New: Package.swift
+  - New: Sources/LTMCore/Anchor.swift
+  - New: Sources/LTMCore/Event.swift
+  - New: Sources/LTMMemory/EventStore.swift
+  - New: Sources/LTMMemory/Projection.swift
+  - New: Sources/LTMQuery/Candidate.swift
+  - New: Sources/LTMQuery/MemoryStrategy.swift
+  - New: Sources/LTMQuery/Strategies/ArchivalStrategy.swift
+  - New: Sources/LTMQuery/Strategies/HumanLikeStrategy.swift
+  - New: Sources/LTMEval/QueryClass.swift
+  - New: Sources/LTMEval/PresentationRecord.swift
+  - New: Sources/LTMEval/Interleaving.swift
+  - New: Sources/LTMEval/ComparisonReport.swift
+  - New: Tests/LTMMemoryTests/EventStoreTests.swift
+  - New: Tests/LTMQueryTests/MemoryStrategyTests.swift
+  - New: Tests/LTMEvalTests/InterleavingTests.swift
+  - Modified: docs/memory-systems/README.md
+  - Modified: CLAUDE.md
+  - Removed: (none)

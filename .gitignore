@@ -20,3 +20,9 @@ state.json
 *.wav
 **/*_notes.md
 fixtures/real/
+
+# Spectra app data
+.spectra/
+
+# Claude Code worktrees（隔離用的暫時 checkout，不進版控）
+.claude/worktrees/
