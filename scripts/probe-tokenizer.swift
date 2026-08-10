@@ -226,18 +226,17 @@ func loadEmbedders() {
     if embedders.isEmpty { die("NLContextualEmbedding 全部載入失敗——vector 軌無法量測: \(failReasons)") }
 }
 
-/// 依文字的主要 script 選 embedder + language（修 finding 15：原本無條件 .traditionalChinese）
-func pickScript(_ s: String) -> (NLScript, NLLanguage) {
-    var cjk = 0, latin = 0
-    for c in s { if isCJK(c) { cjk += 1 } else if isLatinAlnum(c) { latin += 1 } }
-    if cjk == 0 && latin > 0 { return (.latin, .english) }
-    return (.traditionalChinese, .traditionalChinese)
-}
+// R2 finding 3/4：v2 的 per-text script 路由會讓查詢與 gold 文件落在**不同模型**的向量空間，
+// 內積因此無意義（且維度不合時 min() 會靜默截斷）。修法：一次實驗固定一個 script，
+// 查詢與文件一律用同一個 embedder；兩個候選模型各跑一軌，把差異當結果報出來而不是藏起來。
+let vecTracks: [(NLScript, NLLanguage, String)] = [
+    (.traditionalChinese, .traditionalChinese, "Hant"),
+    (.latin, .english, "Latn"),
+]
 
-func embed(_ s: String) -> [Float]? {
+func embedWith(_ script: NLScript, _ lang: NLLanguage, _ s: String) -> [Float]? {
     guard #available(macOS 14.0, *) else { return nil }
-    let (script, lang) = pickScript(s)
-    guard let e = embedders[script] ?? embedders[.traditionalChinese] else {
+    guard let e = embedders[script] else {
         embedFail += 1; failReasons["no embedder for \(script.rawValue)", default: 0] += 1; return nil
     }
     let r: NLContextualEmbeddingResult
@@ -302,15 +301,18 @@ let runBins = [(0,1),(1,5),(5,20),(20,10_000)]
 func pad(_ s: String, _ w: Int) -> String { s.count >= w ? s : String(repeating: " ", count: w - s.count) + s }
 
 var header = "    長度\\Latin run |"
-for (a,b) in runBins { header += " " + pad(b > 9999 ? "20+" : "\(a)-\(b)", 5) + " |" }
+for (a,b) in runBins { header += " " + pad(b > 9999 ? "20+" : "\(a)-\(b)", 11) + " |" }
 print(header)
+print("    （每格：平均丟字率 / 該格 n。兩軸在本語料高度共線——長文本幾乎必然有多個 Latin run，")
+print("      故空格與 n 極不均，不足以支撐強因果宣稱。）")
 for (lo,hi) in lenBins {
     var row = "    " + pad(hi > 9999 ? "400+" : "\(lo)-\(hi)", 12) + " |"
     for (ra,rb) in runBins {
         let g = zip(docs, naive).filter { $0.0.count >= lo && $0.0.count < hi && $0.1.latinRuns >= ra && $0.1.latinRuns < rb }.map(\.1)
-        row += g.isEmpty ? "   —   |" : String(format: " %4.1f%% |", g.map(\.lossRatio).reduce(0,+)/Double(g.count)*100)
+        row += g.isEmpty ? pad("—", 11) + " |"
+             : pad(String(format: "%.1f%%/n=%d", g.map(\.lossRatio).reduce(0,+)/Double(g.count)*100, g.count), 11) + " |"
     }
-    print(row + "  n=\(zip(docs, naive).filter { $0.0.count >= lo && $0.0.count < hi }.count)")
+    print(row)
 }
 
 // 合成的短混雜句（**非語料片段**，修 CRITICAL finding 1/2/3/11/24）：
@@ -335,20 +337,34 @@ print("  smoke test 通過；u61 / tri / seg 就緒")
 print("\n== 建向量 ==")
 if #available(macOS 14.0, *) { loadEmbedders() }
 print("  已載入 embedder: \(embedders.keys.map(\.rawValue).sorted().joined(separator: ", "))")
-let t0 = Date()
-let docVecs = docs.map { embed($0) ?? [] }
-let emptyVecs = docVecs.filter(\.isEmpty).count
-print("  \(docs.count) 份耗時 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s；" +
-      "成功 \(embedOK)、失敗 \(embedFail)、空向量 \(emptyVecs)")
-if !failReasons.isEmpty { print("  失敗原因：\(failReasons)") }
-if emptyVecs > docs.count / 10 { print("  ⚠ 空向量超過 10% —— vector 軌數字不可信") }
+// 每個 track 用**單一固定模型**embed 全部文件；查詢在檢索時用同一模型 → 保證同一向量空間。
+var trackDocVecs: [String: [[Float]]] = [:]
+var trackDim: [String: Int] = [:]
+for (script, lang, name) in vecTracks {
+    guard embedders[script] != nil else { print("  track \(name)：embedder 缺席，跳過"); continue }
+    let t0 = Date()
+    let vs = docs.map { embedWith(script, lang, $0) ?? [] }
+    let empty = vs.filter(\.isEmpty).count
+    let dims = Set(vs.filter { !$0.isEmpty }.map(\.count))
+    if dims.count > 1 { die("track \(name) 出現多種向量維度 \(dims)——不可比較") }
+    trackDocVecs[name] = vs
+    trackDim[name] = dims.first ?? 0
+    print("  track \(name)：\(docs.count) 份耗時 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s，" +
+          "dim=\(dims.first ?? 0)，空向量 \(empty)")
+    if empty > docs.count / 10 { print("    ⚠ 空向量超過 10% —— 本 track 數字不可信") }
+}
+if !failReasons.isEmpty { print("  embedding 失敗原因：\(failReasons)") }
 
-func vectorTop(_ q: String, k: Int) -> [Int] {
-    guard let qv = embed(q), !qv.isEmpty else { return [] }
+/// 同一 track 內比較；維度不合直接中止（不再靜默 min() 截斷）
+func vectorTop(_ track: String, _ q: String, k: Int) -> [Int] {
+    guard let dvs = trackDocVecs[track] else { return [] }
+    let (script, lang, _) = vecTracks.first { $0.2 == track }!
+    guard let qv = embedWith(script, lang, q), !qv.isEmpty else { return [] }
+    if let d = trackDim[track], d > 0, qv.count != d { die("track \(track) 查詢向量維度 \(qv.count) ≠ 文件 \(d)") }
     var scored: [(Int, Float)] = []
-    for (i, dv) in docVecs.enumerated() where !dv.isEmpty {
+    for (i, dv) in dvs.enumerated() where !dv.isEmpty {
         var s: Float = 0
-        for j in 0..<min(qv.count, dv.count) { s += qv[j] * dv[j] }
+        for j in 0..<qv.count { s += qv[j] * dv[j] }
         scored.append((i, s))
     }
     return scored.sorted { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }.prefix(k).map(\.0)
@@ -361,10 +377,16 @@ enum Bucket: String, CaseIterable {
 }
 struct Query { let bucket: Bucket; let text: String; let gold: Int }
 
-/// document frequency：多少份文件含此子字串。只收 df==1 的查詢，保證 gold 唯一（修 finding 8）
-func df(_ needle: String) -> (count: Int, first: Int) {
+/// document frequency：多少份文件含此子字串（數到 cap+1 即早停）。
+/// R2 finding 5：df==1 會系統性挑出稀有且獨特的字串——正是 lexical 最擅長的，因而灌水
+/// 所有 lexical 配置。因此改為可調 cap，並在 cap=1 與 cap=5 兩種設定下各跑一次，
+/// 讓「唯一性有多少貢獻」變成可讀的數字而不是隱藏假設。
+func df(_ needle: String, cap: Int) -> (count: Int, first: Int) {
     var c = 0, first = -1
-    for (i, d) in docs.enumerated() where d.contains(needle) { c += 1; if first < 0 { first = i }; if c > 1 { break } }
+    for (i, d) in docs.enumerated() where d.contains(needle) {
+        c += 1; if first < 0 { first = i }
+        if c > cap { break }
+    }
     return (c, first)
 }
 
@@ -382,30 +404,34 @@ let aliases: [(String, String)] = [
     ("commit", "提交"), ("schema", "綱要"), ("cache", "快取"), ("branch", "分支"),
 ]
 
-func buildQueries(perBucket: Int) -> [Query] {
+/// gold 一律是**抽出查詢的那份文件**（不是「第一個含它的文件」）。
+/// dfCap > 1 時其他文件也含該子字串，檢索因此變難——這正是要量的敏感度。
+func buildQueries(perBucket: Int, dfCap: Int) -> [Query] {
+    var localRng = Seeded(argSeed &+ UInt64(dfCap))   // 兩種 cap 各自可重現
     var qs: [Query] = []; var n: [Bucket: Int] = [:]
-    var order = Array(docs.indices); order.shuffle(using: &rng)
+    var order = Array(docs.indices); order.shuffle(using: &localRng)
 
     for i in order {
         let d = docs[i]
-        // CJK 長度桶：排除「整個 run」當查詢（修 finding 7），且要求 df==1（修 finding 8）
+        // CJK 長度桶：排除「整個 run」當查詢（子字串必為 interior）
         for (bucket, L) in [(Bucket.cjk2, 2), (.cjk3, 3), (.cjk4, 4)] where (n[bucket] ?? 0) < perBucket {
-            let runs = cjkRuns(d).filter { $0.count > L }          // 嚴格大於 → 子字串必為 interior
-            guard let run = runs.randomElement(using: &rng) else { continue }
-            let start = Int.random(in: 0...(run.count - L), using: &rng)
+            let runs = cjkRuns(d).filter { $0.count > L }
+            guard let run = runs.randomElement(using: &localRng) else { continue }
+            let start = Int.random(in: 0...(run.count - L), using: &localRng)
             let idx = run.index(run.startIndex, offsetBy: start)
             let sub = String(run[idx..<run.index(idx, offsetBy: L)])
-            let f = df(sub); guard f.count == 1 else { continue }
-            qs.append(Query(bucket: bucket, text: sub, gold: f.first)); n[bucket, default: 0] += 1
+            let f = df(sub, cap: dfCap); guard f.count >= 1 && f.count <= dfCap else { continue }
+            qs.append(Query(bucket: bucket, text: sub, gold: i)); n[bucket, default: 0] += 1
         }
         // 英數
         if (n[.latin] ?? 0) < perBucket {
             let toks = d.split(whereSeparator: { !isLatinAlnum($0) }).map(String.init).filter { $0.count >= 4 }
-            if let t = toks.randomElement(using: &rng) {
-                let f = df(t); if f.count == 1 { qs.append(Query(bucket: .latin, text: t, gold: f.first)); n[.latin, default: 0] += 1 }
+            if let t = toks.randomElement(using: &localRng) {
+                let f = df(t, cap: dfCap)
+                if f.count >= 1 && f.count <= dfCap { qs.append(Query(bucket: .latin, text: t, gold: i)); n[.latin, default: 0] += 1 }
             }
         }
-        // 中英混雜：跨 script 邊界的子字串（修 finding 12/18/29）
+        // 中英混雜：跨 script 邊界的子字串
         if (n[.mixed] ?? 0) < perBucket {
             let chars = Array(d)
             var cands: [String] = []
@@ -416,77 +442,87 @@ func buildQueries(perBucket: Int) -> [Query] {
                     if sub.count >= 4 && sub.contains(where: isCJK) && sub.contains(where: isLatinAlnum) { cands.append(sub) }
                 }
             }
-            if let sub = cands.randomElement(using: &rng) {
-                let f = df(sub); if f.count == 1 { qs.append(Query(bucket: .mixed, text: sub, gold: f.first)); n[.mixed, default: 0] += 1 }
+            if let sub = cands.randomElement(using: &localRng) {
+                let f = df(sub, cap: dfCap)
+                if f.count >= 1 && f.count <= dfCap { qs.append(Query(bucket: .mixed, text: sub, gold: i)); n[.mixed, default: 0] += 1 }
             }
         }
         if Bucket.allCases.filter({ $0 != .synonym }).allSatisfy({ (n[$0] ?? 0) >= perBucket }) { break }
     }
 
-    // 跨語彙同義：文件含 A 面，查詢用 B 面（修 finding 6/12/29）
+    // 跨語彙同義：文件含 A 面、不含 B 面；查詢用 B 面。gold 必須唯一（否則語意不明）
     for (en, zh) in aliases {
         for (side, other) in [(en, zh), (zh, en)] {
             guard (n[.synonym] ?? 0) < perBucket else { break }
             let hits = docs.indices.filter { docs[$0].localizedCaseInsensitiveContains(side) && !docs[$0].contains(other) }
-            guard hits.count == 1 else { continue }        // 同樣要求 gold 唯一
+            guard hits.count == 1 else { continue }
             qs.append(Query(bucket: .synonym, text: other, gold: hits[0])); n[.synonym, default: 0] += 1
         }
     }
     return qs
 }
-
-let queries = buildQueries(perBucket: argQPB)
-print("\n== 查詢集（全部 df==1，gold 唯一；CJK 桶排除 whole-run）==")
-for b in Bucket.allCases { print("  \(b.rawValue): \(queries.filter { $0.bucket == b }.count) 條") }
-
 // --- 量測 ---
 let K = 20
 struct Acc { var hit = 0; var total = 0 }
-var res: [String: [Bucket: Acc]] = [:]
-func rec(_ cfg: String, _ b: Bucket, _ hit: Bool) {
-    res[cfg, default: [:]][b, default: Acc()].total += 1
-    if hit { res[cfg, default: [:]][b, default: Acc()].hit += 1 }
+
+let chance = Double(K) / Double(docs.count) * 100
+print("\n機率 baseline（隨機 top-\(K) / \(docs.count)）：\(String(format: "%.1f%%", chance))")
+if chance > 5 { print("⚠ baseline 過高，語料規模不足") }
+
+/// 對一組 (dfCap, vector track) 跑完整量測並印表
+func runMeasurement(dfCap: Int, track: String?) {
+    let queries = buildQueries(perBucket: argQPB, dfCap: dfCap)
+    var res: [String: [Bucket: Acc]] = [:]
+    func rec(_ cfg: String, _ b: Bucket, _ hit: Bool) {
+        res[cfg, default: [:]][b, default: Acc()].total += 1
+        if hit { res[cfg, default: [:]][b, default: Acc()].hit += 1 }
+    }
+    for q in queries {
+        let phrase = ftsPhrase(q.text)
+        let ru = db.search("u61", phrase, k: K)
+        let rt = db.search("tri", phrase, k: K)
+        let rs = db.search("seg", ftsPhrase(segByScript(q.text).joined(separator: " ")), k: K)
+        let lexOR  = orMerge(rt, rs, k: K)
+        let lexRRF = rrf([rt, rs], k: K)
+        rec("unicode61", q.bucket, ru.contains(q.gold))
+        rec("trigram", q.bucket, rt.contains(q.gold))
+        rec("segment+unicode61", q.bucket, rs.contains(q.gold))
+        rec("trigram+segment (OR)", q.bucket, lexOR.contains(q.gold))
+        rec("trigram+segment (RRF)", q.bucket, lexRRF.contains(q.gold))
+        if let tr = track {
+            let rv = vectorTop(tr, q.text, k: K)
+            rec("vector-only [\(tr)]", q.bucket, rv.contains(q.gold))
+            rec("lexRRF + vector [\(tr)]", q.bucket, rrf([lexRRF, rv], k: K).contains(q.gold))
+        }
+    }
+    var order = ["unicode61", "trigram", "segment+unicode61", "trigram+segment (OR)", "trigram+segment (RRF)"]
+    if let tr = track { order += ["vector-only [\(tr)]", "lexRRF + vector [\(tr)]"] }
+
+    let label = track.map { "df≤\(dfCap)　vector track = \($0)" } ?? "df≤\(dfCap)　lexical only"
+    print("\n### \(label)")
+    var counts = "查詢數："
+    for b in Bucket.allCases { counts += " \(b.rawValue)=\(queries.filter { $0.bucket == b }.count)" }
+    print(counts)
+    var head = "| 配置 |"; var sep = "|---|"
+    for b in Bucket.allCases { head += " \(b.rawValue) |"; sep += "---|" }
+    head += " 全體 |"; sep += "---|"
+    print(head); print(sep)
+    for cfg in order {
+        guard let m = res[cfg] else { continue }
+        var row = "| \(cfg) |"; var th = 0, tt = 0
+        for b in Bucket.allCases {
+            let a = m[b] ?? Acc(); th += a.hit; tt += a.total
+            row += a.total == 0 ? " — |" : " \(String(format: "%.0f%%", Double(a.hit)/Double(a.total)*100)) |"
+        }
+        row += tt == 0 ? " — |" : " **\(String(format: "%.0f%%", Double(th)/Double(tt)*100))** |"
+        print(row)
+    }
 }
 
 print("\n== 量測 Recall@\(K) ==")
-let chance = Double(K) / Double(docs.count) * 100
-print("機率 baseline（隨機 top-\(K) / \(docs.count)）：\(String(format: "%.1f%%", chance))")
-if chance > 5 { print("⚠ baseline 過高，語料規模不足") }
-print("")
+for tr in vecTracks.map(\.2) where trackDocVecs[tr] != nil { runMeasurement(dfCap: 1, track: tr) }
+// df 敏感度：放寬唯一性要求後，lexical 的優勢還剩多少（R2 finding 5）
+runMeasurement(dfCap: 5, track: vecTracks.map(\.2).first { trackDocVecs[$0] != nil })
 
-for q in queries {
-    let phrase = ftsPhrase(q.text)
-    let ru = db.search("u61", phrase, k: K)
-    let rt = db.search("tri", phrase, k: K)
-    let rs = db.search("seg", ftsPhrase(segByScript(q.text).joined(separator: " ")), k: K)
-    let rv = vectorTop(q.text, k: K)
-    let lexOR  = orMerge(rt, rs, k: K)                 // issue 明文指定的 OR
-    let lexRRF = rrf([rt, rs], k: K)                   // 選定配置
-    rec("unicode61", q.bucket, ru.contains(q.gold))
-    rec("trigram", q.bucket, rt.contains(q.gold))
-    rec("segment+unicode61", q.bucket, rs.contains(q.gold))
-    rec("trigram+segment (OR)", q.bucket, lexOR.contains(q.gold))
-    rec("trigram+segment (RRF)", q.bucket, lexRRF.contains(q.gold))
-    rec("vector-only", q.bucket, rv.contains(q.gold))
-    rec("lexRRF + vector (RRF)", q.bucket, rrf([lexRRF, rv], k: K).contains(q.gold))   // 修 finding 5：真正的 fused
-    rec("三路 RRF (tri+seg+vec)", q.bucket, rrf([rt, rs, rv], k: K).contains(q.gold))
-}
-
-let order = ["unicode61", "trigram", "segment+unicode61", "trigram+segment (OR)", "trigram+segment (RRF)",
-             "vector-only", "lexRRF + vector (RRF)", "三路 RRF (tri+seg+vec)"]
-var head = "| 配置 |"; var sep = "|---|"
-for b in Bucket.allCases { head += " \(b.rawValue) |"; sep += "---|" }
-head += " 全體 |"; sep += "---|"
-print(head); print(sep)
-for cfg in order {
-    guard let m = res[cfg] else { continue }
-    var row = "| \(cfg) |"; var th = 0, tt = 0
-    for b in Bucket.allCases {
-        let a = m[b] ?? Acc(); th += a.hit; tt += a.total
-        row += a.total == 0 ? " — |" : " \(String(format: "%.0f%%", Double(a.hit)/Double(a.total)*100)) |"
-    }
-    row += tt == 0 ? " — |" : " **\(String(format: "%.0f%%", Double(th)/Double(tt)*100))** |"
-    print(row)
-}
-print("\nembedding 成功率：\(embedOK)/\(embedOK + embedFail)" +
-      (embedFail > 0 ? "　失敗原因：\(failReasons)" : ""))
+print("\nembedding 累計：成功 \(embedOK)、失敗 \(embedFail)" +
+      (embedFail > 0 ? "　原因：\(failReasons)" : ""))
