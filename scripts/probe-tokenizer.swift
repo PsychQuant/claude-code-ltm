@@ -406,9 +406,19 @@ let aliases: [(String, String)] = [
 
 /// gold 一律是**抽出查詢的那份文件**（不是「第一個含它的文件」）。
 /// dfCap > 1 時其他文件也含該子字串，檢索因此變難——這正是要量的敏感度。
+// R3 finding 3/4/6：原本 seed 帶 dfCap（`argSeed &+ dfCap`），使 df≤1 與 df≤5 用了
+// **不同的抽樣序列**——那是兩個獨立樣本的比較，不是敏感度分析，無法把差異歸因於 cap 本身。
+// 修法：seed 固定，抽樣序列完全相同，**唯一的差別是接受條件**（配對設計）。
 func buildQueries(perBucket: Int, dfCap: Int) -> [Query] {
-    var localRng = Seeded(argSeed &+ UInt64(dfCap))   // 兩種 cap 各自可重現
+    var localRng = Seeded(argSeed)   // 不隨 dfCap 變 → 兩組共用同一抽樣序列
     var qs: [Query] = []; var n: [Bucket: Int] = [:]
+    var dfHist: [Int: Int] = [:]     // 實際被接受的查詢其 df 分布（DA 要求揭露）
+    defer {
+        if dfCap > 1 {
+            let s = dfHist.sorted { $0.key < $1.key }.map { "df=\($0.key):\($0.value)" }.joined(separator: " ")
+            print("  （df≤\(dfCap) 實際分布：\(s)）")
+        }
+    }
     var order = Array(docs.indices); order.shuffle(using: &localRng)
 
     for i in order {
@@ -420,15 +430,16 @@ func buildQueries(perBucket: Int, dfCap: Int) -> [Query] {
             let start = Int.random(in: 0...(run.count - L), using: &localRng)
             let idx = run.index(run.startIndex, offsetBy: start)
             let sub = String(run[idx..<run.index(idx, offsetBy: L)])
-            let f = df(sub, cap: dfCap); guard f.count >= 1 && f.count <= dfCap else { continue }
+            let f = df(sub, cap: 5); guard f.count >= 1 && f.count <= dfCap else { continue }
+            dfHist[f.count, default: 0] += 1
             qs.append(Query(bucket: bucket, text: sub, gold: i)); n[bucket, default: 0] += 1
         }
         // 英數
         if (n[.latin] ?? 0) < perBucket {
             let toks = d.split(whereSeparator: { !isLatinAlnum($0) }).map(String.init).filter { $0.count >= 4 }
             if let t = toks.randomElement(using: &localRng) {
-                let f = df(t, cap: dfCap)
-                if f.count >= 1 && f.count <= dfCap { qs.append(Query(bucket: .latin, text: t, gold: i)); n[.latin, default: 0] += 1 }
+                let f = df(t, cap: 5)
+                if f.count >= 1 && f.count <= dfCap { dfHist[f.count, default: 0] += 1; qs.append(Query(bucket: .latin, text: t, gold: i)); n[.latin, default: 0] += 1 }
             }
         }
         // 中英混雜：跨 script 邊界的子字串
@@ -443,8 +454,8 @@ func buildQueries(perBucket: Int, dfCap: Int) -> [Query] {
                 }
             }
             if let sub = cands.randomElement(using: &localRng) {
-                let f = df(sub, cap: dfCap)
-                if f.count >= 1 && f.count <= dfCap { qs.append(Query(bucket: .mixed, text: sub, gold: i)); n[.mixed, default: 0] += 1 }
+                let f = df(sub, cap: 5)
+                if f.count >= 1 && f.count <= dfCap { dfHist[f.count, default: 0] += 1; qs.append(Query(bucket: .mixed, text: sub, gold: i)); n[.mixed, default: 0] += 1 }
             }
         }
         if Bucket.allCases.filter({ $0 != .synonym }).allSatisfy({ (n[$0] ?? 0) >= perBucket }) { break }
