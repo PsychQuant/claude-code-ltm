@@ -53,13 +53,21 @@ claude-LTM＝Claude Code 的長期記憶。在既有的 `~/.claude/projects/**/*
 
 ## 例外：記憶層不是衍生物
 
-`~/.claude-ltm/memory/ltm.sqlite`（retrieval history、strength、links、pins）記的是
+`~/.claude-ltm/memory/`（append-only 事件日誌：shown／opened／cited／pinned／
+dismissed，一行一筆 JSON Lines）記的是
 **jsonl 記不得的事**——使用歷史。它不適用第 2 條，但受一條獨立硬約束：
 
 > **只存指標、統計、與封閉集合的類別標籤；不存 chunk 原文、query 原文、note 原文。**
 
-如此它即使被備份或同步也不含第三方逐字內容。**這條靠 schema 保證，不靠自律**；
-新增欄位時若要存文字，先問這條。
+如此它即使被備份或同步也不含第三方逐字內容。**strength、links 這些不落地**——
+它們是從事件重算的 projection，改公式只要重跑一次，不必改任何一筆歷史。
+
+這條由 schema 保證到什麼程度，要說清楚（#1 verify 2026-08-11 抓到原本的宣稱過強）：
+識別碼型別（`NoteReference`／`PresentationID` 以 UUID 為儲存型別；`GenerationID`／
+`RankingPolicyID`／`Anchor.source`／`turnID` 限 ASCII 英數與 `.` `_` `-`、長度 ≤64）
+擋掉「不小心把原文塞進識別碼」這個實際會發生的失敗模式，解碼邊界同樣驗證。
+**擋不掉刻意用 ASCII 編碼原文的人**——那不是這層要解的問題。新增欄位時若要存
+文字，先問這條。
 
 「封閉集合的類別標籤」是刻意寫進來的一條窄例外，也是它的邊界：**query class label**
 （`cjk-2char` / `cjk-3char` / `cjk-4plus` / `latin-alnum` / `mixed`）可以存，query 原文

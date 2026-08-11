@@ -75,10 +75,26 @@ public struct Anchor: Sendable, Hashable, Codable {
     public let span: Range<Int>
 
     public init(source: String, turnID: String, contentHash: ContentHash, span: Range<Int>) {
-        self.source = source
-        self.turnID = turnID
+        // `source` 與 `turnID` 會原樣序列化進 canonical store，所以它們跟其他
+        // 識別碼受同一條約束——不得夾帶自由文字。#1 verify 指出這兩個欄位是
+        // 「schema 保證」宣稱的破口之一。
+        self.source = OpaqueIdentifier.require(source, "Anchor.source")
+        self.turnID = OpaqueIdentifier.require(turnID, "Anchor.turnID")
         self.contentHash = contentHash
         self.span = span
+    }
+
+    /// 外來資料（解碼）用：非法值 throw 而不是 trap。
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let source = try c.decode(String.self, forKey: .source)
+        let turnID = try c.decode(String.self, forKey: .turnID)
+        try OpaqueIdentifier.validate(source)
+        try OpaqueIdentifier.validate(turnID)
+        self.source = source
+        self.turnID = turnID
+        self.contentHash = try c.decode(ContentHash.self, forKey: .contentHash)
+        self.span = try c.decode(Range<Int>.self, forKey: .span)
     }
 
     /// 由一則 turn 與 span 造出 anchor。

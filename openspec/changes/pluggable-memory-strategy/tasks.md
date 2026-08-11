@@ -1,6 +1,6 @@
 ## 1. Package skeleton
 
-- [x] 1.1 A Swift package builds and tests clean with four library targets (`LTMCore`, `LTMMemory`, `LTMQuery`, `LTMEval`) and their three test targets, where `LTMQuery` depends on `LTMCore` and `LTMMemory`, and `LTMCore` depends on nothing. Verify by running `swift build` and `swift test` from the repository root; both exit zero with the empty suites discovered.
+- [x] 1.1 A Swift package builds and tests clean with four library targets (`LTMCore`, `LTMMemory`, `LTMQuery`, `LTMEval`) and their three test targets, where `LTMQuery` depends on `LTMCore` **only** (deliberately not on `LTMMemory`, so the retrieval side cannot name `FileEventStore`), `LTMMemory` depends on `LTMCore`, and `LTMCore` depends on nothing. (Corrected 2026-08-11: this task originally said `LTMQuery` depends on `LTMCore` and `LTMMemory`, which contradicts `Package.swift` — flagged by the #1 verify.) Verify by running `swift build` and `swift test` from the repository root; both exit zero with the empty suites discovered.
 
 ## 2. Anchors
 

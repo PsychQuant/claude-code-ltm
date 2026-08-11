@@ -4,14 +4,38 @@ import Foundation
 /// 能被辨認出來而不是被靜靜地混在一起算。
 public struct GenerationID: Sendable, Hashable, Codable, CustomStringConvertible {
     public let value: String
-    public init(_ value: String) { self.value = value }
+    /// 字面值常數用。非法值是程式錯誤 → trap。
+    public init(_ value: String) { self.value = OpaqueIdentifier.require(value, "GenerationID") }
+    /// 外來資料用（解碼、CLI 參數）。非法值 → throw，不進 canonical store。
+    public init(validating value: String) throws {
+        try OpaqueIdentifier.validate(value)
+        self.value = value
+    }
+    public init(from decoder: any Decoder) throws {
+        try self.init(validating: try decoder.singleValueContainer().decode(String.self))
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(value)
+    }
     public var description: String { value }
 }
 
 /// 當下生效的排序策略識別碼。
 public struct RankingPolicyID: Sendable, Hashable, Codable, CustomStringConvertible {
     public let value: String
-    public init(_ value: String) { self.value = value }
+    public init(_ value: String) { self.value = OpaqueIdentifier.require(value, "RankingPolicyID") }
+    public init(validating value: String) throws {
+        try OpaqueIdentifier.validate(value)
+        self.value = value
+    }
+    public init(from decoder: any Decoder) throws {
+        try self.init(validating: try decoder.singleValueContainer().decode(String.self))
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(value)
+    }
     public var description: String { value }
 }
 
@@ -21,10 +45,18 @@ public struct RankingPolicyID: Sendable, Hashable, Codable, CustomStringConverti
 /// 原文放進 canonical 層。note 本文住在另一個 opt-in 加密 store（本 change
 /// 範圍外）。
 public struct NoteReference: Sendable, Hashable, Codable, CustomStringConvertible {
-    public let id: String
-    public init(id: String) { self.id = id }
-    public static func random() -> NoteReference { NoteReference(id: UUID().uuidString) }
-    public var description: String { id }
+    public let id: UUID
+    public init(id: UUID) { self.id = id }
+    public static func random() -> NoteReference { NoteReference(id: UUID()) }
+    /// UUID 是唯一可表達的形狀——沒有一個 initializer 收得下自由文字。
+    public init(from decoder: any Decoder) throws {
+        self.id = try decoder.singleValueContainer().decode(UUID.self)
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(id)
+    }
+    public var description: String { id.uuidString }
 }
 
 /// 一次呈現的不透明識別碼。
@@ -33,10 +65,17 @@ public struct NoteReference: Sendable, Hashable, Codable, CustomStringConvertibl
 /// (anchor, generation) 無法判斷某次點擊來自哪一次呈現，於是也就無法判斷該
 /// 記在哪一個策略頭上。這是隨機 ID、不含任何內容，與 note ref 同一種東西。
 public struct PresentationID: Sendable, Hashable, Codable, CustomStringConvertible {
-    public let id: String
-    public init(id: String) { self.id = id }
-    public static func random() -> PresentationID { PresentationID(id: UUID().uuidString) }
-    public var description: String { id }
+    public let id: UUID
+    public init(id: UUID) { self.id = id }
+    public static func random() -> PresentationID { PresentationID(id: UUID()) }
+    public init(from decoder: any Decoder) throws {
+        self.id = try decoder.singleValueContainer().decode(UUID.self)
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(id)
+    }
+    public var description: String { id.uuidString }
 }
 
 /// 互動事件的種類。封閉五值。

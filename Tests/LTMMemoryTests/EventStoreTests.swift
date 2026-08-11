@@ -29,7 +29,7 @@ private let policy = RankingPolicyID("archival")
 // MARK: - 3.2 序列化不得含任何原文
 
 @Test func serializedStoreContainsNoVerbatimContent() throws {
-    let store = FileEventStore(url: try tempDir().appendingPathComponent("events.jsonl"))
+    let store = try FileEventStore(url: try tempDir().appendingPathComponent("events.jsonl"))
 
     // 語料原文只以「被雜湊」的形式進入 anchor；查詢原文與 note 原文根本沒有
     // 可以傳進來的參數——這正是設計要的，測試只是把它釘死。
@@ -59,7 +59,7 @@ private let policy = RankingPolicyID("archival")
 // MARK: - 3.3 append-only、順序、失敗外顯
 
 @Test func rangeReadPreservesAppendOrder() throws {
-    let store = FileEventStore(url: try tempDir().appendingPathComponent("events.jsonl"))
+    let store = try FileEventStore(url: try tempDir().appendingPathComponent("events.jsonl"))
     let base = Date(timeIntervalSince1970: 1_000_000)
     let kinds: [NonPinKind] = [.shown, .opened, .cited, .dismissed, .shown]
 
@@ -77,7 +77,7 @@ private let policy = RankingPolicyID("archival")
 }
 
 @Test func rangeReadIsBoundedByTimestamp() throws {
-    let store = FileEventStore(url: try tempDir().appendingPathComponent("events.jsonl"))
+    let store = try FileEventStore(url: try tempDir().appendingPathComponent("events.jsonl"))
     let base = Date(timeIntervalSince1970: 1_000_000)
     for i in 0..<5 {
         try store.append(
@@ -96,7 +96,7 @@ private let policy = RankingPolicyID("archival")
     try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
     defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path) }
 
-    let store = FileEventStore(url: dir.appendingPathComponent("events.jsonl"))
+    let store = try FileEventStore(url: dir.appendingPathComponent("events.jsonl"))
     #expect(throws: (any Error).self) {
         try store.append(
             .interaction(.shown, anchor: anchor(語料原文), at: Date(), generation: gen, policy: policy))
@@ -105,7 +105,7 @@ private let policy = RankingPolicyID("archival")
 
 @Test func corruptRecordSurfacesInsteadOfBeingSkipped() throws {
     let url = try tempDir().appendingPathComponent("events.jsonl")
-    let store = FileEventStore(url: url)
+    let store = try FileEventStore(url: url)
     try store.append(
         .interaction(.shown, anchor: anchor(語料原文), at: Date(), generation: gen, policy: policy))
     // 模擬外來寫入者塞進一種本 schema 不認得的 kind。

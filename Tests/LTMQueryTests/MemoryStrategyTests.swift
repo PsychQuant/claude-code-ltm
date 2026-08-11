@@ -4,10 +4,13 @@ import Testing
 @testable import LTMCore
 @testable import LTMQuery
 
-// 依賴約束的驗證標的是 Package.swift：LTMQuery 的 dependencies 只有 LTMCore。
-// 因此 `EventStore` 在本模組不是可見型別，「retrieval 直接讀事件存放」是編譯
-// 錯誤而不是 review 疏漏。這個檔案裡刻意沒有 `import LTMMemory`——加上去就
-// 會讓這條斷言失效，所以它同時是一道防線。
+// 依賴約束的驗證標的是 Package.swift：LTMQuery 的 dependencies 只有 LTMCore，
+// 所以 `FileEventStore` 在本模組不是可見型別。
+//
+// **這條約束比先前寫的弱**（#1 verify 2026-08-11，devils-advocate 實測）：擋住的
+// 只是那個便利型別，JSON Lines 格式與 `Event: Codable` 都在 LTMCore，用
+// Foundation 直接讀檔即可繞過。spec 的 "Retrieval SHALL NOT read the event store
+// directly" 目前**沒有執行點**——把它寫成「編譯期事實」是過度宣稱，已更正。
 
 let instant = Date(timeIntervalSince1970: 3_000_000)
 

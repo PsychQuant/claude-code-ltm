@@ -35,15 +35,30 @@ public struct AnchorStatistics: Sendable, Equatable {
 ///
 /// 型別住在 LTMCore 而不是 LTMMemory，是為了讓 `LTMQuery` 能收下 projection
 /// 卻**不必**依賴 LTMMemory——於是「retrieval 不得直接讀事件存放」從一條紀律
-/// 變成編譯期事實：LTMQuery 根本看不到 `EventStore` 這個型別。
+/// 少一個依賴：LTMQuery 看不到 `FileEventStore`。
+///
+/// **誠實邊界**：這只擋住那個便利型別。JSON Lines 的格式與 `Event: Codable`
+/// 都在本模組，所以 LTMQuery 用 Foundation 仍能直接讀 canonical 事件檔——
+/// #1 verify 的 devils-advocate 實測做到了。原本寫的「編譯期事實」是過度宣稱。
 public struct Projection: Sendable, Equatable {
     public let statistics: [Anchor: AnchorStatistics]
     /// 產生這份 projection 的評估時點。留著是為了讓 reason 能誠實說明依據。
     public let instant: Date
+    /// 有歷史、但 anchor 已 orphan 而被排除的那些。
+    ///
+    /// 存在的理由是 design.md 承諾「orphan **never** silently treated as a normal
+    /// miss」。orphan 過濾發生在 projection，若不把這件事帶出來，策略在結構上
+    /// 就不可能履行那個承諾——#1 verify 指出 `orphanedHistoryIgnored` 因此是一個
+    /// 永不產生的死 case，而 spec delta 剛好被寫得比 design.md 弱、弱到與 code 相符。
+    public let orphanedAnchors: Set<Anchor>
 
-    public init(statistics: [Anchor: AnchorStatistics], instant: Date) {
+    public init(
+        statistics: [Anchor: AnchorStatistics], instant: Date,
+        orphanedAnchors: Set<Anchor> = []
+    ) {
         self.statistics = statistics
         self.instant = instant
+        self.orphanedAnchors = orphanedAnchors
     }
 
     public subscript(anchor: Anchor) -> AnchorStatistics? { statistics[anchor] }
@@ -56,6 +71,9 @@ public struct Projection: Sendable, Equatable {
     public func netStrength(for anchor: Anchor) -> Double {
         statistics[anchor]?.netStrength ?? 0
     }
+
+    /// 這個 anchor 有歷史，但因為 orphan 而不計入。
+    public func isOrphaned(_ anchor: Anchor) -> Bool { orphanedAnchors.contains(anchor) }
 
     public static func empty(at instant: Date) -> Projection {
         Projection(statistics: [:], instant: instant)

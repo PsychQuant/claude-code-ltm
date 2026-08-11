@@ -36,7 +36,17 @@
 | 策略 | 記憶層行為 | 像什麼 | 狀態 |
 |---|---|---|---|
 | `archival` | 無。純內容相關性排序 | 檔案櫃／grep | 已實作（`LTMQuery`）|
-| `human-like` | power-law decay + 提取增強，帶內重排、位移有上限 | 人腦 | 已實作（`LTMQuery`）|
+| `human-like` | power-law decay + 提取增強，帶內重排、位移有上限 | 人腦 | **部分實作**（`LTMQuery`）|
+
+> **`human-like` 缺一個機制，這裡明說。** issue 要的第三個機制是 **spreading
+> activation**（Collins & Loftus, 1975；issue 裡叫「共現擴散激發」，Clarity Surface
+> 已裁決共現實作只是它的一個變體）——**目前沒有實作**。它需要一個共現邊結構，
+> 而事件 schema 還沒帶那個東西；補上去會讓這次改動超出「定義 seam」的範圍。
+> 列為 follow-up。
+>
+> 這條記在這裡，是因為先前的 `proposal.md` 把 "co-retrieval association" 列進
+> 已 ship 的機制、本表也標成「已實作」——那是過度宣稱，由 #1 的 verify
+> （2026-08-11）抓出並更正。**部分實作就寫部分實作。**
 
 ### 移除的第三檔：`conservative`
 

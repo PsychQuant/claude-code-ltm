@@ -61,8 +61,14 @@ public func project(
         return live
     }
 
+    var orphaned: Set<Anchor> = []
     for event in events {
-        guard isLive(event.anchor) else { continue }
+        guard isLive(event.anchor) else {
+            // 記下來而不是丟掉：策略必須能說出「這筆有歷史但已 orphan」，
+            // 否則 design.md 的 never-silent 承諾在結構上無法履行。
+            orphaned.insert(event.anchor)
+            continue
+        }
 
         let ageDays = max(0, instant.timeIntervalSince(event.timestamp)) / 86_400
         let decay = pow(1 + ageDays, -parameters.decayExponent)
@@ -103,5 +109,5 @@ public func project(
             lastDeliberateInteraction: lastDeliberate[anchor],
             deliberateCounts: counts[anchor] ?? [:])
     }
-    return Projection(statistics: statistics, instant: instant)
+    return Projection(statistics: statistics, instant: instant, orphanedAnchors: orphaned)
 }

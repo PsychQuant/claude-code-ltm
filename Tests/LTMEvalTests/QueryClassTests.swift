@@ -14,11 +14,19 @@ func classifierAssignsOneOfTheClosedFiveValues(query: String, expected: QueryCla
     #expect(QueryClassifier.classify(query) == expected)
 }
 
-@Test func everyQueryGetsExactlyOneLabelFromTheClosedSet() {
-    let samples = ["", "   ", "。、！", "42", "中", "中文與 English 混雜", "純中文的長查詢字串"]
-    for sample in samples {
-        #expect(QueryClass.allCases.contains(QueryClassifier.classify(sample)))
-    }
+@Test func degenerateInputsGetTheDocumentedLabelRatherThanAnyLabel() {
+    // 先前這條寫成「classify 的回傳值屬於 QueryClass.allCases」——回傳型別就是
+    // QueryClass，所以它恆真、什麼都沒測到（#1 verify，devils-advocate：
+    // 「名字比證據強」）。改成逐一釘死退化輸入的**具體**歸屬，那才是真正需要
+    // 被固定住的行為：報告的桶會不會因為空字串或純標點而多出一列。
+    #expect(QueryClassifier.classify("") == .latinAlnum)
+    #expect(QueryClassifier.classify("   ") == .latinAlnum)
+    #expect(QueryClassifier.classify("。、！") == .latinAlnum)
+    #expect(QueryClassifier.classify("42") == .latinAlnum)
+    #expect(QueryClassifier.classify("中") == .cjk2char)  // 單字併入最短桶
+    #expect(QueryClassifier.classify("中文與 English 混雜") == .mixed)
+    #expect(QueryClassifier.classify("純中文的長查詢字串") == .cjk4plus)
+
     #expect(QueryClass.allCases.count == 5)
 }
 

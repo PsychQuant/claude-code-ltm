@@ -39,13 +39,25 @@ public struct GenerationRow: Sendable, Equatable {
 /// 只看整體會判成「沒有差異」。
 public struct ComparisonReport: Sendable, Equatable {
     public let classRows: [ClassRow]
-    public let aggregate: StrategyScoreTable
-    /// 資料橫跨一個以上的 generation。橫跨時不得把它們併成一個數字。
+    /// 整體數字。**跨 generation 時為 nil**——spec 寫的是 "Results from different
+    /// generations SHALL NOT be silently pooled into a single figure"，而先前把它
+    /// 宣告成非 optional，等於型別上根本無法表達「這裡不該有整體數字」，於是
+    /// 只讀 aggregate 的消費端會拿到被明文禁止的混合結論。（#1 verify 2026-08-11）
+    public let aggregate: StrategyScoreTable?
+    /// 資料橫跨一個以上的 generation。
     public let spansGenerations: Bool
     /// 只在 `spansGenerations` 為真時非空。
     public let generationRows: [GenerationRow]
 
     public typealias StrategyScoreTable = [RankingPolicyID: StrategyScore]
+}
+
+/// 計分時發現的資料不一致。外顯而不是靜默算到別人頭上。
+public enum ComparisonDataError: Error, Sendable, Equatable {
+    /// 同一個 PresentationID 出現在多筆紀錄上。
+    case duplicatePresentationID(PresentationID)
+    /// 事件宣稱的 generation 與它所屬呈現紀錄的不一致。
+    case generationMismatch(presentation: PresentationID)
 }
 
 public enum ComparisonScorer {
@@ -57,8 +69,16 @@ public enum ComparisonScorer {
     public static func report(
         records: [PresentationRecord],
         events: [Event]
-    ) -> ComparisonReport {
-        let byID = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+    ) throws -> ComparisonReport {
+        // 先前用 `Dictionary(uniqueKeysWithValues:)`，重複 ID 會直接 trap
+        // （fatalError）而不是回報錯誤。呈現紀錄來自檔案，重複是資料問題不是
+        // 程式錯誤，必須 throw。（#1 verify 2026-08-11）
+        var byID: [PresentationID: PresentationRecord] = [:]
+        for record in records {
+            guard byID.updateValue(record, forKey: record.id) == nil else {
+                throw ComparisonDataError.duplicatePresentationID(record.id)
+            }
+        }
 
         var credits: [Key: Int] = [:]
         var penalties: [Key: Int] = [:]
@@ -74,8 +94,15 @@ public enum ComparisonScorer {
                 let policy = record.credit(for: event.anchor)
             else { continue }
 
-            generations.insert(event.generation)
-            let key = Key(policy: policy, queryClass: record.queryClass, generation: event.generation)
+            // 歸屬用**紀錄**的 generation，不是事件自報的。兩者不一致代表資料
+            // 損壞（或事件被錯標），靜默採信事件會讓一次呈現被切成兩半、rate
+            // 悄悄歸零。
+            guard event.generation == record.generation else {
+                throw ComparisonDataError.generationMismatch(presentation: record.id)
+            }
+
+            generations.insert(record.generation)
+            let key = Key(policy: policy, queryClass: record.queryClass, generation: record.generation)
 
             switch event.kind {
             case .shown:
@@ -83,11 +110,11 @@ public enum ComparisonScorer {
             case .opened, .cited, .pinned:
                 credits[key, default: 0] += 1
                 observations[record.queryClass, default: 0] += 1
-                generationObservations[event.generation, default: 0] += 1
+                generationObservations[record.generation, default: 0] += 1
             case .dismissed:
                 penalties[key, default: 0] += 1
                 observations[record.queryClass, default: 0] += 1
-                generationObservations[event.generation, default: 0] += 1
+                generationObservations[record.generation, default: 0] += 1
             }
         }
 
@@ -127,7 +154,8 @@ public enum ComparisonScorer {
 
         return ComparisonReport(
             classRows: classRows,
-            aggregate: table { _ in true },
+            // 跨 generation 時**不產出**整體數字，而不是產出一個標了警語的數字。
+            aggregate: spans ? nil : table { _ in true },
             spansGenerations: spans,
             generationRows: generationRows)
     }

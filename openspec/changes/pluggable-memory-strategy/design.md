@@ -45,6 +45,8 @@ The hash covers normalized text only, excluding role and timestamp. Including th
 
 `MemoryStrategy` is the only new abstraction. Event projection — turning an event sequence into per-anchor statistics — is a free function, not a module or protocol.
 
+**How strongly the seam is enforced, stated honestly.** The strategy signature takes candidates and a projection and nothing else, so a strategy cannot reach the corpus *through its arguments*; but `CorpusReader` and `Anchor.dereference` are public in `LTMCore`, so a strategy that wants corpus text can construct its own reader. Likewise `LTMQuery` does not depend on `LTMMemory` and therefore cannot name `FileEventStore`, but `Event` is `Codable` in `LTMCore` and the store format is JSON Lines, so the event file can be read with Foundation alone. Both were demonstrated by the #1 verify on 2026-08-11. The two "SHALL NOT" requirements are therefore **conventions carried by the dependency graph, not compile-time facts**. Making them facts requires moving the event encoding out of `LTMCore`; that is a separate refactor, tracked as a follow-up.
+
 *Alternative rejected:* a `ProjectionProvider` protocol alongside the strategy protocol. Applying the deletion test: removing the projection abstraction breaks nothing, because there is exactly one way to fold events into statistics and no caller needs to vary it. A second seam there would be a pass-through wrapper. If projection later needs its own caching or incremental update lifecycle, it earns promotion then.
 
 ### Reorder within relevance bands, bound the displacement
@@ -81,7 +83,7 @@ Two strategies each produce a ranking for the same query; the presented list int
 
 **Failure modes.**
 
-- A dereference whose content hash does not match returns an orphaned result. Strategies skip orphaned anchors. This is surfaced in the returned reason, never silently treated as a normal miss.
+- A dereference whose content hash does not match returns an orphaned result. Strategies skip orphaned anchors. This is surfaced in the returned reason, never silently treated as a normal miss. Making that true requires the projection to carry the orphaned anchors forward — orphan filtering happens inside projection, so without that the information is gone before a reason can be composed, and the reason case for it is unreachable. That was the state the #1 verify found on 2026-08-11; the projection now carries them.
 - An event referring to an anchor absent from the current index contributes nothing to projection and is not an error; the canonical store outliving a given index build is expected.
 - A strategy attempting to move a candidate outside its relevance band, or further than the configured bound, is a programming error and fails loudly rather than being clamped, so that a misbehaving strategy cannot silently masquerade as a conforming one.
 - An unwritable event store fails the append and surfaces the failure. Losing usage history silently is not acceptable, because unlike the index it cannot be rebuilt.

@@ -49,7 +49,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("ltm-proj-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    let store = FileEventStore(url: dir.appendingPathComponent("events.jsonl"))
+    let store = try FileEventStore(url: dir.appendingPathComponent("events.jsonl"))
 
     let a = anchor("t1", 訊息A)
     try store.append(event(.opened, a, minutesAgo: 5))

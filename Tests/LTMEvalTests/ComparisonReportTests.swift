@@ -36,7 +36,7 @@ private func event(
         policy: record.credit(for: anchor) ?? archival, presentation: record.id)
 }
 
-@Test func reportCarriesOneRowPerQueryClassWithObservationCounts() {
+@Test func reportCarriesOneRowPerQueryClassWithObservationCounts() throws {
     let a2 = evalAnchor("a2")
     let b2 = evalAnchor("b2")
     let a4 = evalAnchor("a4")
@@ -54,7 +54,7 @@ private func event(
         event(.shown, aLatin, rLatin), event(.shown, bLatin, rLatin),
     ]
 
-    let report = ComparisonScorer.report(records: [r2, r4, rLatin], events: events)
+    let report = try ComparisonScorer.report(records: [r2, r4, rLatin], events: events)
 
     #expect(report.classRows.map(\.queryClass) == [.cjk2char, .cjk4plus, .latinAlnum])
     #expect(report.classRows.first { $0.queryClass == .cjk2char }?.observations == 1)
@@ -63,18 +63,18 @@ private func event(
     #expect(report.classRows.first { $0.queryClass == .latinAlnum }?.observations == 0)
 }
 
-@Test func aggregateNeverAppearsWithoutPerClassRows() {
+@Test func aggregateNeverAppearsWithoutPerClassRows() throws {
     let a = evalAnchor("a")
     let b = evalAnchor("b")
     let r = presentation(.cjk2char, a: a, b: b)
-    let report = ComparisonScorer.report(
+    let report = try ComparisonScorer.report(
         records: [r], events: [event(.shown, a, r), event(.shown, b, r), event(.opened, b, r)])
 
     #expect(!report.classRows.isEmpty)
-    #expect(report.aggregate[humanLike]?.credits == 1)
+    #expect(report.aggregate?[humanLike]?.credits == 1)
 }
 
-@Test func aClassLocalEffectIsNotWashedOutByTheAggregate() {
+@Test func aClassLocalEffectIsNotWashedOutByTheAggregate() throws {
     // 一個桶裡 human-like 完勝，其餘桶全平手。整體看幾乎沒差，逐桶看很清楚。
     var records: [PresentationRecord] = []
     var events: [Event] = []
@@ -94,7 +94,7 @@ private func event(
         events += [event(.shown, a, r), event(.shown, b, r)]
     }
 
-    let report = ComparisonScorer.report(records: records, events: events)
+    let report = try ComparisonScorer.report(records: records, events: events)
 
     let 雙字 = report.classRows.first { $0.queryClass == .cjk2char }!
     #expect(雙字.scores[humanLike]?.rate == 1.0)
@@ -104,10 +104,10 @@ private func event(
     #expect(四字.scores[humanLike]?.net == 0)
 
     // 整體被 90 個平手桶稀釋到 0.1——分桶那一列才看得見 1.0。
-    #expect(report.aggregate[humanLike]?.rate == 0.1)
+    #expect(report.aggregate?[humanLike]?.rate == 0.1)
 }
 
-@Test func impressionsFormTheDenominatorNotTheNumerator() {
+@Test func impressionsFormTheDenominatorNotTheNumerator() throws {
     let a = evalAnchor("a")
     let b = evalAnchor("b")
     let r = PresentationRecord(
@@ -125,28 +125,28 @@ private func event(
         event(.shown, a, r), event(.shown, evalAnchor("c"), r), event(.shown, b, r),
         event(.opened, a, r), event(.opened, b, r),
     ]
-    let report = ComparisonScorer.report(records: [r], events: events)
+    let report = try ComparisonScorer.report(records: [r], events: events)
 
-    #expect(report.aggregate[archival]?.presented == 2)
-    #expect(report.aggregate[humanLike]?.presented == 1)
-    #expect(report.aggregate[archival]?.rate == 0.5)  // 用自己的分母，不是互動總數
-    #expect(report.aggregate[humanLike]?.rate == 1.0)
+    #expect(report.aggregate?[archival]?.presented == 2)
+    #expect(report.aggregate?[humanLike]?.presented == 1)
+    #expect(report.aggregate?[archival]?.rate == 0.5)  // 用自己的分母，不是互動總數
+    #expect(report.aggregate?[humanLike]?.rate == 1.0)
 }
 
-@Test func dismissalCountsAgainstTheCreditingStrategy() {
+@Test func dismissalCountsAgainstTheCreditingStrategy() throws {
     let a = evalAnchor("a")
     let b = evalAnchor("b")
     let r = presentation(.cjk2char, a: a, b: b)
-    let report = ComparisonScorer.report(
+    let report = try ComparisonScorer.report(
         records: [r],
         events: [event(.shown, a, r), event(.shown, b, r), event(.dismissed, b, r)])
 
-    #expect(report.aggregate[humanLike]?.penalties == 1)
-    #expect(report.aggregate[humanLike]?.net == -1)
-    #expect(report.aggregate[archival]?.net == 0)
+    #expect(report.aggregate?[humanLike]?.penalties == 1)
+    #expect(report.aggregate?[humanLike]?.net == -1)
+    #expect(report.aggregate?[archival]?.net == 0)
 }
 
-@Test func nullComparisonsAreExcludedFromScoring() {
+@Test func nullComparisonsAreExcludedFromScoring() throws {
     let a = evalAnchor("a")
     let b = evalAnchor("b")
     let null = PresentationRecord(
@@ -158,7 +158,7 @@ private func event(
         ],
         isNullComparison: true)
 
-    let report = ComparisonScorer.report(
+    let report = try ComparisonScorer.report(
         records: [null],
         events: [
             .interaction(.opened, anchor: a, at: evalInstant, generation: evalGeneration,
@@ -166,10 +166,64 @@ private func event(
         ])
 
     #expect(report.classRows.isEmpty)
-    #expect(report.aggregate.isEmpty)
+    #expect(report.aggregate?.isEmpty == true)
 }
 
-@Test func dataSpanningGenerationsIsFlaggedAndBrokenDown() {
+@Test func crossGenerationReportHasNoPooledAggregateAtAll() throws {
+    // spec: "Results from different generations SHALL NOT be silently pooled into
+    // a single figure"。先前 aggregate 是非 optional，型別上無法表達「這裡不該有
+    // 整體數字」，只讀 aggregate 的消費端會拿到被明文禁止的混合結論。
+    let genA = GenerationID("build-1")
+    let genB = GenerationID("build-2")
+    let r1 = presentation(.cjk2char, a: evalAnchor("a1"), b: evalAnchor("b1"), generation: genA)
+    let r2 = presentation(.cjk2char, a: evalAnchor("a2"), b: evalAnchor("b2"), generation: genB)
+
+    let report = try ComparisonScorer.report(
+        records: [r1, r2],
+        events: [
+            event(.shown, evalAnchor("a1"), r1, generation: genA),
+            event(.opened, evalAnchor("b1"), r1, generation: genA),
+            event(.shown, evalAnchor("a2"), r2, generation: genB),
+            event(.opened, evalAnchor("a2"), r2, generation: genB),
+        ])
+
+    #expect(report.spansGenerations)
+    #expect(report.aggregate == nil)
+    #expect(report.generationRows.count == 2)
+}
+
+@Test func duplicatePresentationIdentifiersAreReportedNotTrapped() {
+    // 先前用 Dictionary(uniqueKeysWithValues:)，重複 ID 直接 fatalError。
+    // 呈現紀錄來自檔案，重複是資料問題不是程式錯誤。
+    let shared = PresentationID.random()
+    func record(_ anchor: Anchor) -> PresentationRecord {
+        PresentationRecord(
+            id: shared, queryClass: .cjk2char,
+            strategyA: archival, strategyB: humanLike, generation: evalGeneration,
+            attribution: [AnchorAttribution(anchor: anchor, creditedTo: archival)],
+            isNullComparison: false)
+    }
+
+    #expect(throws: ComparisonDataError.duplicatePresentationID(shared)) {
+        _ = try ComparisonScorer.report(
+            records: [record(evalAnchor("a")), record(evalAnchor("b"))], events: [])
+    }
+}
+
+@Test func anEventMislabelledWithAnotherGenerationIsReported() {
+    let r = presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"), generation: GenerationID("build-1"))
+    // 事件自報 build-2，但它所屬的呈現是 build-1。靜默採信會讓一次呈現被切成
+    // 兩半、rate 悄悄歸零。
+    let mislabelled = Event.interaction(
+        .opened, anchor: evalAnchor("a"), at: evalInstant,
+        generation: GenerationID("build-2"), policy: archival, presentation: r.id)
+
+    #expect(throws: ComparisonDataError.generationMismatch(presentation: r.id)) {
+        _ = try ComparisonScorer.report(records: [r], events: [mislabelled])
+    }
+}
+
+@Test func dataSpanningGenerationsIsFlaggedAndBrokenDown() throws {
     let genA = GenerationID("build-1")
     let genB = GenerationID("build-2")
 
@@ -188,7 +242,7 @@ private func event(
         event(.opened, a2, r2, generation: genB),
     ]
 
-    let report = ComparisonScorer.report(records: [r1, r2], events: events)
+    let report = try ComparisonScorer.report(records: [r1, r2], events: events)
 
     #expect(report.spansGenerations)
     #expect(report.generationRows.map(\.generation) == [genA, genB])
@@ -196,11 +250,11 @@ private func event(
     #expect(report.generationRows.first { $0.generation == genB }?.scores[archival]?.credits == 1)
 }
 
-@Test func singleGenerationDataIsNotFlagged() {
+@Test func singleGenerationDataIsNotFlagged() throws {
     let a = evalAnchor("a")
     let b = evalAnchor("b")
     let r = presentation(.cjk2char, a: a, b: b)
-    let report = ComparisonScorer.report(
+    let report = try ComparisonScorer.report(
         records: [r], events: [event(.shown, a, r), event(.opened, b, r)])
 
     #expect(!report.spansGenerations)
