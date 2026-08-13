@@ -23,14 +23,23 @@ private let policy = RankingPolicyID("archival")
 @Test func decodingAnUnknownKindFailsAndYieldsNoRecord() throws {
     // 型別層擋不到「別人寫進檔案的第六種 kind」——這才是封閉集合真正會被
     // 攻破的地方，所以斷言下在解碼邊界上。
-    let foreign = """
-        {"kind":"bookmarked","anchor":{"source":"s","turnID":"t1",
-        "contentHash":{"hex":"00"},"span":{"lowerBound":0,"upperBound":1}},
-        "timestamp":0,"generation":{"value":"g"},"policy":{"value":"p"}}
-        """
+    //
+    // #1 verify R2：先前這條的 fixture 在 `contentHash`、`span`、`generation`
+    // 三個欄位的形狀全都是錯的，所以它 throw 的原因根本不是 kind。加一條
+    // **基準斷言**（只換 kind、其餘完全相同、且必須可解）才能讓歸因成立。
+    func record(kind: String) -> Data {
+        Data("""
+            {"kind":"\(kind)","anchor":{"source":"s","turnID":"t1",
+            "contentHash":{"hex":"\(String(repeating: "ab", count: 32))"},"span":[0,1]},
+            "timestamp":0,"generation":"build-1","policy":"archival"}
+            """.utf8)
+    }
+
+    #expect(throws: Never.self) { _ = try JSONDecoder().decode(Event.self, from: record(kind: "opened")) }
+
     var decoded: Event?
     #expect(throws: (any Error).self) {
-        decoded = try JSONDecoder().decode(Event.self, from: Data(foreign.utf8))
+        decoded = try JSONDecoder().decode(Event.self, from: record(kind: "bookmarked"))
     }
     #expect(decoded == nil)
 }

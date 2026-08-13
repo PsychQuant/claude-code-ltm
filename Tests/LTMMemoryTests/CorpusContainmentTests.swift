@@ -40,6 +40,46 @@ import Testing
     }
 }
 
+@Test func dotDotThroughASymlinkCannotEscapeTheGuard() throws {
+    // #1 verify R2（logic + security 各自重現）：`standardizedFileURL` 會把 `..`
+    // 做**字面**消解，但 `..` 在 symlink 之後的語意是「解析後那個目錄的父層」。
+    // 於是守衛判「在外面」、kernel 卻寫進語料裡。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-dotdot-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+    // link → ~/.claude ；於是 link/../claude/projects 實際落在語料根裡。
+    let claudeDir = CorpusLocation.readOnlyRoot.deletingLastPathComponent()
+    let link = dir.appendingPathComponent("link")
+    try? FileManager.default.createSymbolicLink(at: link, withDestinationURL: claudeDir)
+
+    let escape = link
+        .appendingPathComponent("..")
+        .appendingPathComponent(claudeDir.lastPathComponent)
+        .appendingPathComponent("projects")
+        .appendingPathComponent("p")
+        .appendingPathComponent("s.jsonl")
+
+    #expect(CorpusLocation.isInsideReadOnlyCorpus(escape))
+    #expect(throws: (any Error).self) { _ = try FileEventStore(url: escape) }
+}
+
+@Test func danglingSymlinkAtTheLeafIsStillResolved() throws {
+    // 葉節點是 dangling symlink（目標尚不存在）時也不得穿透——先前尾端整段不解析。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-dangling-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+    let target = CorpusLocation.readOnlyRoot
+        .appendingPathComponent("not-yet")
+        .appendingPathComponent("events.jsonl")
+    let leaf = dir.appendingPathComponent("events.jsonl")
+    try FileManager.default.createSymbolicLink(at: leaf, withDestinationURL: target)
+
+    #expect(CorpusLocation.isInsideReadOnlyCorpus(leaf))
+    #expect(throws: (any Error).self) { _ = try FileEventStore(url: leaf) }
+}
+
 @Test func storeAcceptsAPathOutsideTheCorpus() throws {
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("ltm-ok-\(UUID().uuidString)")

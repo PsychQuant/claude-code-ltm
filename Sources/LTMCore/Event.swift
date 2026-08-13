@@ -95,8 +95,14 @@ public enum EventValidationError: Error, Sendable, Equatable {
 /// 一筆 canonical 使用歷史。
 ///
 /// 欄位全是指標與識別碼：沒有 chunk 原文、沒有 query 原文、沒有 note 原文。
-/// 這條約束靠 schema 保證，不靠自律——要新增會存文字的欄位，先回去讀
-/// CLAUDE.md 的記憶層硬約束。
+/// 這條約束由 schema **部分**保證：每個會被原樣序列化的字串欄位都有型別層的
+/// 形狀約束（識別碼走 `OpaqueIdentifier` 字元集、note/presentation ref 是 UUID、
+/// `ContentHash` 是 64 位小寫十六進位）。它擋掉的是「不小心把原文塞進去」，
+/// **擋不掉刻意用 ASCII 編碼原文的人**。
+///
+/// 判準寫在這裡，因為列舉會漏：R1 逐一列舉六個型別、漏掉 `ContentHash`，而
+/// R2 三個 lens 各自重現了那個破口。**新增欄位時要問的不是「它像不像識別碼」，
+/// 而是「它會不會被原樣序列化」**——會的話就必須有形狀約束。
 public struct Event: Sendable, Hashable, Codable {
     public let kind: EventKind
     public let anchor: Anchor

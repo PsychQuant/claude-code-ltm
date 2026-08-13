@@ -66,6 +66,29 @@ public struct HumanLikeStrategy: MemoryStrategy {
     /// 修法是在每次 swap **之前**檢查被越過那一方的累計下移：它移到 `index` 之後，
     /// 相對原始位置的下移量必須仍 ≤ bound，否則放棄這次交換。因此兩個方向都由
     /// 演算法保證，守衛回到它該有的角色——抓別人的錯，而不是抓自己的。
+    ///
+    /// ## 代價（#1 verify R2 量化，2026-08-14）
+    ///
+    /// **對稱上限的必然後果是：一條帶的提升總數上限就是 `bound`，與帶大小無關。**
+    /// 位於索引 j 的候選最多下移 `bound` 名，所以最多只有 `bound` 個候選能越過它；
+    /// 帶首若是一個沒有歷史的候選，整條帶就被它擋住。實測（帶大小 32、其中 31 個
+    /// 有遞減強度）：
+    ///
+    /// | bound | 實際上移總數 |
+    /// |---|---|
+    /// | 1 | 1 |
+    /// | 2 | 2 |
+    /// | 3 | 3 |
+    ///
+    /// 具體例：`[a:0, b:6, c:4, d:2]`、bound 1 → `[b, a, c, d]`。強度 4 的 c 與
+    /// 強度 2 的 d **完全不升**，停在強度 0 的 a 之後。所以下面那句「寧可少升
+    /// 一名」在多數情形下應讀作「寧可完全不升」。
+    ///
+    /// 這不是演算法的缺陷，是**對稱上限這條裁決本身的算術**。要讓 human-like
+    /// 在帶內真的有作用，就必須放寬對稱性（上限只約束提升、下移是後果）或
+    /// 提高 bound——兩者都改變 Clarity Surface 「最多位移一名」的語意，所以
+    /// 交由使用者裁決，追蹤於 #17。**在那之前不要為了讓效果變明顯而偷偷調高
+    /// 預設值**：那會讓比較實驗量到的是參數，不是策略。
     private func promoteWithinBand(
         _ items: inout [Candidate], range: Range<Int>, projection: Projection
     ) {
@@ -117,9 +140,13 @@ public struct HumanLikeStrategy: MemoryStrategy {
             // 真的沒有歷史。這是誠實的「沒有調整」。
             return .noAdjustment
         }
-        guard placement.displacement != 0 || stats.netStrength != 0 else {
-            return .noAdjustment
-        }
+        // spec：「A result whose displacement is zero SHALL carry a reason
+        // indicating that no adjustment was applied.」先前寫成「位移為 0 **且**
+        // 強度為 0 才報 noAdjustment」，於是「有強度但沒動」會報 `.adjusted`
+        // ——而那個組合正因為 R1 的「放棄提升」修法而變得常見（#1 verify R2）。
+        //
+        // 判準只看位移：沒動就是沒調整，不管背後有多少歷史。
+        guard placement.displacement != 0 else { return .noAdjustment }
         return .adjusted(signals: stats.deliberateCounts, netStrength: stats.netStrength)
     }
 }

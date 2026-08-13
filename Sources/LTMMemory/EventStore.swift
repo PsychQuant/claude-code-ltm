@@ -35,29 +35,56 @@ public enum CorpusLocation {
             .appendingPathComponent("projects")
     }
 
-    /// 解析 symlink 之後判斷是否落在語料根底下。
+    /// 判斷路徑是否落在語料根底下，**逐層解析 symlink**。
     ///
-    /// 一定要先 resolve：表面路徑在 `~/.claude-ltm/` 但實際是指向語料的 symlink
-    /// 時，只比字串會穿透。父目錄不存在時退回逐層往上找已存在的祖先來解析。
+    /// #1 verify R2（logic + security 兩個 lens 各自重現）：先前的實作是
+    /// 「`standardizedFileURL` → 從最近的存在祖先 resolve → 把剩下的元件接回去」。
+    /// 兩個破口：
+    ///
+    /// 1. **`standardizedFileURL` 會先把 `..` 做字面消解**，而 `..` 在 symlink
+    ///    之後的語意是「解析後那個目錄的父層」，不是字面上的前一段。於是
+    ///    `<tmp>/link/../projects/p/s.jsonl`（link → `~/.claude`）被字面消成
+    ///    `<tmp>/projects/...`，守衛判「在外面」，kernel 卻寫進語料裡。
+    /// 2. 尾端元件整段不解析，所以**葉節點是 dangling symlink** 時也穿透。
+    ///
+    /// 改法：從根開始逐段拼接，每拼一段就 resolve 一次，`..` 在解析後的路徑上
+    /// 才做消解。這與 kernel 實際走路徑的順序一致。
+    ///
+    /// **誠實邊界：這仍是 TOCTOU 的。** 檢查與開檔之間，任何一段都可能被換成
+    /// symlink。真正的結構解是開檔時用 `O_NOFOLLOW` 逐段開（`openat` 走一遍），
+    /// 那需要重寫 append 路徑，追蹤於 follow-up。這裡擋的是誤用與既存的錯誤
+    /// 佈局，不是有能力在窗口內競態的攻擊者。
     public static func isInsideReadOnlyCorpus(_ url: URL) -> Bool {
-        let root = readOnlyRoot.resolvingSymlinksInPath().standardizedFileURL
-        var probe = url.standardizedFileURL
-        // 目標檔案通常還不存在，resolvingSymlinksInPath 對不存在的路徑不解析，
-        // 所以從最近的存在祖先開始解析，再把剩下的元件接回去。
-        var trailing: [String] = []
-        while !FileManager.default.fileExists(atPath: probe.path), probe.pathComponents.count > 1 {
-            trailing.append(probe.lastPathComponent)
-            probe = probe.deletingLastPathComponent()
-        }
-        var resolved = probe.resolvingSymlinksInPath().standardizedFileURL
-        for component in trailing.reversed() {
+        let root = URL(fileURLWithPath: readOnlyRoot.path).resolvingSymlinksInPath()
+            .standardizedFileURL.pathComponents
+
+        var resolved = URL(fileURLWithPath: "/")
+        for component in url.pathComponents.dropFirst() {
+            if component == "." { continue }
+            if component == ".." {
+                // 在**已解析**的路徑上往上一層，而不是在字面路徑上。
+                resolved = resolved.deletingLastPathComponent()
+                continue
+            }
             resolved = resolved.appendingPathComponent(component)
+            // 逐段解析：存在且是 symlink 時展開，不存在就原樣留著（尾端常見）。
+            if FileManager.default.fileExists(atPath: resolved.path) {
+                resolved = resolved.resolvingSymlinksInPath()
+            } else if let target = try? FileManager.default.destinationOfSymbolicLink(
+                atPath: resolved.path)
+            {
+                // dangling symlink：destinationOfSymbolicLink 仍讀得到目標。
+                let targetURL =
+                    target.hasPrefix("/")
+                    ? URL(fileURLWithPath: target)
+                    : resolved.deletingLastPathComponent().appendingPathComponent(target)
+                resolved = targetURL.standardizedFileURL
+            }
         }
 
-        let rootComponents = root.pathComponents
-        let targetComponents = resolved.standardizedFileURL.pathComponents
-        guard targetComponents.count >= rootComponents.count else { return false }
-        return Array(targetComponents.prefix(rootComponents.count)) == rootComponents
+        let target = resolved.standardizedFileURL.pathComponents
+        guard target.count >= root.count else { return false }
+        return Array(target.prefix(root.count)) == root
     }
 }
 
@@ -101,17 +128,43 @@ public struct FileEventStore: EventStore {
         }
         defer { close(fd) }
 
+        // #1 verify R2（logic lens）：先前的迴圈把任何 `write` 失敗直接拋出，
+        // 於是「已寫了一半再失敗」會在檔尾留下**半行 JSON**。因為讀取端對解不開
+        // 的行是 fail-loud（這是刻意的），那半行會讓**整個 canonical store 從此
+        // 讀不出來**——一次暫時性的錯誤變成永久性的損壞。EINTR 更是被當成致命錯，
+        // 而它只是「被訊號打斷，請重試」。
+        //
+        // 兩層處理：EINTR / EAGAIN 重試；真的中斷在半路時，補一個換行把殘行封口，
+        // 讓損壞侷限在那一筆而不是整份檔案。
         var remaining = line[...]
+        var wroteAnything = false
         while !remaining.isEmpty {
             let written = remaining.withUnsafeBytes { buffer in
                 write(fd, buffer.baseAddress, buffer.count)
             }
-            guard written > 0 else {
+            if written < 0 {
+                if errno == EINTR || errno == EAGAIN { continue }
+                let failure = errno
+                if wroteAnything { Self.terminatePartialLine(fd) }
                 throw EventStoreError.appendFailed(
-                    path: url.path, underlying: "write 失敗：errno \(errno)")
+                    path: url.path,
+                    underlying: "write 失敗：errno \(failure)"
+                        + (wroteAnything ? "（已寫入部分位元組，已補換行封口）" : ""))
             }
+            if written == 0 {
+                if wroteAnything { Self.terminatePartialLine(fd) }
+                throw EventStoreError.appendFailed(path: url.path, underlying: "write 回傳 0")
+            }
+            wroteAnything = true
             remaining = remaining.dropFirst(written)
         }
+    }
+
+    /// 盡力把殘行封口。這裡刻意忽略錯誤：已經在錯誤路徑上，再拋一次只會蓋掉
+    /// 原始原因，而封口失敗的後果不會比不封口更糟。
+    private static func terminatePartialLine(_ fd: Int32) {
+        var newline: UInt8 = 0x0A
+        _ = withUnsafeBytes(of: &newline) { write(fd, $0.baseAddress, 1) }
     }
 
     public func events(from: Date, to: Date) throws -> [Event] {

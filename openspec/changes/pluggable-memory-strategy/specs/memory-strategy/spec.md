@@ -66,11 +66,17 @@ A strategy that reorders SHALL move a candidate by at most a configured number o
 
 ##### Example: Bound applied within a band
 
-| Configured bound | Input position | Reinforcing events | Resulting position |
-| ---------------- | -------------- | ------------------ | ------------------ |
-| 1                | 5              | 10 citations       | 4                  |
-| 3                | 5              | 10 citations       | 2                  |
-| 3                | 5              | 0                  | 5                  |
+This table holds when the promoted candidate is **the only one in its band with recorded history**. That qualifier is load-bearing and was missing until the second verify round measured its absence.
+
+| Configured bound | Input position | Reinforcing events | Other candidates with history | Resulting position |
+| ---------------- | -------------- | ------------------ | ----------------------------- | ------------------ |
+| 1                | 5              | 10 citations       | none                          | 4                  |
+| 3                | 5              | 10 citations       | none                          | 2                  |
+| 3                | 5              | 0                  | none                          | 5                  |
+
+Because the bound is symmetric, a candidate at position j can be displaced downward by at most the bound, so **at most `bound` candidates in total can move ahead of it**. A single history-less candidate at the head of a band therefore caps the whole band's promotions at `bound`, independently of band size. Measured: a band of 32 with 31 reinforced candidates yields exactly 1 promotion at bound 1, 2 at bound 2, 3 at bound 3.
+
+This is arithmetic forced by the symmetric bound, not an implementation defect. Whether the bound should stay symmetric — and therefore whether `human-like` can produce an observable effect at all under the default — is recorded as an open decision.
 
 ### Requirement: Orphaned anchors do not influence ranking
 

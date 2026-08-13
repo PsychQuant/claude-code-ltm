@@ -100,22 +100,30 @@ private let longFixture = String(
     }
 }
 
-@Test func contentHashDependsOnTextAloneNotOnHowItWasSplit() {
-    // 取代先前那個「同一個運算式算兩次」的空測試：真正該證明的是**同一段文字
-    // 無論由哪一組切分產生，雜湊都相同**——所以用兩個不同 chunker 各自切出
-    // 涵蓋同一 span 的結果來比。
+@Test func contentHashDependsOnTextAloneNotOnPosition() {
+    // #1 verify R2（regression lens，實測）：這條先前**仍是同義反覆**——
+    // `sharedSpan = 0..<viaSmallChunks.upperBound` 就是 `viaSmallChunks`，
+    // 兩個 anchor 用完全相同的參數建出來。我在修同義反覆時又寫了一個同義反覆。
+    //
+    // 真正要證的性質是「雜湊是文字的函式，不是位置的函式」。fixture 是同一句
+    // 重複 14 次，所以**不同位置**的兩段 span 含有**相同文字**——那才是可以
+    // 拿來比的東西。
     let turn = Turn(id: "t1", role: "user", timestamp: Date(), text: longFixture)
+    let 一句 = "標記某個節點然後做對照，這是合成語料的一句，用來把長度撐過四百個字元。"
+    let L = 一句.unicodeScalars.count
 
-    let viaBigChunks = ToyChunker(size: 400, overlap: 40).spans(over: longFixture)[0]
-    let viaSmallChunks = ToyChunker(size: 100, overlap: 0).spans(over: longFixture)[0]
-    #expect(viaBigChunks != viaSmallChunks)  // 兩者確實不同
+    let 第一次出現 = 0..<L
+    let 第二次出現 = L..<(2 * L)
+    #expect(第一次出現 != 第二次出現)  // 位置確實不同
+    #expect(Turn.slice(longFixture, 第一次出現) == Turn.slice(longFixture, 第二次出現))  // 文字確實相同
 
-    // 對「同一段 span」而言，雜湊只由文字決定。用小 chunker 的邊界重造一個
-    // 涵蓋相同範圍的 anchor，雜湊必須與大 chunker 那個相同。
-    let sharedSpan = 0..<viaSmallChunks.upperBound
-    let fromBig = Anchor(source: "fixture-a", turn: turn, span: sharedSpan)
-    let fromSmall = Anchor(source: "fixture-a", turn: turn, span: viaSmallChunks)
+    let a = Anchor(source: "fixture-a", turn: turn, span: 第一次出現)
+    let b = Anchor(source: "fixture-a", turn: turn, span: 第二次出現)
+    #expect(a.contentHash == b.contentHash)  // 位置不同、文字相同 → 雜湊相同
+    #expect(a != b)  // 但 anchor 本身不同（span 是 anchor 的一部分）
 
-    #expect(fromBig.contentHash == fromSmall.contentHash)
-    #expect(fromBig.span == fromSmall.span)
+    // 反向：文字不同就必須不同雜湊。跨句邊界取一段，內容與整句不同。
+    let 跨邊界 = (L / 2)..<(L / 2 + L)
+    let c = Anchor(source: "fixture-a", turn: turn, span: 跨邊界)
+    #expect(c.contentHash != a.contentHash)
 }

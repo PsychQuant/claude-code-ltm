@@ -40,27 +40,56 @@ private let 原文 = "這是一段不該進入 canonical 層的第三方逐字�
     }
 }
 
+/// 形狀合法的雜湊。用它當基準，才能讓「解碼失敗」歸因到我要測的那個欄位，
+/// 而不是被別的欄位形狀先擋下來。
+///
+/// #1 verify R2（devils-advocate）指出：先前這幾條測試用 `"hex":"00"`，於是
+/// 它們 throw 的原因其實是雜湊形狀不合法，**與它們宣稱要驗的自由文字無關**。
+/// 測試名字比證據強，第二次犯同一類錯。
+private let 合法雜湊 = String(repeating: "ab", count: 32)
+
 @Test func decodingAnEventWhoseIdentifiersCarryFreeTextFails() {
     // 外來寫入者（或被竄改的備份）把原文塞進識別碼欄位。必須在解碼邊界被擋下，
     // 而不是原樣讀回來繼續流通。
-    let hostile = """
-        {"kind":"opened","anchor":{"source":"s","turnID":"t1",
-        "contentHash":{"hex":"00"},"span":{"lowerBound":0,"upperBound":1}},
-        "timestamp":0,"generation":"\(原文)","policy":"archival"}
-        """
-    #expect(throws: (any Error).self) {
-        _ = try JSONDecoder().decode(Event.self, from: Data(hostile.utf8))
+    func hostile(generation: String) -> Data {
+        Data("""
+            {"kind":"opened","anchor":{"source":"s","turnID":"t1",
+            "contentHash":{"hex":"\(合法雜湊)"},"span":[0,1]},
+            "timestamp":0,"generation":"\(generation)","policy":"archival"}
+            """.utf8)
     }
+
+    // 先確認基準可解——否則下面的 throw 可能只是形狀問題。
+    #expect(throws: Never.self) { _ = try JSONDecoder().decode(Event.self, from: hostile(generation: "build-1")) }
+    // 只換掉 generation，其餘完全相同 → 失敗必然歸因於它。
+    #expect(throws: (any Error).self) { _ = try JSONDecoder().decode(Event.self, from: hostile(generation: 原文)) }
 }
 
 @Test func decodingAnAnchorWhoseSourceCarriesFreeTextFails() {
-    let hostile = """
-        {"source":"\(原文)","turnID":"t1",
-        "contentHash":{"hex":"00"},"span":{"lowerBound":0,"upperBound":1}}
-        """
-    #expect(throws: (any Error).self) {
-        _ = try JSONDecoder().decode(Anchor.self, from: Data(hostile.utf8))
+    func hostile(source: String) -> Data {
+        Data("""
+            {"source":"\(source)","turnID":"t1",
+            "contentHash":{"hex":"\(合法雜湊)"},"span":[0,1]}
+            """.utf8)
     }
+
+    #expect(throws: Never.self) { _ = try JSONDecoder().decode(Anchor.self, from: hostile(source: "fixture-a")) }
+    #expect(throws: (any Error).self) { _ = try JSONDecoder().decode(Anchor.self, from: hostile(source: 原文)) }
+}
+
+@Test func contentHashRejectsFreeTextAtBothConstructionAndDecoding() {
+    // R1 的加固逐一列舉了六個識別碼型別，**漏了這一個**——而它在每一筆 Event 裡。
+    #expect(throws: ContentHash.ValidationError.self) { try ContentHash.validate(原文) }
+    #expect(throws: ContentHash.ValidationError.wrongLength(2)) { try ContentHash.validate("00") }
+    #expect(throws: ContentHash.ValidationError.self) { try ContentHash.validate(合法雜湊.uppercased()) }
+    #expect(throws: Never.self) { try ContentHash.validate(合法雜湊) }
+
+    // 解碼邊界同樣要擋——先前 Anchor.init(from:) 驗了 source/turnID 卻直接 decode 雜湊。
+    let hostile = Data("""
+        {"source":"s","turnID":"t1","contentHash":{"hex":"\(原文)"},
+        "span":[0,1]}
+        """.utf8)
+    #expect(throws: (any Error).self) { _ = try JSONDecoder().decode(Anchor.self, from: hostile) }
 }
 
 @Test func noteAndPresentationReferencesCannotExpressFreeTextAtAll() throws {

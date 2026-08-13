@@ -1,10 +1,13 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
-// 依賴方向是單向的，且刻意如此：LTMQuery 拿得到 LTMMemory 的 projection，
-// 但 LTMCore 什麼都不依賴，所以 anchor／event 這兩個 canonical 值型別
-// 不可能反過來依賴索引或策略。retrieval 繞過 MemoryStrategy 直接讀事件
-// 在這個圖裡是編譯錯誤，不是紀律問題。
+// 依賴方向是單向的，且刻意如此：LTMCore 什麼都不依賴，所以 anchor／event
+// 這兩個 canonical 值型別不可能反過來依賴索引或策略。
+//
+// **但依賴圖擋不住「retrieval 繞過 seam 讀事件」**——見下方 LTMQuery 那條的
+// 誠實邊界。這個檔頭先前寫的是「在這個圖裡是編譯錯誤，不是紀律問題」，那句話
+// 已被實測推翻（#1 verify R1），而 R1 的更正只改了下面的 target 註解、漏了這裡，
+// 於是同一個檔案自相矛盾（R2 的 logic 與 regression 兩個 lens 各自指出）。
 let package = Package(
     name: "claude-LTM",
     platforms: [.macOS(.v14)],

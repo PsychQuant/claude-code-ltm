@@ -63,8 +63,14 @@ public enum StrategyViolation: Error, Sendable, Equatable {
 /// 使用歷史能影響排序的**唯一**入口。
 ///
 /// 簽章上收得到的只有候選與 projection：沒有 CorpusReader（策略讀不到語料）、
-/// 也沒有 EventStore（本模組根本不依賴 LTMMemory）。這兩件事都不是靠紀律，
-/// 是靠型別。
+/// 也沒有 `FileEventStore`（本模組不依賴 LTMMemory）。
+///
+/// **兩者的強度不同，不可混為一談**（#1 verify R1 實測推翻原宣稱、R2 指出這裡
+/// 漏改）：簽章不收 CorpusReader 是型別層事實，但 `CorpusReader` 與
+/// `Anchor.dereference` 都是 LTMCore 的 public API，策略側自建 reader 仍可還原
+/// 原文；依賴宣告擋掉的只是 `FileEventStore` 這個便利型別，`Event: Codable`
+/// 在 LTMCore，用 Foundation 直接讀檔即可繞過。兩條 SHALL NOT 目前**沒有
+/// 執行點**，追蹤於 #14。
 public protocol MemoryStrategy: Sendable {
     /// 策略識別碼。由「消費哪些訊號」定義，不由調整幅度定義——所以同一個策略
     /// 配不同位移上限仍是同一個 id。

@@ -129,3 +129,33 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     #expect(p.reinforcement(for: orphaned) == 0)
     #expect(p.reinforcement(for: live) > 0)
 }
+
+@Test func projectionReportsWhichAnchorsWereOrphaned() {
+    // #1 verify R2（regression lens，A/B 實測）：R1 的 orphan 修法**沒有生產端
+    // 回歸測試**——拿掉 `project()` 裡填 orphanedAnchors 的那幾行，87 個測試
+    // 全部照過，因為 LTMQuery 那側的 orphan 測試都是手工建 Projection。
+    //
+    // 這條補上缺的那半：斷言**摺疊函式本身**會把 orphan 帶出來。
+    let orphaned = anchor("t3", 訊息C)
+    let live = anchor("t1", 訊息A)
+    let c = corpus([turn("t1", 訊息A), turn("t3", "這段文字已經被改掉了，雜湊不會相符。")])
+
+    let p = project(
+        [event(.cited, orphaned, minutesAgo: 1), event(.opened, live, minutesAgo: 1)],
+        at: instant, resolvedBy: c)
+
+    #expect(p.orphanedAnchors == [orphaned])
+    #expect(p.isOrphaned(orphaned))
+    #expect(!p.isOrphaned(live))
+}
+
+@Test func anchorsWithNoEventsAreNotReportedAsOrphaned() {
+    // 邊界：orphan 的語意是「有歷史但解不開」，不是「沒出現過」。
+    let live = anchor("t1", 訊息A)
+    let neverSeen = anchor("t2", 訊息B)
+    let c = corpus([turn("t1", 訊息A), turn("t2", 訊息B)])
+
+    let p = project([event(.opened, live, minutesAgo: 1)], at: instant, resolvedBy: c)
+    #expect(p.orphanedAnchors.isEmpty)
+    #expect(!p.isOrphaned(neverSeen))
+}

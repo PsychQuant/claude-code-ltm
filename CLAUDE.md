@@ -62,12 +62,15 @@ dismissed，一行一筆 JSON Lines）記的是
 如此它即使被備份或同步也不含第三方逐字內容。**strength、links 這些不落地**——
 它們是從事件重算的 projection，改公式只要重跑一次，不必改任何一筆歷史。
 
-這條由 schema 保證到什麼程度，要說清楚（#1 verify 2026-08-11 抓到原本的宣稱過強）：
-識別碼型別（`NoteReference`／`PresentationID` 以 UUID 為儲存型別；`GenerationID`／
-`RankingPolicyID`／`Anchor.source`／`turnID` 限 ASCII 英數與 `.` `_` `-`、長度 ≤64）
-擋掉「不小心把原文塞進識別碼」這個實際會發生的失敗模式，解碼邊界同樣驗證。
-**擋不掉刻意用 ASCII 編碼原文的人**——那不是這層要解的問題。新增欄位時若要存
-文字，先問這條。
+這條由 schema 保證到什麼程度，要說清楚（#1 verify 兩輪都抓到宣稱過強）：**每個會被
+原樣序列化的字串欄位**都必須有型別層的形狀約束——`NoteReference`／`PresentationID`
+以 UUID 為儲存型別、`GenerationID`／`RankingPolicyID`／`Anchor.source`／`turnID` 限
+ASCII 英數與 `.` `_` `-`、長度 ≤64、`ContentHash` 限 64 位小寫十六進位；解碼邊界同樣
+驗證。它擋掉的是「不小心把原文塞進去」，**擋不掉刻意用 ASCII 編碼原文的人**。
+
+**判準是「會不會被原樣序列化」，不是「它像不像識別碼」。** 這句話是代價換來的：
+R1 逐一列舉了六個型別當作加固，R2 三個 lens 各自重現了被漏掉的第七個
+（`ContentHash`），而我當時已經把那份清單寫成本節的保證。**列舉會漏，判準不會。**
 
 「封閉集合的類別標籤」是刻意寫進來的一條窄例外，也是它的邊界：**query class label**
 （`cjk-2char` / `cjk-3char` / `cjk-4plus` / `latin-alnum` / `mixed`）可以存，query 原文

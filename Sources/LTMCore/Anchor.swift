@@ -58,8 +58,53 @@ public enum OrphanReason: Sendable, Equatable {
 
 /// 正規化後文字的 SHA-256，十六進位小寫。
 public struct ContentHash: Sendable, Hashable, Codable, CustomStringConvertible {
+    /// 恰好 64 個小寫十六進位字元。
+    ///
+    /// #1 verify R2（2026-08-14，logic / security / regression 三個 lens 各自重現）：
+    /// R1 的隱私加固逐一列舉了識別碼型別，**漏掉這一個**。`ContentHash` 是
+    /// `Anchor` 的欄位、`Anchor` 是每一筆 `Event` 的欄位，所以未驗證的
+    /// `ContentHash(hex:)` 等於公開 API 直接把任意第三方文字寫進 canonical store
+    /// ——正是那次加固要關掉的失敗模式。解碼路徑同樣無檢查。
+    ///
+    /// 教訓記在這裡：**逐一列舉是不可靠的加固方式**。當時列了六個型別、漏了第七個，
+    /// 而我寫進 CLAUDE.md 的句子把那份清單當成 schema 層保證。真正的判準是
+    /// 「這個欄位會不會被原樣序列化」，不是「我想不想得到它」。
     public let hex: String
-    public init(hex: String) { self.hex = hex }
+
+    public enum ValidationError: Error, Sendable, Equatable {
+        case wrongLength(Int)
+        case illegalCharacter(Character)
+    }
+
+    /// 字面值常數用（測試 fixture、內部計算結果）。非法值是程式錯誤 → trap。
+    public init(hex: String) {
+        do {
+            try ContentHash.validate(hex)
+        } catch {
+            preconditionFailure("ContentHash 收到非法值（\(error)）——雜湊欄位不得夾帶自由文字")
+        }
+        self.hex = hex
+    }
+
+    public init(validating hex: String) throws {
+        try ContentHash.validate(hex)
+        self.hex = hex
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(validating: try c.decode(String.self, forKey: .hex))
+    }
+
+    public static func validate(_ hex: String) throws {
+        guard hex.count == 64 else { throw ValidationError.wrongLength(hex.count) }
+        for character in hex {
+            guard character.isASCII, character.isHexDigit, !character.isUppercase else {
+                throw ValidationError.illegalCharacter(character)
+            }
+        }
+    }
+
     public var description: String { hex }
 }
 
