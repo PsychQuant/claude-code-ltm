@@ -149,6 +149,27 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     #expect(!p.isOrphaned(live))
 }
 
+@Test func futureDatedEventsAreIgnoredRatherThanGivenMaximumWeight() {
+    // #1 verify R3：先前 `max(0, instant - event.timestamp)` 把未來時間戳夾成
+    // age 0，也就是 decay = 1.0 的**最大權重、而且永遠維持**。竄改備份（或時鐘
+    // 倒退）只要把 timestamp 寫到未來，就能把某筆結果永久釘在帶首。
+    // 夾成最大值是最糟的一種夾法。
+    let a = anchor("t1", 訊息A)
+    let c = corpus([turn("t1", 訊息A)])
+
+    let future = Event.interaction(
+        .cited, anchor: a, at: instant.addingTimeInterval(86_400 * 365),
+        generation: gen, policy: policy)
+    let p = project([future], at: instant, resolvedBy: c)
+
+    #expect(p.reinforcement(for: a) == 0)
+    #expect(p[a] == nil)
+
+    // 對照：同一筆事件放在過去就正常計入，證明差別確實來自時間方向。
+    let past = project([event(.cited, a, minutesAgo: 1)], at: instant, resolvedBy: c)
+    #expect(past.reinforcement(for: a) > 0)
+}
+
 @Test func anchorsWithNoEventsAreNotReportedAsOrphaned() {
     // 邊界：orphan 的語意是「有歷史但解不開」，不是「沒出現過」。
     let live = anchor("t1", 訊息A)

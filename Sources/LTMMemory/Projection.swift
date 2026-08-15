@@ -63,6 +63,12 @@ public func project(
 
     var orphaned: Set<Anchor> = []
     for event in events {
+        // 評估時點之後的事件不可能已經發生。先前的 `max(0, ...)` 把未來時間戳
+        // 夾成 age 0，也就是 decay = 1.0 的**最大權重，而且永遠維持**——竄改
+        // 備份（或時鐘倒退）只要把 timestamp 寫到未來，就能把某筆結果永久釘在
+        // 帶首（#1 verify R3）。夾成最大值是最糟的一種夾法。
+        guard event.timestamp <= instant else { continue }
+
         guard isLive(event.anchor) else {
             // 記下來而不是丟掉：策略必須能說出「這筆有歷史但已 orphan」，
             // 否則 design.md 的 never-silent 承諾在結構上無法履行。

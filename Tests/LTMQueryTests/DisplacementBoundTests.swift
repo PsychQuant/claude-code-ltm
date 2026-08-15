@@ -141,17 +141,30 @@ func promotionBoundHoldsAcrossManyStrengthPatterns(bound: Int) throws {
                 result.displacement <= bound,
                 "rotation \(rotation) bound \(bound)：\(result.candidate.anchor.turnID) 提升 \(result.displacement)")
         }
-        // 排列性質仍然成立——下移不設限不代表可以憑空增刪。
-        #expect(Set(output.map(\.candidate.anchor)) == Set(input.map(\.anchor)))
+        // 這裡**刻意不斷言排列性質**：`rerank` 內部已呼叫 `RankingGuard.check`，
+        // 非排列會在到達斷言之前就拋出，所以那個 `#expect` 不可能失敗。
+        // 先前這裡有一條，是三輪裡第三個同義反覆測試（#1 verify R3）。
+        // 排列性質由 `RankingGuardTests` 直接對守衛下手來驗，那裡才驗得到。
     }
 }
 
-@Test func aStrategyThatLeapsBeyondTheBoundStillFailsLoudly() {
-    // 上限單向化之後，守衛仍必須擋住「單一項目暴衝」——那才是它要防的東西。
-    let input = candidates(["a", "b", "c", "d", "e"])
-    let leapt = [input[4]] + input.dropLast()  // 第 4 名跳到第 0 名
+@Test func aLargerBoundActuallyProducesALargerPromotionThroughARealStrategy() throws {
+    // 先前這個位置是一條直接對 `RankingGuard.check` 下手的測試，而它與
+    // `StrategyTests.exceedingTheDisplacementBoundIsReportedNotClamped` **逐字重複**
+    // （同 bound 1、同 attempted 4、同期望）——而且它取代掉的是本檔唯一一條
+    // 透過真實策略驗證上限行為的測試（#1 verify R3）。
+    //
+    // 換成真的只有透過策略才驗得到的東西：上限是**有效的預算**，不是裝飾。
+    // 新的 pass-based 演算法跑 `bound` 輪，所以 bound 越大、實際提升越多。
+    let input = candidates(["a", "b", "c", "d", "e", "f"])
+    let projection = multiStrengthProjection([(testAnchor("f"), 9)])
 
-    #expect(throws: StrategyViolation.displacementBoundExceeded(bound: 1, attempted: 4)) {
-        _ = try RankingGuard.check(original: input, reordered: leapt, bound: 1)
-    }
+    let bound1 = try HumanLikeStrategy(displacementBound: 1).rerank(input, with: projection)
+    let bound3 = try HumanLikeStrategy(displacementBound: 3).rerank(input, with: projection)
+
+    let at1 = bound1.firstIndex { $0.candidate.anchor == testAnchor("f") }!
+    let at3 = bound3.firstIndex { $0.candidate.anchor == testAnchor("f") }!
+    #expect(at1 == 4)  // 原本第 5，升一名
+    #expect(at3 == 2)  // 升三名
+    #expect(at3 < at1, "更大的上限必須換到更大的提升，否則上限不是有效預算")
 }

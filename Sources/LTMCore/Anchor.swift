@@ -139,7 +139,17 @@ public struct Anchor: Sendable, Hashable, Codable {
         self.source = source
         self.turnID = turnID
         self.contentHash = try c.decode(ContentHash.self, forKey: .contentHash)
-        self.span = try c.decode(Range<Int>.self, forKey: .span)
+        let span = try c.decode(Range<Int>.self, forKey: .span)
+        // 解碼邊界同樣擋空 span 與負位移：外來檔案裡一筆 `span: [3,3]` 的紀錄
+        // 會是一個對任何文字都成立的萬用 anchor。span 是會被原樣序列化的欄位，
+        // 所以它跟識別碼一樣需要形狀約束——R3 指出「每個被原樣序列化的欄位」
+        // 這個判準被我縮成了「字串欄位」，而缺口正好落在縮掉的地方。
+        guard !span.isEmpty, span.lowerBound >= 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .span, in: c,
+                debugDescription: "span \(span) 為空或起點為負——空 span 沒有內容綁定")
+        }
+        self.span = span
     }
 
     /// 由一則 turn 與 span 造出 anchor。
@@ -149,7 +159,21 @@ public struct Anchor: Sendable, Hashable, Codable {
     /// 而那並不是「這段文字變了」。兩段一模一樣的短文字會雜湊相同，靠
     /// `turnID` 與 `span` 區辨。
     public init(source: String, turn: Turn, span: Range<Int>) {
-        let sliced = Turn.slice(turn.text, span) ?? ""
+        // 越界或空 span 是**呼叫端的錯**，不是語料的狀態，所以 trap 而不是
+        // 靜默產生一筆紀錄。先前寫的是 `Turn.slice(...) ?? ""`，兩個後果都很糟
+        // （#1 verify R3 實測）：
+        //
+        // 1. 越界時建構子替它**沒讀到的內容**算出 `sha256("")`，造出一筆永遠
+        //    orphan 的紀錄，而 orphan 原因會顯示成 `.spanOutOfBounds`——看起來
+        //    像語料變了，實際上是呼叫端給錯了。
+        // 2. 空 span（`n..<n`）讓內容綁定整個失效：它的雜湊是 `sha256("")`，
+        //    於是**對任何一段第三方文字都 resolve 成功**。`memory-events` spec
+        //    的「Altered source text dereferences as orphaned」對空 span 不成立。
+        guard let sliced = Turn.slice(turn.text, span), !span.isEmpty else {
+            preconditionFailure(
+                "anchor 的 span \(span) 對長度 \(turn.text.unicodeScalars.count) 的 turn 越界或為空"
+                    + "——空 span 沒有內容可綁定，越界 span 綁的是不存在的內容")
+        }
         self.init(
             source: source,
             turnID: turn.id,

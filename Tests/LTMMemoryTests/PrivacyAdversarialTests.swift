@@ -92,6 +92,26 @@ private let 合法雜湊 = String(repeating: "ab", count: 32)
     #expect(throws: (any Error).self) { _ = try JSONDecoder().decode(Anchor.self, from: hostile) }
 }
 
+@Test func anEmptySpanCannotBeDecodedBecauseItBindsToNothing() {
+    // #1 verify R3：`span: [3,3]` 的 anchor 雜湊是 `sha256("")`，於是它對**任何**
+    // 一段第三方文字都 resolve 成功——`memory-events` spec 的「Altered source
+    // text dereferences as orphaned」對空 span 完全不成立。一筆這樣的紀錄等於
+    // 一個萬用 anchor。
+    //
+    // span 是會被原樣序列化的欄位，所以它跟識別碼一樣需要形狀約束。R3 指出
+    // 我把「每個被原樣序列化的欄位」這個判準縮成了「字串欄位」，缺口正好落在
+    // 縮掉的地方。
+    func anchorJSON(span: String) -> Data {
+        Data("""
+            {"source":"s","turnID":"t1","contentHash":{"hex":"\(合法雜湊)"},"span":\(span)}
+            """.utf8)
+    }
+
+    #expect(throws: Never.self) { _ = try JSONDecoder().decode(Anchor.self, from: anchorJSON(span: "[0,1]")) }
+    #expect(throws: (any Error).self) { _ = try JSONDecoder().decode(Anchor.self, from: anchorJSON(span: "[3,3]")) }
+    #expect(throws: (any Error).self) { _ = try JSONDecoder().decode(Anchor.self, from: anchorJSON(span: "[-2,1]")) }
+}
+
 @Test func noteAndPresentationReferencesCannotExpressFreeTextAtAll() throws {
     // 這兩個型別的 storage 是 UUID——沒有任何 initializer 收得下字串，
     // 所以「塞原文」在型別層不可表達，不需要驗證邏輯。

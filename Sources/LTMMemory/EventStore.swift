@@ -50,10 +50,20 @@ public enum CorpusLocation {
     /// 改法：從根開始逐段拼接，每拼一段就 resolve 一次，`..` 在解析後的路徑上
     /// 才做消解。這與 kernel 實際走路徑的順序一致。
     ///
-    /// **誠實邊界：這仍是 TOCTOU 的。** 檢查與開檔之間，任何一段都可能被換成
-    /// symlink。真正的結構解是開檔時用 `O_NOFOLLOW` 逐段開（`openat` 走一遍），
-    /// 那需要重寫 append 路徑，追蹤於 follow-up。這裡擋的是誤用與既存的錯誤
-    /// 佈局，不是有能力在窗口內競態的攻擊者。
+    /// **誠實邊界——這條擋得住什麼、擋不住什麼：**
+    ///
+    /// - **擋得住**：直接指進語料的路徑、`..` 穿過 symlink、單層與多層 dangling
+    ///   symlink 鏈、相對路徑（建構子先正規化成絕對路徑）。
+    /// - **擋不住 hardlink。** hardlink 在檔案系統層與原檔**無法區分**——沒有
+    ///   「指向」可以解析，兩個名字是同一個 inode。所以先前寫的「擋的是誤用與
+    ///   既存的錯誤佈局」是過度宣稱（#1 verify R3）：一個指向語料檔的 hardlink
+    ///   就是既存的錯誤佈局，而這裡看不出來。要擋得先比對 `st_dev`/`st_ino`
+    ///   與語料樹的內容，成本與收益不成比例。
+    /// - **擋不住 TOCTOU。** 檢查與開檔之間，任何一段都可能被換成 symlink。
+    ///
+    /// 後兩者的結構解是同一個：開檔時用 `openat` + `O_NOFOLLOW` 逐段開，並在
+    /// 開到之後以 `fstat` 確認 inode 不在語料樹裡。那需要重寫 append 路徑，
+    /// 追蹤於 follow-up。**在那之前，這條守衛防的是意外，不是有意的攻擊者。**
     public static func isInsideReadOnlyCorpus(_ url: URL) -> Bool {
         let root = URL(fileURLWithPath: readOnlyRoot.path).resolvingSymlinksInPath()
             .standardizedFileURL.pathComponents
@@ -119,11 +129,25 @@ public struct FileEventStore: EventStore {
     public let url: URL
 
     /// 建構即檢查路徑。落在唯讀語料內 → throw，不給呼叫端「先建起來再說」的機會。
+    ///
+    /// 先正規化成絕對路徑再檢查：相對 URL 會讓守衛檢查的字串與 `open()` 實際
+    /// 走的路徑**不是同一條**（守衛看 `pathComponents`，kernel 看 cwd + 相對路徑），
+    /// 於是檢查通過而寫入落在別處（#1 verify R3）。
     public init(url: URL) throws {
-        guard !CorpusLocation.isInsideReadOnlyCorpus(url) else {
-            throw EventStoreError.pathInsideReadOnlyCorpus(path: url.path)
+        // **只補絕對路徑，不做正規化。** `standardizedFileURL` 會把 `..` 字面
+        // 消解，而 `..` 在 symlink 之後的語意是「解析後那個目錄的父層」——
+        // 用它等於重新引入 R2 修掉的那個穿透（我第一版就這樣寫，被
+        // `dotDotThroughASymlinkCannotEscapeTheGuard` 當場抓到）。
+        // `..` 交給守衛的逐段解析處理，那裡才處理得對。
+        let absolutePath =
+            url.path.hasPrefix("/")
+            ? url.path
+            : FileManager.default.currentDirectoryPath + "/" + url.path
+        let absolute = URL(fileURLWithPath: absolutePath)
+        guard !CorpusLocation.isInsideReadOnlyCorpus(absolute) else {
+            throw EventStoreError.pathInsideReadOnlyCorpus(path: absolute.path)
         }
-        self.url = url
+        self.url = absolute
     }
 
     /// 每次呼叫新建 encoder。
