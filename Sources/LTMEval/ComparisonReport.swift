@@ -58,6 +58,14 @@ public enum ComparisonDataError: Error, Sendable, Equatable {
     case duplicatePresentationID(PresentationID)
     /// 事件宣稱的 generation 與它所屬呈現紀錄的不一致。
     case generationMismatch(presentation: PresentationID)
+    /// 呈現紀錄的 attribution 把位置記給了不屬於這次比較的策略。
+    ///
+    /// #1 verify R3：先前 scorer 直接信任 `credit(for:)` 回來的任何 policy id，
+    /// 於是一筆損壞（或第三方偽造）的紀錄可以把分數記到一個根本沒參與這次
+    /// 比較的策略頭上，而報告會照常產出。
+    case attributionNamesAThirdStrategy(presentation: PresentationID, policy: RankingPolicyID)
+    /// 同一個 anchor 在一次呈現裡出現多次。
+    case duplicateAnchorInPresentation(presentation: PresentationID, anchor: Anchor)
 }
 
 public enum ComparisonScorer {
@@ -77,6 +85,21 @@ public enum ComparisonScorer {
         for record in records {
             guard byID.updateValue(record, forKey: record.id) == nil else {
                 throw ComparisonDataError.duplicatePresentationID(record.id)
+            }
+            // 紀錄本身也要驗，不能只驗事件：損壞或偽造的 attribution 會讓分數
+            // 記到沒參與比較的策略頭上，而報告照常產出（#1 verify R3）。
+            var seen: Set<Anchor> = []
+            for entry in record.attribution {
+                guard seen.insert(entry.anchor).inserted else {
+                    throw ComparisonDataError.duplicateAnchorInPresentation(
+                        presentation: record.id, anchor: entry.anchor)
+                }
+                if let policy = entry.creditedTo,
+                    policy != record.strategyA, policy != record.strategyB
+                {
+                    throw ComparisonDataError.attributionNamesAThirdStrategy(
+                        presentation: record.id, policy: policy)
+                }
             }
         }
 

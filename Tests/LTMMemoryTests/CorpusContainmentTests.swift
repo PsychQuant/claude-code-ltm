@@ -80,6 +80,42 @@ import Testing
     #expect(throws: (any Error).self) { _ = try FileEventStore(url: leaf) }
 }
 
+@Test func multiHopDanglingSymlinkChainIsFollowedToTheEnd() throws {
+    // #1 verify R3（security lens，實測穿透）：R2 只修好單層 dangling。
+    // `destinationOfSymbolicLink` 只回直接目標，`standardizedFileURL` 不再解
+    // symlink，所以 A → B → <corpus> 在守衛眼中只看到 A → B 就停了。而
+    // `open(O_WRONLY|O_APPEND|O_CREAT)` 會沿鏈把檔案建在最終目標。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-chain-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+    let finalTarget = CorpusLocation.readOnlyRoot
+        .appendingPathComponent("ltm-probe-never-created")
+        .appendingPathComponent("events.jsonl")
+    let hopB = dir.appendingPathComponent("B")
+    let hopA = dir.appendingPathComponent("A")
+    try FileManager.default.createSymbolicLink(at: hopB, withDestinationURL: finalTarget)
+    try FileManager.default.createSymbolicLink(at: hopA, withDestinationURL: hopB)
+
+    #expect(CorpusLocation.isInsideReadOnlyCorpus(hopA))
+    #expect(throws: (any Error).self) { _ = try FileEventStore(url: hopA) }
+}
+
+@Test func aSymlinkLoopTerminatesRatherThanHanging() throws {
+    // 遞迴解析必須有上限。自我迴圈不得讓守衛掛住——那會把一個路徑檢查
+    // 變成 DoS。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-loop-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let a = dir.appendingPathComponent("A")
+    let b = dir.appendingPathComponent("B")
+    try FileManager.default.createSymbolicLink(at: a, withDestinationURL: b)
+    try FileManager.default.createSymbolicLink(at: b, withDestinationURL: a)
+
+    // 只要它回得來就算通過——回 true 或 false 都可以，掛住才是失敗。
+    _ = CorpusLocation.isInsideReadOnlyCorpus(a)
+}
+
 @Test func storeAcceptsAPathOutsideTheCorpus() throws {
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("ltm-ok-\(UUID().uuidString)")

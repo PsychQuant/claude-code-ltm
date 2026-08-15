@@ -119,3 +119,33 @@ private let policy = RankingPolicyID("archival")
         _ = try store.events(from: .distantPast, to: .distantFuture)
     }
 }
+
+@Test func corruptLineCanBeIsolatedForRepairWithoutLosingTheRestOfTheStore() throws {
+    // #1 verify R3：R2 的註解宣稱「補換行封口讓損壞侷限在那一筆」——**不成立**，
+    // 因為讀取端對壞行 fail-loud，一行壞掉整份就讀不出來。封口只讓壞的範圍
+    // 停在一行，沒讓資料救得回來。
+    //
+    // 真正讓「侷限」成立的是這條路徑：預設仍 fail-loud（不可重建的資料不該
+    // 安靜地少讀幾筆），但修復情境可以明確要求跳過，並拿到跳過了哪幾行。
+    let url = try tempDir().appendingPathComponent("events.jsonl")
+    let store = try FileEventStore(url: url)
+    try store.append(
+        .interaction(.shown, anchor: anchor(語料原文, id: "t0"), at: Date(), generation: gen, policy: policy))
+
+    let handle = try FileHandle(forWritingTo: url)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data("{\"kind\":\"truncated\n".utf8))  // 半行
+    try handle.close()
+
+    try store.append(
+        .interaction(.cited, anchor: anchor(語料原文, id: "t2"), at: Date(), generation: gen, policy: policy))
+
+    // 預設路徑：仍然整份失敗。
+    #expect(throws: (any Error).self) { _ = try store.allEvents() }
+
+    // 修復路徑：兩筆好的都救得回來，壞的那一行被具名回報。
+    let salvaged = try store.allEvents(skippingCorrupt: true)
+    #expect(salvaged.events.count == 2)
+    #expect(salvaged.corruptLines == [2])
+    #expect(salvaged.events.map(\.anchor.turnID) == ["t0", "t2"])
+}

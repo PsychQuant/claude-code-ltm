@@ -31,7 +31,7 @@ private struct TruncatingStrategy: MemoryStrategy {
     #expect(throws: InterleavingViolation.duplicateCandidate(a.anchor)) {
         _ = try InterleavingHarness(generation: evalGeneration).present(
             query: "測試查詢", candidates: withDuplicate, projection: .empty(at: evalInstant),
-            a: ArchivalStrategy(), b: HumanLikeStrategy())
+            a: ArchivalStrategy(), b: HumanLikeStrategy(), startingSide: .a)
     }
 }
 
@@ -43,7 +43,7 @@ private struct TruncatingStrategy: MemoryStrategy {
     ) {
         _ = try InterleavingHarness(generation: evalGeneration).present(
             query: "測試查詢", candidates: input, projection: .empty(at: evalInstant),
-            a: TruncatingStrategy(), b: ArchivalStrategy())
+            a: TruncatingStrategy(), b: ArchivalStrategy(), startingSide: .a)
     }
 }
 
@@ -51,7 +51,7 @@ private struct TruncatingStrategy: MemoryStrategy {
     let input = evalCandidates(["only"])
     let result = try InterleavingHarness(generation: evalGeneration).present(
         query: "測試查詢", candidates: input, projection: .empty(at: evalInstant),
-        a: ArchivalStrategy(), b: HumanLikeStrategy())
+        a: ArchivalStrategy(), b: HumanLikeStrategy(), startingSide: .a)
 
     #expect(result.presented.count == 1)
 }
@@ -59,7 +59,7 @@ private struct TruncatingStrategy: MemoryStrategy {
 @Test func harnessTerminatesOnAnEmptyCandidateList() throws {
     let result = try InterleavingHarness(generation: evalGeneration).present(
         query: "測試查詢", candidates: [], projection: .empty(at: evalInstant),
-        a: ArchivalStrategy(), b: HumanLikeStrategy())
+        a: ArchivalStrategy(), b: HumanLikeStrategy(), startingSide: .a)
 
     #expect(result.presented.isEmpty)
 }

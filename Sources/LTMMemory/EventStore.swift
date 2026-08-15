@@ -70,21 +70,44 @@ public enum CorpusLocation {
             // 逐段解析：存在且是 symlink 時展開，不存在就原樣留著（尾端常見）。
             if FileManager.default.fileExists(atPath: resolved.path) {
                 resolved = resolved.resolvingSymlinksInPath()
-            } else if let target = try? FileManager.default.destinationOfSymbolicLink(
-                atPath: resolved.path)
-            {
-                // dangling symlink：destinationOfSymbolicLink 仍讀得到目標。
-                let targetURL =
-                    target.hasPrefix("/")
-                    ? URL(fileURLWithPath: target)
-                    : resolved.deletingLastPathComponent().appendingPathComponent(target)
-                resolved = targetURL.standardizedFileURL
+            } else {
+                resolved = Self.followDanglingChain(from: resolved)
             }
         }
 
         let target = resolved.standardizedFileURL.pathComponents
         guard target.count >= root.count else { return false }
         return Array(target.prefix(root.count)) == root
+    }
+
+    /// 沿著 dangling symlink 鏈一路解析到不再是 symlink 為止。
+    ///
+    /// `destinationOfSymbolicLink` 只回**直接目標**，而 `standardizedFileURL`
+    /// 只做字面消解、不再解 symlink。R2 修好了單層 dangling 的穿透，但
+    /// `A → B → <corpus>/x.jsonl`（整鏈 dangling）在守衛眼中只看到 `A → B`
+    /// 就停了——#1 verify R3 實測穿透，且 `open(O_WRONLY|O_APPEND|O_CREAT)`
+    /// 會沿鏈把檔案建在最終目標，也就是語料裡。
+    ///
+    /// 上限取 `SYMLOOP_MAX`（POSIX 保證至少 8；這裡取 40 與多數 kernel 一致），
+    /// 到頂就停在當下位置——寧可把它當成「還在鏈上」保守判斷，也不要無限迴圈。
+    private static func followDanglingChain(from start: URL) -> URL {
+        var current = start
+        for _ in 0..<40 {
+            guard
+                let target = try? FileManager.default.destinationOfSymbolicLink(
+                    atPath: current.path)
+            else { return current }
+            current =
+                target.hasPrefix("/")
+                ? URL(fileURLWithPath: target).standardizedFileURL
+                : current.deletingLastPathComponent().appendingPathComponent(target)
+                    .standardizedFileURL
+            // 中途若接到一個真的存在的節點，交回一般路徑解析。
+            if FileManager.default.fileExists(atPath: current.path) {
+                return current.resolvingSymlinksInPath().standardizedFileURL
+            }
+        }
+        return current
     }
 }
 
@@ -103,16 +126,22 @@ public struct FileEventStore: EventStore {
         self.url = url
     }
 
-    private static let encoder: JSONEncoder = {
+    /// 每次呼叫新建 encoder。
+    ///
+    /// 先前是 `private static let`——跨呼叫共享的 reference type，而
+    /// `EventStore: Sendable` 等於承諾可以並行呼叫。`JSONEncoder` 在此沒有任何
+    /// 序列化保護，那個 `Sendable` 是假的（#1 verify R3）。新建一個 encoder 的
+    /// 成本遠低於「canonical 歷史被兩個執行緒寫壞」的成本。
+    private var encoder: JSONEncoder {
         let e = JSONEncoder()
         e.outputFormatting = [.sortedKeys]
         return e
-    }()
+    }
 
     public func append(_ event: Event) throws {
         let line: Data
         do {
-            line = try Self.encoder.encode(event) + Data("\n".utf8)
+            line = try encoder.encode(event) + Data("\n".utf8)
         } catch {
             throw EventStoreError.appendFailed(path: url.path, underlying: "\(error)")
         }
@@ -126,6 +155,10 @@ public struct FileEventStore: EventStore {
             throw EventStoreError.appendFailed(
                 path: url.path, underlying: "open 失敗：errno \(errno)（目錄可寫嗎？）")
         }
+        // durability：回傳成功必須代表**已落盤**。protocol 的註解寫「無法持久化時
+        // 必須拋出——記憶層與索引不同，掉了就回不來」，但先前只涵蓋 `write` 失敗，
+        // 不涵蓋「還在 page cache、斷電就沒了」（#1 verify R3）。
+        // fsync 失敗同樣要拋——那正是「寫不進去」的一種。
         defer { close(fd) }
 
         // #1 verify R2（logic lens）：先前的迴圈把任何 `write` 失敗直接拋出，
@@ -134,8 +167,12 @@ public struct FileEventStore: EventStore {
         // 讀不出來**——一次暫時性的錯誤變成永久性的損壞。EINTR 更是被當成致命錯，
         // 而它只是「被訊號打斷，請重試」。
         //
-        // 兩層處理：EINTR / EAGAIN 重試；真的中斷在半路時，補一個換行把殘行封口，
-        // 讓損壞侷限在那一筆而不是整份檔案。
+        // 兩層處理：EINTR / EAGAIN 重試；真的中斷在半路時，補一個換行把殘行封口。
+        //
+        // **封口本身不足以讓損壞侷限在那一筆**（#1 verify R3 指出 R2 的註解在這裡
+        // 過度宣稱）：讀取端對解不開的行是 fail-loud，所以檔案裡有一行壞掉，
+        // 整份就讀不出來。封口只是讓壞的範圍停在一行、不吃掉下一筆。真正讓
+        // 「損壞侷限」成立的是讀取端的 `allEvents(skippingCorrupt:)`——見該方法。
         var remaining = line[...]
         var wroteAnything = false
         while !remaining.isEmpty {
@@ -158,6 +195,11 @@ public struct FileEventStore: EventStore {
             wroteAnything = true
             remaining = remaining.dropFirst(written)
         }
+
+        guard fsync(fd) == 0 else {
+            throw EventStoreError.appendFailed(
+                path: url.path, underlying: "fsync 失敗：errno \(errno)（資料可能未落盤）")
+        }
     }
 
     /// 盡力把殘行封口。這裡刻意忽略錯誤：已經在錯誤路徑上，再拋一次只會蓋掉
@@ -173,9 +215,24 @@ public struct FileEventStore: EventStore {
 
     /// 全部事件，維持寫入順序。
     public func allEvents() throws -> [Event] {
+        try allEvents(skippingCorrupt: false).events
+    }
+
+    /// 讀取全部事件，可選擇是否跳過壞行。
+    ///
+    /// **預設 fail-loud**（`skippingCorrupt: false`）：解不開的紀錄一律外顯，
+    /// 因為靜默跳過會讓「外來寫入者塞了本 schema 不認得的東西」看起來像
+    /// 「那天沒有事件」——記憶層是不可重建的資料，安靜地少讀幾筆比讀不出來更糟。
+    ///
+    /// 但那個預設有個代價，#1 verify R3 指出來了：一次半途中斷的 append 留下
+    /// 一行壞資料，**整份 canonical store 從此讀不出來**。所以另外提供
+    /// `skippingCorrupt: true`——它不會被排序或計分路徑呼叫，只給修復情境用：
+    /// 讀得回來的部分先救出來，同時**明確回報跳過了哪幾行**，讓「損壞侷限在
+    /// 那一筆」成為可觀察的事實而不是註解裡的宣稱。
+    public func allEvents(skippingCorrupt: Bool) throws -> (events: [Event], corruptLines: [Int]) {
         let bytes: Data
         do {
-            guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+            guard FileManager.default.fileExists(atPath: url.path) else { return ([], []) }
             bytes = try Data(contentsOf: url)
         } catch {
             throw EventStoreError.readFailed(path: url.path, underlying: "\(error)")
@@ -183,16 +240,20 @@ public struct FileEventStore: EventStore {
 
         let decoder = JSONDecoder()
         var result: [Event] = []
+        var corrupt: [Int] = []
         for (index, line) in String(decoding: bytes, as: UTF8.self)
             .split(separator: "\n", omittingEmptySubsequences: true).enumerated()
         {
             do {
                 result.append(try decoder.decode(Event.self, from: Data(line.utf8)))
             } catch {
-                throw EventStoreError.corruptRecord(path: url.path, lineNumber: index + 1)
+                guard skippingCorrupt else {
+                    throw EventStoreError.corruptRecord(path: url.path, lineNumber: index + 1)
+                }
+                corrupt.append(index + 1)
             }
         }
-        return result
+        return (result, corrupt)
     }
 
     /// 檔案的原始 bytes。給「序列化輸出不得含任何原文」那條測試用——

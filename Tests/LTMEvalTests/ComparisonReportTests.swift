@@ -210,6 +210,43 @@ private func event(
     }
 }
 
+@Test func attributionNamingAStrategyOutsideTheComparisonIsRejected() {
+    // #1 verify R3：scorer 先前直接信任 `credit(for:)` 回來的任何 policy id，
+    // 於是損壞或偽造的紀錄可以把分數記到根本沒參與這次比較的策略頭上，
+    // 而報告照常產出。
+    let third = RankingPolicyID("some-other-strategy")
+    let r = PresentationRecord(
+        id: .random(), queryClass: .cjk2char,
+        strategyA: archival, strategyB: humanLike, generation: evalGeneration,
+        attribution: [AnchorAttribution(anchor: evalAnchor("a"), creditedTo: third)],
+        isNullComparison: false)
+
+    #expect(throws: ComparisonDataError.attributionNamesAThirdStrategy(
+        presentation: r.id, policy: third)
+    ) {
+        _ = try ComparisonScorer.report(records: [r], events: [])
+    }
+}
+
+@Test func anAnchorAppearingTwiceInOnePresentationIsRejected() {
+    // 一次呈現裡同一個 anchor 出現兩次 → 分母會被灌水，而報告看不出來。
+    let a = evalAnchor("a")
+    let r = PresentationRecord(
+        id: .random(), queryClass: .cjk2char,
+        strategyA: archival, strategyB: humanLike, generation: evalGeneration,
+        attribution: [
+            AnchorAttribution(anchor: a, creditedTo: archival),
+            AnchorAttribution(anchor: a, creditedTo: humanLike),
+        ],
+        isNullComparison: false)
+
+    #expect(throws: ComparisonDataError.duplicateAnchorInPresentation(
+        presentation: r.id, anchor: a)
+    ) {
+        _ = try ComparisonScorer.report(records: [r], events: [])
+    }
+}
+
 @Test func anEventMislabelledWithAnotherGenerationIsReported() {
     let r = presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"), generation: GenerationID("build-1"))
     // 事件自報 build-2，但它所屬的呈現是 build-1。靜默採信會讓一次呈現被切成

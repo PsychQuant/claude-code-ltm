@@ -42,7 +42,7 @@ func evalProjection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
     let result = try InterleavingHarness(generation: evalGeneration).present(
         query: 查詢原文, candidates: input,
         projection: evalProjection([(evalAnchor("d"), [.cited: 5])]),
-        a: ArchivalStrategy(), b: HumanLikeStrategy(displacementBound: 3))
+        a: ArchivalStrategy(), b: HumanLikeStrategy(displacementBound: 3), startingSide: .a)
 
     #expect(result.presented.count == input.count)
     #expect(Set(result.presented.map(\.anchor)) == Set(input.map(\.anchor)))
@@ -53,7 +53,7 @@ func evalProjection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
     let result = try InterleavingHarness(generation: evalGeneration).present(
         query: 查詢原文, candidates: input,
         projection: evalProjection([(evalAnchor("d"), [.cited: 5])]),
-        a: ArchivalStrategy(), b: HumanLikeStrategy(displacementBound: 3))
+        a: ArchivalStrategy(), b: HumanLikeStrategy(displacementBound: 3), startingSide: .a)
 
     #expect(!result.record.isNullComparison)
     for attribution in result.record.attribution {
@@ -73,7 +73,7 @@ func evalProjection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
     // 沒有任何使用歷史 → human-like 與 archival 產生相同排序。
     let result = try InterleavingHarness(generation: evalGeneration).present(
         query: 查詢原文, candidates: input, projection: .empty(at: evalInstant),
-        a: ArchivalStrategy(), b: HumanLikeStrategy())
+        a: ArchivalStrategy(), b: HumanLikeStrategy(), startingSide: .a)
 
     #expect(result.record.isNullComparison)
     #expect(result.record.attribution.allSatisfy { $0.creditedTo == nil })
@@ -85,7 +85,7 @@ func evalProjection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
     let result = try InterleavingHarness(generation: evalGeneration).present(
         query: 查詢原文, candidates: input,
         projection: evalProjection([(evalAnchor("d"), [.cited: 5])]),
-        a: ArchivalStrategy(), b: HumanLikeStrategy(displacementBound: 3))
+        a: ArchivalStrategy(), b: HumanLikeStrategy(displacementBound: 3), startingSide: .a)
 
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]

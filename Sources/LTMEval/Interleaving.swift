@@ -50,15 +50,21 @@ public struct InterleavingHarness: Sendable {
     /// 產生交錯清單與其紀錄。
     ///
     /// `query` 只用來算 class label，**不被保存**：出了這個函式，字串就沒有
-    /// 任何持有者。`startingSide` 由呼叫端指定而非內部隨機，理由是結果必須
-    /// 可重現——隨機起手要靠外部種子注入，不能藏在這裡。
+    /// 任何持有者。
+    ///
+    /// `startingSide` **沒有預設值**，這是刻意的。team-draft 的起手方決定誰拿到
+    /// 第 1 個位置，而第 1 個位置的點擊率遠高於其後——先前它預設 `.a`，於是
+    /// 每一次呈現都系統性地偏向 A，比較實驗量到的一部分是位置效應而不是策略差異
+    /// （#1 verify R3）。拿掉預設值就讓呼叫端**必須**決定，而那個決定應該來自
+    /// 外部種子的平衡分派（例如依 presentation id 的雜湊決定），不是這裡的隨機
+    /// ——結果必須可重現。
     public func present(
         query: String,
         candidates: [Candidate],
         projection: Projection,
         a: some MemoryStrategy,
         b: some MemoryStrategy,
-        startingSide: Side = .a
+        startingSide: Side
     ) throws -> Interleaving {
         let queryClass = QueryClassifier.classify(query)
         let presentationID = PresentationID.random()
