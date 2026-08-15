@@ -65,60 +65,62 @@ public enum CorpusLocation {
     /// 開到之後以 `fstat` 確認 inode 不在語料樹裡。那需要重寫 append 路徑，
     /// 追蹤於 follow-up。**在那之前，這條守衛防的是意外，不是有意的攻擊者。**
     public static func isInsideReadOnlyCorpus(_ url: URL) -> Bool {
-        let root = URL(fileURLWithPath: readOnlyRoot.path).resolvingSymlinksInPath()
-            .standardizedFileURL.pathComponents
+        let root = Self.realpath(readOnlyRoot.path) ?? readOnlyRoot.path
+        guard let resolved = Self.fullyResolve(url.path) else { return false }
 
-        var resolved = URL(fileURLWithPath: "/")
-        for component in url.pathComponents.dropFirst() {
-            if component == "." { continue }
-            if component == ".." {
-                // 在**已解析**的路徑上往上一層，而不是在字面路徑上。
-                resolved = resolved.deletingLastPathComponent()
-                continue
-            }
-            resolved = resolved.appendingPathComponent(component)
-            // 逐段解析：存在且是 symlink 時展開，不存在就原樣留著（尾端常見）。
-            if FileManager.default.fileExists(atPath: resolved.path) {
-                resolved = resolved.resolvingSymlinksInPath()
-            } else {
-                resolved = Self.followDanglingChain(from: resolved)
-            }
-        }
-
-        let target = resolved.standardizedFileURL.pathComponents
-        guard target.count >= root.count else { return false }
-        return Array(target.prefix(root.count)) == root
+        // 用元件比對而非字串前綴：`/a/bc` 不該被 `/a/b` 判成在內。
+        let rootParts = URL(fileURLWithPath: root).pathComponents
+        let targetParts = URL(fileURLWithPath: resolved).pathComponents
+        guard targetParts.count >= rootParts.count else { return false }
+        return Array(targetParts.prefix(rootParts.count)) == rootParts
     }
 
-    /// 沿著 dangling symlink 鏈一路解析到不再是 symlink 為止。
+    /// 把路徑解析成 kernel 實際會走到的最終位置。
     ///
-    /// `destinationOfSymbolicLink` 只回**直接目標**，而 `standardizedFileURL`
-    /// 只做字面消解、不再解 symlink。R2 修好了單層 dangling 的穿透，但
-    /// `A → B → <corpus>/x.jsonl`（整鏈 dangling）在守衛眼中只看到 `A → B`
-    /// 就停了——#1 verify R3 實測穿透，且 `open(O_WRONLY|O_APPEND|O_CREAT)`
-    /// 會沿鏈把檔案建在最終目標，也就是語料裡。
+    /// **不再用字串模擬 kernel 的路徑解析。** 這條前後改了四次（R2 修 `..`、
+    /// R3 修單層 dangling、R4 修多層鏈），每一次都是「補上我這次想到的 symlink
+    /// 擺法」，而每一次 verify 都找到新的擺法——R4 一口氣量到四種穿透，包括
+    /// 「dangling 目標的父層是 symlink」與「目標裡含 `..`」。根因是同一個：
+    /// **用字串近似一個由 kernel 定義的操作，近似永遠會漏。**
     ///
-    /// 上限取 `SYMLOOP_MAX`（POSIX 保證至少 8；這裡取 40 與多數 kernel 一致），
-    /// 到頂就停在當下位置——寧可把它當成「還在鏈上」保守判斷，也不要無限迴圈。
-    private static func followDanglingChain(from start: URL) -> URL {
-        var current = start
-        for _ in 0..<40 {
-            guard
-                let target = try? FileManager.default.destinationOfSymbolicLink(
-                    atPath: current.path)
-            else { return current }
-            current =
-                target.hasPrefix("/")
-                ? URL(fileURLWithPath: target).standardizedFileURL
-                : current.deletingLastPathComponent().appendingPathComponent(target)
-                    .standardizedFileURL
-            // 中途若接到一個真的存在的節點，交回一般路徑解析。
-            if FileManager.default.fileExists(atPath: current.path) {
-                return current.resolvingSymlinksInPath().standardizedFileURL
-            }
+    /// 改法是把解析交給 `realpath(3)`——它就是 kernel 的解析器。因為目標檔案
+    /// 通常還不存在（append 會建它），所以拆成兩段：父目錄交給 realpath 完整
+    /// 解析，最後一段自己處理 symlink（含 dangling，遞迴且有上限）。
+    static func fullyResolve(_ path: String, depth: Int = 0) -> String? {
+        guard depth < 40 else { return path }  // SYMLOOP_MAX 量級；迴圈時停手
+        let absolute =
+            path.hasPrefix("/") ? path : FileManager.default.currentDirectoryPath + "/" + path
+        let url = URL(fileURLWithPath: absolute)
+        let parent = url.deletingLastPathComponent().path
+        let base = url.lastPathComponent
+
+        // 父目錄必須解析成 kernel 真正會走到的目錄。它若不存在，往上遞推。
+        guard let realParent = Self.realpath(parent) else {
+            guard parent != "/" , parent != absolute else { return absolute }
+            guard let resolvedParent = Self.fullyResolve(parent, depth: depth + 1) else { return nil }
+            return resolvedParent + "/" + base
         }
-        return current
+
+        let candidate = realParent == "/" ? "/" + base : realParent + "/" + base
+
+        // 最後一段自己看：它可能是 symlink（含 dangling），而 realpath 對不存在
+        // 的路徑不作用。
+        var info = stat()
+        if lstat(candidate, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK,
+            let target = try? FileManager.default.destinationOfSymbolicLink(atPath: candidate)
+        {
+            let next = target.hasPrefix("/") ? target : realParent + "/" + target
+            return Self.fullyResolve(next, depth: depth + 1)
+        }
+        return candidate
     }
+
+    private static func realpath(_ path: String) -> String? {
+        guard let c = Darwin.realpath(path, nil) else { return nil }
+        defer { free(c) }
+        return String(cString: c)
+    }
+
 }
 
 /// JSON Lines 檔案實作。
@@ -174,7 +176,18 @@ public struct FileEventStore: EventStore {
         // canonical history（#1 verify）。改用 O_APPEND：核心保證「移到檔尾」與
         // 「寫入」對一般檔案是原子的，多行程並行 append 因此安全。
         // 權限 0o600：記憶層是本專案唯一必須備份的資料，不該是 world-readable。
-        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
+        // `O_NONBLOCK` 是為了讓下面的 `fstat` 檢查**真的有機會執行**。
+        // #1 verify R4 的 CRITICAL：對一個沒有讀者的 FIFO，`open(O_WRONLY)`
+        // 會永久阻塞——檢查寫在 open 之後，所以「一併拒絕非一般檔案」那句話
+        // 對 FIFO 是假的，實際行為是掛住。
+        //
+        // 更難堪的是我**已經知道**這個阻塞行為：刪掉那條假測試時我親手寫下
+        // 「FIFO 的 open(O_WRONLY) 無讀者時會阻塞」，卻只當成測試成本問題，
+        // 沒認出它同時代表生產程式碼會掛住。non-termination 是 R1 與 R3 各抓過
+        // 一次的 failure class，這是第三次。
+        //
+        // 對一般檔案 `O_NONBLOCK` 對讀寫語意無影響，所以不必事後清掉。
+        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT | O_NONBLOCK, 0o600)
         guard fd >= 0 else {
             throw EventStoreError.appendFailed(
                 path: url.path, underlying: "open 失敗：errno \(errno)（目錄可寫嗎？）")
@@ -236,7 +249,8 @@ public struct FileEventStore: EventStore {
     /// 現有測試只驗證新建的檔案，抓不到升級／還原情境。
     ///
     /// 一併拒絕非一般檔案：canonical store 指向 FIFO 或裝置節點時，`append`
-    /// 的語意完全不是「附加一筆歷史」。
+    /// 的語意完全不是「附加一筆歷史」。這條要成立，開檔必須帶 `O_NONBLOCK`
+    /// ——否則對無讀者的 FIFO 會停在 `open` 而永遠走不到這裡（見呼叫端）。
     private static func enforceOwnerOnlyRegularFile(fd: Int32, path: String) throws {
         var info = stat()
         guard fstat(fd, &info) == 0 else {

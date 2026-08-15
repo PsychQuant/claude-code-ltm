@@ -42,6 +42,27 @@ import Testing
     }
 }
 
+@Test func anOverBoundDemotionIsRejectedJustLikeAnOverBoundPromotion() {
+    // #1 verify R4 CRITICAL：**把守衛的 `abs()` 拿掉（改回單向），118 個測試
+    // 全部照過**——套件裡沒有任何一條測試餵給守衛一個超限的**下移**。
+    //
+    // 唯一那條違規測試（`exceedingTheDisplacementBoundIsReportedNotClamped`）
+    // 驅動的是 +4 的**提升**，單向檢查一樣擋得住。所以對稱契約——這一輪的
+    // 招牌修復——完全沒有被釘住。
+    let original = candidates(["a", "b", "c", "d", "e"])
+    // 第 0 名沉到最後：位移 -4，提升側完全沒有超限。
+    let demoted = Array(original.dropFirst()) + [original[0]]
+
+    #expect(throws: StrategyViolation.displacementBoundExceeded(bound: 1, attempted: 4)) {
+        _ = try RankingGuard.check(original: original, reordered: demoted, bound: 1)
+    }
+    // 界內的下移仍然放行——否則上面那條可以被一個「拒絕所有下移」滿足。
+    let swapped = [original[1], original[0]] + Array(original.dropFirst(2))
+    #expect(throws: Never.self) {
+        _ = try RankingGuard.check(original: original, reordered: swapped, bound: 1)
+    }
+}
+
 @Test func genuinePermutationStillPasses() throws {
     let original = candidates(["a", "b", "c"])
     let swapped = [original[1], original[0], original[2]]

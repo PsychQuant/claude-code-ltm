@@ -119,7 +119,33 @@ public struct Anchor: Sendable, Hashable, Codable {
     public let contentHash: ContentHash
     public let span: Range<Int>
 
+    public enum SpanValidationError: Error, Sendable, Equatable {
+        case empty(Range<Int>)
+        case negativeLowerBound(Range<Int>)
+    }
+
+    /// span 的形狀約束，**所有建構路徑共用這一個**。
+    ///
+    /// #1 verify R4 的 CRITICAL：R3 抓到「空 span 的雜湊是 `sha256("")`，於是對
+    /// 任何文字都 resolve 成功」之後，我的修法是逐一補入口——補了 `init(from:)`
+    /// 與 `init(source:turn:span:)`，**漏掉 memberwise 這一個**。萬用 anchor 仍然
+    /// 造得出來。
+    ///
+    /// 這與 R1「列舉六個識別碼型別、漏掉 ContentHash」是同一個形狀，而
+    /// CLAUDE.md 自己寫著「列舉會漏，判準不會」——我第二次違反自己寫的那句話。
+    /// 所以這次不是再補一個入口，是把判準抽成一個函式，讓「新增建構路徑卻忘了
+    /// 驗證」在結構上更難發生。
+    public static func validate(span: Range<Int>) throws {
+        guard !span.isEmpty else { throw SpanValidationError.empty(span) }
+        guard span.lowerBound >= 0 else { throw SpanValidationError.negativeLowerBound(span) }
+    }
+
     public init(source: String, turnID: String, contentHash: ContentHash, span: Range<Int>) {
+        do {
+            try Anchor.validate(span: span)
+        } catch {
+            preconditionFailure("anchor 的 span 不合法（\(error)）——空 span 沒有內容可綁定")
+        }
         // `source` 與 `turnID` 會原樣序列化進 canonical store，所以它們跟其他
         // 識別碼受同一條約束——不得夾帶自由文字。#1 verify 指出這兩個欄位是
         // 「schema 保證」宣稱的破口之一。
@@ -144,10 +170,11 @@ public struct Anchor: Sendable, Hashable, Codable {
         // 會是一個對任何文字都成立的萬用 anchor。span 是會被原樣序列化的欄位，
         // 所以它跟識別碼一樣需要形狀約束——R3 指出「每個被原樣序列化的欄位」
         // 這個判準被我縮成了「字串欄位」，而缺口正好落在縮掉的地方。
-        guard !span.isEmpty, span.lowerBound >= 0 else {
+        do {
+            try Anchor.validate(span: span)
+        } catch {
             throw DecodingError.dataCorruptedError(
-                forKey: .span, in: c,
-                debugDescription: "span \(span) 為空或起點為負——空 span 沒有內容綁定")
+                forKey: .span, in: c, debugDescription: "\(error)")
         }
         self.span = span
     }
@@ -169,10 +196,13 @@ public struct Anchor: Sendable, Hashable, Codable {
         // 2. 空 span（`n..<n`）讓內容綁定整個失效：它的雜湊是 `sha256("")`，
         //    於是**對任何一段第三方文字都 resolve 成功**。`memory-events` spec
         //    的「Altered source text dereferences as orphaned」對空 span 不成立。
-        guard let sliced = Turn.slice(turn.text, span), !span.isEmpty else {
+        do { try Anchor.validate(span: span) } catch {
+            preconditionFailure("anchor 的 span 不合法（\(error)）")
+        }
+        guard let sliced = Turn.slice(turn.text, span) else {
             preconditionFailure(
-                "anchor 的 span \(span) 對長度 \(turn.text.unicodeScalars.count) 的 turn 越界或為空"
-                    + "——空 span 沒有內容可綁定，越界 span 綁的是不存在的內容")
+                "anchor 的 span \(span) 對長度 \(turn.text.unicodeScalars.count) 的 turn 越界"
+                    + "——越界 span 綁的是不存在的內容")
         }
         self.init(
             source: source,
