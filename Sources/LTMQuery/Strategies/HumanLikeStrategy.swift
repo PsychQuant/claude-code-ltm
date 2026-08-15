@@ -26,6 +26,7 @@ public struct HumanLikeStrategy: MemoryStrategy {
     }
 
     public func rerank(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
+        try MemoryStrategySupport.requireFiniteBaseScores(candidates)
         var reordered = candidates
 
         // 依帶切段後各自處理。段與段之間永遠不交換，所以帶的圍籬在演算法層
@@ -52,56 +53,61 @@ public struct HumanLikeStrategy: MemoryStrategy {
     /// 帶內的有界冒泡：**每筆候選最多往上冒 `displacementBound` 次**，且只越過
     /// 強度嚴格較低的鄰居。
     ///
-    /// ## 為什麼上限是單向的（#17 裁決，2026-08-15）
-    ///
-    /// 上限只約束**提升**。被越過的候選會下移，下移量等於「越過它的人數」，
-    /// 不另設限。這條走過一段彎路，紀錄如下，因為它看起來像退步：
+    /// ## 上限是對稱的。這條走過兩次彎路，兩次都留在這裡
     ///
     /// - **R1**（2026-08-11）：verify 抓到本策略對一般輸入拋
-    ///   `displacementBoundExceeded`——當時的契約是**對稱**上限，而演算法只約束
-    ///   提升。反例 `[a:0, b:6, c:4, d:2]`、bound 1：a 連續被 b、c、d 跳過而下移三格。
-    /// - **R1 的修法**：在每次 swap 前檢查被越過那方的累計下移，超限就放棄提升。
-    ///   這讓演算法符合契約了。
-    /// - **R2**（2026-08-14）：量化證明那個修法選錯邊。對稱上限的算術是
-    ///   「位於索引 j 的候選最多下移 bound 名 → 最多只有 bound 個人能越過它」，
-    ///   所以**一條帶的提升總數上限就是 bound，與帶大小無關**。實測帶大小 32、
-    ///   其中 31 個有遞減強度：bound 1 → 實際上移總數 **1**。500 次交錯呈現有
-    ///   13.2% 落成 null comparison 被丟棄。策略差異的訊號比 design.md 假設的
-    ///   低一個數量級，比較實驗量不到東西。
-    /// - **裁決**：改契約，不改演算法。真正圍住傷害的是**相關性帶**——帶內候選
-    ///   按定義同等相關，帶已經把重排的影響限制在「不影響相關性判斷」的範圍內。
-    ///   上限該擋的是「單一項目暴衝」，不是「很多項目各前進一名」。而且
-    ///   「沒被回憶的東西相對往後沉」正是人類記憶的行為，不是缺陷。
+    ///   `displacementBoundExceeded`——契約是對稱上限，而當時的貪婪冒泡只約束
+    ///   提升。反例 `[a:0, b:6, c:4, d:2]`、bound 1：a 連續被 b、c、d 跳過、下移三格。
+    /// - **R1 的修法**：swap 前檢查被越過那方的累計下移，超限就放棄提升。演算法
+    ///   因此符合契約，但引入了**楔住**——帶首的擋路者用完預算後，它上方的位置
+    ///   對所有後續候選永久封死。
+    /// - **R2**（2026-08-14）：量到「帶大小 32、31 個有歷史 → 只有 1 次提升」，
+    ///   判定 human-like 幾乎被關掉。
+    /// - **我當時的反應是改契約**（改成只約束提升），論證是「對稱上限的算術必然
+    ///   讓整帶提升總數 ≤ bound」。
+    /// - **R3**（2026-08-15）：那句話**是錯的**。反例：bound 1、
+    ///   `[A,B,C,D] → [B,A,D,C]`，每筆位移都 ≤1 卻有兩個提升。被量測推翻的是
+    ///   R1 的**演算法**，不是契約；我卻改了契約。而且 R2 那個輸入的第 0 名以外
+    ///   本來就按強度排好了——**1 次提升是最佳解，不是飢餓**。量測為真、詮釋有誤。
     ///
-    /// 位移仍然**逐筆據實回報**（`RankedResult.displacement`），所以可稽核性沒有
-    /// 損失——改變的是「什麼算違規」，不是「看不看得見」。
+    /// 所以：**契約改回對稱，換掉演算法。** 現在的作法是 pass-based，每個元素
+    /// 每輪最多參與一次交換，跑 `bound` 輪——兩個方向的上限由構造保證，且沒有
+    /// 「放棄提升」規則，所以不會楔住（測試 `promotionsHappenWhereverTheyAreNeeded`
+    /// 釘住這件事）。
+    ///
+    /// 留著這整段的理由：中間那一步「改掉自己 code 一直違反的規則」在當下看起來
+    /// 有充分理由，而它錯了。只寫結論的話，下一個人會再走一次。
     private func promoteWithinBand(
         _ items: inout [Candidate], range: Range<Int>, projection: Projection
     ) {
         guard displacementBound > 0, range.count > 1 else { return }
 
-        // 先處理強度高的，同強度維持原順序，結果才是決定性的。
-        let order = range.sorted { lhs, rhs in
-            let a = projection.netStrength(for: items[lhs].anchor)
-            let b = projection.netStrength(for: items[rhs].anchor)
-            return a == b ? lhs < rhs : a > b
-        }
-        let queue = order.map { items[$0].anchor }
-
-        for anchor in queue {
-            guard projection.netStrength(for: anchor) > 0 else { continue }
-            guard var index = items.firstIndex(where: { $0.anchor == anchor }) else { continue }
-            var moves = 0
-            while moves < displacementBound, index > range.lowerBound {
-                let neighbour = items[index - 1]
-                guard projection.netStrength(for: neighbour.anchor)
-                    < projection.netStrength(for: anchor)
-                else { break }
-
-                items.swapAt(index - 1, index)
-                index -= 1
-                moves += 1
+        // 每一輪由左往右掃一次相鄰對，強度較高者往前換；**每個元素每輪最多參與
+        // 一次交換**（`movedThisPass`）。因此單輪位移至多 1，跑 `bound` 輪之後
+        // 任一元素的位移至多 `bound`——**對稱上限由構造保證，兩個方向都是**。
+        //
+        // 這取代了先前那個「冒泡到上限、被越過方超額就放棄提升」的貪婪版本。
+        // 那一版的問題不是不安全，是會**楔住**：帶首一個沒有歷史的候選用完下移
+        // 預算之後，它上方的位置對所有後續候選永久封死。這裡沒有放棄規則，
+        // 每一輪都做得了的相鄰改善全部做掉，所以提升會散佈到整條帶上。
+        for _ in 0..<displacementBound {
+            var movedThisPass: Set<Anchor> = []
+            var i = range.lowerBound + 1
+            while i < range.upperBound {
+                let left = items[i - 1]
+                let right = items[i]
+                if projection.netStrength(for: right.anchor)
+                    > projection.netStrength(for: left.anchor),
+                    !movedThisPass.contains(left.anchor),
+                    !movedThisPass.contains(right.anchor)
+                {
+                    items.swapAt(i - 1, i)
+                    movedThisPass.insert(left.anchor)
+                    movedThisPass.insert(right.anchor)
+                }
+                i += 1
             }
+            if movedThisPass.isEmpty { break }  // 已到不動點，剩下的輪次沒有意義
         }
     }
 
@@ -112,9 +118,14 @@ public struct HumanLikeStrategy: MemoryStrategy {
         if projection.isOrphaned(placement.candidate.anchor) {
             return .orphanedHistoryIgnored
         }
-        guard let stats = projection[placement.candidate.anchor] else {
-            // 真的沒有歷史。這是誠實的「沒有調整」。
-            return .noAdjustment
+        guard let stats = projection[placement.candidate.anchor], stats.netStrength != 0 else {
+            // 沒有歷史。位置沒變 → 誠實的「沒有調整」；位置變了 → 是被有歷史的
+            // 鄰居超車擠下來的，必須說出來。先前這裡一律回 `.noAdjustment`，
+            // 於是一筆下移三名的結果同時聲稱「移動了三名」與「沒有套用任何調整」
+            // （#1 verify R3）。
+            return placement.displacement == 0
+                ? .noAdjustment
+                : .displacedByPeers(positions: -placement.displacement)
         }
         // spec：「A result whose displacement is zero SHALL carry a reason
         // indicating that no adjustment was applied.」先前寫成「位移為 0 **且**

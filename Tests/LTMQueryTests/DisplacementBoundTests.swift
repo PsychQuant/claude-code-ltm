@@ -44,35 +44,82 @@ private func multiStrengthProjection(_ entries: [(Anchor, Double)]) -> Projectio
     }
 }
 
-@Test func demotionMayExceedTheBoundAndThatIsTheContract() throws {
-    // 同一個輸入：a 沒有歷史，被 b、c、d 各跳過一次 → 下移三格。
-    // **這是契約，不是違規。** R1 那版會為此拋錯，代價是整條帶只剩一次提升。
+@Test func demotionIsBoundedToo() throws {
+    // 對稱契約：被超車的一方也不得下移超過上限。
     let input = candidates(["a", "b", "c", "d"])
     let projection = multiStrengthProjection([
         (testAnchor("b"), 6), (testAnchor("c"), 4), (testAnchor("d"), 2),
     ])
 
     let output = try HumanLikeStrategy(displacementBound: 1).rerank(input, with: projection)
-    let positions = output.map(\.candidate.anchor)
-
-    #expect(positions == [testAnchor("b"), testAnchor("c"), testAnchor("d"), testAnchor("a")])
-    let a = output.first { $0.candidate.anchor == testAnchor("a") }!
-    #expect(a.displacement == -3)  // 下移三格，超過 bound 1
+    for result in output {
+        #expect(abs(result.displacement) <= 1)
+    }
 }
 
-@Test func everyReinforcedCandidateGetsPromotedNotJustTheFirst() throws {
-    // R2 量化的那件事的反面：對稱上限之下這條會失敗（整帶只有 1 次提升）。
-    // 單向上限之下，每個有歷史的候選都真的往前走。
-    let ids = (0..<12).map { "c\($0)" }
+@Test func aDemotedCandidateSaysWhyItMoved() throws {
+    // 位移非零就必須說明原因。先前沒有歷史的候選被超車時回報 `.noAdjustment`，
+    // 於是同時聲稱「移動了」與「沒有調整」（#1 verify R3）。
+    let input = candidates(["a", "b"])
+    let output = try HumanLikeStrategy(displacementBound: 1)
+        .rerank(input, with: multiStrengthProjection([(testAnchor("b"), 5)]))
+
+    let a = output.first { $0.candidate.anchor == testAnchor("a") }!
+    #expect(a.displacement == -1)
+    #expect(a.reason == .displacedByPeers(positions: 1))
+}
+
+@Test func onePromotionIsTheOptimumWhenOnlyTheHeadIsMisplaced() throws {
+    // **R2 警訊的誠實反駁，留成測試。**
+    //
+    // R2 量到「帶大小 32、31 個有歷史，bound 1 → 只有 1 次提升」，並據此判定
+    // human-like 幾乎被關掉。我當時接受了那個詮釋並改掉契約——那是錯的。
+    //
+    // 該輸入的第 0 名沒有歷史、其餘**本來就已按強度遞減排好**。也就是說
+    // 目標順序與輸入只差「把第 0 名移到最後」，其餘 31 筆的相對順序完全正確、
+    // 不需要移動。在對稱 bound 1 之下，第 0 名最多下沉一格，所以最多一人能
+    // 超過它——**1 次提升是最佳解，不是飢餓**。
+    //
+    // 量測為真、詮釋有誤。這條測試把「為什麼 1 是對的」釘住。
+    let ids = (0..<32).map { "c\($0)" }
     let input = candidates(ids)
-    // 第 0 名沒有歷史（帶首擋路者），其餘遞減強度。
-    let entries = ids.dropFirst().enumerated().map { (testAnchor($1), Double(12 - $0)) }
+    let entries = ids.dropFirst().enumerated().map { (testAnchor($1), Double(32 - $0)) }
 
     let output = try HumanLikeStrategy(displacementBound: 1)
         .rerank(input, with: multiStrengthProjection(entries))
 
-    let promoted = output.filter { $0.displacement > 0 }.count
-    #expect(promoted >= 10, "只有 \(promoted) 個候選被提升——帶首擋路者又把整條帶卡住了")
+    #expect(output.filter { $0.displacement > 0 }.count == 1)
+    // 而且那一次提升確實發生了——不是完全沒動。
+    #expect(output.first?.candidate.anchor == testAnchor("c1"))
+}
+
+@Test func promotionsHappenWhereverTheyAreNeededNotOnlyAtTheHead() throws {
+    // 真正該擔心的「楔住」是：帶首的擋路者用完預算之後，**帶內其他地方**
+    // 需要的提升也一併停擺。這條輸入在兩個不相鄰的位置各需要一次提升。
+    let input = candidates(["a", "b", "c", "d"])
+    let projection = multiStrengthProjection([(testAnchor("b"), 6), (testAnchor("d"), 5)])
+
+    let output = try HumanLikeStrategy(displacementBound: 1).rerank(input, with: projection)
+
+    #expect(output.filter { $0.displacement > 0 }.count == 2)
+    #expect(output.map(\.candidate.anchor) == [testAnchor("b"), testAnchor("a"), testAnchor("d"), testAnchor("c")])
+    #expect(output.allSatisfy { abs($0.displacement) <= 1 })
+}
+
+@Test func nonFiniteBaseScoreIsRejectedAtTheSeamEntry() {
+    // NaN 讓 `x == x` 為 false，而等分區段切分與守衛的排列比對都建立在等值
+    // 比較上。#1 verify R3 實測 `ConservativeStrategy` 因此無限迴圈。
+    let bad = [Candidate(anchor: testAnchor("nan"), baseScore: .nan, band: RelevanceBand(rank: 0))]
+
+    #expect(throws: StrategyViolation.nonFiniteBaseScore(testAnchor("nan"))) {
+        _ = try HumanLikeStrategy().rerank(bad, with: .empty(at: instant))
+    }
+    #expect(throws: StrategyViolation.nonFiniteBaseScore(testAnchor("nan"))) {
+        _ = try ConservativeStrategy().rerank(bad, with: .empty(at: instant))
+    }
+    #expect(throws: StrategyViolation.nonFiniteBaseScore(testAnchor("nan"))) {
+        _ = try ArchivalStrategy().rerank(bad, with: .empty(at: instant))
+    }
 }
 
 @Test(arguments: [1, 2, 3])

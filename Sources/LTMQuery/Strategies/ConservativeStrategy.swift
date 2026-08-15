@@ -39,12 +39,18 @@ public struct ConservativeStrategy: MemoryStrategy {
     public init() {}
 
     public func rerank(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
+        try MemoryStrategySupport.requireFiniteBaseScores(candidates)
         var reordered = candidates
 
         // 只在「同帶 + base score 完全相等」的連續區段內重排。區段之外一律不動。
         var start = 0
         while start < reordered.count {
-            var end = start
+            // `end` 從 start + 1 起算：區段至少含自己。先前寫成 `end = start`，
+            // 於是第一個條件是 `x.baseScore == x.baseScore`——對 NaN 為 false，
+            // `end` 停在 `start`、`start = end` 不前進，**整個 rerank 無限迴圈**
+            // （#1 verify R3 實測掛住，不拋錯）。非有限值現在已在入口擋掉，
+            // 這裡的寫法仍然改成「不可能不前進」，因為兩道防線的成本是一行。
+            var end = start + 1
             while end < reordered.count,
                 reordered[end].band == reordered[start].band,
                 reordered[end].baseScore == reordered[start].baseScore
@@ -63,38 +69,44 @@ public struct ConservativeStrategy: MemoryStrategy {
             start = end
         }
 
-        // 平手區段內的重排，位移不可能超過該區段長度；用區段最大長度當上限，
-        // 讓守衛仍然檢查「沒有跨帶、是排列」而不會誤報。
-        let widestTie = widestTiedRun(candidates)
-        let placements = try RankingGuard.check(
-            original: candidates, reordered: reordered, bound: max(0, widestTie - 1))
+        // **不設位移上限，改用更嚴格的檢查**：每一筆只能在自己原本的等分區段內
+        // 移動。
+        //
+        // 先前這裡把 `widestTiedRun` 算出來當成自己的 bound 傳給守衛——**策略
+        // 自己授權自己的上限**，於是守衛對它恆真：#1 verify R3 實測 8 個平手候選
+        // 可以整個反轉、提升 7 名而不拋錯，正是 design.md 說要防的「行為不合規的
+        // 策略偽裝成合規」。而且那個上限取自**整份候選清單**的最寬區段，所以
+        // 一個 2 長區段裡的候選會被拿另一條帶的 8 長區段去檢查。
+        //
+        // 正解不是放寬而是換一條更強的約束：base score 完全相等時檢索對先後
+        // **沒有表達任何偏好**，區段內任意重排都不牴觸相關性判斷；但跨區段
+        // 移動一格都不行。
+        let placements = try RankingGuard.checkTieRunsOnly(
+            original: candidates, reordered: reordered)
 
         return placements.map { placement in
-            guard placement.displacement != 0, let stats = projection[placement.candidate.anchor]
-            else {
-                return RankedResult(
-                    candidate: placement.candidate, displacement: placement.displacement,
-                    reason: projection.isOrphaned(placement.candidate.anchor)
-                        ? .orphanedHistoryIgnored : .noAdjustment)
-            }
-            return RankedResult(
-                candidate: placement.candidate, displacement: placement.displacement,
-                reason: .adjusted(signals: stats.deliberateCounts, netStrength: stats.netStrength))
+            reasoned(placement, in: projection)
         }
     }
 
-    private func widestTiedRun(_ candidates: [Candidate]) -> Int {
-        var widest = 0
-        var start = 0
-        while start < candidates.count {
-            var end = start
-            while end < candidates.count,
-                candidates[end].band == candidates[start].band,
-                candidates[end].baseScore == candidates[start].baseScore
-            { end += 1 }
-            widest = max(widest, end - start)
-            start = end
+    private func reasoned(_ placement: GuardedPlacement, in projection: Projection) -> RankedResult {
+        if projection.isOrphaned(placement.candidate.anchor) {
+            return RankedResult(
+                candidate: placement.candidate, displacement: placement.displacement,
+                reason: .orphanedHistoryIgnored)
         }
-        return widest
+        guard placement.displacement != 0 else {
+            return RankedResult(
+                candidate: placement.candidate, displacement: 0, reason: .noAdjustment)
+        }
+        guard let stats = projection[placement.candidate.anchor], stats.netStrength != 0 else {
+            // 位移非零但自己沒有歷史 → 是被同區段裡有歷史的鄰居擠動的。
+            return RankedResult(
+                candidate: placement.candidate, displacement: placement.displacement,
+                reason: .displacedByPeers(positions: -placement.displacement))
+        }
+        return RankedResult(
+            candidate: placement.candidate, displacement: placement.displacement,
+            reason: .adjusted(signals: stats.deliberateCounts, netStrength: stats.netStrength))
     }
 }

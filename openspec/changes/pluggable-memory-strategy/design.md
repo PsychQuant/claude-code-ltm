@@ -14,13 +14,13 @@ A prerequisite measurement (issue #2) established the retrieval baseline this ch
 
 - Make the memory strategy a runtime parameter with exactly one architectural seam, so strategies can be added without touching retrieval.
 - Define a canonical event schema that survives index rebuilds, formula changes, and chunker changes.
-- Ship two strategies that differ in kind (memory absent versus memory present), not in degree.
+- Ship strategies that differ in kind (memory absent / memory only at ties / memory active), never in degree.
 - Provide a comparison method that works without retaining query text.
 
 **Non-Goals:**
 
 - **Not building the ingest pipeline or the retrieval index.** This change defines the seam and its inputs; candidates arrive as a value type and tests construct them synthetically. Wiring to a real index is separate work informed by issue #2.
-- **Not shipping a third strategy.** The removed `conservative` tier is not replaced. If a third is ever wanted it must be defined by which signals it consumes, never by how large an adjustment it makes.
+- **Not shipping a fourth strategy.** Three ship: `archival`, `conservative`, `human-like`. An earlier draft of this document removed `conservative` and stated it would not be replaced; that removal rested on an argument that was only half true, and the tier was restored. Any further strategy must be defined by which signals it consumes and under what condition it acts, never by how large an adjustment it makes.
 - **Not choosing the displacement bound.** The bound is a tunable parameter with a recorded default; its correct value cannot be derived before an evaluation set exists.
 - **Not encrypting pin notes.** This change defines the pointer that references a note; the note store itself is separate work tracked by issue #3.
 - **Not retaining query text under any option.** Rejected explicitly: retaining queries would permit retrospective strategy replay, but query text routinely contains third-party names and unpublished material, which the project's privacy rule places outside the canonical store.

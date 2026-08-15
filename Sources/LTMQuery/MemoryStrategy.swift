@@ -27,10 +27,17 @@ public struct Candidate: Sendable, Equatable {
 
 /// 某筆結果為何在它現在的位置。
 public enum RankingReason: Sendable, Equatable {
-    /// 沒有套用任何調整。`archival` 的每一筆都是這個。
+    /// 沒有套用任何調整，且位置也沒變。
     case noAdjustment
-    /// 被使用歷史上推／下壓。`signals` 指名是哪些事件促成的。
+    /// 被使用歷史上推。`signals` 指名是哪些事件促成的。
     case adjusted(signals: [EventKind: Int], netStrength: Double)
+    /// **自己沒有被調整，但被別人的提升擠下來。**
+    ///
+    /// #1 verify R3：先前這種情形回報 `.noAdjustment`，於是一筆下移三名的結果
+    /// 同時聲稱「移動了三名」與「沒有套用任何調整」——直接牴觸 spec 的
+    /// 「每筆結果都要說明它為何移動」。沒有歷史的候選被有歷史的鄰居超車是
+    /// 常態，不是邊角。
+    case displacedByPeers(positions: Int)
     /// 有歷史，但 anchor 已 orphan，所以歷史不計入。
     case orphanedHistoryIgnored
 }
@@ -58,6 +65,31 @@ public enum StrategyViolation: Error, Sendable, Equatable {
     case displacementBoundExceeded(bound: Int, attempted: Int)
     /// 重排結果不是輸入的排列（多了、少了、或換了東西）。
     case candidateSetChanged
+    /// tie-only 策略把候選移出了它原本所屬的等分區段。
+    case movedAcrossTieRuns
+    /// 候選的 base score 不是有限值。
+    ///
+    /// 這是**前置條件**而非邊角處理：`NaN` 讓 `x == x` 為 false，而策略與守衛都
+    /// 用等值比較切分等分區段——#1 verify R3 實測 `ConservativeStrategy` 因此
+    /// 無限迴圈（不拋錯，直接掛住燒 CPU），與 R1 修掉的交錯迴圈是同一個
+    /// failure class。在 seam 入口一次擋掉，比讓每個迴圈各自防禦可靠。
+    case nonFiniteBaseScore(Anchor)
+}
+
+/// 所有策略共用的前置條件。
+public enum MemoryStrategySupport {
+    /// base score 必須是有限值。
+    ///
+    /// 這條是**前置條件**，在 seam 入口一次擋掉，不讓每個迴圈各自防禦。理由是
+    /// 實證的：`NaN` 讓 `x == x` 為 false，而等分區段的切分、守衛的排列比對都
+    /// 建立在等值比較上。#1 verify R3 實測 `ConservativeStrategy` 因此無限迴圈
+    /// ——不拋錯、直接掛住——與 R1 修掉的交錯迴圈是同一個 failure class。
+    /// 讓它在最上游變成一個具名錯誤，比在三個地方各補一次防禦可靠。
+    public static func requireFiniteBaseScores(_ candidates: [Candidate]) throws {
+        for candidate in candidates where !candidate.baseScore.isFinite {
+            throw StrategyViolation.nonFiniteBaseScore(candidate.anchor)
+        }
+    }
 }
 
 /// 使用歷史能影響排序的**唯一**入口。
@@ -76,9 +108,13 @@ public protocol MemoryStrategy: Sendable {
     /// 配不同位移上限仍是同一個 id。
     var id: RankingPolicyID { get }
 
-    /// 這個策略會消費哪些事件種類。**策略軸就是這個集合**：要有第三檔，必須
-    /// 指出它吃的訊號不同（例如只吃 cited/pinned），不得用「調整幅度不同」
-    /// 來定義。空集合代表完全不看使用歷史。
+    /// 這個策略會消費哪些事件種類。空集合代表完全不看使用歷史。
+    ///
+    /// **策略軸是「消費哪些訊號」加上「在什麼條件下作用」，永遠不是「調整幅度」。**
+    /// 這句話比原本寫的寬：先前只寫訊號集合，於是 `conservative`（與 human-like
+    /// 同訊號、只在等分時作用）在字面上被自己的 protocol doc 禁止（#1 verify R3）。
+    /// 幅度仍然不算——把 human-like 的上限調到 0 得到的是「什麼都不做」，
+    /// 不是 tie-breaking，兩者不是同一個機制的兩種強度。
     var consumedSignals: Set<EventKind> { get }
 
     func rerank(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult]

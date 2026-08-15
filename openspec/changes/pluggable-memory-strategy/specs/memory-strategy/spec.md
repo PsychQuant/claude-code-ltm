@@ -49,30 +49,33 @@ A strategy that reorders SHALL move a candidate only among candidates sharing it
 - **WHEN** the `human-like` strategy is invoked
 - **THEN** the candidate with citations is ordered above the other and its reason names the citation signal
 
-### Requirement: Promotion is bounded; demotion is a reported consequence
+### Requirement: Displacement is bounded in both directions
 
-A strategy that reorders SHALL promote a candidate by at most a configured number of positions. The bound SHALL be supplied as configuration rather than compiled in. The default SHALL be one position, and SHALL be documented as provisional: its correct value is not derivable before an evaluation set exists. Attempting to promote a candidate beyond the bound SHALL fail loudly rather than being clamped.
+A strategy that reorders SHALL move a candidate by at most a configured number of positions, **in either direction**. The bound SHALL be supplied as configuration rather than compiled in. The default SHALL be one position, and SHALL be documented as provisional: its correct value is not derivable before an evaluation set exists. Attempting to move a candidate beyond the bound SHALL fail loudly rather than being clamped.
 
-Demotion SHALL NOT be separately bounded. A candidate sinks by exactly as many positions as the number of peers promoted past it, and that displacement SHALL be reported on the result like any other.
+An intermediate draft of this requirement made the bound apply to promotion only, on the argument that a symmetric bound necessarily caps a whole band's promotions at the bound. **That argument was false** — with a bound of one, a band of four can go from `[A,B,C,D]` to `[B,A,D,C]`, which has two promotions and no displacement above one. What the measurement behind that draft actually refuted was one particular reordering algorithm, not the contract; the contract was changed when the algorithm should have been. The requirement is symmetric again and the algorithm was replaced with one that satisfies it by construction.
 
-The bound is deliberately one-directional, and this replaces an earlier symmetric formulation. The symmetric version was measured to cap a whole band's promotions at the bound regardless of band size — a band of 32 with 31 reinforced candidates produced exactly one promotion at the default — because a candidate that may sink at most `bound` positions can be overtaken by at most `bound` peers. That made the memory-bearing strategy indistinguishable from the memory-free one, defeating the comparison the change exists to enable. What limits the damage of reordering is the **relevance band**, whose members are equally relevant by construction; the promotion bound exists to stop a single candidate leaping, not to stop many candidates each advancing one place.
+#### Scenario: Movement beyond the bound is rejected in either direction
 
-#### Scenario: Promotion beyond the bound is rejected
-
-- **WHEN** a strategy attempts to promote a candidate more positions than the configured bound allows
+- **WHEN** a strategy attempts to move a candidate more positions than the configured bound allows, whether up or down
 - **THEN** the invocation fails and reports the attempted bound violation
 
-#### Scenario: A candidate overtaken by several peers sinks by more than the bound
+#### Scenario: A candidate displaced by a promoted peer says so
 
-- **GIVEN** a band of four candidates in which the first has no recorded history and the other three do, and a bound of one
+- **GIVEN** a band of two in which the second candidate has recorded history and the first has none
 - **WHEN** `human-like` reorders the band
-- **THEN** each of the three is promoted by at most one position, the first is reported with a displacement of minus three, and the invocation succeeds
+- **THEN** the first is reported with a displacement of minus one and a reason stating it was displaced by a peer, not a reason stating no adjustment was applied
 
-#### Scenario: Every reinforced candidate advances, not only the first
+#### Scenario: Promotions occur wherever they are needed, not only at the head of the band
 
-- **GIVEN** a band of twelve whose first candidate has no history and whose other eleven do
+- **GIVEN** a band of four in which the second and fourth candidates have recorded history and the first and third have none
 - **WHEN** `human-like` reorders the band with a bound of one
-- **THEN** at least ten of the eleven carry a positive displacement
+- **THEN** both reinforced candidates carry a positive displacement, and every displacement is within the bound
+
+#### Scenario: A non-finite base score is rejected before any reordering
+
+- **WHEN** any candidate carries a base score that is not finite
+- **THEN** every strategy rejects the input with a named error rather than reordering it
 
 #### Scenario: The bound is configurable at construction
 
@@ -82,15 +85,15 @@ The bound is deliberately one-directional, and this replaces an earlier symmetri
 
 ##### Example: Bound applied within a band
 
-A candidate is promoted past peers whose strength is strictly lower, up to the bound.
+A candidate is promoted past peers whose strength is strictly lower, up to the bound, and the peers it overtakes sink correspondingly — also within the bound.
 
-| Configured bound | Input position | Reinforcing events | Resulting position |
-| ---------------- | -------------- | ------------------ | ------------------ |
-| 1                | 5              | 10 citations       | 4                  |
-| 3                | 5              | 10 citations       | 2                  |
-| 3                | 5              | 0                  | 5                  |
+| Configured bound | Input position | Reinforcing events | Other reinforced peers | Resulting position |
+| ---------------- | -------------- | ------------------ | ---------------------- | ------------------ |
+| 1                | 5              | 10 citations       | none                   | 4                  |
+| 3                | 5              | 10 citations       | none                   | 2                  |
+| 3                | 5              | 0                  | none                   | 5                  |
 
-Unlike the earlier symmetric formulation, these rows do not depend on how many other candidates in the band carry history: each reinforced candidate spends its own promotion budget independently. The candidates they overtake sink correspondingly, which is reported and not bounded.
+The last column is exact only for the single-promoter case shown. With several reinforced candidates competing for the same positions, each still moves at most `bound`, but which of them advances depends on their relative strengths — a symmetric bound cannot let two candidates both pass the same peer when that peer may sink only one place. That is a property of the bound, not a defect: it is the sense in which the bound limits how far memory may override retrieval order.
 
 ### Requirement: Orphaned anchors do not influence ranking
 

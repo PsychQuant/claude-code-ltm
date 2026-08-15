@@ -9,10 +9,9 @@ A second forcing function: the canonical store must hold usage history, which is
 - Introduce an append-only **event store** as the canonical record of usage history, holding only pointers and statistics — never chunk text, never query strings.
 - Introduce a stable **anchor** type addressing source turns by content, not by derived chunk identity, so the disposable index can be rebuilt without orphaning canonical records.
 - Introduce a **`MemoryStrategy` seam**: one protocol that takes retrieval candidates plus an event projection and returns a re-ranked list with per-item displacement provenance.
-- Ship two strategies: `archival` (identity — the null object and correctness oracle) and `human-like` (power-law decay and retrieval reinforcement).
+- Ship three strategies: `archival` (identity — the null object and correctness oracle), `conservative` (acts only where base scores tie), and `human-like` (power-law decay and retrieval reinforcement).
 - **Not shipped, and named as such:** the third `human-like` mechanism the issue asks for — spreading activation (Collins & Loftus, 1975; the issue calls it 共現擴散激發, and the Clarity Surface resolved that co-occurrence edges are one implementation variant of it) — is **absent from this change**. It needs a co-occurrence edge structure that the event schema does not yet carry, and building it would widen this change past the seam it is meant to define. Tracked as a follow-up. Earlier drafts of this proposal listed "co-retrieval association" among the shipped mechanisms; that was an overclaim, caught by the #1 verify on 2026-08-11 and corrected here.
-- Ship an **interleaving comparison harness** that compares two strategies on live usage rather than by replaying stored queries, since queries are deliberately not retained. It records a per-presentation **query class label** drawn from a closed five-value set — a statistic, not content — so results can be reported per class without storing a single query.
-- Ship a third strategy, `conservative`: it consumes the same signals as `human-like` but acts **only where base scores are exactly equal within a band**, so it never overrides a relevance judgement the retrieval layer actually made.
+- Ship an **interleaving comparison harness** that compares a pair of strategies on live usage rather than by replaying stored queries, since queries are deliberately not retained. It records a per-presentation **query class label** drawn from a closed five-value set — a statistic, not content — so results can be reported per class without storing a single query.
 - **Corrected from an earlier draft of this proposal.** That draft removed `conservative` outright, arguing its defining rule ("strength acts only as a tie-breaker, capped at ±5%") was not expressible. Half of that argument holds: reciprocal-rank-fusion scores carry no cross-query semantics, so a percentage cap has no stable referent. The other half does not — "acts only as a tie-breaker" is perfectly expressible in this change's own vocabulary, and `human-like` does not contain it (a bound of zero yields no reordering, not tie-breaking). A half-true argument was used to support a universal conclusion; the tier is restored.
 
 ## Capabilities
@@ -20,8 +19,8 @@ A second forcing function: the canonical store must hold usage history, which is
 ### New Capabilities
 
 - `memory-events`: append-only canonical record of retrieval interactions, addressed by stable anchors, storing pointers and statistics only.
-- `memory-strategy`: the pluggable re-ranking seam plus its two shipped implementations, including displacement provenance on every returned item.
-- `strategy-comparison`: interleaved evaluation of two strategies over live usage, reported per query-class rather than in aggregate.
+- `memory-strategy`: the pluggable re-ranking seam plus its three shipped implementations, including displacement provenance on every returned item.
+- `strategy-comparison`: interleaved evaluation of a pair of strategies over live usage, reported per query-class rather than in aggregate.
 
 ### Modified Capabilities
 
@@ -39,7 +38,9 @@ A second forcing function: the canonical store must hold usage history, which is
   - New: Sources/LTMQuery/Candidate.swift
   - New: Sources/LTMQuery/MemoryStrategy.swift
   - New: Sources/LTMQuery/Strategies/ArchivalStrategy.swift
+  - New: Sources/LTMQuery/Strategies/ConservativeStrategy.swift
   - New: Sources/LTMQuery/Strategies/HumanLikeStrategy.swift
+  - New: Sources/LTMQuery/RankingGuard.swift
   - New: Sources/LTMEval/QueryClass.swift
   - New: Sources/LTMEval/PresentationRecord.swift
   - New: Sources/LTMEval/Interleaving.swift
