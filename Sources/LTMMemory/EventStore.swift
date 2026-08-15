@@ -161,6 +161,8 @@ public struct FileEventStore: EventStore {
         // fsync 失敗同樣要拋——那正是「寫不進去」的一種。
         defer { close(fd) }
 
+        try Self.enforceOwnerOnlyRegularFile(fd: fd, path: url.path)
+
         // #1 verify R2（logic lens）：先前的迴圈把任何 `write` 失敗直接拋出，
         // 於是「已寫了一半再失敗」會在檔尾留下**半行 JSON**。因為讀取端對解不開
         // 的行是 fail-loud（這是刻意的），那半行會讓**整個 canonical store 從此
@@ -199,6 +201,34 @@ public struct FileEventStore: EventStore {
         guard fsync(fd) == 0 else {
             throw EventStoreError.appendFailed(
                 path: url.path, underlying: "fsync 失敗：errno \(errno)（資料可能未落盤）")
+        }
+    }
+
+    /// 確認開到的是一般檔案，且權限收到 owner-only。
+    ///
+    /// `open(..., O_CREAT, 0o600)` 的 mode **只在真正新建檔案時生效**（#1 verify
+    /// R3）。既有的 `events.jsonl`——舊版建立、備份還原、或不同 umask 產生的——
+    /// 會維持它原本的 mode，於是同機其他使用者讀得到全部 anchor 與互動歷史。
+    /// 現有測試只驗證新建的檔案，抓不到升級／還原情境。
+    ///
+    /// 一併拒絕非一般檔案：canonical store 指向 FIFO 或裝置節點時，`append`
+    /// 的語意完全不是「附加一筆歷史」。
+    private static func enforceOwnerOnlyRegularFile(fd: Int32, path: String) throws {
+        var info = stat()
+        guard fstat(fd, &info) == 0 else {
+            throw EventStoreError.appendFailed(
+                path: path, underlying: "fstat 失敗：errno \(errno)")
+        }
+        guard (info.st_mode & S_IFMT) == S_IFREG else {
+            throw EventStoreError.appendFailed(
+                path: path, underlying: "不是一般檔案（mode \(String(info.st_mode, radix: 8))）")
+        }
+        let permissions = info.st_mode & 0o777
+        guard permissions & 0o077 != 0 else { return }  // 已經是 owner-only
+        guard fchmod(fd, 0o600) == 0 else {
+            throw EventStoreError.appendFailed(
+                path: path,
+                underlying: "既有檔案為 \(String(permissions, radix: 8))，收緊權限失敗：errno \(errno)")
         }
     }
 

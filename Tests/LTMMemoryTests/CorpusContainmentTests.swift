@@ -126,6 +126,43 @@ import Testing
     }
 }
 
+@Test func anExistingWorldReadableStoreIsTightenedOnNextAppend() throws {
+    // #1 verify R3：`open(..., O_CREAT, 0o600)` 的 mode 只在**新建**時生效。
+    // 舊版建立、備份還原、或不同 umask 產生的既有 events.jsonl 會維持它原本的
+    // mode，於是同機其他使用者讀得到全部 anchor 與互動歷史。原本的測試只驗
+    // 新建的檔案，抓不到升級／還原情境。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-tighten-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let url = dir.appendingPathComponent("events.jsonl")
+
+    // 模擬既有的 world-readable store。
+    FileManager.default.createFile(atPath: url.path, contents: Data())
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+
+    let store = try FileEventStore(url: url)
+    try store.append(
+        .interaction(
+            .shown,
+            anchor: Anchor(
+                source: "fixture-a",
+                turn: Turn(id: "t1", role: "user", timestamp: Date(), text: "合成文字內容"),
+                span: 0..<4),
+            at: Date(), generation: GenerationID("build-1"), policy: RankingPolicyID("archival")))
+
+    let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+    let perms = (attrs[.posixPermissions] as? NSNumber)?.uint16Value ?? 0
+    #expect(perms & 0o077 == 0, "既有檔案未被收緊：\(String(perms, radix: 8))")
+}
+
+// 「非一般檔案要被拒絕」這條**沒有測試**，理由記在這裡而不是寫一條假裝有測的：
+// 用 FIFO 當標的的話，`open(O_WRONLY)` 在沒有讀者時會阻塞，測試會掛住而不是
+// 失敗；用目錄的話 `open` 先以 EISDIR 失敗，根本走不到 fstat 那段。要真的測到
+// 得起一條讀者執行緒，成本與收益不成比例。
+//
+// 先前這裡有一條 `aStoreThatIsNotARegularFileIsRejected`，它只斷言「FIFO 是
+// FIFO」——名字比證據強，正是前兩輪被抓的那種測試。刪掉比留著誠實。
+
 @Test func memoryFileIsNotWorldReadable() throws {
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("ltm-perm-\(UUID().uuidString)")

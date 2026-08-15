@@ -117,6 +117,8 @@ Three strategies ship:
 
 `conservative` and `human-like` therefore share a signal set and differ in condition. That is a mechanism difference, not a magnitude one: constructing `human-like` with a bound of zero yields no reordering at all, not tie-breaking.
 
+**Whether `conservative` is distinguishable from `archival` in practice is unmeasured, and this specification does not assume it is.** Off ties the two are provably identical, so the tier's usefulness reduces entirely to how often exact ties occur. Ties are structurally guaranteed to be possible — reciprocal rank fusion assigns `1/(k + rank)` per contributing list, so two candidates each appearing in exactly one list at the same rank score identically — but the *rate* has not been measured on this corpus. Until it is, no artifact may claim the tier "hits in practice".
+
 #### Scenario: Two bounds do not constitute two strategies
 
 - **WHEN** the `human-like` strategy is constructed with two different displacement bounds

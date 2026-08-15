@@ -122,7 +122,9 @@ import Testing
 }
 
 @Test func differentBoundsAreTheSameStrategy() {
-    // 幅度不是策略軸。要有第三檔，必須用「消費哪些訊號」定義。
+    // 幅度不是策略軸。第三檔必須用「消費哪些訊號」**或「在什麼條件下作用」**
+    // 定義——`conservative` 走的是後者（同訊號、只在等分時作用）。這句先前只寫
+    // 訊號集合，於是在字面上禁止了後來加進來的 conservative（#1 verify R3）。
     #expect(HumanLikeStrategy(displacementBound: 1).id == HumanLikeStrategy(displacementBound: 9).id)
     #expect(HumanLikeStrategy().id != ArchivalStrategy().id)
 }
