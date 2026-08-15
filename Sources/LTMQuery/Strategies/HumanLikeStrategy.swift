@@ -49,55 +49,36 @@ public struct HumanLikeStrategy: MemoryStrategy {
         }
     }
 
-    /// 帶內的有界冒泡，**上下位移都受同一個上限約束**。
+    /// 帶內的有界冒泡：**每筆候選最多往上冒 `displacementBound` 次**，且只越過
+    /// 強度嚴格較低的鄰居。
     ///
-    /// 每筆候選最多往上冒 `displacementBound` 次，且只越過強度嚴格較低的鄰居。
-    /// 這個上限是**策略自己的預算**，不是把越界結果夾回合法範圍——後者會讓
-    /// 違規變得不可觀察。
+    /// ## 為什麼上限是單向的（#17 裁決，2026-08-15）
     ///
-    /// 關鍵是：向上的預算不足以保證向下也在界內。被越過的候選每被跳過一次
-    /// 就下移一格，而**它自己並沒有次數上限**——先前版本的註解宣稱「位於索引 j
-    /// 的候選只可能被起點落在 (j, j+bound] 的候選越過」，那個推理假設索引不會
-    /// 漂移，但漂移正是這個演算法在做的事。實際反例（bound = 1、同帶
-    /// `[a:0, b:6, c:4, d:2]`，冒號後為 netStrength）會讓 `a` 連續被 b、c、d 跳過而
-    /// 下移三格，於是 `RankingGuard` 對**內建策略自己**拋 `displacementBoundExceeded`。
-    /// 見 claude-LTM #1 的 verify（2026-08-11，codex 與 logic 兩個 lens 各自重現）。
+    /// 上限只約束**提升**。被越過的候選會下移，下移量等於「越過它的人數」，
+    /// 不另設限。這條走過一段彎路，紀錄如下，因為它看起來像退步：
     ///
-    /// 修法是在每次 swap **之前**檢查被越過那一方的累計下移：它移到 `index` 之後，
-    /// 相對原始位置的下移量必須仍 ≤ bound，否則放棄這次交換。因此兩個方向都由
-    /// 演算法保證，守衛回到它該有的角色——抓別人的錯，而不是抓自己的。
+    /// - **R1**（2026-08-11）：verify 抓到本策略對一般輸入拋
+    ///   `displacementBoundExceeded`——當時的契約是**對稱**上限，而演算法只約束
+    ///   提升。反例 `[a:0, b:6, c:4, d:2]`、bound 1：a 連續被 b、c、d 跳過而下移三格。
+    /// - **R1 的修法**：在每次 swap 前檢查被越過那方的累計下移，超限就放棄提升。
+    ///   這讓演算法符合契約了。
+    /// - **R2**（2026-08-14）：量化證明那個修法選錯邊。對稱上限的算術是
+    ///   「位於索引 j 的候選最多下移 bound 名 → 最多只有 bound 個人能越過它」，
+    ///   所以**一條帶的提升總數上限就是 bound，與帶大小無關**。實測帶大小 32、
+    ///   其中 31 個有遞減強度：bound 1 → 實際上移總數 **1**。500 次交錯呈現有
+    ///   13.2% 落成 null comparison 被丟棄。策略差異的訊號比 design.md 假設的
+    ///   低一個數量級，比較實驗量不到東西。
+    /// - **裁決**：改契約，不改演算法。真正圍住傷害的是**相關性帶**——帶內候選
+    ///   按定義同等相關，帶已經把重排的影響限制在「不影響相關性判斷」的範圍內。
+    ///   上限該擋的是「單一項目暴衝」，不是「很多項目各前進一名」。而且
+    ///   「沒被回憶的東西相對往後沉」正是人類記憶的行為，不是缺陷。
     ///
-    /// ## 代價（#1 verify R2 量化，2026-08-14）
-    ///
-    /// **對稱上限的必然後果是：一條帶的提升總數上限就是 `bound`，與帶大小無關。**
-    /// 位於索引 j 的候選最多下移 `bound` 名，所以最多只有 `bound` 個候選能越過它；
-    /// 帶首若是一個沒有歷史的候選，整條帶就被它擋住。實測（帶大小 32、其中 31 個
-    /// 有遞減強度）：
-    ///
-    /// | bound | 實際上移總數 |
-    /// |---|---|
-    /// | 1 | 1 |
-    /// | 2 | 2 |
-    /// | 3 | 3 |
-    ///
-    /// 具體例：`[a:0, b:6, c:4, d:2]`、bound 1 → `[b, a, c, d]`。強度 4 的 c 與
-    /// 強度 2 的 d **完全不升**，停在強度 0 的 a 之後。所以下面那句「寧可少升
-    /// 一名」在多數情形下應讀作「寧可完全不升」。
-    ///
-    /// 這不是演算法的缺陷，是**對稱上限這條裁決本身的算術**。要讓 human-like
-    /// 在帶內真的有作用，就必須放寬對稱性（上限只約束提升、下移是後果）或
-    /// 提高 bound——兩者都改變 Clarity Surface 「最多位移一名」的語意，所以
-    /// 交由使用者裁決，追蹤於 #17。**在那之前不要為了讓效果變明顯而偷偷調高
-    /// 預設值**：那會讓比較實驗量到的是參數，不是策略。
+    /// 位移仍然**逐筆據實回報**（`RankedResult.displacement`），所以可稽核性沒有
+    /// 損失——改變的是「什麼算違規」，不是「看不看得見」。
     private func promoteWithinBand(
         _ items: inout [Candidate], range: Range<Int>, projection: Projection
     ) {
         guard displacementBound > 0, range.count > 1 else { return }
-
-        // 原始索引要在任何交換之前定下來——位移是相對於「檢索送進來的順序」，
-        // 不是相對於中途某個狀態。
-        var originIndex: [Anchor: Int] = [:]
-        for i in range { originIndex[items[i].anchor] = i }
 
         // 先處理強度高的，同強度維持原順序，結果才是決定性的。
         let order = range.sorted { lhs, rhs in
@@ -115,11 +96,6 @@ public struct HumanLikeStrategy: MemoryStrategy {
                 let neighbour = items[index - 1]
                 guard projection.netStrength(for: neighbour.anchor)
                     < projection.netStrength(for: anchor)
-                else { break }
-                // 被越過的一方會落到 `index`。它相對原始位置的下移量若超過上限，
-                // 這次提升就得放棄——寧可少升一名，也不產出違反自身契約的排序。
-                guard let neighbourOrigin = originIndex[neighbour.anchor],
-                    index - neighbourOrigin <= displacementBound
                 else { break }
 
                 items.swapAt(index - 1, index)

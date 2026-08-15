@@ -59,9 +59,12 @@ public enum RankingGuard {
                 throw StrategyViolation.candidateSetChanged
             }
             let displacement = from - newIndex
-            guard abs(displacement) <= bound else {
+            // 上限只約束**提升**（正位移）。下移是別人提升的後果，據實回報但不
+            // 另設限——理由見 `HumanLikeStrategy` 的「為什麼上限是單向的」。
+            // 真正圍住傷害的是相關性帶：帶內候選按定義同等相關。
+            guard displacement <= bound else {
                 throw StrategyViolation.displacementBoundExceeded(
-                    bound: bound, attempted: abs(displacement))
+                    bound: bound, attempted: displacement)
             }
             placements.append(GuardedPlacement(candidate: candidate, displacement: displacement))
         }
