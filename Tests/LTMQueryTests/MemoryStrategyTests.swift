@@ -304,3 +304,71 @@ private func statsProjection(_ entries: [(String, AnchorStatistics)]) -> Project
         _ = try HumanLikeStrategy().rerank(input, with: poisoned)
     }
 }
+
+
+/// 順序不動、displacement 誠實，卻在 `reason.movement` 上說謊。
+private struct MovementLiar: MemoryStrategy {
+    let id = RankingPolicyID("movement-liar")
+    let consumedSignals: Set<EventKind> = []
+    let displacementBound = 0
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        input.candidates.map {
+            RankedResult(
+                candidate: $0, displacement: 0,
+                reason: RankingReason(history: .none, movement: .advanced(positions: 999)))
+        }
+    }
+}
+
+@Test func aStrategyCannotLieAboutMovementEvenWhenDisplacementIsHonest() {
+    // R6：`displacement` 與 `reason.movement` 陳述同一件事，而 R5 只驗了前者。
+    // 一個策略可以回傳原順序、displacement 全 0，卻附上
+    // `movement: .advanced(positions: 999)`，報告照讀。
+    #expect(throws: StrategyViolation.misreportedMovement(
+        testAnchor("a"), reported: .advanced(positions: 999), actual: .unmoved)
+    ) {
+        _ = try MovementLiar().rerank(candidates(["a", "b"]), with: .empty(at: instant))
+    }
+}
+
+
+private struct NegativeBoundStrategy: MemoryStrategy {
+    let id = RankingPolicyID("negative-bound")
+    let consumedSignals: Set<EventKind> = []
+    let displacementBound = -1
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        input.candidates.map {
+            RankedResult(
+                candidate: $0, displacement: 0,
+                reason: RankingReason(history: .none, movement: .unmoved))
+        }
+    }
+}
+
+@Test func aNegativeDisplacementBoundIsThrownNotTrapped() {
+    // R6：負的上限來自**外來策略**，不是程式錯誤，所以中止行程是錯的處置。
+    // `RankingGuard.check` 的 `precondition(bound >= 0)` 會讓一個合規 conformer
+    // 把整個行程帶走。
+    #expect(throws: StrategyViolation.negativeDisplacementBound(-1)) {
+        _ = try NegativeBoundStrategy().rerank(candidates(["a"]), with: .empty(at: instant))
+    }
+}
+
+@Test func anImpressionCannotMasqueradeAsADeliberateSignal() {
+    // R6：`deliberateCounts` 收得下 `.shown`，於是一次曝光會在 reason 裡冒充
+    // 成增強訊號——而 spec 明寫「只有曝光等同於沒有事件」。
+    let p = statsProjection([
+        ("a", AnchorStatistics(
+            reinforcement: 1, suppression: 0, impressions: 0,
+            lastDeliberateInteraction: instant, deliberateCounts: [.shown: 3]))
+    ])
+    #expect(throws: StrategyViolation.malformedStatistics(
+        testAnchor("a"), .impressionAsDeliberateSignal)
+    ) {
+        _ = try HumanLikeStrategy().rerank(candidates(["a", "b"]), with: p)
+    }
+}

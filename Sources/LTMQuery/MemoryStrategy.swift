@@ -156,6 +156,12 @@ public enum StrategyViolation: Error, Sendable, Equatable {
     /// 比較實驗讀到的就不是實際發生的事。先前沒有任何地方驗它——策略自己算
     /// displacement、自己回報，守衛只看順序（#1 verify R4）。
     case misreportedDisplacement(Anchor, reported: Int, actual: Int)
+    /// 策略回報的 `reason.movement` 與實際位置變化不符。
+    ///
+    /// `displacement` 與 `movement` 陳述同一件事，所以兩個都要驗——R5 只驗了
+    /// 前者（#1 verify R6）。
+    case misreportedMovement(
+        Anchor, reported: RankingReason.Movement, actual: RankingReason.Movement)
     /// projection 裡的統計形狀不合法（非有限值或負值）。
     ///
     /// seam 先前只驗 `Candidate.baseScore` 的有限性，projection 側完全不驗
@@ -164,6 +170,8 @@ public enum StrategyViolation: Error, Sendable, Equatable {
     /// 對那一帶靜默退化成 `archival`，而被大量引用的 anchor 永遠卡在 NaN
     /// 鄰居後面。R3 修的是 base score 那一側，這是同一個根因的另一側。
     case malformedStatistics(Anchor, AnchorStatistics.Malformation)
+    /// 策略宣告了負的位移上限。
+    case negativeDisplacementBound(Int)
     /// 輸入的相關性帶不是非遞減的。
     ///
     /// 帶要能當圍籬，同一個帶必須在輸入裡形成單一連續區段。#1 verify R5 給了
@@ -358,6 +366,12 @@ extension MemoryStrategy {
     public func rerank(_ candidates: [Candidate], with projection: Projection) throws
         -> [RankedResult]
     {
+        // 負的上限是**外來策略給的值**，不是程式錯誤——所以 throw 而不是 trap。
+        // `RankingGuard.check` 裡的 `precondition(bound >= 0)` 會讓一個宣告
+        // `displacementBound = -1` 的合規 conformer 中止行程（#1 verify R6）。
+        guard displacementBound >= 0 else {
+            throw StrategyViolation.negativeDisplacementBound(displacementBound)
+        }
         try MemoryStrategySupport.requireFiniteBaseScores(candidates)
         try MemoryStrategySupport.requireBandsInOrder(candidates)
         // **只有會消費歷史的策略才受 projection 形狀約束。**
@@ -377,11 +391,27 @@ extension MemoryStrategy {
         let placements = try RankingGuard.check(
             original: candidates, reordered: results.map(\.candidate),
             bound: displacementBound)
-        for (result, placement) in zip(results, placements)
-        where result.displacement != placement.displacement {
-            throw StrategyViolation.misreportedDisplacement(
-                result.candidate.anchor,
-                reported: result.displacement, actual: placement.displacement)
+        for (result, placement) in zip(results, placements) {
+            guard result.displacement == placement.displacement else {
+                throw StrategyViolation.misreportedDisplacement(
+                    result.candidate.anchor,
+                    reported: result.displacement, actual: placement.displacement)
+            }
+            // `movement` 陳述的是**同一件事**，所以同樣要對得上。R5 只驗了兩個
+            // 欄位裡的一個（#1 verify R6）——一個策略可以回傳原順序、
+            // displacement 全 0，卻附上 `movement: .advanced(positions: 999)`，
+            // 而報告會照讀。這與 `misreportedDisplacement` 存在的理由是同一條：
+            // provenance 若可以說謊，比較實驗讀到的就不是實際發生的事。
+            let expected: RankingReason.Movement =
+                placement.displacement > 0
+                ? .advanced(positions: placement.displacement)
+                : (placement.displacement < 0
+                    ? .receded(positions: -placement.displacement) : .unmoved)
+            guard result.reason.movement == expected else {
+                throw StrategyViolation.misreportedMovement(
+                    result.candidate.anchor,
+                    reported: result.reason.movement, actual: expected)
+            }
         }
         return results
     }

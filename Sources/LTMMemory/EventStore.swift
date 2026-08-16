@@ -208,7 +208,16 @@ public struct FileEventStore: EventStore {
         //
         // sticky bit 例外：`/tmp` 是 1777，但 sticky 讓非擁有者無法 unlink
         // 別人的檔案，所以那個組合是可接受的。
-        let parent = absolute.deletingLastPathComponent().path
+        // **用解析後的路徑取父目錄。** 同一個 initializer 裡兩個檢查先前看的是
+        // 不同的路徑：`isInsideReadOnlyCorpus` 走 `fullyResolve`（會解析最後一段
+        // 的 symlink），而這裡用 `deletingLastPathComponent()`——純字面。於是
+        // `~/ltm/events.jsonl` 是個指向 `/tmp/pub/events.jsonl` 的 symlink 時，
+        // 檢查的是 0700 的 `~/ltm`，而 `open` 跟著連結寫進非 sticky 的
+        // world-writable 目錄——正是這個檢查本輪要擋的組態（#1 verify R6）。
+        let resolvedForPermissions =
+            CorpusLocation.fullyResolve(absolute.path) ?? absolute.path
+        let parent = URL(fileURLWithPath: resolvedForPermissions)
+            .deletingLastPathComponent().path
         var info = stat()
         if stat(parent, &info) == 0 {
             let worldOrGroupWritable = (info.st_mode & (S_IWGRP | S_IWOTH)) != 0
@@ -275,11 +284,23 @@ public struct FileEventStore: EventStore {
         // fsync 失敗同樣要拋——那正是「寫不進去」的一種。
         defer { close(fd) }
 
-        // 跨行程互斥，涵蓋整個 write 迴圈（見上方說明）。取不到鎖就拋——
-        // 靜默降級成無鎖寫入會讓保證變成「有時成立」，那比沒有保證更糟。
-        guard flock(fd, LOCK_EX) == 0 else {
-            throw EventStoreError.appendFailed(
-                path: url.path, underlying: "flock 失敗：errno \(errno)")
+        // 跨行程互斥，涵蓋整個 write 迴圈。**非阻塞 + 有界重試**：
+        // `LOCK_EX` 單獨使用會無限期停在 flock 裡，而那正是這個 change 已經
+        // 撞過三次的 non-termination 類別（交錯迴圈、NaN 迴圈、FIFO open）
+        // ——上一輪對 FIFO 的修法是給 `open` 加 `O_NONBLOCK`，而兩行之下新加的
+        // 鎖又把它引回來，且註解寫著「取不到鎖就拋」這個 code 沒有的性質
+        // （#1 verify R6）。
+        //
+        // 上限刻意小（約 2 秒）：append 是短操作，等超過這個量級代表對方卡住，
+        // 而卡住時回一個錯誤遠好過跟著卡住。
+        var lockAttempts = 0
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            guard errno == EWOULDBLOCK, lockAttempts < 200 else {
+                throw EventStoreError.appendFailed(
+                    path: url.path, underlying: "flock 失敗：errno \(errno)")
+            }
+            lockAttempts += 1
+            usleep(10_000)  // 10ms
         }
         defer { flock(fd, LOCK_UN) }
 
@@ -320,9 +341,28 @@ public struct FileEventStore: EventStore {
             remaining = remaining.dropFirst(written)
         }
 
-        guard fsync(fd) == 0 else {
-            throw EventStoreError.appendFailed(
-                path: url.path, underlying: "fsync 失敗：errno \(errno)（資料可能未落盤）")
+        // **macOS 上 `fsync` 不保證裝置真的把資料寫下去**——它只把資料交給
+        // 驅動器，斷電仍可能丟失。`F_FULLFSYNC` 才會要求裝置 flush 它自己的
+        // 快取。protocol 的註解寫「回傳成功必須代表已落盤」，先前只有 `fsync`
+        // 撐不起那句話（#1 verify R6）。
+        //
+        // `F_FULLFSYNC` 在某些檔案系統／掛載上回 ENOTSUP，那時退回 `fsync`
+        // ——那是平台能力的限制，不是我們的錯誤，但要退得明白而不是靜默。
+        if fcntl(fd, F_FULLFSYNC) != 0 {
+            guard fsync(fd) == 0 else {
+                throw EventStoreError.appendFailed(
+                    path: url.path, underlying: "fsync 失敗：errno \(errno)（資料可能未落盤）")
+            }
+        }
+
+        // **新建檔案時，目錄項本身也要落盤。** 只 fsync 檔案而不 fsync 目錄，
+        // 斷電後可能出現「檔案內容在、但目錄裡沒有這個名字」。成本是一次
+        // syscall，且只在這條路徑上。
+        let dirPath = url.deletingLastPathComponent().path
+        let dirFD = open(dirPath, O_RDONLY)
+        if dirFD >= 0 {
+            defer { close(dirFD) }
+            _ = fsync(dirFD)
         }
     }
 
@@ -386,7 +426,27 @@ public struct FileEventStore: EventStore {
         let bytes: Data
         do {
             guard FileManager.default.fileExists(atPath: url.path) else { return ([], []) }
-            bytes = try Data(contentsOf: url)
+            // **讀取要取共享鎖。** 寫入端用 `flock` 協調，而讀取端先前完全不參與，
+            // 於是一次進行中的 append（多次 write 之間）會被讀成損壞——修復工具
+            // 照著 `corruptLines` 去刪，刪掉的是一筆好紀錄（#1 verify R6）。
+            //
+            // 取不到就照讀：讀取沒有正確性風險（最壞是看到半行並回報損壞，
+            // 與先前行為相同），為它引入一個新的阻塞點不划算。
+            let fd = open(url.path, O_RDONLY | O_NONBLOCK)
+            if fd >= 0 {
+                var attempts = 0
+                while flock(fd, LOCK_SH | LOCK_NB) != 0, errno == EWOULDBLOCK, attempts < 200 {
+                    attempts += 1
+                    usleep(10_000)
+                }
+                defer {
+                    flock(fd, LOCK_UN)
+                    close(fd)
+                }
+                bytes = try Data(contentsOf: url)
+            } else {
+                bytes = try Data(contentsOf: url)
+            }
         } catch {
             throw EventStoreError.readFailed(path: url.path, underlying: "\(error)")
         }

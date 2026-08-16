@@ -474,3 +474,34 @@ private func event(
     let bad = try ComparisonScorer.report(records: lopsided, events: [])
     #expect(bad.startingSides.isSeverelyImbalanced, "全部同側必須是讀得出來的事實")
 }
+
+
+@Test func aGenerationMismatchIsNotLaunderedByANullComparison() throws {
+    // R6：null 的分支先 `continue`，於是一筆 generation 對不上的事件只要指向
+    // null 紀錄就被洗成「合法略過」——資料不一致偽裝成正常情形。
+    let a = evalAnchor("a")
+    let null = try PresentationRecord(
+        id: .random(), queryClass: .cjk2char,
+        strategyA: archival, strategyB: humanLike, generation: GenerationID("build-1"),
+        attribution: [AnchorAttribution(anchor: a, creditedTo: nil)],
+        startingSide: .a, isNullComparison: true)
+
+    let mislabelled = Event.interaction(
+        .opened, anchor: a, at: evalInstant, generation: GenerationID("build-2"),
+        policy: archival, presentation: null.id)
+
+    #expect(throws: ComparisonDataError.generationMismatch(presentation: null.id)) {
+        _ = try ComparisonScorer.report(records: [null], events: [mislabelled])
+    }
+}
+
+@Test func aRecordCannotCompareAStrategyWithItself() {
+    // 交錯器已經擋這件事，但 `PresentationRecord` 是公開可建構、也會被解碼的。
+    #expect(throws: PresentationRecord.ShapeViolation.strategiesShareAnIdentifier(archival)) {
+        _ = try PresentationRecord(
+            id: .random(), queryClass: .cjk2char,
+            strategyA: archival, strategyB: archival, generation: evalGeneration,
+            attribution: [AnchorAttribution(anchor: evalAnchor("a"), creditedTo: archival)],
+            startingSide: .a, isNullComparison: false)
+    }
+}

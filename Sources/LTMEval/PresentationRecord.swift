@@ -47,6 +47,12 @@ public struct PresentationRecord: Sendable, Equatable, Codable {
     public enum ShapeViolation: Error, Sendable, Equatable {
         case nullComparisonWithAttributedAnchor(Anchor)
         case realComparisonWithUnattributedAnchor(Anchor)
+        /// 兩邊是同一個策略識別碼。
+        ///
+        /// 交錯器已經擋這件事，但 `PresentationRecord` 是**公開可建構**的，
+        /// 而且會被解碼——一筆偽造或損壞的紀錄可以產生一個沒有對照組的
+        /// 「比較」，而歸屬按 id 記，兩邊記給誰都一樣（#1 verify R6）。
+        case strategiesShareAnIdentifier(RankingPolicyID)
     }
 
     public init(
@@ -59,6 +65,9 @@ public struct PresentationRecord: Sendable, Equatable, Codable {
         startingSide: InterleavingHarness.Side,
         isNullComparison: Bool
     ) throws {
+        guard strategyA != strategyB else {
+            throw ShapeViolation.strategiesShareAnIdentifier(strategyA)
+        }
         for entry in attribution {
             switch (isNullComparison, entry.creditedTo) {
             case (true, .some):
@@ -80,6 +89,12 @@ public struct PresentationRecord: Sendable, Equatable, Codable {
 
     /// 解碼走同一條驗證：外來紀錄不得帶著混合形狀進到計分。
     public init(from decoder: any Decoder) throws {
+        // R6：CLAUDE.md 與 `CanonicalCoding` 都寫「每一個我們自己寫的 keyed
+        // decoder 都呼叫 `rejectUnknownKeys`」，而這個手寫 decoder 沒有呼叫它
+        // ——同一份 diff 裡的反例。
+        try CanonicalCoding.rejectUnknownKeys(
+            in: decoder, declared: Set(CodingKeys.allCases.map(\.stringValue)),
+            type: "PresentationRecord")
         let c = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
             id: try c.decode(PresentationID.self, forKey: .id),
@@ -90,6 +105,13 @@ public struct PresentationRecord: Sendable, Equatable, Codable {
             attribution: try c.decode([AnchorAttribution].self, forKey: .attribution),
             startingSide: try c.decode(InterleavingHarness.Side.self, forKey: .startingSide),
             isNullComparison: try c.decode(Bool.self, forKey: .isNullComparison))
+    }
+
+    /// 顯式宣告：`rejectUnknownKeys` 需要 `allCases`，而 `init(from:)` 逐一具名
+    /// 引用每個 key，所以少一個 case 是編譯錯誤而不是靜默少一個欄位。
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case id, queryClass, strategyA, strategyB, generation, attribution
+        case startingSide, isNullComparison
     }
 
     /// 呈現順序。

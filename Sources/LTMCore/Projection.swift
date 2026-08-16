@@ -49,8 +49,12 @@ public struct AnchorStatistics: Sendable, Equatable {
         if reinforcement < 0 { return .negative(field: "reinforcement") }
         if suppression < 0 { return .negative(field: "suppression") }
         if impressions < 0 { return .negative(field: "impressions") }
-        for (kind, count) in deliberateCounts where count < 0 {
-            return .negative(field: "deliberateCounts[\(kind.rawValue)]")
+        for (kind, count) in deliberateCounts {
+            if count < 0 { return .negative(field: "deliberateCounts[\(kind.rawValue)]") }
+            // `shown` 是曝光，不是 deliberate 訊號。spec 明寫「只有曝光等同於
+            // 沒有事件」，而這個欄位的名字就叫 deliberateCounts——放它進來會讓
+            // 一次曝光在 reason 裡冒充成增強訊號（#1 verify R6）。
+            if kind == .shown { return .impressionAsDeliberateSignal }
         }
         return nil
     }
@@ -63,6 +67,8 @@ public struct AnchorStatistics: Sendable, Equatable {
         case nonFinite(field: String)
         /// 負值。負 reinforcement 會讓一個增強事件變成壓抑。
         case negative(field: String)
+        /// `deliberateCounts` 含 `.shown`。曝光不是 deliberate 訊號。
+        case impressionAsDeliberateSignal
     }
 }
 

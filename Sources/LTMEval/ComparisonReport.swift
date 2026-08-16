@@ -235,6 +235,12 @@ public enum ComparisonScorer {
             guard let record = byID[presentationID] else {
                 throw ComparisonDataError.unknownPresentationReference(presentationID)
             }
+            // **generation 一致性在 null-comparison 之前驗。** 先前 null 的分支
+            // 先 `continue`，於是一筆 generation 對不上的事件只要指向 null 紀錄
+            // 就會被洗成「合法略過」——資料不一致偽裝成正常情形（#1 verify R6）。
+            guard event.generation == record.generation else {
+                throw ComparisonDataError.generationMismatch(presentation: record.id)
+            }
             guard !record.isNullComparison else {
                 skippedNullComparison += 1  // 合法：兩邊排序相同，不得歸屬
                 continue
@@ -247,11 +253,6 @@ public enum ComparisonScorer {
             // 歸屬用**紀錄**的 generation，不是事件自報的。兩者不一致代表資料
             // 損壞（或事件被錯標），靜默採信事件會讓一次呈現被切成兩半、rate
             // 悄悄歸零。
-            // 拒絕原因之三。放在這裡而不是列進「四種」——見迴圈頂端的說明。
-            guard event.generation == record.generation else {
-                throw ComparisonDataError.generationMismatch(presentation: record.id)
-            }
-
             generations.insert(record.generation)
             let key = Key(policy: policy, queryClass: record.queryClass, generation: record.generation)
 
