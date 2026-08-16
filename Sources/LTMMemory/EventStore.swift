@@ -21,6 +21,10 @@ public enum EventStoreError: Error, Sendable {
     case corruptRecord(path: String, lineNumber: Int)
     /// 指定的路徑落在唯讀語料內。
     case pathInsideReadOnlyCorpus(path: String)
+    /// 存放目錄是 group／other 可寫且沒有 sticky bit。
+    ///
+    /// 檔案本身 0o600 在這種目錄裡保護不了什麼：別人換掉整個檔案即可。
+    case insecureDirectory(path: String)
 }
 
 /// 唯讀語料的根。任何寫入路徑都不得落在它底下。
@@ -196,6 +200,22 @@ public struct FileEventStore: EventStore {
         let absolute = URL(fileURLWithPath: absolutePath)
         guard !CorpusLocation.isInsideReadOnlyCorpus(absolute) else {
             throw EventStoreError.pathInsideReadOnlyCorpus(path: absolute.path)
+        }
+        // **檔案 0o600 擋不住一個誰都能寫的目錄**（#1 verify R5）。權限檢查
+        // 先前只在 `append` 裡、只看檔案本身；而在 group/other 可寫的目錄裡，
+        // 任何人都能把那個檔案換掉、rename 掉、或先建一個自己的版本。
+        // 記憶層是本專案唯一必須備份的資料，這個檢查值得在建構時就做。
+        //
+        // sticky bit 例外：`/tmp` 是 1777，但 sticky 讓非擁有者無法 unlink
+        // 別人的檔案，所以那個組合是可接受的。
+        let parent = absolute.deletingLastPathComponent().path
+        var info = stat()
+        if stat(parent, &info) == 0 {
+            let worldOrGroupWritable = (info.st_mode & (S_IWGRP | S_IWOTH)) != 0
+            let sticky = (info.st_mode & S_ISVTX) != 0
+            guard !worldOrGroupWritable || sticky else {
+                throw EventStoreError.insecureDirectory(path: parent)
+            }
         }
         self.url = absolute
     }

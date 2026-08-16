@@ -62,7 +62,12 @@ public struct RankingReason: Sendable, Equatable {
         case none
         /// 有計入的歷史。`signals` 指名是哪些事件。
         case counted(signals: [EventKind: Int], netStrength: Double)
-        /// 有歷史，但 anchor 已 orphan，所以不計入。
+        /// **anchor 不再解析得到原本的文字**，所以它的任何事件都不計入。
+        ///
+        /// 措辭刻意不說「有歷史」（#1 verify R5）：orphan 是 anchor 的性質，
+        /// 不是歷史的性質。一個只有 `shown` 事件的 anchor 也會落在這裡，而
+        /// spec 明寫「只有曝光等同於沒有事件」——舊措辭會讓那種情形讀成
+        /// 「它有深思熟慮的歷史，只是被忽略了」。
         case orphaned
     }
 

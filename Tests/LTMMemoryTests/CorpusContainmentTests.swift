@@ -237,3 +237,39 @@ private func anchorForFifoTest() -> Anchor {
     // 記憶層是本專案唯一必須備份的資料，不該讓同機其他使用者讀得到。
     #expect(perms & 0o077 == 0, "權限為 \(String(perms, radix: 8))，group/other 不得有任何權限")
 }
+
+
+// MARK: - 存放目錄的權限（#1 verify R5）
+
+@Test func aWorldWritableDirectoryWithoutStickyBitIsRejected() throws {
+    // 檔案 0o600 在一個誰都能寫的目錄裡保護不了什麼：別人換掉整個檔案即可。
+    // 先前權限檢查只在 append 裡、只看檔案本身。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-perm-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(
+        at: dir, withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o777])
+
+    #expect(throws: (any Error).self) {
+        _ = try FileEventStore(url: dir.appendingPathComponent("events.jsonl"))
+    }
+
+    // 對照：收緊之後可以建。沒有這條，一個無條件拒絕也能讓上面變綠。
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+    #expect(throws: Never.self) {
+        _ = try FileEventStore(url: dir.appendingPathComponent("events.jsonl"))
+    }
+}
+
+@Test func aStickyWorldWritableDirectoryIsAccepted() throws {
+    // `/tmp` 是 1777——sticky 讓非擁有者無法 unlink 別人的檔案，所以那個組合
+    // 是可接受的。沒有這個例外，任何直接放在 /tmp 的 store 都會被拒絕。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-sticky-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(
+        at: dir, withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o1777])
+    #expect(throws: Never.self) {
+        _ = try FileEventStore(url: dir.appendingPathComponent("events.jsonl"))
+    }
+}

@@ -81,3 +81,24 @@ private let policy = RankingPolicyID("archival")
     #expect(event.policy == policy)
     #expect(event.noteRef == nil)
 }
+
+
+@Test func presentationIdentifiersAreContentIndependent() {
+    // memory-events 的 scenario「Presentation identifier is content-independent」
+    // 先前沒有任何測試（#1 verify R5）。它要防的是「用內容雜湊當 id」——
+    // 短字串的雜湊可被字典攻擊還原，那等同把內容放進 canonical 層。
+    //
+    // 「content-independent」是**否定命題**，證不了；能證的是它的可觀察後果：
+    // 同樣的輸入產生**不同**的識別碼，所以識別碼不是輸入的函數。
+    let a = PresentationID.random()
+    let b = PresentationID.random()
+    #expect(a != b)
+
+    let n = NoteReference.random()
+    let m = NoteReference.random()
+    #expect(n != m)
+
+    // 而且型別上收不下內容：storage 是 UUID，沒有任何 initializer 接受字串。
+    #expect(UUID(uuidString: a.description) != nil)
+    #expect(UUID(uuidString: n.description) != nil)
+}
