@@ -125,7 +125,7 @@ public struct HumanLikeStrategy: MemoryStrategy {
             // （#1 verify R3）。
             return placement.displacement == 0
                 ? .noAdjustment
-                : .displacedByPeers(positions: -placement.displacement)
+                : .displacedByPeers(positions: placement.displacement)
         }
         // spec：「A result whose displacement is zero SHALL carry a reason
         // indicating that no adjustment was applied.」先前寫成「位移為 0 **且**

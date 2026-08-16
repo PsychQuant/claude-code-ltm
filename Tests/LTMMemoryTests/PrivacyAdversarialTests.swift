@@ -112,6 +112,49 @@ private let 合法雜湊 = String(repeating: "ab", count: 32)
     #expect(throws: (any Error).self) { _ = try JSONDecoder().decode(Anchor.self, from: anchorJSON(span: "[-2,1]")) }
 }
 
+@Test func aRecordCarryingAnUndeclaredFieldIsRejected() {
+    // #1 verify R4：Swift 的 `JSONDecoder` **預設忽略未知欄位**。所以一行只要
+    // 帶齊合法欄位、再多掛一個 `"query": "第三方未發表原文"`，就會解碼成功、
+    // 被讀取端視為正常紀錄——而 events.jsonl 的**實際 bytes** 永久保留那段原文。
+    //
+    // 這是「每個會被原樣序列化的欄位都要有形狀約束」這條判準的結構性缺口：
+    // 未知欄位根本不是欄位。隱私硬約束的標的是**落地的 bytes**，不是 decode
+    // 之後的 Swift 值，所以判準要再往前推一步。
+    func record(extra: String) -> Data {
+        Data("""
+            {"kind":"opened","anchor":{"source":"s","turnID":"t1",
+            "contentHash":{"hex":"\(合法雜湊)"},"span":[0,1]},
+            "timestamp":0,"generation":"build-1","policy":"archival"\(extra)}
+            """.utf8)
+    }
+
+    #expect(throws: Never.self) { _ = try JSONDecoder().decode(Event.self, from: record(extra: "")) }
+    #expect(throws: (any Error).self) {
+        _ = try JSONDecoder().decode(Event.self, from: record(extra: ",\"query\":\"\(原文)\""))
+    }
+}
+
+@Test func eventSurvivesAJSONRoundTripWithEveryFieldPopulated() throws {
+    // `CodingKeys` 現在是顯式宣告的（`rejectUnknownKeys` 需要 `allCases`），
+    // 而顯式清單會漂移：新增屬性卻忘了加 case，編碼會**安靜地**少一個欄位。
+    // 這條把每個欄位都填滿再 round-trip，讓那種漏掉變成紅燈而不是靜默資料遺失。
+    let anchor = Anchor(
+        source: "fixture-a",
+        turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字內容"),
+        span: 0..<4)
+    let original = Event.pin(
+        anchor: anchor, at: Date(timeIntervalSince1970: 12_345),
+        generation: GenerationID("build-1"), policy: RankingPolicyID("human-like"),
+        presentation: .random())
+
+    let encoded = try JSONEncoder().encode(original)
+    let decoded = try JSONDecoder().decode(Event.self, from: encoded)
+
+    #expect(decoded == original)
+    #expect(decoded.noteRef != nil)
+    #expect(decoded.presentation != nil)
+}
+
 @Test func noteAndPresentationReferencesCannotExpressFreeTextAtAll() throws {
     // 這兩個型別的 storage 是 UUID——沒有任何 initializer 收得下字串，
     // 所以「塞原文」在型別層不可表達，不需要驗證邏輯。

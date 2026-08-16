@@ -31,12 +31,19 @@ public enum RankingReason: Sendable, Equatable {
     case noAdjustment
     /// 被使用歷史上推。`signals` 指名是哪些事件促成的。
     case adjusted(signals: [EventKind: Int], netStrength: Double)
-    /// **自己沒有被調整，但被別人的提升擠下來。**
+    /// **自己沒有歷史，位置變動來自鄰居的移動。**
+    ///
+    /// `positions` 與 `displacement` 同號：正數代表相對上移、負數代表下沉。
     ///
     /// #1 verify R3：先前這種情形回報 `.noAdjustment`，於是一筆下移三名的結果
-    /// 同時聲稱「移動了三名」與「沒有套用任何調整」——直接牴觸 spec 的
-    /// 「每筆結果都要說明它為何移動」。沒有歷史的候選被有歷史的鄰居超車是
-    /// 常態，不是邊角。
+    /// 同時聲稱「移動了三名」與「沒有套用任何調整」。
+    ///
+    /// #1 verify R4：修法寫成 `positions: -displacement`，**假設沒有歷史的候選
+    /// 只會往下移**。錯了——`dismissed` 讓鄰居的 netStrength 變負，於是沒有歷史
+    /// 的候選會相對**上移**，而 reason 回報 `positions: -1`。實測：`a` 帶
+    /// `dismissed: 5`、`b` 無歷史 → b 上移一名、reason 說它被擠下 −1 名。
+    /// **修法在它所修的那個缺陷的鏡像上重演了同一件事**：reason 描述的與實際
+    /// 發生的相反。改為與 displacement 同號，語意由文件說明方向。
     case displacedByPeers(positions: Int)
     /// 有歷史，但 anchor 已 orphan，所以歷史不計入。
     case orphanedHistoryIgnored

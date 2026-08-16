@@ -121,7 +121,7 @@ public struct ConservativeStrategy: MemoryStrategy {
             // 位移非零但自己沒有歷史 → 是被同區段裡有歷史的鄰居擠動的。
             return RankedResult(
                 candidate: placement.candidate, displacement: placement.displacement,
-                reason: .displacedByPeers(positions: -placement.displacement))
+                reason: .displacedByPeers(positions: placement.displacement))
         }
         return RankedResult(
             candidate: placement.candidate, displacement: placement.displacement,

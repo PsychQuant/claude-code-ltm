@@ -56,7 +56,19 @@ public struct Projection: Sendable, Equatable {
         statistics: [Anchor: AnchorStatistics], instant: Date,
         orphanedAnchors: Set<Anchor> = []
     ) {
-        self.statistics = statistics
+        // **orphan 的統計在建構時就被移除**，不是留著讓每個讀取端記得跳過。
+        //
+        // #1 verify R4：先前同一個 anchor 可以同時出現在 `statistics` 與
+        // `orphanedAnchors`。策略排序只讀 `netStrength(for:)`（不看 orphan），
+        // 所以一個高強度的 orphan **會真的被提升**；等到組 reason 時才回報
+        // 「歷史已忽略」。同一筆結果因 orphan 歷史而移動、又聲稱該歷史被忽略。
+        //
+        // 更糟的是 spec 的 scenario 描述的**正是**這個輸入形狀（「GIVEN a
+        // projection in which the most heavily reinforced anchor is orphaned」），
+        // 而所有測試都用 `statistics: [:]` 建 Projection，所以沒有一條覆蓋它。
+        // 目前只因為 `project(...)` 剛好不會產生重疊而倖免——但 `Projection` 是
+        // seam 的公開輸入型別，不變式不能靠生產端的巧合維持。
+        self.statistics = statistics.filter { !orphanedAnchors.contains($0.key) }
         self.instant = instant
         self.orphanedAnchors = orphanedAnchors
     }

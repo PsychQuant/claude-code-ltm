@@ -66,7 +66,29 @@ private func multiStrengthProjection(_ entries: [(Anchor, Double)]) -> Projectio
 
     let a = output.first { $0.candidate.anchor == testAnchor("a") }!
     #expect(a.displacement == -1)
-    #expect(a.reason == .displacedByPeers(positions: 1))
+    // `positions` 與 displacement 同號：負數代表下沉。
+    #expect(a.reason == .displacedByPeers(positions: -1))
+}
+
+@Test func aCandidatePromotedBecauseAPeerSankAlsoSaysWhyItMoved() throws {
+    // #1 verify R4：`displacedByPeers` 原本寫 `positions: -displacement`，
+    // **假設沒有歷史的候選只會往下移**。錯了——`dismissed` 讓鄰居的 netStrength
+    // 變負，於是沒有歷史的候選會相對**上移**，而 reason 回報負數。
+    //
+    // 修法在它所修的那個缺陷的**鏡像**上重演了同一件事：reason 描述的與實際
+    // 發生的相反。這條測的就是那個鏡像。
+    let input = candidates(["a", "b"])
+    var stats: [Anchor: AnchorStatistics] = [:]
+    stats[testAnchor("a")] = AnchorStatistics(
+        reinforcement: 0, suppression: 5, impressions: 0,
+        lastDeliberateInteraction: instant, deliberateCounts: [.dismissed: 5])
+    let p = Projection(statistics: stats, instant: instant)
+
+    let output = try HumanLikeStrategy(displacementBound: 1).rerank(input, with: p)
+    let b = output.first { $0.candidate.anchor == testAnchor("b") }!
+
+    #expect(b.displacement == 1, "b 沒有歷史，但 a 被壓低所以 b 相對上移")
+    #expect(b.reason == .displacedByPeers(positions: 1))
 }
 
 @Test func onePromotionIsTheOptimumWhenOnlyTheHeadIsMisplaced() throws {
