@@ -144,6 +144,14 @@ public enum StrategyViolation: Error, Sendable, Equatable {
     /// 比較實驗讀到的就不是實際發生的事。先前沒有任何地方驗它——策略自己算
     /// displacement、自己回報，守衛只看順序（#1 verify R4）。
     case misreportedDisplacement(Anchor, reported: Int, actual: Int)
+    /// projection 裡的統計形狀不合法（非有限值或負值）。
+    ///
+    /// seam 先前只驗 `Candidate.baseScore` 的有限性，projection 側完全不驗
+    /// （#1 verify R5）。一個 NaN 的 netStrength 會讓
+    /// `boundedReorderByStrength` 的 `>` 恆偽——不拋錯、不重排，`human-like`
+    /// 對那一帶靜默退化成 `archival`，而被大量引用的 anchor 永遠卡在 NaN
+    /// 鄰居後面。R3 修的是 base score 那一側，這是同一個根因的另一側。
+    case malformedStatistics(Anchor, AnchorStatistics.Malformation)
     /// 輸入的相關性帶不是非遞減的。
     ///
     /// 帶要能當圍籬，同一個帶必須在輸入裡形成單一連續區段。#1 verify R5 給了
@@ -184,6 +192,19 @@ public enum MemoryStrategySupport {
     public static func requireFiniteBaseScores(_ candidates: [Candidate]) throws {
         for candidate in candidates where !candidate.baseScore.isFinite {
             throw StrategyViolation.nonFiniteBaseScore(candidate.anchor)
+        }
+    }
+
+    /// projection 的統計必須是有限的非負值。
+    ///
+    /// 驗**整份** projection 而不只是候選涉及的 anchor：一筆壞統計即使這次沒被
+    /// 用到，下一次查詢就會用到，而那時錯誤會出現在另一個地方、看起來像另一個
+    /// 問題。在唯一無條件會跑的位置一次驗完。
+    public static func requireWellFormedStatistics(_ projection: Projection) throws {
+        for (anchor, stats) in projection.statistics {
+            if let problem = stats.malformation {
+                throw StrategyViolation.malformedStatistics(anchor, problem)
+            }
         }
     }
 
@@ -305,6 +326,7 @@ extension MemoryStrategy {
         -> [RankedResult]
     {
         try MemoryStrategySupport.requireFiniteBaseScores(candidates)
+        try MemoryStrategySupport.requireWellFormedStatistics(projection)
         try MemoryStrategySupport.requireBandsInOrder(candidates)
         let results = try rerankChecked(ValidatedCandidates(candidates), with: projection)
 

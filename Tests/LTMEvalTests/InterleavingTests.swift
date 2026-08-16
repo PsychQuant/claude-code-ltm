@@ -1,4 +1,19 @@
 import Foundation
+
+extension Array where Element == Character {
+    /// `abcde` 的全部 120 個排列。手寫遞迴而不是引入依賴。
+    func permutationsOfFive() -> [String] {
+        func permute(_ rest: [Character], _ prefix: [Character]) -> [[Character]] {
+            if rest.isEmpty { return [prefix] }
+            return rest.indices.flatMap { i -> [[Character]] in
+                var remaining = rest
+                let picked = remaining.remove(at: i)
+                return permute(remaining, prefix + [picked])
+            }
+        }
+        return permute(self, []).map { String($0) }
+    }
+}
 import Testing
 
 @testable import LTMCore
@@ -141,16 +156,47 @@ func evalProjection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
     // **golden 值，刻意寫死。** 這條擋的是「有人把 FNV-1a 換成 `hashValue`」：
     // Swift 的 `Hasher` 每個 process 隨機種子化，換過去之後這些斷言會在**某些**
     // 執行失敗——而分派不可重現這件事本身不會有任何其他症狀。
+    //
+    // 兩個 golden 值刻意取不同側：全同側的 golden 會被一個常數函式滿足。
     #expect(InterleavingHarness.Side.balanced(seed: "presentation-0") == .a)
-    #expect(InterleavingHarness.Side.balanced(seed: "presentation-1") == .b)
-    #expect(InterleavingHarness.Side.balanced(seed: "presentation-10") == .b)
-    #expect(InterleavingHarness.Side.balanced(seed: "presentation-11") == .a)
+    #expect(InterleavingHarness.Side.balanced(seed: "presentation-5") == .b)
 }
 
-@Test func balancedStartingSideActuallySplitsEvenly() {
-    // 平衡是這個機制存在的理由，所以要量而不是相信。
-    let aCount = (0..<200).count { InterleavingHarness.Side.balanced(seed: "p\($0)") == .a }
-    #expect(aCount == 100)
+@Test func reorderingTheSeedChangesTheAssignmentForSomeInputs() {
+    // **這條是 R5 那個缺陷的判別器。**
+    //
+    // 舊版取 FNV 的 bit 0，而 FNV 的乘數是奇數、乘法保留最低位，於是結果只
+    // 取決於「奇數位元組的個數的奇偶」——那對種子的**任意重排不變**。
+    // `abcde` 的 120 個排列在舊版下必然全部落在同一側；新版實測 67/120。
+    //
+    // 用排列而不是隨手挑兩個字串：單一 anagram 對在真雜湊下也有一半機率碰撞，
+    // 那樣的測試會偶然通過。「120 個排列不得全部同側」則直接否證那個結構性質。
+    let permutations = Array("abcde").permutationsOfFive()
+    let sides = permutations.map { InterleavingHarness.Side.balanced(seed: $0) }
+    #expect(sides.contains(.a) && sides.contains(.b), "重排種子不得完全不改變分派")
+    let aCount = sides.count { $0 == .a }
+    #expect((30...90).contains(aCount), "120 個排列的分派嚴重偏向一側：a=\(aCount)")
+}
+
+@Test func balancedStartingSideSplitsEvenlyAcrossStructurallyDifferentSeedFamilies() {
+    // 平衡是這個機制存在的理由，所以要量而不是相信——**但要量多個結構不同的
+    // 家族**。上一版只量 `p0…p199` 並斷言恰好 100/200，而那個「恰好」正是
+    // parity 缺陷的症狀：換成同樣自然的 `p0, p2, p4…` 就是 200/0（R5 實測）。
+    let families: [(String, [String])] = [
+        ("連續序號", (0..<200).map { "p\($0)" }),
+        ("偶數序號", (0..<200).map { "p\($0 * 2)" }),
+        ("全偶位元組", ["b", "d", "f", "p", "t", "v", "x", "z", "0", "2", "4", "6", "8",
+                        "bb", "dd", "x2", "p0"]),
+        ("CJK", (0..<200).map { "查詢\($0)" }),
+    ]
+    for (name, seeds) in families {
+        let aCount = seeds.count { InterleavingHarness.Side.balanced(seed: $0) == .a }
+        let low = seeds.count / 4
+        let high = seeds.count - low
+        #expect(
+            (low...high).contains(aCount),
+            "家族「\(name)」分派偏向一側：a=\(aCount)/\(seeds.count)")
+    }
 }
 
 // MARK: - 歸屬的形狀只有兩種（#1 verify R4）

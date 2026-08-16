@@ -221,3 +221,61 @@ private struct FarJumpingStrategy: MemoryStrategy {
         _ = try RankingGuard.check(original: original, reordered: swapped, bound: 2)
     }
 }
+
+
+// MARK: - projection 側的形狀（#1 verify R5；R3 只修了 base score 那一側）
+
+private func statsProjection(_ entries: [(String, AnchorStatistics)]) -> Projection {
+    var stats: [Anchor: AnchorStatistics] = [:]
+    for (id, s) in entries { stats[testAnchor(id)] = s }
+    return Projection(statistics: stats, instant: instant)
+}
+
+@Test func aNonFiniteStrengthIsRejectedRatherThanSilentlyDisablingReordering() {
+    // 不修的話這是**靜默退化**而不是錯誤：`NaN > x` 與 `x > NaN` 都為 false，
+    // 於是有界重排一次交換都不做、`human-like` 對那一帶等於 `archival`，
+    // 而被大量引用的 anchor 永遠卡在 NaN 鄰居後面。
+    let p = statsProjection([
+        ("a", AnchorStatistics(
+            reinforcement: .nan, suppression: 0, impressions: 0,
+            lastDeliberateInteraction: instant)),
+        ("b", AnchorStatistics(
+            reinforcement: 10, suppression: 0, impressions: 0,
+            lastDeliberateInteraction: instant, deliberateCounts: [.cited: 10])),
+    ])
+    #expect(throws: StrategyViolation.malformedStatistics(
+        testAnchor("a"), .nonFinite(field: "reinforcement"))
+    ) {
+        _ = try HumanLikeStrategy().rerank(candidates(["a", "b"]), with: p)
+    }
+}
+
+@Test func aNegativeReinforcementIsRejected() {
+    // 負 reinforcement 讓一個增強事件變成壓抑。型別 doc 先前逐字寫「永遠 ≥ 0」
+    // 而沒有任何機制支撐那句話。
+    let p = statsProjection([
+        ("a", AnchorStatistics(
+            reinforcement: -5, suppression: 0, impressions: 0,
+            lastDeliberateInteraction: instant))
+    ])
+    #expect(throws: StrategyViolation.malformedStatistics(
+        testAnchor("a"), .negative(field: "reinforcement"))
+    ) {
+        _ = try ConservativeStrategy().rerank(candidates(["a", "b"]), with: p)
+    }
+}
+
+@Test func theCheckRunsOnTheWholeProjectionNotJustTheCandidatesInPlay() {
+    // 一筆壞統計即使這次沒被用到，下一次查詢就會用到——那時錯誤會出現在另一個
+    // 地方、看起來像另一個問題。所以驗整份。
+    let p = statsProjection([
+        ("unused", AnchorStatistics(
+            reinforcement: .infinity, suppression: 0, impressions: 0,
+            lastDeliberateInteraction: instant))
+    ])
+    #expect(throws: StrategyViolation.malformedStatistics(
+        testAnchor("unused"), .nonFinite(field: "reinforcement"))
+    ) {
+        _ = try ArchivalStrategy().rerank(candidates(["a", "b"]), with: p)
+    }
+}

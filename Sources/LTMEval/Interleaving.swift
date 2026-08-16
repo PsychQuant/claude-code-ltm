@@ -64,12 +64,35 @@ public struct InterleavingHarness: Sendable {
         /// 用 FNV-1a 而不是 `hashValue`：Swift 的 `Hasher` 每個 process 隨機
         /// 種子化，同一個字串在兩次執行會得到不同雜湊。實驗分派必須可重現，
         /// 否則重跑報告會換到另一組起手方，而紀錄裡看不出發生過這件事。
+        ///
+        /// **不能直接取 FNV 的 bit 0**（#1 verify R5，logic 與 devils-advocate
+        /// 各自量到）。FNV 的乘數是奇數，乘法保留最低位，所以
+        /// `hash & 1 == 1 XOR (奇數位元組的個數 mod 2)`——整個函式退化成
+        /// 「種子裡奇數位元組的個數的奇偶」。三個結構性質隨之出現：
+        /// (1) 全由偶數位元組組成的種子**必定**落在同一側（實測 17/17）；
+        /// (2) 對種子的任意重排不變（`balanced("ab") == balanced("ba")`）；
+        /// (3) 插入或刪除任何偶數位元組不改變結果。
+        /// 而示範用法是拿**查詢字串**當種子，所以互為重排的查詢、加了尾隨
+        /// 空白的查詢，永遠分到同一側——分派規則在使用者最可能製造的近似
+        /// 輸入上完全不去相關化，等於沒有平衡。
+        ///
+        /// 當時的測試 `aCount == 100`（200 個種子恰好各半）看起來是最強的證據，
+        /// 其實是**症狀**：真雜湊出現剛好 100 的機率約 5.6%，而 parity 對
+        /// `p0…p199` 這個家族必然給出 100。
+        ///
+        /// 修法是把 FNV 的輸出過一次雪崩化（splitmix64 的 finalizer）再取位元，
+        /// 讓每個輸入位元都影響最低位。
         public static func balanced(seed: String) -> Side {
             var hash: UInt64 = 0xcbf2_9ce4_8422_2325
             for byte in seed.utf8 {
                 hash ^= UInt64(byte)
                 hash = hash &* 0x0000_0100_0000_01b3
             }
+            hash ^= hash >> 33
+            hash = hash &* 0xff51_afd7_ed55_8ccd
+            hash ^= hash >> 33
+            hash = hash &* 0xc4ce_b9fe_1a85_ec53
+            hash ^= hash >> 33
             return hash & 1 == 0 ? .a : .b
         }
     }

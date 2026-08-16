@@ -180,3 +180,27 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     #expect(p.orphanedAnchors.isEmpty)
     #expect(!p.isOrphaned(neverSeen))
 }
+
+
+// MARK: - 參數驗證（#1 verify R5）
+
+@Test func aNegativeDecayExponentIsRejected() async {
+    // 負指數讓「衰減」反向：越舊的事件權重越大。這不是邊角，是把整個
+    // power-law 的方向倒過來，而先前完全不驗。
+    await #expect(processExitsWith: .failure) {
+        _ = ProjectionParameters(decayExponent: -1)
+    }
+}
+
+@Test func aNonFiniteWeightIsRejected() async {
+    await #expect(processExitsWith: .failure) {
+        _ = ProjectionParameters(citedWeight: .nan)
+    }
+}
+
+@Test func ordinaryParametersStillConstruct() {
+    // 反向對照：exit test 只證明「會死」，不證明它死得有道理。
+    let p = ProjectionParameters()
+    #expect(p.decayExponent > 0)
+    #expect(ProjectionParameters(decayExponent: 0).decayExponent == 0)
+}

@@ -23,6 +23,18 @@ public struct ProjectionParameters: Sendable, Equatable {
         pinnedWeight: Double = 3.0,
         dismissedWeight: Double = 2.0
     ) {
+        // 參數是程式／設定層的東西，錯了是程式錯誤 → trap（#1 verify R5）。
+        // 先前完全不驗，於是：`decayExponent: -1` 讓「衰減」變成越舊權重越大；
+        // `openedWeight: -1` 讓一個增強事件產生負 reinforcement；任何一個 NaN
+        // 都會讓強度比較恆偽、策略靜默退化成 archival。
+        for (name, value) in [
+            ("decayExponent", decayExponent), ("openedWeight", openedWeight),
+            ("citedWeight", citedWeight), ("pinnedWeight", pinnedWeight),
+            ("dismissedWeight", dismissedWeight),
+        ] {
+            precondition(value.isFinite, "ProjectionParameters.\(name) 必須是有限值，實得 \(value)")
+            precondition(value >= 0, "ProjectionParameters.\(name) 不得為負，實得 \(value)")
+        }
         self.decayExponent = decayExponent
         self.openedWeight = openedWeight
         self.citedWeight = citedWeight

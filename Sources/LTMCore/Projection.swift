@@ -5,7 +5,16 @@ import Foundation
 /// 這正是「存事件不存聚合值」那條決策的具體形狀：改公式只需要重跑 projection，
 /// 不需要改任何一筆歷史紀錄。
 public struct AnchorStatistics: Sendable, Equatable {
-    /// 來自 opened／cited／pinned 的加權衰減和。永遠 ≥ 0。
+    /// 來自 opened／cited／pinned 的加權衰減和。
+    ///
+    /// **這個型別的建構子不驗證任何東西**，所以「≥ 0」是生產端的性質而不是
+    /// 型別保證——先前這裡逐字寫「永遠 ≥ 0」，那是一句沒有機制支撐的宣稱
+    /// （#1 verify R5）。要驗的地方在 seam：`MemoryStrategySupport`
+    /// `.requireWellFormedStatistics` 會擋非有限值與負值。
+    ///
+    /// 為什麼不在建構子擋：`Projection` 是 seam 的**公開輸入型別**，而 seam 的
+    /// 教訓已經重複兩輪——檢查放在「呼叫端要記得走的路徑」上就會有人不走。
+    /// 放在 seam 是唯一無條件會執行的位置。
     public let reinforcement: Double
     /// 來自 dismissed 的加權衰減和。以正值表示「壓抑的量」。
     public let suppression: Double
@@ -29,6 +38,32 @@ public struct AnchorStatistics: Sendable, Equatable {
     }
 
     public var netStrength: Double { reinforcement - suppression }
+
+    /// 形狀問題。`nil` 代表這筆統計沒問題。
+    ///
+    /// 回傳而不是 throw，讓呼叫端決定要拋什麼——LTMCore 不該知道
+    /// `StrategyViolation` 這種上層型別。
+    public var malformation: Malformation? {
+        if !reinforcement.isFinite { return .nonFinite(field: "reinforcement") }
+        if !suppression.isFinite { return .nonFinite(field: "suppression") }
+        if reinforcement < 0 { return .negative(field: "reinforcement") }
+        if suppression < 0 { return .negative(field: "suppression") }
+        if impressions < 0 { return .negative(field: "impressions") }
+        for (kind, count) in deliberateCounts where count < 0 {
+            return .negative(field: "deliberateCounts[\(kind.rawValue)]")
+        }
+        return nil
+    }
+
+    public enum Malformation: Sendable, Equatable {
+        /// NaN／Infinity。**這是靜默失效而不是崩潰**：`NaN > x` 與 `x > NaN`
+        /// 都為 false，於是有界重排的比較恆偽、策略不重排也不報錯，直接退化成
+        /// `archival`——正是守衛存在要防的「不合規策略偽裝成合規」。
+        /// 與 R3 抓到的 NaN 無限迴圈是同一個根因的另一側（那次落在 `==`）。
+        case nonFinite(field: String)
+        /// 負值。負 reinforcement 會讓一個增強事件變成壓抑。
+        case negative(field: String)
+    }
 }
 
 /// 一次 projection 的結果。
