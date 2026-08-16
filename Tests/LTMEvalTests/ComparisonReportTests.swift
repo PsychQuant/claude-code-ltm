@@ -170,7 +170,13 @@ private func event(
         ])
 
     #expect(report.classRows.isEmpty)
-    #expect(report.aggregate?.isEmpty == true)
+    // **R5**：先前這裡斷言 `aggregate?.isEmpty == true`，也就是 aggregate 非 nil
+    // 而內容為空——正是 doc、design.md 與 spec 三處都寫「不存在」的那個形狀
+    // （「只有整體數字、沒有逐類列」）。三份文件寫著不變式而 code 不擋，於是
+    // 這條測試通過的同時逐字否證了它們。不變式現在做進 code：classRows 空時
+    // aggregate 必為 nil。
+    #expect(report.aggregate == nil, "沒有逐類列時不得有整體數字")
+    #expect(report.skipped.fromNullComparison == 1, "而那筆互動要看得見是被略過了")
 }
 
 @Test func crossGenerationReportHasNoPooledAggregateAtAll() throws {

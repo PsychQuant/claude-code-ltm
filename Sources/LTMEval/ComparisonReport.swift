@@ -291,7 +291,12 @@ public enum ComparisonScorer {
         return ComparisonReport(
             classRows: classRows,
             // 跨 generation 時**不產出**整體數字，而不是產出一個標了警語的數字。
-            aggregate: spans ? nil : table { _ in true },
+            // **`classRows` 空時 aggregate 也必須是 nil**（#1 verify R5）。
+            // doc、design.md 與 spec 三處都寫「不存在只有整體數字的形態」，
+            // 而型別完全沒有阻止它——同一檔的 `nullComparisonsAreExcludedFromScoring`
+            // 產出的正是那個被禁止的形狀（classRows 空、aggregate 非 nil）。
+            // 不變式寫在三個文件裡而 code 不擋，那是三份會分岔的規格。
+            aggregate: (spans || classRows.isEmpty) ? nil : table { _ in true },
             spansGenerations: spans,
             generationRows: generationRows,
             skipped: ComparisonReport.SkippedEvents(

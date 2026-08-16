@@ -8,6 +8,18 @@ import PackageDescription
 // 誠實邊界。這個檔頭先前寫的是「在這個圖裡是編譯錯誤，不是紀律問題」，那句話
 // 已被實測推翻（#1 verify R1），而 R1 的更正只改了下面的 target 註解、漏了這裡，
 // 於是同一個檔案自相矛盾（R2 的 logic 與 regression 兩個 lens 各自指出）。
+// **依賴圖的執行點就在下面這份宣告，沒有別的地方。**
+//
+// 先前每個測試 target 各有一個 `ModuleGraphTests.swift`，內容只有 import 與
+// 註解，其中一份宣稱「這些 import 本身就是斷言：若模組依賴圖被改壞，這個檔案
+// 會編譯失敗」。不成立（#1 verify R5）：反向依賴 LTMCore 會在套件解析／建置時
+// 失敗，與那個檔案無關；import 兩個 target 本來就依賴的模組，斷言不了任何
+// `swift build` 沒做的事。唯一可能載重的那份（LTMQuery 不得看到 LTMMemory）
+// 從未嘗試那個 import，所以同樣什麼都沒斷言。三份已刪除，理由留在這裡。
+//
+// Swift 沒有「斷言某個 import 會失敗」的機制，所以這條約束的執行點只能是
+// 下面的 `dependencies:` 清單本身——它是編譯期強制的，只是強制它的是 SwiftPM
+// 而不是一個測試檔。
 let package = Package(
     name: "claude-LTM",
     platforms: [.macOS(.v14)],

@@ -87,11 +87,15 @@ import Testing
     }
 }
 
-@Test func orphanedHistoryEarnsNoPromotion() throws {
+@Test func anEmptyProjectionEarnsNoPromotion() throws {
+    // **改名，因為舊名字說謊**（#1 verify R5）：它叫
+    // `orphanedHistoryEarnsNoPromotion`，卻餵 `.empty(at:)`——裡面一個 orphan
+    // 都沒有。空 projection 之下任何策略都不會動，把 orphan 機制整個拿掉它
+    // 照樣綠。這是 R4 清理「名字比證據強」時漏掉的同類殘留。
+    //
+    // 它仍然有價值（策略對空 projection 不得崩潰或給預設值），所以留著、
+    // 但改成它實際驗的名字。真正的 orphan 覆蓋在 `OrphanReasonTests`。
     let input = candidates(["a", "b", "c"])
-
-    // projection 裡沒有這個 anchor（orphan 已在 projection 階段被濾掉），
-    // 策略必須據此不給任何提升，而不是崩潰或給預設值。
     let output = try HumanLikeStrategy(displacementBound: 3)
         .rerank(input, with: .empty(at: instant))
 

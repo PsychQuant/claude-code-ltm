@@ -219,7 +219,19 @@ public struct FileEventStore: EventStore {
 
         // `seekToEnd` + `write` 是兩個 syscall，中間可被其他行程插入 → 互相覆寫
         // canonical history（#1 verify）。改用 O_APPEND：核心保證「移到檔尾」與
-        // 「寫入」對一般檔案是原子的，多行程並行 append 因此安全。
+        // 「寫入」對一般檔案是原子的。
+        //
+        // **但那只保證單一 `write(2)`，不保證下面那個迴圈**（#1 verify R5，
+        // codex 與 logic 各自指出）。一筆事件可能要多次 write 才寫完（short
+        // write，或 `EINTR` 發生在部分傳輸之後——程式碼自己用 `wroteAnything`
+        // 承認了這件事）。兩次 write 之間另一個行程 append 一整行，結果是
+        // 第一行 = A 的前綴 + B 的整行、第二行 = A 的後綴，**兩筆都壞**。
+        // 先前那句「多行程並行 append 因此安全」是過度宣稱。
+        //
+        // 修法是把整個 write 迴圈 + 封口 + fsync 包進 `flock(LOCK_EX)`。
+        // 誠實邊界：`flock` 是**協同式**的——不用 flock 的寫入者不受它約束，
+        // 而 NFS 上的行為依實作而異。它擋的是「本專案自己的多個行程」，
+        // 不是任意寫入者。
         // 權限 0o600：記憶層是本專案唯一必須備份的資料，不該是 world-readable。
         // `O_NONBLOCK` 是為了讓下面的 `fstat` 檢查**真的有機會執行**。
         // #1 verify R4 的 CRITICAL：對一個沒有讀者的 FIFO，`open(O_WRONLY)`
@@ -242,6 +254,14 @@ public struct FileEventStore: EventStore {
         // 不涵蓋「還在 page cache、斷電就沒了」（#1 verify R3）。
         // fsync 失敗同樣要拋——那正是「寫不進去」的一種。
         defer { close(fd) }
+
+        // 跨行程互斥，涵蓋整個 write 迴圈（見上方說明）。取不到鎖就拋——
+        // 靜默降級成無鎖寫入會讓保證變成「有時成立」，那比沒有保證更糟。
+        guard flock(fd, LOCK_EX) == 0 else {
+            throw EventStoreError.appendFailed(
+                path: url.path, underlying: "flock 失敗：errno \(errno)")
+        }
+        defer { flock(fd, LOCK_UN) }
 
         try Self.enforceOwnerOnlyRegularFile(fd: fd, path: url.path)
 

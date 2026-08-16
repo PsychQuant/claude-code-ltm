@@ -54,17 +54,26 @@ private func multiStrengthProjection(_ entries: [(Anchor, Double)]) -> Projectio
     }
 }
 
-@Test func demotionIsBoundedToo() throws {
-    // 對稱契約：被超車的一方也不得下移超過上限。
+@Test func demotionActuallyHappensAndIsBounded() throws {
+    // **這條先前與上一條逐字相同**——同一組候選、同一個 projection、同一個
+    // bound、同一句斷言，只有函式名與註解不同（#1 verify R5）。它的名字承諾
+    // 「下移也受限」，但沒有斷言任何一筆**確實下移**：演算法退化成完全不動
+    // 它照樣綠。測試數字再一次不是證據。
+    //
+    // 改成斷言具體的下移量。對稱上限真正的釘子在
+    // `RankingGuardTests.anOverBoundDemotionIsRejectedJustLikeAnOverBoundPromotion`
+    // ——那一條直接對守衛下手，這一條只確認經由策略確實會發生下移。
     let input = candidates(["a", "b", "c", "d"])
     let projection = multiStrengthProjection([
         (testAnchor("b"), 6), (testAnchor("c"), 4), (testAnchor("d"), 2),
     ])
 
     let output = try HumanLikeStrategy(displacementBound: 1).rerank(input, with: projection)
-    for result in output {
-        #expect(abs(result.displacement) <= 1)
-    }
+    let a = output.first { $0.candidate.anchor == testAnchor("a") }!
+    #expect(a.displacement == -1, "a 沒有歷史、被 b 超車，必須確實下移一名")
+    #expect(a.reason.movement == .receded(positions: 1))
+    #expect(output.contains { $0.displacement > 0 }, "必須真的有人上移")
+    #expect(output.allSatisfy { abs($0.displacement) <= 1 })
 }
 
 @Test func aDemotedCandidateSaysWhyItMoved() throws {

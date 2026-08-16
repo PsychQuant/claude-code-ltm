@@ -155,13 +155,65 @@ import Testing
     #expect(perms & 0o077 == 0, "既有檔案未被收緊：\(String(perms, radix: 8))")
 }
 
-// 「非一般檔案要被拒絕」這條**沒有測試**，理由記在這裡而不是寫一條假裝有測的：
-// 用 FIFO 當標的的話，`open(O_WRONLY)` 在沒有讀者時會阻塞，測試會掛住而不是
-// 失敗；用目錄的話 `open` 先以 EISDIR 失敗，根本走不到 fstat 那段。要真的測到
-// 得起一條讀者執行緒，成本與收益不成比例。
+// 「非一般檔案要被拒絕」這條**現在有測試了**。
 //
-// 先前這裡有一條 `aStoreThatIsNotARegularFileIsRejected`，它只斷言「FIFO 是
-// FIFO」——名字比證據強，正是前兩輪被抓的那種測試。刪掉比留著誠實。
+// 先前這裡寫著不寫測試的理由：「用 FIFO 當標的的話，`open(O_WRONLY)` 在沒有
+// 讀者時會阻塞，測試會掛住而不是失敗」。**那個理由已經被同一輪的修復推翻**
+// （#1 verify R5）：`append` 現在帶 `O_NONBLOCK`，無讀者 FIFO 的 open 會立刻
+// 以 ENXIO 失敗。也就是說 R4 標為 CRITICAL 的 non-termination 修復本身，
+// 讓「為什麼不能測」的理由失效了——而我沒有回頭把測試補上。
+//
+// 一般化的教訓：**「這條測不了」的理由要跟著實作一起複查。** 它在寫下的當下
+// 可能是對的，而修掉那個原因的正是下一個 commit。
+
+@Test func aFifoIsRejectedRatherThanBlockingForever() throws {
+    // R4 的 CRITICAL：沒有 `O_NONBLOCK` 時，這一行會**永久阻塞**——生產路徑
+    // 掛住而不是回錯。這條測試若回歸，症狀是測試套件跑不完，本身就是訊號。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-fifo-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let fifo = dir.appendingPathComponent("events.jsonl")
+    #expect(mkfifo(fifo.path, 0o600) == 0, "mkfifo 失敗，這條測試沒測到東西")
+
+    let store = try FileEventStore(url: fifo)
+    #expect(throws: (any Error).self) {
+        try store.append(
+            .interaction(
+                .shown, anchor: anchorForFifoTest(), at: Date(),
+                generation: GenerationID("g1"), policy: RankingPolicyID("archival")))
+    }
+}
+
+@Test func aFifoWithAReaderIsStillRejectedBecauseItIsNotARegularFile() throws {
+    // 上一條走的是 ENXIO（沒有讀者）。這條先開一個非阻塞的讀端，讓 open 成功，
+    // 於是真正走到 `enforceOwnerOnlyRegularFile` 的 `S_IFREG` 拒絕分支——
+    // 那個分支先前同樣沒有任何測試覆蓋。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-fifo2-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let fifo = dir.appendingPathComponent("events.jsonl")
+    #expect(mkfifo(fifo.path, 0o600) == 0)
+
+    let reader = open(fifo.path, O_RDONLY | O_NONBLOCK)
+    #expect(reader >= 0, "讀端開不起來，這條測試沒走到 S_IFREG 分支")
+    defer { close(reader) }
+
+    let store = try FileEventStore(url: fifo)
+    #expect(throws: (any Error).self) {
+        try store.append(
+            .interaction(
+                .shown, anchor: anchorForFifoTest(), at: Date(),
+                generation: GenerationID("g1"), policy: RankingPolicyID("archival")))
+    }
+}
+
+private func anchorForFifoTest() -> Anchor {
+    Anchor(
+        source: "fixture-a",
+        turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
+        span: 0..<4)
+}
+
 
 @Test func memoryFileIsNotWorldReadable() throws {
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())

@@ -70,17 +70,19 @@ func evalProjection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
         projection: evalProjection([(evalAnchor("d"), [.cited: 5])]),
         a: ArchivalStrategy(), b: HumanLikeStrategy(displacementBound: 3), startingSide: .a)
 
+    // **只留載重的那一條。**（#1 verify R5）先前這裡還有兩句：
+    // 「每個 attribution 的 creditedTo 非 nil」與「兩邊貢獻數加起來等於呈現
+    // 長度」——兩者都由**同一次 `present()` 呼叫剛剛強制過**：
+    // `PresentationRecord` 的建構子對「非 null 卻帶未歸屬 anchor」直接 throw，
+    // 而 attribution 本來就是由 `presented` 逐位建出來的。形狀的強制由
+    // `aNullComparisonCannotCarryAnAttributedAnchor` /
+    // `aRealComparisonCannotCarryAnUnattributedAnchor` 直接覆蓋。
+    //
+    // 真正只有這裡驗得到的，是**兩邊都確實貢獻了位置**——也就是交錯真的在
+    // 交錯，而不是整份來自同一邊。
     #expect(!result.record.isNullComparison)
-    for attribution in result.record.attribution {
-        #expect(attribution.creditedTo != nil)
-    }
     let credits = Set(result.record.attribution.compactMap(\.creditedTo))
     #expect(credits == [RankingPolicyID("archival"), RankingPolicyID("human-like")])
-
-    // 逐位歸屬互斥且窮盡：兩邊的貢獻數加起來等於呈現長度。
-    let total = result.record.presentedCount(for: RankingPolicyID("archival"))
-        + result.record.presentedCount(for: RankingPolicyID("human-like"))
-    #expect(total == result.presented.count)
 }
 
 @Test func identicalRankingsYieldANullComparison() throws {

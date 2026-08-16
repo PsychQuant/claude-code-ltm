@@ -16,6 +16,13 @@ public struct ProjectionParameters: Sendable, Equatable {
     public let pinnedWeight: Double
     public let dismissedWeight: Double
 
+    /// **這些預設值全部未經校準，方向也未知。**
+    ///
+    /// 形式（power-law decay）沿用 `PsychQuant/ai4o` 的
+    /// `docs/memory/implementation/`，那套已按 Wixted & Ebbesen (1991) 調過；
+    /// 但**參數值是在日常聊天語料上調的**，而本專案是技術對話，性質差很多。
+    /// 在評估集就緒之前沒有任何證據支持任何特定數字（#1 verify R5：先前這裡
+    /// 沒有任何標記，而 diff 同時刪掉了 README 裡記載出處的那一段）。
     public init(
         decayExponent: Double = 0.5,
         openedWeight: Double = 1.0,
