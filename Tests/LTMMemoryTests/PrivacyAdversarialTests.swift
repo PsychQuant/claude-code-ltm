@@ -134,6 +134,61 @@ private let 合法雜湊 = String(repeating: "ab", count: 32)
     }
 }
 
+/// 把一棵 JSON 裡**每一個**字串葉節點的路徑找出來。
+private func stringLeafPaths(_ value: Any, prefix: [String] = []) -> [[String]] {
+    switch value {
+    case let object as [String: Any]:
+        return object.keys.sorted().flatMap { stringLeafPaths(object[$0]!, prefix: prefix + [$0]) }
+    case is String:
+        return [prefix]
+    default:
+        return []
+    }
+}
+
+private func substituting(_ value: Any, at path: [String], with replacement: String) -> Any {
+    guard let key = path.first, var object = value as? [String: Any] else { return replacement }
+    object[key] = substituting(object[key]!, at: Array(path.dropFirst()), with: replacement)
+    return object
+}
+
+@Test func everyStringFieldInAnEncodedEventRejectsFreeText() throws {
+    // **這一條取代逐欄位列舉。**（#1 verify R4）
+    //
+    // 前幾條測試各自攻擊一個具名欄位——generation、source、contentHash——而
+    // R4 指出 `policy` 與 `turnID` 的解碼邊界從來沒被碰過。那不是漏了兩條
+    // 測試，是測試的**形狀**錯了：判準是「每個會被原樣序列化的欄位都要有形狀
+    // 約束」，而逐一列舉欄位的測試只能證明我想得到的那些。
+    // CLAUDE.md 自己那句「列舉會漏，判準不會」在這裡第三次適用。
+    //
+    // 所以欄位清單改成從**編碼輸出**導出：把一筆填滿的 Event 編碼、走訪 JSON
+    // 樹上每一個字串葉節點、逐一換成原文、斷言解碼失敗。新增一個字串欄位而
+    // 忘了給它形狀約束，這條會自己變紅——不需要有人想起來補測試。
+    let anchor = Anchor(
+        source: "fixture-a",
+        turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
+        span: 0..<4)
+    let event = Event.pin(
+        anchor: anchor, at: Date(timeIntervalSince1970: 12_345),
+        generation: GenerationID("build-1"), policy: RankingPolicyID("human-like"),
+        presentation: .random())
+
+    let encoded = try JSONEncoder().encode(event)
+    let tree = try JSONSerialization.jsonObject(with: encoded)
+    let paths = stringLeafPaths(tree)
+
+    // 先確認真的走訪到了東西——空清單會讓整條測試 vacuously pass。
+    #expect(paths.count >= 6, "只找到 \(paths.count) 個字串欄位，走訪可能壞了")
+
+    for path in paths {
+        let mutated = substituting(tree, at: path, with: 原文)
+        let data = try JSONSerialization.data(withJSONObject: mutated)
+        #expect(throws: (any Error).self, "欄位 \(path.joined(separator: ".")) 收下了原文") {
+            _ = try JSONDecoder().decode(Event.self, from: data)
+        }
+    }
+}
+
 @Test func eventSurvivesAJSONRoundTripWithEveryFieldPopulated() throws {
     // `CodingKeys` 現在是顯式宣告的（`rejectUnknownKeys` 需要 `allCases`），
     // 而顯式清單會漂移：新增屬性卻忘了加 case，編碼會**安靜地**少一個欄位。

@@ -36,9 +36,14 @@ func classifierAssignsOneOfTheClosedFiveValues(query: String, expected: QueryCla
     #expect(QueryClassifier.classify("  釘選  ") == .cjk2char)
 }
 
-@Test func classifierDoesNotRetainTheQuery() {
-    // 標籤器是純函式、沒有存放：同一個 query 進去兩次拿到同一個標籤，且
-    // 型別上沒有任何地方能把字串留下來（回傳型別就是一個 enum）。
+@Test func theClassifierIsAFunctionOfTheQueryAlone() {
+    // 這條**只**驗確定性，不再宣稱它證明了「不保留 query」（#1 verify R4）：
+    // 純函式呼叫兩次得到同樣的值，對「有沒有把字串留在別處」一無所知——
+    // 一個會把每個 query 抄進檔案的分類器也照樣通過。
+    //
+    // 「不保留」的證據在 `InterleavingTests` 的
+    // `thePresentationRecordCarriesNoByteOfTheQuery`：那條真的把 query 送進
+    // harness、把產出的紀錄序列化，再檢查落地的 bytes。判準是輸出，不是簽章。
     let query = "這是一個不該被留下來的查詢字串"
     #expect(QueryClassifier.classify(query) == QueryClassifier.classify(query))
     #expect(QueryClassifier.classify(query) == .cjk4plus)

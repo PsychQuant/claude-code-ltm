@@ -186,3 +186,36 @@ func evalProjection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
             startingSide: .a, isNullComparison: false)
     }
 }
+
+// MARK: - query 真的沒有落地（#1 verify R4）
+
+@Test func thePresentationRecordCarriesNoByteOfTheQuery() throws {
+    // 取代 `classifierDoesNotRetainTheQuery` 的同義反覆版本：那條只證明分類器
+    // 是確定性的，對「字串有沒有被留在別處」一無所知。這條把 query 真的送進
+    // harness，再檢查**落地的 bytes**。
+    let query = "釘選版本的比較實驗"
+    let input = evalCandidates(["a", "b", "c"])
+    let projection = Projection(
+        statistics: [evalAnchor("c"): AnchorStatistics(
+            reinforcement: 5, suppression: 0, impressions: 0,
+            lastDeliberateInteraction: evalInstant, deliberateCounts: [.cited: 5])],
+        instant: evalInstant)
+
+    let result = try InterleavingHarness(generation: evalGeneration).present(
+        query: query, candidates: input, projection: projection,
+        a: ArchivalStrategy(), b: HumanLikeStrategy(),
+        startingSide: .balanced(seed: query))
+
+    let bytes = try JSONEncoder().encode(result.record)
+    let text = String(decoding: bytes, as: UTF8.self)
+
+    #expect(!text.contains(query))
+    #expect(!text.contains("釘選"))
+    // 比子字串搜尋強的結構性質：紀錄的每一個 byte 都是 ASCII。本專案語料裡的
+    // 第三方逐字內容幾乎必然含 CJK，所以這條把「原文外洩」從「我有沒有想到
+    // 要搜這個字串」換成一個不依賴我想像力的性質。
+    //
+    // 誠實邊界：它擋不掉純 ASCII 的英文 query。那一側靠的是型別——紀錄的每個
+    // 字串欄位不是識別碼字元集就是 UUID 或封閉集合標籤。
+    #expect(bytes.allSatisfy { $0 <= 0x7F }, "紀錄含非 ASCII byte")
+}

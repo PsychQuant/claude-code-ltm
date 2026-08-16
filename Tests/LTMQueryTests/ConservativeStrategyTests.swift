@@ -189,6 +189,34 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
     #expect(output.map(\.candidate.anchor) == [testAnchor("b"), testAnchor("a")])
 }
 
+@Test func offTiesConservativeIsByteForByteArchival() throws {
+    // spec 說「off ties 兩者可證相同」，而先前被拿來當證據的那條測試**從頭到尾
+    // 沒有呼叫 archival**（#1 verify R4，devils-advocate）。這條真的把兩邊都跑
+    // 一次再比——包含 reason 與 displacement，不只順序。
+    //
+    // 這件事也是 conservative 這一檔有沒有用的全部關鍵：它的價值完全等於
+    // 「精確平手多常發生」，而那個比率在本語料上**還沒量過**（#18）。
+    let nonTied = candidates(["a", "b", "c", "d"])
+    let projection = strengths([("d", 100), ("c", 50), ("b", 10)])
+
+    let conservative = try ConservativeStrategy(displacementBound: 3)
+        .rerank(nonTied, with: projection)
+    let archival = try ArchivalStrategy().rerank(nonTied, with: projection)
+
+    #expect(conservative == archival)
+}
+
+@Test func onTiesConservativeIsNotArchival() throws {
+    // 上一條的對照：平手時兩者必須分歧，否則這一檔連存在的理由都沒有。
+    let tied = tiedCandidates(["a", "b", "c"])
+    let projection = strengths([("c", 5)])
+
+    let conservative = try ConservativeStrategy().rerank(tied, with: projection)
+    let archival = try ArchivalStrategy().rerank(tied, with: projection)
+
+    #expect(conservative != archival)
+}
+
 @Test func threeStrategiesNowCoexistAndAreDistinguishable() throws {
     // issue #1 的 Expected 要三檔並存。這條把「並存」釘成一個可執行的事實。
     let all: [any MemoryStrategy] = [ArchivalStrategy(), ConservativeStrategy(), HumanLikeStrategy()]

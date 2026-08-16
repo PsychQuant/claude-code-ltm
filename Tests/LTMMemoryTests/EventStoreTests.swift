@@ -6,8 +6,6 @@ import Testing
 
 // 已知的合成字串。測試會在序列化輸出裡逐一搜尋這三者，全部必須 0 次命中。
 private let 語料原文 = "標記某個節點然後做對照，這是合成語料裡不該外洩的一句話。"
-private let 查詢原文 = "釘選版本 做比較"
-private let note原文 = "這是使用者自己寫的 pin 註記，屬於自由文字。"
 
 private func tempDir() throws -> URL {
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -31,10 +29,18 @@ private let policy = RankingPolicyID("archival")
 @Test func serializedStoreContainsNoVerbatimContent() throws {
     let store = try FileEventStore(url: try tempDir().appendingPathComponent("events.jsonl"))
 
-    // 語料原文只以「被雜湊」的形式進入 anchor；查詢原文與 note 原文根本沒有
-    // 可以傳進來的參數——這正是設計要的，測試只是把它釘死。
-    _ = 查詢原文
-    _ = note原文
+    // **只有語料原文真的走過這條路**：它以「被雜湊」的形式進入 anchor，所以
+    // 「它沒出現在輸出裡」是一個有內容的斷言。
+    //
+    // 查詢原文與 note 原文則**沒有任何參數收得下它們**。先前這條測試把三者
+    // 一起斷言，於是其中兩條是空的——輸入從未包含的東西，輸出當然找不到
+    // （#1 verify R4）。空斷言比沒有斷言更糟：它讓覆蓋率看起來是三倍。
+    //
+    // 那兩件事的真正證據在型別層，不在這裡：`note` 走 UUID storage
+    // （`noteAndPresentationReferencesCannotExpressFreeTextAtAll`），而
+    // 「沒有一個可序列化欄位收得下自由文字」由
+    // `everyStringFieldInAnEncodedEventRejectsFreeText` 從編碼輸出導出欄位
+    // 清單來驗——那條不會因為我想不到某個欄位而漏掉它。
     let a = anchor(語料原文)
     try store.append(.interaction(.shown, anchor: a, at: Date(), generation: gen, policy: policy))
     try store.append(.interaction(.opened, anchor: a, at: Date(), generation: gen, policy: policy))
@@ -43,13 +49,9 @@ private let policy = RankingPolicyID("archival")
     let bytes = try store.serializedBytes()
     let text = String(decoding: bytes, as: UTF8.self)
 
-    for 原文 in [語料原文, 查詢原文, note原文] {
-        #expect(!text.contains(原文), "序列化輸出不得含原文：\(原文)")
-    }
-    // 也不得含任何較長的子字串片段（防「只切掉尾巴就當作沒外洩」）。
+    #expect(!text.contains(語料原文), "序列化輸出不得含語料原文")
+    // 也不得含較長的子字串片段（防「只切掉尾巴就當作沒外洩」）。
     #expect(!text.contains("標記某個節點"))
-    #expect(!text.contains("釘選版本"))
-    #expect(!text.contains("pin 註記"))
 
     // 反向確認：指標與識別碼確實有被寫出去，否則上面的斷言可能只是因為檔案是空的。
     #expect(text.contains(a.contentHash.hex))
