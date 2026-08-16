@@ -77,6 +77,13 @@ public struct AnchorStatistics: Sendable, Equatable {
 /// #1 verify 的 devils-advocate 實測做到了。原本寫的「編譯期事實」是過度宣稱。
 public struct Projection: Sendable, Equatable {
     public let statistics: [Anchor: AnchorStatistics]
+    /// 因為時間戳晚於評估時點而**被丟棄**的事件數。
+    ///
+    /// 存在的理由與 `ComparisonReport.SkippedEvents` 完全相同（#1 verify R5）：
+    /// 一個裸 `continue` 讓那些事件消失得無影無蹤，而一個整段歷史都在未來的
+    /// anchor 與一個從沒被碰過的 anchor 在 projection 裡完全無法區分。
+    /// 而註解自己指名的觸發情境（備份被竄改、時鐘回捲）正是最不該看不見的那種。
+    public let futureDatedEventsIgnored: Int
     /// 產生這份 projection 的評估時點。留著是為了讓 reason 能誠實說明依據。
     public let instant: Date
     /// 有歷史、但 anchor 已 orphan 而被排除的那些。
@@ -89,8 +96,10 @@ public struct Projection: Sendable, Equatable {
 
     public init(
         statistics: [Anchor: AnchorStatistics], instant: Date,
-        orphanedAnchors: Set<Anchor> = []
+        orphanedAnchors: Set<Anchor> = [],
+        futureDatedEventsIgnored: Int = 0
     ) {
+        self.futureDatedEventsIgnored = futureDatedEventsIgnored
         // **orphan 的統計在建構時就被移除**，不是留著讓每個讀取端記得跳過。
         //
         // #1 verify R4：先前同一個 anchor 可以同時出現在 `statistics` 與

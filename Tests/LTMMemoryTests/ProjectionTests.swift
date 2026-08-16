@@ -204,3 +204,28 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     #expect(p.decayExponent > 0)
     #expect(ProjectionParameters(decayExponent: 0).decayExponent == 0)
 }
+
+
+@Test func futureDatedEventsAreCountedNotSilentlyDropped() throws {
+    // R5：裸 `continue` 讓一個整段歷史都在未來的 anchor 與一個從沒被碰過的
+    // anchor 完全無法區分，而觸發情境（竄改備份、時鐘回捲）正是最不該看不見
+    // 的那種。同一輪 `ComparisonScorer` 為了同樣的理由把它的 continue 拆開計數。
+    let text = "合成語料內容夠長"
+    let c = corpus([turn("t1", text)])
+    let a = anchor("t1", text)
+    let future = Event.interaction(
+        .cited, anchor: a, at: instant.addingTimeInterval(3600),
+        generation: GenerationID("g1"), policy: RankingPolicyID("archival"))
+
+    let p = project([future], at: instant, resolvedBy: c)
+    #expect(p.futureDatedEventsIgnored == 1)
+    #expect(p[a] == nil, "它仍然不得計入強度")
+
+    // 對照：時間戳合法時計數為 0，否則上面那條可能只是「永遠回 1」。
+    let past = Event.interaction(
+        .cited, anchor: a, at: instant.addingTimeInterval(-3600),
+        generation: GenerationID("g1"), policy: RankingPolicyID("archival"))
+    let ok = project([past], at: instant, resolvedBy: c)
+    #expect(ok.futureDatedEventsIgnored == 0)
+    #expect(ok[a] != nil)
+}

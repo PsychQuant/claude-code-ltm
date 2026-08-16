@@ -74,12 +74,21 @@ public func project(
     }
 
     var orphaned: Set<Anchor> = []
+    var futureDated = 0
     for event in events {
         // 評估時點之後的事件不可能已經發生。先前的 `max(0, ...)` 把未來時間戳
         // 夾成 age 0，也就是 decay = 1.0 的**最大權重，而且永遠維持**——竄改
         // 備份（或時鐘倒退）只要把 timestamp 寫到未來，就能把某筆結果永久釘在
         // 帶首（#1 verify R3）。夾成最大值是最糟的一種夾法。
-        guard event.timestamp <= instant else { continue }
+        guard event.timestamp <= instant else {
+            // **數出來，不要靜默丟掉**（#1 verify R5）。裸 `continue` 讓一個
+            // 整段歷史都在未來的 anchor 與一個從沒被碰過的 anchor 完全無法
+            // 區分，而上面那段註解自己指名的觸發情境（竄改備份、時鐘回捲）
+            // 正是最不該看不見的那種。同一輪 `ComparisonScorer` 就是為了這個
+            // 理由把它的四個 `continue` 拆開計數的，這裡當時沒有一起改。
+            futureDated += 1
+            continue
+        }
 
         guard isLive(event.anchor) else {
             // 記下來而不是丟掉：策略必須能說出「這筆有歷史但已 orphan」，
@@ -127,5 +136,7 @@ public func project(
             lastDeliberateInteraction: lastDeliberate[anchor],
             deliberateCounts: counts[anchor] ?? [:])
     }
-    return Projection(statistics: statistics, instant: instant, orphanedAnchors: orphaned)
+    return Projection(
+        statistics: statistics, instant: instant, orphanedAnchors: orphaned,
+        futureDatedEventsIgnored: futureDated)
 }

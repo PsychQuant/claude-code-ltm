@@ -95,7 +95,15 @@ public struct PresentationRecord: Sendable, Equatable, Codable {
     /// 呈現順序。
     public var presented: [Anchor] { attribution.map(\.anchor) }
 
-    /// 某一邊貢獻了幾個位置。per-presentation rate 的分母用它，而不是用互動總數。
+    /// 某一邊在**這筆紀錄裡**貢獻了幾個位置。
+    ///
+    /// **這不是 `ComparisonScorer` 用的分母**（#1 verify R5 更正了這段 doc）。
+    /// scorer 的分母是 `.shown` 事件數，也就是呼叫端**真的送出了幾筆曝光**；
+    /// 這個函式數的是紀錄裡的位置數。兩者在「只對可見的 top-k 記 shown」這種
+    /// 完全正常的做法下並不相等，而舊 doc 指的是不會被用到的那一個。
+    ///
+    /// 留著它是因為它是紀錄自身的性質（檢查歸屬是否平均分佈時要用），但它與
+    /// 計分無關。哪一個才該當分母是評估設計的問題，追蹤於 #16。
     public func presentedCount(for policy: RankingPolicyID) -> Int {
         attribution.count { $0.creditedTo == policy }
     }

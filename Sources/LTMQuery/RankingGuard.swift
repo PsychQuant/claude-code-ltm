@@ -30,7 +30,7 @@ public enum RankingGuard {
         }
         for i in 0..<original.count where reordered[i].band != original[i].band {
             throw StrategyViolation.crossedRelevanceBand(
-                from: reordered[i].band, to: original[i].band)
+                expected: original[i].band, found: reordered[i].band)
         }
 
         var originalIndex: [Anchor: Int] = [:]

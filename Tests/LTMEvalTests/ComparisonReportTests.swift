@@ -13,7 +13,8 @@ private func presentation(
     _ queryClass: QueryClass,
     a: Anchor,
     b: Anchor,
-    generation: GenerationID = evalGeneration
+    generation: GenerationID = evalGeneration,
+    startingSide: InterleavingHarness.Side = .a
 ) throws -> PresentationRecord {
     try PresentationRecord(
         id: .random(),
@@ -24,7 +25,7 @@ private func presentation(
             AnchorAttribution(anchor: a, creditedTo: archival),
             AnchorAttribution(anchor: b, creditedTo: humanLike),
         ],
-        startingSide: .a,
+        startingSide: startingSide,
         isNullComparison: false)
 }
 
@@ -382,4 +383,49 @@ private func event(
     #expect(throws: Never.self) {
         _ = try ComparisonScorer.report(records: [ab, ab2], events: [])
     }
+}
+
+
+// MARK: - 分母、起手方、與「型別要能表達沒有數字」（#1 verify R5）
+
+@Test func aStrategyWithNoImpressionsHasNoRateRatherThanZero() throws {
+    // R5 實測：一個沒有任何 shown 事件、卻贏下每一筆被觀測互動的策略，rate
+    // 讀作 0.0——與從沒得過分的策略在同一欄位上無法區分。而這不是邊角：
+    // `presented` 只由 `.shown` 累加。
+    let a = evalAnchor("a")
+    let r = try presentation(.cjk2char, a: a, b: evalAnchor("b"))
+    let report = try ComparisonScorer.report(records: [r], events: [event(.opened, a, r)])
+
+    let row = report.classRows.first { $0.queryClass == .cjk2char }!
+    let score = row.scores[archival]!
+    #expect(score.net == 1, "它贏下了唯一一筆互動")
+    #expect(score.presented == 0, "而它沒有任何曝光事件")
+    #expect(score.rate == nil, "所以 rate 不該是一個看起來很有信心的 0.0")
+}
+
+@Test func aRateIsReportedWhenThereAreImpressions() throws {
+    let a = evalAnchor("a")
+    let r = try presentation(.cjk2char, a: a, b: evalAnchor("b"))
+    let report = try ComparisonScorer.report(
+        records: [r], events: [event(.shown, a, r), event(.opened, a, r)])
+    #expect(report.classRows.first?.scores[archival]?.rate == 1.0)
+}
+
+@Test func theReportMakesTheStartingSideAssignmentVisible() throws {
+    // R4 把起手方寫進紀錄，理由是「記下來才能事後檢查分派是否平衡」——而那個
+    // 檢查沒有任何程式碼實作它（R5）。這條把「可見」釘成事實。
+    let balanced = [
+        try presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"), startingSide: .a),
+        try presentation(.cjk2char, a: evalAnchor("c"), b: evalAnchor("d"), startingSide: .b),
+    ]
+    let report = try ComparisonScorer.report(records: balanced, events: [])
+    #expect(report.startingSides.a == 1)
+    #expect(report.startingSides.b == 1)
+    #expect(!report.startingSides.isSeverelyImbalanced)
+
+    let lopsided = (0..<8).map { i in
+        try! presentation(.cjk2char, a: evalAnchor("x\(i)"), b: evalAnchor("y\(i)"), startingSide: .a)
+    }
+    let bad = try ComparisonScorer.report(records: lopsided, events: [])
+    #expect(bad.startingSides.isSeverelyImbalanced, "全部同側必須是讀得出來的事實")
 }

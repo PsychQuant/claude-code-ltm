@@ -125,7 +125,14 @@ public struct RankedResult: Sendable, Equatable {
 /// 夾（clamp）會讓一個行為不合規的策略看起來像合規的策略——那正是比較實驗
 /// 最不能容忍的失真。
 public enum StrategyViolation: Error, Sendable, Equatable {
-    case crossedRelevanceBand(from: RelevanceBand, to: RelevanceBand)
+    /// 某個位置上的帶與原順序不符。
+    ///
+    /// 參數叫 `expected`／`found` 而不是 `from`／`to`（#1 verify R5）：後者讀起來
+    /// 是「這一筆從 X 移到 Y」，而實際帶進去的是「這個位置本來該是哪個帶」與
+    /// 「現在是哪個帶」。對 `[a(帶0), z(帶1)] → [z, a]`，z 從沒離開帶 1，舊的
+    /// 命名卻報 `from: 1, to: 0`。這個檔案裡有一個 `misreportedDisplacement`
+    /// 專門為了「provenance 不得說謊」而存在，而這是一個讀反的 provenance 欄位。
+    case crossedRelevanceBand(expected: RelevanceBand, found: RelevanceBand)
     case displacementBoundExceeded(bound: Int, attempted: Int)
     /// 重排結果不是輸入的排列（多了、少了、或換了東西）。
     case candidateSetChanged

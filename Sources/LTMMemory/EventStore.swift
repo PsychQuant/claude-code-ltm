@@ -353,9 +353,18 @@ public struct FileEventStore: EventStore {
 
         var result: [Event] = []
         var corrupt: [Int] = []
+        // **不略過空行**（#1 verify R5）。舊版用 `omittingEmptySubsequences: true`，
+        // 於是 `corruptLines` 回報的是「第幾個非空行」而不是「檔案第幾行」——
+        // 每一個空行都會讓後面的行號往前偏。這個方法存在的全部理由是修復情境
+        // （doc 逐字寫「明確回報跳過了哪幾行」），而照著偏掉的行號去編輯檔案
+        // 會刪錯紀錄。空行是可達的：`terminatePartialLine` 在錯誤路徑會補一個
+        // 裸 `\n`，而本 store 也從未宣稱自己是唯一的寫入者。
         for (index, line) in String(decoding: bytes, as: UTF8.self)
-            .split(separator: "\n", omittingEmptySubsequences: true).enumerated()
+            .split(separator: "\n", omittingEmptySubsequences: false).enumerated()
         {
+            // 空行不是紀錄也不是損壞——它不解碼、也不計入 corruptLines，
+            // 但**佔一個行號**，這才是行號有意義的前提。
+            if line.isEmpty { continue }
             do {
                 // **bytes 逐字比對**，不是單純解碼（#1 verify R5 的 CRITICAL）。
                 // 解碼會靜默丟掉 JSON 文法允許而 schema 沒定義的東西——巢狀未知鍵、

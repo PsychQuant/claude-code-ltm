@@ -151,3 +151,37 @@ private let policy = RankingPolicyID("archival")
     #expect(salvaged.corruptLines == [2])
     #expect(salvaged.events.map(\.anchor.turnID) == ["t0", "t2"])
 }
+
+
+@Test func corruptLineNumbersAreTrueFileLineNumbers() throws {
+    // R5：`omittingEmptySubsequences: true` 讓回報的是「第幾個非空行」，於是每個
+    // 空行都讓後面的行號往前偏。這個方法存在的全部理由是修復情境，而照著偏掉的
+    // 行號去編輯檔案會刪錯紀錄。空行是可達的——錯誤路徑的 `terminatePartialLine`
+    // 會補一個裸換行，而本 store 從未宣稱自己是唯一寫入者。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-lineno-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let path = dir.appendingPathComponent("events.jsonl")
+
+    let good = String(decoding: try canonicalLineForLineNumberTest(), as: UTF8.self)
+    // 第 1 行合法、第 2 行空、第 3 行合法、第 4 行空、第 5 行損壞。
+    let contents = good + "\n\n" + good + "\n\n" + "{ 這不是合法 JSON\n"
+    try Data(contents.utf8).write(to: path)
+
+    let store = try FileEventStore(url: path)
+    let result = try store.allEvents(skippingCorrupt: true)
+    #expect(result.events.count == 2)
+    #expect(result.corruptLines == [5], "回報的必須是檔案第 5 行，不是第 3 個非空行")
+}
+
+/// 與隱私測試那條同形，複製一份以免跨檔耦合。
+private func canonicalLineForLineNumberTest() throws -> Data {
+    let a = Anchor(
+        source: "fixture-a",
+        turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
+        span: 0..<4)
+    let e = Event.interaction(
+        .shown, anchor: a, at: Date(timeIntervalSince1970: 12_345),
+        generation: GenerationID("build-1"), policy: RankingPolicyID("archival"))
+    return try CanonicalCoding.encoder.encode(e)
+}

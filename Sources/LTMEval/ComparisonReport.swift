@@ -14,7 +14,16 @@ public struct StrategyScore: Sendable, Equatable {
 
     /// per-presentation rate。分母是自己的呈現數，不是互動總數——兩邊貢獻的
     /// 位置數不一定相同，用共同分母會讓貢獻多的那邊被稀釋。
-    public var rate: Double { presented == 0 ? 0 : Double(net) / Double(presented) }
+    ///
+    /// **分母為零時是 `nil` 而不是 0**（#1 verify R5）。舊版回 0.0，於是一個
+    /// 沒有任何 `shown` 事件、卻贏下每一筆被觀測互動的策略，rate 讀作 0.0
+    /// ——與從沒得過分的策略在同一欄位上無法區分。而這不是邊角：`presented`
+    /// 只由 `.shown` 累加，任何只送 opened／cited 而沒送 shown 的呼叫端，
+    /// 每一格都會是那個假的 0.0。
+    ///
+    /// 這與 `aggregate` 被改成 optional 是同一個理由——**型別要能表達
+    /// 「這裡沒有數字」**，否則消費端讀到的是一個看起來很有信心的零。
+    public var rate: Double? { presented == 0 ? nil : Double(net) / Double(presented) }
 }
 
 /// 一個 query class 的一列。
@@ -55,6 +64,34 @@ public struct ComparisonReport: Sendable, Equatable {
     /// 是為了讓「這份報告只用到了多少事件」在報告本身讀得到——分母的來源
     /// 不該只存在於讀 code 的人腦中。
     public let skipped: SkippedEvents
+    /// 起手方的分派計數。
+    ///
+    /// **記下來但沒人讀，等於沒記**（#1 verify R5）。R4 把 `startingSide` 寫進
+    /// presentation record，理由逐字是「記下來才能事後檢查分派是否平衡」——
+    /// 而那個事後檢查沒有任何程式碼實作它，於是「偏誤已消除」仍然是一句
+    /// 從報告讀不出來的宣稱。這是 R3→R4 那個「只完成一半」的第三次。
+    ///
+    /// 這裡只做**可見**：把計數放進報告，讓失衡是讀得到的事實。**按起手方
+    /// 分層計分**（真正能校正位置效應的做法）需要先決定分層之後的統計量，
+    /// 屬於評估設計，追蹤於 #16。在那之前，讀者至少看得到分派長什麼樣子。
+    public let startingSides: StartingSideCounts
+
+    public struct StartingSideCounts: Sendable, Equatable {
+        public let a: Int
+        public let b: Int
+        public init(a: Int, b: Int) {
+            self.a = a
+            self.b = b
+        }
+
+        /// 分派是否嚴重偏向一側。門檻刻意寬鬆（少於四分之一）：這是要讓
+        /// 「明顯壞掉」被看見，不是做統計檢定。
+        public var isSeverelyImbalanced: Bool {
+            let total = a + b
+            guard total > 0 else { return false }
+            return min(a, b) * 4 < total
+        }
+    }
 
     public struct SkippedEvents: Sendable, Equatable {
         /// 事件不屬於任何一次呈現（例如從別處直接引用某段）。
@@ -259,7 +296,10 @@ public enum ComparisonScorer {
             generationRows: generationRows,
             skipped: ComparisonReport.SkippedEvents(
                 notFromAPresentation: skippedNotFromAPresentation,
-                fromNullComparison: skippedNullComparison))
+                fromNullComparison: skippedNullComparison),
+            startingSides: ComparisonReport.StartingSideCounts(
+                a: records.count { $0.startingSide == .a },
+                b: records.count { $0.startingSide == .b }))
     }
 
     private struct Key: Hashable {

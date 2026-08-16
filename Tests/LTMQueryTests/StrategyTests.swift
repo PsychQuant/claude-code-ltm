@@ -70,8 +70,9 @@ import Testing
     let input = candidates(["a"], band: 0) + candidates(["z"], band: 1)
     let rogue = RogueStrategy(mode: .crossBand)
 
+    // 參數名改過（R5）：`expected` 是這個位置本來該有的帶，`found` 是現在的。
     #expect(throws: StrategyViolation.crossedRelevanceBand(
-        from: RelevanceBand(rank: 1), to: RelevanceBand(rank: 0))
+        expected: RelevanceBand(rank: 0), found: RelevanceBand(rank: 1))
     ) {
         _ = try rogue.rerank(input, with: .empty(at: instant))
     }
