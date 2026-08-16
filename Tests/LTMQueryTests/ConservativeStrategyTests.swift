@@ -136,7 +136,7 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
     let crossing = [input[0], input[2], input[1], input[3]]
 
     #expect(throws: StrategyViolation.movedAcrossTieRuns) {
-        _ = try RankingGuard.checkTieRunsOnly(original: input, reordered: crossing, bound: 9)
+        _ = try RankingGuard.checkTieRunsOnly(original: input, reordered: crossing)
     }
 }
 

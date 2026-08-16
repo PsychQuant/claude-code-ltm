@@ -87,6 +87,32 @@ public enum StrategyViolation: Error, Sendable, Equatable {
     /// 比較實驗讀到的就不是實際發生的事。先前沒有任何地方驗它——策略自己算
     /// displacement、自己回報，守衛只看順序（#1 verify R4）。
     case misreportedDisplacement(Anchor, reported: Int, actual: Int)
+    /// 輸入的相關性帶不是非遞減的。
+    ///
+    /// 帶要能當圍籬，同一個帶必須在輸入裡形成單一連續區段。#1 verify R5 給了
+    /// 反例：`[A(帶0), B(帶1), C(帶0)]` → `[C, B, A]`，逐位的帶序列都還是
+    /// `[0,1,0]`、候選集合沒變、位移在上限內，守衛全部放行——但 A 與 C 都跨過了
+    /// 帶 1 的 B。守衛的逐位比對只在帶連續時才等價於圍籬，而那個前提從來沒有
+    /// 被驗證過。與其把圍籬檢查改成 O(n²) 的兩兩比較，不如在入口要求輸入有序
+    /// ——檢索本來就是照相關性排出來的，非遞減是它真實的形狀。
+    case bandsOutOfOrder(at: Int)
+}
+
+/// 進到 `rerankChecked` 的入場券。
+///
+/// 存在的唯一理由是**讓 seam 不可繞過**（#1 verify R5）：R4 把 `rerank` 移到
+/// extension，但 `rerankChecked` 是 public protocol requirement，所以
+/// `strategy.rerankChecked(candidates, with: projection)` 一行就繞過了全部檢查
+/// ——而交錯器已經因為相信那個宣稱刪掉了自己的防線。
+///
+/// `init` 是 internal，所以模組外**造不出這個型別的值**，也就呼叫不到
+/// `rerankChecked`。這不是命名慣例上的「請勿呼叫」，是型別層的不可達。
+///
+/// **誠實邊界**：LTMQuery 模組內部（含 `@testable` 的測試）造得出來。擋的是
+/// 外部呼叫端，不是作者自己——後者與「策略自建 reader 讀語料」同屬 #14。
+public struct ValidatedCandidates: Sendable {
+    public let candidates: [Candidate]
+    init(_ candidates: [Candidate]) { self.candidates = candidates }
 }
 
 /// 所有策略共用的前置條件。
@@ -101,6 +127,17 @@ public enum MemoryStrategySupport {
     public static func requireFiniteBaseScores(_ candidates: [Candidate]) throws {
         for candidate in candidates where !candidate.baseScore.isFinite {
             throw StrategyViolation.nonFiniteBaseScore(candidate.anchor)
+        }
+    }
+
+    /// 相關性帶必須非遞減。
+    ///
+    /// 這是**圍籬能成立的前提**，不是格式潔癖：守衛用逐位比對驗帶，而逐位比對
+    /// 只在「同一個帶在輸入裡是單一連續區段」時才等價於「不得跨帶移動」。
+    /// R5 的反例見 `StrategyViolation.bandsOutOfOrder`。
+    public static func requireBandsInOrder(_ candidates: [Candidate]) throws {
+        for i in 1..<max(candidates.count, 1) where candidates[i].band < candidates[i - 1].band {
+            throw StrategyViolation.bandsOutOfOrder(at: i)
         }
     }
 
@@ -166,12 +203,26 @@ public protocol MemoryStrategy: Sendable {
     /// 不是 tie-breaking，兩者不是同一個機制的兩種強度。
     var consumedSignals: Set<EventKind> { get }
 
+    /// 這個策略最多能把一筆結果移動幾個名次（雙向）。
+    ///
+    /// **在 protocol 上，不在各策略自己身上**（#1 verify R5）：R4 把前置條件與
+    /// 排列檢查提升成 seam 強制，卻把位移上限留在原地由各策略自願呼叫守衛。
+    /// 於是一個新策略可以把同帶五筆從 `[A,B,C,D,E]` 排成 `[E,A,B,C,D]`、
+    /// 據實回報位移 `[4,-1,-1,-1,-1]`，通過 public `rerank`——同一個檔案裡
+    /// 同一個缺陷只修了一半。spec 的「Displacement is bounded in both directions」
+    /// 是對**任何會重排的策略**下的全稱要求，所以執行點必須在 seam。
+    ///
+    /// `archival` 宣告 0（它從不重排）。tie-run 之類的額外條件仍由該策略自己加，
+    /// 那是**加**在這條之上，不是替代。
+    var displacementBound: Int { get }
+
     /// **實作點，不是呼叫點。** 呼叫端一律用 `rerank`。
     ///
-    /// 名字裡的 checked 指的是「呼叫它的人已經檢查過前置條件」：進到這裡時
-    /// base score 保證有限，離開之後排列性、帶保持與 displacement 誠實性
-    /// 會被無條件驗證。實作者不需要（也不應該）自己重複這些。
-    func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws
+    /// 參數型別是 `ValidatedCandidates` 而不是 `[Candidate]`，因為那個型別的
+    /// `init` 是 internal——模組外造不出它，也就呼叫不到這個方法。R5 指出
+    /// 上一版把它宣告成收 `[Candidate]` 的 public requirement，於是「不可繞過的
+    /// seam」被一行正常 API 呼叫繞過。
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
         -> [RankedResult]
 }
 
@@ -189,19 +240,23 @@ extension MemoryStrategy {
     /// 新策略只要不呼叫就完全不受約束——而 seam 的全部意義就是「不可繞過」。
     /// 那時的「入口」只是一個約定俗成的第一行。
     ///
-    /// **誠實邊界**：具體型別上若另外定義同名 `rerank`，對該具體型別的靜態
-    /// 呼叫會選到它自己的版本。擋得住的是「經由 seam 的呼叫」，擋不住「刻意
-    /// 繞過 seam 直接對具體型別下手」——後者與策略自己讀語料一樣，屬於 #14。
+    /// **誠實邊界**：擋得住的是**模組外**的呼叫端——`rerankChecked` 收的
+    /// `ValidatedCandidates` 只有 LTMQuery 內部造得出來。模組內部（含
+    /// `@testable` 測試）仍可繞過，具體型別上另外定義同名 `rerank` 也仍會被
+    /// 靜態呼叫選中。這兩者與「策略自建 reader 讀語料」同屬 #14。
     public func rerank(_ candidates: [Candidate], with projection: Projection) throws
         -> [RankedResult]
     {
         try MemoryStrategySupport.requireFiniteBaseScores(candidates)
-        let results = try rerankChecked(candidates, with: projection)
+        try MemoryStrategySupport.requireBandsInOrder(candidates)
+        let results = try rerankChecked(ValidatedCandidates(candidates), with: projection)
 
-        // 後置條件：回傳的必須是輸入的排列、必須保持帶、而且每一筆自報的
-        // displacement 必須等於實際的位置變化。
-        let placements = try RankingGuard.verifyPermutation(
-            original: candidates, reordered: results.map(\.candidate))
+        // 後置條件：排列性、帶保持、**位移上限**、以及每一筆自報的 displacement
+        // 等於實際的位置變化。上限走 `check` 而不是 `verifyPermutation`——R5：
+        // 上一版把上限留給各策略自願呼叫，於是它不受 seam 約束。
+        let placements = try RankingGuard.check(
+            original: candidates, reordered: results.map(\.candidate),
+            bound: displacementBound)
         for (result, placement) in zip(results, placements)
         where result.displacement != placement.displacement {
             throw StrategyViolation.misreportedDisplacement(

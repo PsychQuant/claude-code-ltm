@@ -25,9 +25,10 @@ public struct HumanLikeStrategy: MemoryStrategy {
         self.displacementBound = displacementBound
     }
 
-    public func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws
+    public func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
         -> [RankedResult]
     {
+        let candidates = input.candidates
         var reordered = candidates
 
         // 依帶切段後各自處理。段與段之間永遠不交換，所以帶的圍籬在演算法層
@@ -40,8 +41,10 @@ public struct HumanLikeStrategy: MemoryStrategy {
             start = end
         }
 
-        let placements = try RankingGuard.check(
-            original: candidates, reordered: reordered, bound: displacementBound)
+        // 只取 placements（位移計算）——**上限由 seam 執行**，不在這裡自願呼叫。
+        // R5：上一版每個策略各自呼叫 `check`，所以不呼叫的策略就不受約束。
+        let placements = try RankingGuard.verifyPermutation(
+            original: candidates, reordered: reordered)
 
         return placements.map { placement in
             RankedResult(

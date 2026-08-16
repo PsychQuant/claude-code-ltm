@@ -17,8 +17,10 @@ import Testing
 private struct TruncatingStrategy: MemoryStrategy {
     let id = RankingPolicyID("truncating")
     let consumedSignals: Set<EventKind> = []
-    func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
-        candidates.dropLast().map {
+    let displacementBound = 99
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws -> [RankedResult] {
+        let candidates = input.candidates
+        return candidates.dropLast().map {
             RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment)
         }
     }

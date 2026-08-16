@@ -96,29 +96,25 @@ public enum RankingGuard {
         return placements
     }
 
-    /// 給 tie-only 策略用的檢查：**不設位移上限，改為要求「只在等分區段內移動」**。
+    /// tie-only 策略的**額外**條件：每一筆只能在自己原本的等分區段內移動。
     ///
-    /// 為什麼需要一條不同的檢查而不是把 bound 放寬（#1 verify R3 的 CRITICAL）：
-    /// 先前 `ConservativeStrategy` 把 `widestTiedRun` 算出來當成自己的 bound 傳給
-    /// 守衛——**策略自己授權自己的上限**，於是守衛對它恆真、8 個平手候選可以整個
-    /// 反轉而不拋錯。那正是 design.md 說要防的「行為不合規的策略偽裝成合規」。
+    /// **它不收 bound，也不檢查幅度**——位移上限是 seam 對所有策略無條件執行的
+    /// （`MemoryStrategy.displacementBound`）。這一條只加它自己那個維度。
     ///
-    /// tie-run 約束是**額外**條件，不是位移上限的替代。
+    /// 這個簽章改過三次，三次都錯在同一件事——**讓被約束者提供約束值**：
+    /// R3 抓到 `ConservativeStrategy` 傳 `widestTiedRun`（守衛對它恆真）；
+    /// R4 換成 `max(original.count, 1)`（一個保證不會觸發的門檻，同一件事）；
+    /// R4 的第二次修法讓策略帶自己的 `displacementBound` 傳進來，而 R5 實測
+    /// 那個參數**沒有任何測試釘得住**——改回 `max(count,1)` 測試全綠，因為
+    /// 所有經由策略的測試都先被策略內部的有界重排壓住了幅度，守衛拿到什麼
+    /// 都不影響輸出。守衛存在的全部理由就是攔截不守規矩的實作，而那條路徑
+    /// 從來沒被驗證過。
     ///
-    /// R4 指出我上一版寫錯了兩次：註解說「這條約束比位移上限強，不是它的豁免」
-    /// ——**不成立**。它只在「能否跨越語意區段」這個維度更嚴格，在位移幅度這個
-    /// 維度完全不設限，兩者不可比較，所以那就是豁免。而實作傳
-    /// `bound: max(original.count, 1)`，一個**保證不會觸發**的門檻——正是 R3 判
-    /// CRITICAL 的「策略自己授權自己的上限」，只是從 `widestTiedRun` 換成
-    /// `original.count`，換個地方寫。
-    ///
-    /// 所以現在收一個真的上限。位移上限不只是「別推翻檢索的判斷」，也是穩定性
-    /// 與可稽核性——同一筆結果不該在兩次 session 之間跳七名，**那對平手區段
-    /// 一樣適用**。
+    /// 現在幅度不再經過這個簽章，那個洞在結構上關掉了。
     public static func checkTieRunsOnly(
-        original: [Candidate], reordered: [Candidate], bound: Int
+        original: [Candidate], reordered: [Candidate]
     ) throws -> [GuardedPlacement] {
-        let placements = try check(original: original, reordered: reordered, bound: bound)
+        let placements = try verifyPermutation(original: original, reordered: reordered)
 
         // 每一筆的原位置與新位置必須落在**同一個等分區段**內。
         let runID = tieRunIdentifiers(original)

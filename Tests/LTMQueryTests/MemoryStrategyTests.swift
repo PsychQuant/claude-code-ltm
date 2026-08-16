@@ -48,8 +48,10 @@ func projection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
 private struct IdentityProbe: MemoryStrategy {
     let id = RankingPolicyID("identity-probe")
     let consumedSignals: Set<EventKind> = []
-    func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
-        candidates.map { RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment) }
+    let displacementBound = 99
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws -> [RankedResult] {
+        let candidates = input.candidates
+        return candidates.map { RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment) }
     }
 }
 
@@ -87,11 +89,13 @@ private struct IdentityProbe: MemoryStrategy {
 private struct LyingStrategy: MemoryStrategy {
     let id = RankingPolicyID("lying")
     let consumedSignals: Set<EventKind> = []
-    func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws
+    let displacementBound = 99
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
         -> [RankedResult]
     {
+        let candidates = input.candidates
         // 順序原封不動，卻宣稱每一筆都上移了三名。
-        candidates.map { RankedResult(candidate: $0, displacement: 3, reason: .noAdjustment) }
+        return candidates.map { RankedResult(candidate: $0, displacement: 3, reason: .noAdjustment) }
     }
 }
 
@@ -99,10 +103,12 @@ private struct LyingStrategy: MemoryStrategy {
 private struct BandCrossingStrategy: MemoryStrategy {
     let id = RankingPolicyID("band-crossing")
     let consumedSignals: Set<EventKind> = []
-    func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws
+    let displacementBound = 99
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
         -> [RankedResult]
     {
-        candidates.reversed().map {
+        let candidates = input.candidates
+        return candidates.reversed().map {
             RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment)
         }
     }
@@ -133,5 +139,85 @@ private struct BandCrossingStrategy: MemoryStrategy {
     let bad = [Candidate(anchor: testAnchor("nan"), baseScore: .nan, band: RelevanceBand(rank: 0))]
     #expect(throws: StrategyViolation.nonFiniteBaseScore(testAnchor("nan"))) {
         _ = try LyingStrategy().rerank(bad, with: .empty(at: instant))
+    }
+}
+
+// MARK: - 位移上限與帶圍籬由 seam 執行（#1 verify R5）
+
+/// 誠實回報自己位移、但跳很遠的策略。宣告的上限是 1。
+///
+/// R5 的反例逐字版：把同帶五筆從 `[A,B,C,D,E]` 排成 `[E,A,B,C,D]`，回報
+/// `[4,-1,-1,-1,-1]`。上一版的 seam 只驗排列與 displacement 誠實性，兩者它都
+/// 通過——因為上限當時還留給各策略自願呼叫守衛。
+private struct FarJumpingStrategy: MemoryStrategy {
+    let id = RankingPolicyID("far-jumping")
+    let consumedSignals: Set<EventKind> = []
+    let displacementBound = 1
+
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        let candidates = input.candidates
+        var reordered = candidates
+        let last = reordered.removeLast()
+        reordered.insert(last, at: 0)
+        var index: [Anchor: Int] = [:]
+        for (i, c) in candidates.enumerated() { index[c.anchor] = i }
+        return reordered.enumerated().map { newIndex, candidate in
+            RankedResult(
+                candidate: candidate,
+                displacement: index[candidate.anchor]! - newIndex,  // 據實回報
+                reason: .noAdjustment)
+        }
+    }
+}
+
+@Test func theSeamEnforcesTheDisplacementBoundEvenWhenTheStrategyReportsItHonestly() {
+    let input = candidates(["a", "b", "c", "d", "e"])
+    #expect(throws: StrategyViolation.displacementBoundExceeded(bound: 1, attempted: 4)) {
+        _ = try FarJumpingStrategy().rerank(input, with: .empty(at: instant))
+    }
+}
+
+@Test func archivalDeclaresAZeroBoundSoAnyMovementWouldBeCaught() {
+    // 這一檔的「永遠不動」先前只是註解。現在 seam 用 `displacementBound = 0`
+    // 呼叫守衛，所以它是守衛會擋的事。
+    #expect(ArchivalStrategy().displacementBound == 0)
+}
+
+@Test func nonMonotonicBandsAreRejectedAtTheSeamEntry() {
+    // R5：守衛的帶圍籬是**逐位**比對，只在同一個帶形成單一連續區段時才等價於
+    // 「不得跨帶移動」。反例 `[A(0), B(1), C(0)]` → `[C, B, A]`：逐位帶序列
+    // 仍是 `[0,1,0]`、集合沒變、位移在上限內，全部放行——但 A 與 C 都跨過了 B。
+    // 與其把圍籬改成兩兩比較，不如在入口要求輸入有序：檢索本來就是照相關性
+    // 排出來的。
+    let outOfOrder = [
+        Candidate(anchor: testAnchor("a"), baseScore: 0.9, band: RelevanceBand(rank: 0)),
+        Candidate(anchor: testAnchor("b"), baseScore: 0.5, band: RelevanceBand(rank: 1)),
+        Candidate(anchor: testAnchor("c"), baseScore: 0.4, band: RelevanceBand(rank: 0)),
+    ]
+    #expect(throws: StrategyViolation.bandsOutOfOrder(at: 2)) {
+        _ = try HumanLikeStrategy().rerank(outOfOrder, with: .empty(at: instant))
+    }
+    // 三檔都必須擋——這是 seam 的前置條件，不是某一檔的自律。
+    #expect(throws: StrategyViolation.bandsOutOfOrder(at: 2)) {
+        _ = try ArchivalStrategy().rerank(outOfOrder, with: .empty(at: instant))
+    }
+    #expect(throws: StrategyViolation.bandsOutOfOrder(at: 2)) {
+        _ = try ConservativeStrategy().rerank(outOfOrder, with: .empty(at: instant))
+    }
+}
+
+@Test func theGuardWouldOtherwiseAcceptTheNonMonotonicBandSwap() throws {
+    // 把上一條的理由釘成事實：**守衛本身**確實會放行那個交換。沒有這條，
+    // 「入口前置條件是必要的」只是我的說法。
+    let original = [
+        Candidate(anchor: testAnchor("a"), baseScore: 0.9, band: RelevanceBand(rank: 0)),
+        Candidate(anchor: testAnchor("b"), baseScore: 0.5, band: RelevanceBand(rank: 1)),
+        Candidate(anchor: testAnchor("c"), baseScore: 0.4, band: RelevanceBand(rank: 0)),
+    ]
+    let swapped = [original[2], original[1], original[0]]
+    #expect(throws: Never.self, "守衛放行了跨帶移動——這正是入口要擋的原因") {
+        _ = try RankingGuard.check(original: original, reordered: swapped, bound: 2)
     }
 }

@@ -78,9 +78,10 @@ public struct ConservativeStrategy: MemoryStrategy {
         self.displacementBound = displacementBound
     }
 
-    public func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws
+    public func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
         -> [RankedResult]
     {
+        let candidates = input.candidates
         var reordered = candidates
 
         // 只在「同帶 + base score 完全相等」的連續區段內重排。區段之外一律不動。
@@ -105,20 +106,20 @@ public struct ConservativeStrategy: MemoryStrategy {
             start = end
         }
 
-        // **不設位移上限，改用更嚴格的檢查**：每一筆只能在自己原本的等分區段內
-        // 移動。
+        // tie-run 是**額外**條件：每一筆只能在自己原本的等分區段內移動。
+        // 位移上限**不在這裡**——它是 seam 對所有策略無條件執行的（R5）。
         //
-        // 先前這裡把 `widestTiedRun` 算出來當成自己的 bound 傳給守衛——**策略
-        // 自己授權自己的上限**，於是守衛對它恆真：#1 verify R3 實測 8 個平手候選
-        // 可以整個反轉、提升 7 名而不拋錯，正是 design.md 說要防的「行為不合規的
-        // 策略偽裝成合規」。而且那個上限取自**整份候選清單**的最寬區段，所以
-        // 一個 2 長區段裡的候選會被拿另一條帶的 8 長區段去檢查。
+        // 這段歷史留著，因為它被寫錯過兩次：R3 抓到這一檔把 `widestTiedRun`
+        // 當成自己的 bound 傳給守衛（**策略自己授權自己的上限**，守衛對它恆真、
+        // 8 個平手候選整個反轉不拋錯）；R4 的修法把它換成 `max(count, 1)`
+        // ——同一件事換個地方寫；R4 的第二次修法讓策略自己帶 bound 傳給守衛，
+        // 而 R5 實測那個參數**沒有任何測試釘住**（改回 `max(count,1)` 全綠），
+        // 因為所有經由策略的測試都已經被策略內部的有界重排壓住幅度了。
         //
-        // 正解不是放寬而是換一條更強的約束：base score 完全相等時檢索對先後
-        // **沒有表達任何偏好**，區段內任意重排都不牴觸相關性判斷；但跨區段
-        // 移動一格都不行。
+        // 三次都錯在同一個地方：**讓被約束者提供約束值**。現在上限由 seam 從
+        // protocol 讀，策略只提供它自己的額外條件。
         let placements = try RankingGuard.checkTieRunsOnly(
-            original: candidates, reordered: reordered, bound: displacementBound)
+            original: candidates, reordered: reordered)
 
         return placements.map { placement in
             reasoned(placement, in: projection)
