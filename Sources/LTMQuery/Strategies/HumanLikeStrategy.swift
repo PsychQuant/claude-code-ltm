@@ -80,35 +80,8 @@ public struct HumanLikeStrategy: MemoryStrategy {
     private func promoteWithinBand(
         _ items: inout [Candidate], range: Range<Int>, projection: Projection
     ) {
-        guard displacementBound > 0, range.count > 1 else { return }
-
-        // 每一輪由左往右掃一次相鄰對，強度較高者往前換；**每個元素每輪最多參與
-        // 一次交換**（`movedThisPass`）。因此單輪位移至多 1，跑 `bound` 輪之後
-        // 任一元素的位移至多 `bound`——**對稱上限由構造保證，兩個方向都是**。
-        //
-        // 這取代了先前那個「冒泡到上限、被越過方超額就放棄提升」的貪婪版本。
-        // 那一版的問題不是不安全，是會**楔住**：帶首一個沒有歷史的候選用完下移
-        // 預算之後，它上方的位置對所有後續候選永久封死。這裡沒有放棄規則，
-        // 每一輪都做得了的相鄰改善全部做掉，所以提升會散佈到整條帶上。
-        for _ in 0..<displacementBound {
-            var movedThisPass: Set<Anchor> = []
-            var i = range.lowerBound + 1
-            while i < range.upperBound {
-                let left = items[i - 1]
-                let right = items[i]
-                if projection.netStrength(for: right.anchor)
-                    > projection.netStrength(for: left.anchor),
-                    !movedThisPass.contains(left.anchor),
-                    !movedThisPass.contains(right.anchor)
-                {
-                    items.swapAt(i - 1, i)
-                    movedThisPass.insert(left.anchor)
-                    movedThisPass.insert(right.anchor)
-                }
-                i += 1
-            }
-            if movedThisPass.isEmpty { break }  // 已到不動點，剩下的輪次沒有意義
-        }
+        MemoryStrategySupport.boundedReorderByStrength(
+            &items, range: range, projection: projection, bound: displacementBound)
     }
 
     private func reason(for placement: GuardedPlacement, in projection: Projection) -> RankingReason {

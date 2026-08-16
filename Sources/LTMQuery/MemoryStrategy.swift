@@ -97,6 +97,42 @@ public enum MemoryStrategySupport {
             throw StrategyViolation.nonFiniteBaseScore(candidate.anchor)
         }
     }
+
+    /// 在一段連續區間內依強度做**有界**重排。
+    ///
+    /// 每一輪由左往右掃相鄰對，強度較高者往前換，且**每個元素每輪最多參與一次
+    /// 交換**。因此單輪位移至多 1，跑 `bound` 輪之後任一元素的位移至多 `bound`
+    /// ——雙向上限由構造保證。
+    ///
+    /// 這是 `human-like` 與 `conservative` **共用**的重排核心，兩檔的差別因此
+    /// 落在「餵給它哪些區間」：human-like 給整條相關性帶，conservative 只給
+    /// base score 完全相等的區段。**同機制、不同條件**——這句話原本只寫在註解裡，
+    /// 現在是 code 的形狀（#1 verify R4 指出原本的論證挑錯了證據，見
+    /// `ConservativeStrategy` 的說明）。
+    public static func boundedReorderByStrength(
+        _ items: inout [Candidate], range: Range<Int>, projection: Projection, bound: Int
+    ) {
+        guard bound > 0, range.count > 1 else { return }
+        for _ in 0..<bound {
+            var movedThisPass: Set<Anchor> = []
+            var i = range.lowerBound + 1
+            while i < range.upperBound {
+                let left = items[i - 1]
+                let right = items[i]
+                if projection.netStrength(for: right.anchor)
+                    > projection.netStrength(for: left.anchor),
+                    !movedThisPass.contains(left.anchor),
+                    !movedThisPass.contains(right.anchor)
+                {
+                    items.swapAt(i - 1, i)
+                    movedThisPass.insert(left.anchor)
+                    movedThisPass.insert(right.anchor)
+                }
+                i += 1
+            }
+            if movedThisPass.isEmpty { break }  // 已到不動點
+        }
+    }
 }
 
 /// 使用歷史能影響排序的**唯一**入口。

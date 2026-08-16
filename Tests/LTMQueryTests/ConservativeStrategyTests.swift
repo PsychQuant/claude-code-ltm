@@ -25,10 +25,17 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
 
 @Test func conservativeBreaksTiesByStrength() throws {
     let input = tiedCandidates(["a", "b", "c"])  // base score 全部相同
-    let output = try ConservativeStrategy()
+    // 有界重排**不會**完全排序：每個元素每輪最多移一格，所以 n 筆要完全倒序
+    // 需要約 n 輪。這不是缺陷，是上限的定義。
+    let output = try ConservativeStrategy(displacementBound: 3)
         .rerank(input, with: strengths([("c", 5), ("b", 2)]))
 
     #expect(output.map(\.candidate.anchor) == [testAnchor("c"), testAnchor("b"), testAnchor("a")])
+
+    // 預設上限下仍然有 tie-breaking，只是幅度受限——強者往前一格。
+    let bounded = try ConservativeStrategy().rerank(input, with: strengths([("c", 5), ("b", 2)]))
+    #expect(bounded.allSatisfy { abs($0.displacement) <= 1 })
+    #expect(bounded.map(\.candidate.anchor) != input.map(\.anchor), "預設上限下仍應有動作")
 }
 
 @Test func conservativeNeverReordersCandidatesWithDifferentBaseScores() throws {
@@ -55,18 +62,44 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
     #expect(humanLike.contains { $0.displacement > 0 })
 }
 
-@Test func conservativeIsNotHumanLikeWithBoundZero() throws {
-    // 反面確認：把 human-like 的上限調到 0 得不到 tie-breaking，只得到「什麼都不做」。
-    // 所以這兩檔的差別是機制，不是幅度——spec 的「策略由訊號集合定義、不由幅度
-    // 定義」那條規則因此沒有被違反。
+@Test func noBoundMakesHumanLikeBehaveLikeConservativeOnNonTiedInput() throws {
+    // **這才是「機制不是幅度」的證明。**
+    //
+    // #1 verify R4（devils-advocate 實測）：我先前的論證架在 bound=0 這一個值上
+    // ——「把 human-like 調到 0 得不到 tie-breaking」。那個點的性質由
+    // `guard bound > 0 ... else { return }` 這句 early return 直接保證，
+    // 證不了整個值域。DA 掃過 bound 0…6 後指出：**在全平手輸入上，bound 夠大時
+    // human-like 與 conservative 逐字相同**。所以在 conservative 唯一會作用的
+    // 那類輸入上，兩者的差別確實只是幅度。
+    //
+    // 可辯護的證據一直在旁邊：**base score 相異時，沒有任何 bound 能讓
+    // human-like 變成 conservative**——因為 conservative 在那裡完全不動，而
+    // human-like 只要 bound > 0 就會動。這是條件差異，不是幅度差異。
+    let nonTied = candidates(["a", "b", "c"])  // base score 互異
+    let projection = strengths([("c", 5)])
+
+    let conservative = try ConservativeStrategy().rerank(nonTied, with: projection)
+    #expect(conservative.allSatisfy { $0.displacement == 0 })
+
+    for bound in 0...6 {
+        let humanLike = try HumanLikeStrategy(displacementBound: bound).rerank(nonTied, with: projection)
+        let same = humanLike.map(\.candidate.anchor) == conservative.map(\.candidate.anchor)
+        // bound=0 時 human-like 也完全不動，那是 early return 而不是機制；
+        // 只要 bound > 0，兩者必然分歧。
+        #expect(same == (bound == 0), "bound \(bound)：非平手輸入上兩檔應分歧")
+    }
+}
+
+@Test func onAllTiedInputASufficientBoundDoesReproduceConservative() throws {
+    // 誠實記錄 DA 量到的事：在全平手輸入上，bound 夠大時 human-like 與
+    // conservative **逐字相同**。這條寫成斷言而不是註解，是為了讓下一個人
+    // 不會拿「機制不是幅度」去推導它推不出來的東西。
     let tied = tiedCandidates(["a", "b", "c"])
     let projection = strengths([("c", 5), ("b", 2)])
 
-    let boundZero = try HumanLikeStrategy(displacementBound: 0).rerank(tied, with: projection)
-    let conservative = try ConservativeStrategy().rerank(tied, with: projection)
-
-    #expect(boundZero.map(\.candidate.anchor) == tied.map(\.anchor))  // 完全不動
-    #expect(conservative.map(\.candidate.anchor) != tied.map(\.anchor))  // 有動
+    let humanLike = try HumanLikeStrategy(displacementBound: 3).rerank(tied, with: projection)
+    let conservative = try ConservativeStrategy(displacementBound: 3).rerank(tied, with: projection)
+    #expect(humanLike.map(\.candidate.anchor) == conservative.map(\.candidate.anchor))
 }
 
 @Test func conservativeStaysWithinItsRelevanceBand() throws {
@@ -103,7 +136,7 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
     let crossing = [input[0], input[2], input[1], input[3]]
 
     #expect(throws: StrategyViolation.movedAcrossTieRuns) {
-        _ = try RankingGuard.checkTieRunsOnly(original: input, reordered: crossing)
+        _ = try RankingGuard.checkTieRunsOnly(original: input, reordered: crossing, bound: 9)
     }
 }
 
@@ -114,10 +147,18 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
     let input = tiedCandidates(["a", "b", "c", "d", "e", "f", "g", "h"])
     let ascending = (0..<8).map { (["a", "b", "c", "d", "e", "f", "g", "h"][$0], Double($0)) }
 
-    let output = try ConservativeStrategy().rerank(input, with: strengths(ascending))
+    // R4：先前這條斷言 `displacement == 7`，也就是**整段反轉**——那正是 R3 判
+    // CRITICAL 的行為，只是換成由 `max(count,1)` 這個不會觸發的門檻放行。
+    // conservative 現在與 human-like 受同一個上限約束，所以整段反轉需要
+    // bound 夠大才做得到，而預設 bound 下只會做相鄰的 tie-breaking。
+    let wide = try ConservativeStrategy(displacementBound: 8)
+        .rerank(input, with: strengths(ascending))
+    #expect(wide.allSatisfy { abs($0.displacement) <= 8 })
+    #expect(wide.first?.candidate.anchor == testAnchor("h"), "最強者應排到區段首")
 
-    #expect(output.map(\.candidate.anchor) == input.map(\.anchor).reversed())
-    #expect(output.first?.displacement == 7)  // 完全反轉，區段內
+    let defaultBound = try ConservativeStrategy().rerank(input, with: strengths(ascending))
+    #expect(defaultBound.allSatisfy { abs($0.displacement) <= 1 }, "預設上限也必須被遵守")
+    #expect(defaultBound.map(\.candidate.anchor) != input.map(\.anchor).reversed())
 }
 
 @Test func conservativeDoesNotHangOnNonFiniteBaseScores() throws {

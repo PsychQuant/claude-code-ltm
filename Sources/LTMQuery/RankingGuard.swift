@@ -89,16 +89,22 @@ public enum RankingGuard {
     /// 守衛——**策略自己授權自己的上限**，於是守衛對它恆真、8 個平手候選可以整個
     /// 反轉而不拋錯。那正是 design.md 說要防的「行為不合規的策略偽裝成合規」。
     ///
-    /// 正解是給它一條**更嚴格而非更寬鬆**的檢查：base score 完全相等時，檢索對
-    /// 這幾筆的先後**沒有表達任何偏好**，所以在區段內任意重排都不牴觸相關性判斷；
-    /// 但跨區段移動一格都不行。這條約束比位移上限強，不是它的豁免。
+    /// tie-run 約束是**額外**條件，不是位移上限的替代。
+    ///
+    /// R4 指出我上一版寫錯了兩次：註解說「這條約束比位移上限強，不是它的豁免」
+    /// ——**不成立**。它只在「能否跨越語意區段」這個維度更嚴格，在位移幅度這個
+    /// 維度完全不設限，兩者不可比較，所以那就是豁免。而實作傳
+    /// `bound: max(original.count, 1)`，一個**保證不會觸發**的門檻——正是 R3 判
+    /// CRITICAL 的「策略自己授權自己的上限」，只是從 `widestTiedRun` 換成
+    /// `original.count`，換個地方寫。
+    ///
+    /// 所以現在收一個真的上限。位移上限不只是「別推翻檢索的判斷」，也是穩定性
+    /// 與可稽核性——同一筆結果不該在兩次 session 之間跳七名，**那對平手區段
+    /// 一樣適用**。
     public static func checkTieRunsOnly(
-        original: [Candidate], reordered: [Candidate]
+        original: [Candidate], reordered: [Candidate], bound: Int
     ) throws -> [GuardedPlacement] {
-        // 先借用主檢查做帶／排列驗證；位移上限給一個不可能觸發的值，因為這條
-        // 路徑不靠它把關——真正的把關在下面。
-        let placements = try check(
-            original: original, reordered: reordered, bound: max(original.count, 1))
+        let placements = try check(original: original, reordered: reordered, bound: bound)
 
         // 每一筆的原位置與新位置必須落在**同一個等分區段**內。
         let runID = tieRunIdentifiers(original)

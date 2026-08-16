@@ -19,11 +19,23 @@ import LTMCore
 ///
 /// ## 它與 human-like 的差別是「何時作用」，不是「作用多強」
 ///
-/// 這一點值得說清楚，因為 spec 寫的是「策略由消費的訊號集合定義，不由調整幅度
-/// 定義」。`conservative` 消費的訊號與 `human-like` 相同，差別在**條件**：
-/// tie-breaker 永遠不改變 base score 不同的兩筆之間的順序，human-like 會。
-/// 那是機制差異，不是強度差異——把 bound 調到 0 也得不到 tie-breaking，
-/// 只會得到「什麼都不做」。
+/// `conservative` 消費的訊號與 `human-like` 相同（兩檔用的甚至是**同一個**
+/// 有界重排核心 `MemoryStrategySupport.boundedReorderByStrength`），差別在
+/// **餵給它哪些區間**：human-like 給整條相關性帶，這一檔只給 base score
+/// 完全相等的區段。
+///
+/// **證據在非平手側，不在 bound=0。**（#1 verify R4 指正）我原本的論證是
+/// 「把 human-like 的 bound 調到 0 得不到 tie-breaking」——那個點的性質由
+/// 一句 early return 直接保證，證不了整個值域。DA 實測掃過 bound 0…6 後指出：
+/// **在全平手輸入上，bound 夠大時 human-like 與 conservative 逐字相同**。
+/// 所以在這一檔唯一會作用的那類輸入上，兩者的差別確實只是幅度。
+///
+/// 真正的證據一直在旁邊：**base score 相異時，沒有任何 bound 能讓 human-like
+/// 變成 conservative**——這一檔在那裡完全不動，而 human-like 只要 bound > 0
+/// 就會動。那是條件差異。兩條事實都寫成了測試
+/// （`noBoundMakesHumanLikeBehaveLikeConservativeOnNonTiedInput` 與
+/// `onAllTiedInputASufficientBoundDoesReproduceConservative`），後者刻意把
+/// 「幅度確實能重現」也釘住，免得下一個人拿前者去推導它推不出來的東西。
 ///
 /// ## 這一檔的存廢完全取決於「平手到底常不常見」
 ///
@@ -54,7 +66,17 @@ public struct ConservativeStrategy: MemoryStrategy {
     public let id = RankingPolicyID("conservative")
     public let consumedSignals: Set<EventKind> = [.opened, .cited, .pinned, .dismissed]
 
-    public init() {}
+    /// 與 `human-like` 同一個上限，預設同樣是 1 且同樣是 provisional。
+    ///
+    /// R4：先前這一檔**沒有**上限參數，而守衛收到的是 `max(count, 1)`——一個
+    /// 保證不會觸發的門檻。位移上限不只是「別推翻檢索」，也是穩定性與可稽核性，
+    /// 那對平手區段一樣適用，所以沒有理由豁免。
+    public let displacementBound: Int
+
+    public init(displacementBound: Int = 1) {
+        precondition(displacementBound >= 0, "位移上限不得為負")
+        self.displacementBound = displacementBound
+    }
 
     public func rerank(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
         try MemoryStrategySupport.requireFiniteBaseScores(candidates)
@@ -74,16 +96,11 @@ public struct ConservativeStrategy: MemoryStrategy {
                 reordered[end].baseScore == reordered[start].baseScore
             { end += 1 }
 
-            if end - start > 1 {
-                let tied = Array(reordered[start..<end])
-                // 穩定排序：強度高者在前，同強度維持原順序。
-                let sorted = tied.enumerated().sorted { lhs, rhs in
-                    let a = projection.netStrength(for: lhs.element.anchor)
-                    let b = projection.netStrength(for: rhs.element.anchor)
-                    return a == b ? lhs.offset < rhs.offset : a > b
-                }.map(\.element)
-                reordered.replaceSubrange(start..<end, with: sorted)
-            }
+            // 與 human-like **共用**同一個有界重排核心，只是餵給它的區間不同：
+            // human-like 給整條帶，這裡只給 base score 完全相等的區段。
+            MemoryStrategySupport.boundedReorderByStrength(
+                &reordered, range: start..<end, projection: projection,
+                bound: displacementBound)
             start = end
         }
 
@@ -100,7 +117,7 @@ public struct ConservativeStrategy: MemoryStrategy {
         // **沒有表達任何偏好**，區段內任意重排都不牴觸相關性判斷；但跨區段
         // 移動一格都不行。
         let placements = try RankingGuard.checkTieRunsOnly(
-            original: candidates, reordered: reordered)
+            original: candidates, reordered: reordered, bound: displacementBound)
 
         return placements.map { placement in
             reasoned(placement, in: projection)
