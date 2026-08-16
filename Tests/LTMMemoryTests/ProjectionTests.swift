@@ -202,7 +202,16 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     // 反向對照：exit test 只證明「會死」，不證明它死得有道理。
     let p = ProjectionParameters()
     #expect(p.decayExponent > 0)
-    #expect(ProjectionParameters(decayExponent: 0).decayExponent == 0)
+    #expect(ProjectionParameters(decayExponent: 0.25).decayExponent == 0.25)
+}
+
+@Test func aZeroDecayExponentIsRejected() async {
+    // R7：`pow(1 + ageDays, -0) == 1`，完全沒有衰減——而 spec 的 SHALL 是
+    // 「同一事件於較晚時點必須嚴格較小」。先前這個值被明確斷言為合法，
+    // 也就是一個合法的 `human-like` 設定可以移除它命名的核心機制。
+    await #expect(processExitsWith: .failure) {
+        _ = ProjectionParameters(decayExponent: 0)
+    }
 }
 
 

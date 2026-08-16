@@ -1,5 +1,18 @@
 ## ADDED Requirements
 
+### Requirement: What this change makes pluggable, and what it does not
+
+The pluggable axis introduced here is **reranking**: a strategy receives an ordered candidate list and a projection, and returns a reordering. The **projection formula is not on that axis**. Decay shape, per-event-kind weights, and the reduction of an event sequence to `reinforcement` and `suppression` are computed by a single shared function before any strategy is selected, and both arms of a comparison receive the same projection object.
+
+A strategy's declared `consumedSignals` therefore describes which signals it takes into account when reordering; it does not constrain how the projection was computed. A strategy that wanted a different decay shape, a different weighting, or the raw per-kind timing could not express it: the aggregation is lossy and happens upstream.
+
+This is a real limitation of the interface shape, not merely of the implementation, and it is recorded here rather than left to be rediscovered. Issue #1 asks that the memory model not be a hard-wired architectural premise; for the *ordering* layer this change delivers that, and for the *projection* layer it does not. Widening the axis — passing strategy-neutral evidence that preserves event kind and timestamp, or letting one policy describe both projection and reranking — is a separate interface change.
+
+#### Scenario: Two strategies in one comparison share a projection
+
+- **WHEN** the interleaving harness compares two strategies
+- **THEN** both receive the same projection value, computed once by the shared projection function
+
 ### Requirement: MemoryStrategy is the sole seam between retrieval and memory
 
 The system SHALL expose exactly one abstraction through which usage history influences result ordering. That abstraction SHALL take an ordered candidate list carrying base scores and relevance bands, together with a projection of per-anchor statistics, and SHALL return a reordered result list. Retrieval SHALL NOT read the event store directly, and no strategy SHALL read the corpus directly.

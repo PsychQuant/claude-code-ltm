@@ -42,6 +42,14 @@ public struct ProjectionParameters: Sendable, Equatable {
             precondition(value.isFinite, "ProjectionParameters.\(name) 必須是有限值，實得 \(value)")
             precondition(value >= 0, "ProjectionParameters.\(name) 不得為負，實得 \(value)")
         }
+        // **指數必須嚴格為正。** `pow(1 + ageDays, -0) == 1`，也就是完全沒有衰減
+        // ——而 spec 的 SHALL 是「同一事件於較晚時點必須嚴格較小」，那條需求存在的
+        // 理由逐字是「否則一個線性計數、從不讀 timestamp 的實作也滿足所有其他
+        // scenario」。零值讓一個合法的 `human-like` 設定移除掉它命名的核心機制
+        // （#1 verify R7）。要「關掉衰減」得是另一個策略身分，不是這一檔的參數值。
+        precondition(
+            decayExponent > 0,
+            "ProjectionParameters.decayExponent 必須 > 0（0 等於關閉衰減），實得 \(decayExponent)")
         self.decayExponent = decayExponent
         self.openedWeight = openedWeight
         self.citedWeight = citedWeight
