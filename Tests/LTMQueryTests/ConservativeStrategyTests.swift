@@ -118,7 +118,7 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
     let p = Projection(statistics: [:], instant: instant, orphanedAnchors: [testAnchor("b")])
     let output = try ConservativeStrategy().rerank(input, with: p)
 
-    #expect(output.first { $0.candidate.anchor == testAnchor("b") }?.reason == .orphanedHistoryIgnored)
+    #expect(output.first { $0.candidate.anchor == testAnchor("b") }?.reason.history == .orphaned)
 }
 
 @Test func conservativeCannotMoveACandidateOutOfItsTieRun() throws {
@@ -189,13 +189,20 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
     #expect(output.map(\.candidate.anchor) == [testAnchor("b"), testAnchor("a")])
 }
 
-@Test func offTiesConservativeIsByteForByteArchival() throws {
-    // spec 說「off ties 兩者可證相同」，而先前被拿來當證據的那條測試**從頭到尾
-    // 沒有呼叫 archival**（#1 verify R4，devils-advocate）。這條真的把兩邊都跑
-    // 一次再比——包含 reason 與 displacement，不只順序。
+@Test func offTiesConservativeMatchesArchivalInOrderButNotInReason() throws {
+    // **「off ties 兩者可證相同」這句話是錯的，而且是這條測試自己抓到的。**
     //
-    // 這件事也是 conservative 這一檔有沒有用的全部關鍵：它的價值完全等於
-    // 「精確平手多常發生」，而那個比率在本語料上**還沒量過**（#18）。
+    // 經過（值得記下來，因為結論比原本的宣稱窄）：R4 的 DA 指出 spec 說
+    // 「provably identical off ties」卻沒有任何測試呼叫過 archival。我補了一條
+    // 直接比對**完整** `RankedResult` 的測試，它當時綠燈——因為那時 reason 的
+    // 值域讓兩者剛好一致。R5 把 reason 拆成 (history, movement) 兩軸之後這條
+    // 立刻變紅，而紅得有道理：`conservative` 會回報它查到的歷史
+    // （`history: .counted(...)`），`archival` 依契約**永遠不看 projection**，
+    // 所以永遠是 `.none`。
+    //
+    // 正確的宣稱因此是：**順序與位移相同，reason 不同**。前者才是「這一檔在
+    // 非平手輸入上不改變檢索判斷」的意思；後者是刻意的——archival 是對照組，
+    // 它的輸出必須與 projection 無關。
     let nonTied = candidates(["a", "b", "c", "d"])
     let projection = strengths([("d", 100), ("c", 50), ("b", 10)])
 
@@ -203,7 +210,13 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
         .rerank(nonTied, with: projection)
     let archival = try ArchivalStrategy().rerank(nonTied, with: projection)
 
-    #expect(conservative == archival)
+    #expect(conservative.map(\.candidate) == archival.map(\.candidate))
+    #expect(conservative.allSatisfy { $0.displacement == 0 })
+    #expect(archival.allSatisfy { $0.displacement == 0 })
+
+    // 而 reason **必須**不同——這是 archival 作為對照組的定義，不是瑕疵。
+    #expect(conservative.map(\.reason) != archival.map(\.reason))
+    #expect(archival.allSatisfy { $0.reason.history == RankingReason.History.none })
 }
 
 @Test func onTiesConservativeIsNotArchival() throws {

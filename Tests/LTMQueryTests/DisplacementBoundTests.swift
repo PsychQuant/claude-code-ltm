@@ -76,8 +76,9 @@ private func multiStrengthProjection(_ entries: [(Anchor, Double)]) -> Projectio
 
     let a = output.first { $0.candidate.anchor == testAnchor("a") }!
     #expect(a.displacement == -1)
-    // `positions` 與 displacement 同號：負數代表下沉。
-    #expect(a.reason == .displacedByPeers(positions: -1))
+    // 兩個軸分開讀：a 自己沒有計入的歷史，而它下移了一名。
+    #expect(a.reason.history == RankingReason.History.none)
+    #expect(a.reason.movement == .receded(positions: 1))
 }
 
 @Test func aCandidatePromotedBecauseAPeerSankAlsoSaysWhyItMoved() throws {
@@ -98,7 +99,8 @@ private func multiStrengthProjection(_ entries: [(Anchor, Double)]) -> Projectio
     let b = output.first { $0.candidate.anchor == testAnchor("b") }!
 
     #expect(b.displacement == 1, "b 沒有歷史，但 a 被壓低所以 b 相對上移")
-    #expect(b.reason == .displacedByPeers(positions: 1))
+    #expect(b.reason.history == RankingReason.History.none)
+    #expect(b.reason.movement == .advanced(positions: 1))
 }
 
 @Test func onePromotionIsTheOptimumWhenOnlyTheHeadIsMisplaced() throws {

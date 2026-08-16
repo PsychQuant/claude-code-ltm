@@ -26,27 +26,84 @@ public struct Candidate: Sendable, Equatable {
 }
 
 /// 某筆結果為何在它現在的位置。
-public enum RankingReason: Sendable, Equatable {
-    /// 沒有套用任何調整，且位置也沒變。
-    case noAdjustment
-    /// 被使用歷史上推。`signals` 指名是哪些事件促成的。
-    case adjusted(signals: [EventKind: Int], netStrength: Double)
-    /// **自己沒有歷史，位置變動來自鄰居的移動。**
-    ///
-    /// `positions` 與 `displacement` 同號：正數代表相對上移、負數代表下沉。
-    ///
-    /// #1 verify R3：先前這種情形回報 `.noAdjustment`，於是一筆下移三名的結果
-    /// 同時聲稱「移動了三名」與「沒有套用任何調整」。
-    ///
-    /// #1 verify R4：修法寫成 `positions: -displacement`，**假設沒有歷史的候選
-    /// 只會往下移**。錯了——`dismissed` 讓鄰居的 netStrength 變負，於是沒有歷史
-    /// 的候選會相對**上移**，而 reason 回報 `positions: -1`。實測：`a` 帶
-    /// `dismissed: 5`、`b` 無歷史 → b 上移一名、reason 說它被擠下 −1 名。
-    /// **修法在它所修的那個缺陷的鏡像上重演了同一件事**：reason 描述的與實際
-    /// 發生的相反。改為與 displacement 同號，語意由文件說明方向。
-    case displacedByPeers(positions: Int)
-    /// 有歷史，但 anchor 已 orphan，所以歷史不計入。
-    case orphanedHistoryIgnored
+///
+/// ## 兩個**正交**的軸，不是一個列舉
+///
+/// 這個型別被同一類缺陷咬了三輪，每一輪都是同一個原因：把「這一筆自己的歷史
+/// 處於什麼狀態」與「它相對純檢索順序移動了沒有」擠進一個 enum，於是每個
+/// case 都在同時宣稱兩件事，而其中一件常常是錯的。
+///
+/// - **R3**：下移三名的候選回報 `.noAdjustment`——同時聲稱「移動了三名」與
+///   「沒有套用任何調整」。
+/// - **R4**：修法寫成 `positions: -displacement`，假設沒有歷史的候選只會下移。
+///   錯了——`dismissed` 讓鄰居的 netStrength 變負，於是它會相對**上移**，
+///   而 reason 回報負數。修法在自己所修缺陷的鏡像上重演了同一件事。
+/// - **R5**：兩個變體同時還在。(a) 自己有正向歷史、卻被更強的鄰居壓下去的
+///   候選收到 `.adjusted`，而那個 case 的 doc 逐字寫「**被使用歷史上推**」；
+///   (b) orphan 分支在最上面無條件 return，於是一筆實際被鄰居擠動的 orphan
+///   只回報「歷史不計入」，沒有方向、也沒有說明它為何移動；(c) reinforcement 2
+///   與 suppression 2 相抵的候選被歸進「自己沒有歷史」那一支。
+///
+/// 三輪都在補 case，而缺陷是**結構**：一個值域無法忠實表達兩個獨立的事實。
+/// 所以改成兩個欄位。
+///
+/// ## 刻意不宣稱因果
+///
+/// `Movement` 只說方向與幅度，不說「因為誰」。這是誠實邊界：一筆候選上移，
+/// 可能是自己的歷史夠強、可能是鄰居被 `dismissed` 壓下去、也可能兩者都有份，
+/// 而有界重排的逐輪交換不保留足以區分它們的資訊。上一版硬要在標籤裡回答
+/// 「因為誰」，三輪的錯都出在那個回答上。`history` 給出這一筆自己的訊號，
+/// `movement` 給出實際發生的位移，消費端要下因果結論時自己承擔。
+public struct RankingReason: Sendable, Equatable {
+    /// 這一筆**自己的**使用歷史處於什麼狀態。
+    public enum History: Sendable, Equatable {
+        /// 沒有計入的歷史。**包含「有事件但淨強度為零」**（例如 reinforcement 與
+        /// suppression 相抵）——所以它的語意是「歷史沒有讓它動」，不是「從沒被用過」。
+        case none
+        /// 有計入的歷史。`signals` 指名是哪些事件。
+        case counted(signals: [EventKind: Int], netStrength: Double)
+        /// 有歷史，但 anchor 已 orphan，所以不計入。
+        case orphaned
+    }
+
+    /// 相對於純檢索順序，它移動了沒有、往哪邊。
+    public enum Movement: Sendable, Equatable {
+        case unmoved
+        /// 上移（索引變小）。`positions` 為正。
+        case advanced(positions: Int)
+        /// 下移。`positions` 為正，方向由 case 本身表達。
+        case receded(positions: Int)
+    }
+
+    public let history: History
+    public let movement: Movement
+
+    public init(history: History, movement: Movement) {
+        self.history = history
+        self.movement = movement
+    }
+
+    /// 由 projection 與實際位移組出 reason。**所有策略共用這一條**——
+    /// 三檔各自寫一份 switch 正是前三輪變體長出來的地方。
+    public static func describing(
+        _ anchor: Anchor, displacement: Int, in projection: Projection
+    ) -> RankingReason {
+        let history: History
+        if projection.isOrphaned(anchor) {
+            history = .orphaned
+        } else if let stats = projection[anchor], stats.netStrength != 0 {
+            history = .counted(signals: stats.deliberateCounts, netStrength: stats.netStrength)
+        } else {
+            history = .none
+        }
+
+        let movement: Movement =
+            displacement > 0
+            ? .advanced(positions: displacement)
+            : (displacement < 0 ? .receded(positions: -displacement) : .unmoved)
+
+        return RankingReason(history: history, movement: movement)
+    }
 }
 
 /// 重排後的一筆結果。

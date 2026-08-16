@@ -12,7 +12,7 @@ import Testing
 
     #expect(output.map(\.candidate.anchor) == input.map(\.anchor))
     #expect(output.allSatisfy { $0.displacement == 0 })
-    #expect(output.allSatisfy { $0.reason == .noAdjustment })
+    #expect(output.allSatisfy { $0.reason == RankingReason(history: .none, movement: .unmoved) })
 }
 
 @Test func archivalIgnoresUsageHistoryEntirely() throws {
@@ -45,10 +45,11 @@ import Testing
 
     let result = output[citedIndex]
     #expect(result.displacement > 0)
-    guard case .adjusted(let signals, let net) = result.reason else {
-        Issue.record("預期 adjusted reason，實得 \(result.reason)")
+    guard case .counted(let signals, let net) = result.reason.history else {
+        Issue.record("預期 counted history，實得 \(result.reason.history)")
         return
     }
+    #expect(result.reason.movement == .advanced(positions: result.displacement))
     #expect(signals[.cited] == 3)  // reason 必須指名是引用促成的
     #expect(net > 0)
 }
@@ -153,13 +154,13 @@ private struct RogueStrategy: MemoryStrategy {
         case .crossBand:
             let reordered = Array(candidates.reversed())  // 把第 1 帶推到第 0 帶前面
             return try RankingGuard.check(original: candidates, reordered: reordered, bound: 99)
-                .map { RankedResult(candidate: $0.candidate, displacement: $0.displacement, reason: .noAdjustment) }
+                .map { RankedResult(candidate: $0.candidate, displacement: $0.displacement, reason: RankingReason(history: .none, movement: .unmoved)) }
         case .jumpFourPlaces(let bound):
             var reordered = candidates
             let moved = reordered.remove(at: 4)
             reordered.insert(moved, at: 0)
             return try RankingGuard.check(original: candidates, reordered: reordered, bound: bound)
-                .map { RankedResult(candidate: $0.candidate, displacement: $0.displacement, reason: .noAdjustment) }
+                .map { RankedResult(candidate: $0.candidate, displacement: $0.displacement, reason: RankingReason(history: .none, movement: .unmoved)) }
         }
     }
 }

@@ -14,15 +14,36 @@ The system SHALL expose exactly one abstraction through which usage history infl
 - **WHEN** a strategy returns its result list
 - **THEN** the returned list is a permutation of the input candidates, with no candidate added and none removed
 
-### Requirement: Every result carries displacement and reason
+### Requirement: Every result carries displacement and a reason with two independent axes
 
-Each returned result SHALL carry its position displacement relative to the input candidate order and a reason describing why it moved. A result whose displacement is zero SHALL carry a reason indicating that no adjustment was applied.
+Each returned result SHALL carry its position displacement relative to the input candidate order, and a reason composed of **two independent fields**:
+
+- **history** — the state of *this candidate's own* recorded history: none (including a history whose net strength is zero), counted (naming the contributing signals), or orphaned.
+- **movement** — whether the candidate is unmoved, advanced, or receded relative to pure retrieval order, and by how many positions.
+
+The two SHALL NOT be collapsed into a single value. Three successive review rounds found a defect of the same class in a single-value encoding — a result that had moved reporting "no adjustment"; a candidate promoted by a sinking peer reporting a negative displacement; a candidate with positive history that was pushed down reporting that its history had promoted it; an orphan that moved reporting only that its history was ignored. Each round added a case; the defect was that one value cannot state two independent facts.
+
+The reason SHALL NOT assert a *cause* for the movement. A candidate can advance because its own history is strong, because a neighbour was suppressed, or both, and a bounded reordering does not retain enough information to distinguish them. Naming the signals and stating the direction is what the implementation can support; attributing the cause is not.
+
+The `archival` strategy is the exception to consulting history at all: its reason SHALL report history as none regardless of the projection, because its contract is to produce identical output for every projection.
 
 #### Scenario: Reason names the contributing events
 
 - **GIVEN** an anchor whose projection includes three `cited` events
 - **WHEN** a strategy moves that anchor upward
-- **THEN** the result's reason names the citation signal as the contributing cause
+- **THEN** the result's history field names the citation signal and its movement field reports the advance
+
+#### Scenario: A candidate with its own history that is pushed down says it receded
+
+- **GIVEN** a band of two where both candidates have positive history and the second is stronger
+- **WHEN** `human-like` reorders the band
+- **THEN** the first candidate's history reports its own counted signals and its movement reports a recession
+
+#### Scenario: An orphan that moved reports both facts
+
+- **GIVEN** a band of two where the first anchor is orphaned and the second has recorded history
+- **WHEN** `human-like` reorders the band
+- **THEN** the first candidate's history reports orphaned and its movement reports a recession
 
 ### Requirement: The archival strategy performs no reordering
 
@@ -119,7 +140,7 @@ Three strategies ship:
 
 Both strategies are subject to the displacement bound. `conservative` is not exempt: an earlier draft passed the guard a threshold that could never fire, which is the same defect as a strategy authorising its own bound. The tie-run constraint is an **additional** condition, not a substitute — it is stricter about which candidates may be reordered and says nothing about how far, so the two constraints are incomparable and both must hold.
 
-**Whether `conservative` is distinguishable from `archival` in practice is unmeasured, and this specification does not assume it is.** Off ties the two are provably identical, so the tier's usefulness reduces entirely to how often exact ties occur. Ties are structurally guaranteed to be possible — reciprocal rank fusion assigns `1/(k + rank)` per contributing list, so two candidates each appearing in exactly one list at the same rank score identically — but the *rate* has not been measured on this corpus. Until it is, no artifact may claim the tier "hits in practice".
+**Whether `conservative` is distinguishable from `archival` in practice is unmeasured, and this specification does not assume it is.** Off ties the two produce the same order and the same displacements; their reasons differ, because `conservative` reports the history it consulted and `archival` reports none by contract. An earlier draft said "provably identical", which was false in the reason field — the test that now pins this was green under the previous single-value reason encoding and went red the moment the encoding was corrected. The tier's usefulness therefore reduces entirely to how often exact ties occur. Ties are structurally guaranteed to be possible — reciprocal rank fusion assigns `1/(k + rank)` per contributing list, so two candidates each appearing in exactly one list at the same rank score identically — but the *rate* has not been measured on this corpus. Until it is, no artifact may claim the tier "hits in practice".
 
 #### Scenario: Two bounds do not constitute two strategies
 

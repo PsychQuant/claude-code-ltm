@@ -23,8 +23,14 @@ public struct ArchivalStrategy: MemoryStrategy {
         // 前置條件對三檔一致：非有限 base score 在 seam 入口就擋掉，不因為這一檔
         // 不重排就放行——放行會讓「哪一檔會擋」變成呼叫端要記得的事。
         // 連看都不看 projection。這不是省事，是定義。
+        // reason 也一樣不看 projection：`history: .none` 是這一檔的定義，
+        // 不是「這一筆剛好沒有歷史」。**刻意不用 `RankingReason.describing`**
+        // ——那個函式會讀 projection，而 archival 的契約是「不論給它什麼
+        // projection 都產出相同輸出」，讀了就破壞它作為對照組的性質。
         return input.candidates.map {
-            RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment)
+            RankedResult(
+                candidate: $0, displacement: 0,
+                reason: RankingReason(history: .none, movement: .unmoved))
         }
     }
 }

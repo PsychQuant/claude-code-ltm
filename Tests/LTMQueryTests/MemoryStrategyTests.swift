@@ -51,7 +51,7 @@ private struct IdentityProbe: MemoryStrategy {
     let displacementBound = 99
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws -> [RankedResult] {
         let candidates = input.candidates
-        return candidates.map { RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment) }
+        return candidates.map { RankedResult(candidate: $0, displacement: 0, reason: RankingReason(history: .none, movement: .unmoved)) }
     }
 }
 
@@ -70,7 +70,7 @@ private struct IdentityProbe: MemoryStrategy {
     // 零位移也必須有 reason——「沒調整」是一個要被說出口的事實，不是空白。
     for result in output {
         #expect(result.displacement == 0)
-        #expect(result.reason == .noAdjustment)
+        #expect(result.reason == RankingReason(history: .none, movement: .unmoved))
     }
 }
 
@@ -95,7 +95,7 @@ private struct LyingStrategy: MemoryStrategy {
     {
         let candidates = input.candidates
         // 順序原封不動，卻宣稱每一筆都上移了三名。
-        return candidates.map { RankedResult(candidate: $0, displacement: 3, reason: .noAdjustment) }
+        return candidates.map { RankedResult(candidate: $0, displacement: 3, reason: RankingReason(history: .none, movement: .unmoved)) }
     }
 }
 
@@ -109,7 +109,7 @@ private struct BandCrossingStrategy: MemoryStrategy {
     {
         let candidates = input.candidates
         return candidates.reversed().map {
-            RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment)
+            RankedResult(candidate: $0, displacement: 0, reason: RankingReason(history: .none, movement: .unmoved))
         }
     }
 }
@@ -167,7 +167,7 @@ private struct FarJumpingStrategy: MemoryStrategy {
             RankedResult(
                 candidate: candidate,
                 displacement: index[candidate.anchor]! - newIndex,  // 據實回報
-                reason: .noAdjustment)
+                reason: RankingReason(history: .none, movement: .unmoved))
         }
     }
 }

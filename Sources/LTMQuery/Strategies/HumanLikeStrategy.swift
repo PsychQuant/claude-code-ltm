@@ -88,29 +88,14 @@ public struct HumanLikeStrategy: MemoryStrategy {
             &items, range: range, projection: projection, bound: displacementBound)
     }
 
+    /// **三檔共用 `RankingReason.describing`**，不再各寫一份 switch。
+    ///
+    /// 各寫一份正是 R3／R4／R5 三輪變體長出來的地方：修好其中一份，另一份原封
+    /// 不動。現在方向與歷史狀態由同一個函式從 (anchor, displacement, projection)
+    /// 導出，三檔不可能不一致。
     private func reason(for placement: GuardedPlacement, in projection: Projection) -> RankingReason {
-        // 先問 orphan。design.md 承諾 orphan「never silently treated as a normal
-        // miss」，而先前的實作把它報成 `.noAdjustment`——註解自己都寫了「分不出來」。
-        // 分不出來是因為 projection 沒把這件事帶出來，不是因為它不可知。
-        if projection.isOrphaned(placement.candidate.anchor) {
-            return .orphanedHistoryIgnored
-        }
-        guard let stats = projection[placement.candidate.anchor], stats.netStrength != 0 else {
-            // 沒有歷史。位置沒變 → 誠實的「沒有調整」；位置變了 → 是被有歷史的
-            // 鄰居超車擠下來的，必須說出來。先前這裡一律回 `.noAdjustment`，
-            // 於是一筆下移三名的結果同時聲稱「移動了三名」與「沒有套用任何調整」
-            // （#1 verify R3）。
-            return placement.displacement == 0
-                ? .noAdjustment
-                : .displacedByPeers(positions: placement.displacement)
-        }
-        // spec：「A result whose displacement is zero SHALL carry a reason
-        // indicating that no adjustment was applied.」先前寫成「位移為 0 **且**
-        // 強度為 0 才報 noAdjustment」，於是「有強度但沒動」會報 `.adjusted`
-        // ——而那個組合正因為 R1 的「放棄提升」修法而變得常見（#1 verify R2）。
-        //
-        // 判準只看位移：沒動就是沒調整，不管背後有多少歷史。
-        guard placement.displacement != 0 else { return .noAdjustment }
-        return .adjusted(signals: stats.deliberateCounts, netStrength: stats.netStrength)
+        RankingReason.describing(
+            placement.candidate.anchor, displacement: placement.displacement, in: projection)
     }
+
 }

@@ -21,7 +21,7 @@ private struct TruncatingStrategy: MemoryStrategy {
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws -> [RankedResult] {
         let candidates = input.candidates
         return candidates.dropLast().map {
-            RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment)
+            RankedResult(candidate: $0, displacement: 0, reason: RankingReason(history: .none, movement: .unmoved))
         }
     }
 }

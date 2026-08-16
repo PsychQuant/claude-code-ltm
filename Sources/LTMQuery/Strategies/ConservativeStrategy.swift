@@ -126,24 +126,14 @@ public struct ConservativeStrategy: MemoryStrategy {
         }
     }
 
+    /// 與 human-like 共用 `RankingReason.describing`——見那一檔的說明。
     private func reasoned(_ placement: GuardedPlacement, in projection: Projection) -> RankedResult {
-        if projection.isOrphaned(placement.candidate.anchor) {
-            return RankedResult(
-                candidate: placement.candidate, displacement: placement.displacement,
-                reason: .orphanedHistoryIgnored)
-        }
-        guard placement.displacement != 0 else {
-            return RankedResult(
-                candidate: placement.candidate, displacement: 0, reason: .noAdjustment)
-        }
-        guard let stats = projection[placement.candidate.anchor], stats.netStrength != 0 else {
-            // 位移非零但自己沒有歷史 → 是被同區段裡有歷史的鄰居擠動的。
-            return RankedResult(
-                candidate: placement.candidate, displacement: placement.displacement,
-                reason: .displacedByPeers(positions: placement.displacement))
-        }
-        return RankedResult(
-            candidate: placement.candidate, displacement: placement.displacement,
-            reason: .adjusted(signals: stats.deliberateCounts, netStrength: stats.netStrength))
+        RankedResult(
+            candidate: placement.candidate,
+            displacement: placement.displacement,
+            reason: RankingReason.describing(
+                placement.candidate.anchor, displacement: placement.displacement,
+                in: projection))
     }
+
 }
