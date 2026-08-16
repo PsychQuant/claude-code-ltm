@@ -158,11 +158,8 @@ public struct FileEventStore: EventStore {
     /// `EventStore: Sendable` 等於承諾可以並行呼叫。`JSONEncoder` 在此沒有任何
     /// 序列化保護，那個 `Sendable` 是假的（#1 verify R3）。新建一個 encoder 的
     /// 成本遠低於「canonical 歷史被兩個執行緒寫壞」的成本。
-    private var encoder: JSONEncoder {
-        let e = JSONEncoder()
-        e.outputFormatting = [.sortedKeys]
-        return e
-    }
+    /// 與讀取端的 bytes 比對**共用同一個**編碼器——那是比對能成立的前提。
+    private var encoder: JSONEncoder { CanonicalCoding.encoder }
 
     public func append(_ event: Event) throws {
         let line: Data
@@ -306,14 +303,18 @@ public struct FileEventStore: EventStore {
             throw EventStoreError.readFailed(path: url.path, underlying: "\(error)")
         }
 
-        let decoder = JSONDecoder()
         var result: [Event] = []
         var corrupt: [Int] = []
         for (index, line) in String(decoding: bytes, as: UTF8.self)
             .split(separator: "\n", omittingEmptySubsequences: true).enumerated()
         {
             do {
-                result.append(try decoder.decode(Event.self, from: Data(line.utf8)))
+                // **bytes 逐字比對**，不是單純解碼（#1 verify R5 的 CRITICAL）。
+                // 解碼會靜默丟掉 JSON 文法允許而 schema 沒定義的東西——巢狀未知鍵、
+                // 陣列多餘元素、重複鍵、`\uXXXX` 逃脫——而那些東西**留在檔案裡**。
+                // 隱私硬約束的標的是落地的 bytes，所以檢查也必須在 bytes 上。
+                result.append(
+                    try CanonicalCoding.decodeCanonicalLine(Event.self, from: Data(line.utf8)))
             } catch {
                 guard skippingCorrupt else {
                     throw EventStoreError.corruptRecord(path: url.path, lineNumber: index + 1)

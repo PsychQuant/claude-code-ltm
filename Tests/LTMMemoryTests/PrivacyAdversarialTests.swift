@@ -134,22 +134,64 @@ private let 合法雜湊 = String(repeating: "ab", count: 32)
     }
 }
 
-/// 把一棵 JSON 裡**每一個**字串葉節點的路徑找出來。
-private func stringLeafPaths(_ value: Any, prefix: [String] = []) -> [[String]] {
+/// JSON 樹上的一個位置。用 enum 而不是 `[String]`，因為路徑要能穿過陣列。
+///
+/// #1 verify R5：上一版的走訪器 `switch` 只列了 `[String: Any]` 與 `String` 兩種，
+/// 陣列落進 `default` 被吞掉。也就是說那條自稱「取代逐欄位列舉」的測試，只是把
+/// **欄位列舉換成了容器種類列舉**——而漏掉的那一種正好是當時唯一活著的外洩管道
+/// （`span: [Int]`）。判準是「每個會被原樣序列化的**東西**」，不是「每個字串葉節點」。
+private enum JSONStep: Equatable { case key(String), index(Int) }
+
+private func objectNodes(_ value: Any, at path: [JSONStep] = []) -> [[JSONStep]] {
     switch value {
     case let object as [String: Any]:
-        return object.keys.sorted().flatMap { stringLeafPaths(object[$0]!, prefix: prefix + [$0]) }
-    case is String:
-        return [prefix]
+        return [path]
+            + object.keys.sorted().flatMap { objectNodes(object[$0]!, at: path + [.key($0)]) }
+    case let array as [Any]:
+        return array.enumerated().flatMap { objectNodes($1, at: path + [.index($0)]) }
     default:
         return []
     }
 }
 
-private func substituting(_ value: Any, at path: [String], with replacement: String) -> Any {
-    guard let key = path.first, var object = value as? [String: Any] else { return replacement }
-    object[key] = substituting(object[key]!, at: Array(path.dropFirst()), with: replacement)
-    return object
+private func arrayNodes(_ value: Any, at path: [JSONStep] = []) -> [[JSONStep]] {
+    switch value {
+    case let object as [String: Any]:
+        return object.keys.sorted().flatMap { arrayNodes(object[$0]!, at: path + [.key($0)]) }
+    case let array as [Any]:
+        return [path] + array.enumerated().flatMap { arrayNodes($1, at: path + [.index($0)]) }
+    default:
+        return []
+    }
+}
+
+private func stringLeaves(_ value: Any, at path: [JSONStep] = []) -> [[JSONStep]] {
+    switch value {
+    case let object as [String: Any]:
+        return object.keys.sorted().flatMap { stringLeaves(object[$0]!, at: path + [.key($0)]) }
+    case let array as [Any]:
+        return array.enumerated().flatMap { stringLeaves($1, at: path + [.index($0)]) }
+    case is String:
+        return [path]
+    default:
+        return []
+    }
+}
+
+/// 在 `path` 指到的節點上動手腳。`mutate` 收到該節點、回傳改過的版本。
+private func mutating(_ value: Any, at path: [JSONStep], _ mutate: (Any) -> Any) -> Any {
+    guard let step = path.first else { return mutate(value) }
+    let rest = Array(path.dropFirst())
+    switch step {
+    case .key(let k):
+        guard var object = value as? [String: Any], let child = object[k] else { return value }
+        object[k] = mutating(child, at: rest, mutate)
+        return object
+    case .index(let i):
+        guard var array = value as? [Any], array.indices.contains(i) else { return value }
+        array[i] = mutating(array[i], at: rest, mutate)
+        return array
+    }
 }
 
 @Test func everyStringFieldInAnEncodedEventRejectsFreeText() throws {
@@ -175,15 +217,15 @@ private func substituting(_ value: Any, at path: [String], with replacement: Str
 
     let encoded = try JSONEncoder().encode(event)
     let tree = try JSONSerialization.jsonObject(with: encoded)
-    let paths = stringLeafPaths(tree)
+    let paths = stringLeaves(tree)
 
     // 先確認真的走訪到了東西——空清單會讓整條測試 vacuously pass。
     #expect(paths.count >= 6, "只找到 \(paths.count) 個字串欄位，走訪可能壞了")
 
     for path in paths {
-        let mutated = substituting(tree, at: path, with: 原文)
+        let mutated = mutating(tree, at: path) { _ in 原文 }
         let data = try JSONSerialization.data(withJSONObject: mutated)
-        #expect(throws: (any Error).self, "欄位 \(path.joined(separator: ".")) 收下了原文") {
+        #expect(throws: (any Error).self, "\(path) 收下了原文") {
             _ = try JSONDecoder().decode(Event.self, from: data)
         }
     }
@@ -254,4 +296,183 @@ private func substituting(_ value: Any, at path: [String], with replacement: Str
     let bytes = try store.serializedBytes()
     let nonASCII = bytes.filter { $0 > 0x7F }
     #expect(nonASCII.isEmpty, "canonical 檔出現 \(nonASCII.count) 個非 ASCII byte")
+}
+
+// MARK: - 判準在 bytes 層（#1 verify R5 的 CRITICAL）
+
+/// 造一筆合法事件的 canonical bytes。
+private func canonicalLine() throws -> Data {
+    let anchor = Anchor(
+        source: "fixture-a",
+        turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
+        span: 0..<4)
+    let event = Event.interaction(
+        .shown, anchor: anchor, at: Date(timeIntervalSince1970: 12_345),
+        generation: GenerationID("build-1"), policy: RankingPolicyID("archival"))
+    return try CanonicalCoding.encoder.encode(event)
+}
+
+@Test func canonicalBytesRoundTripForAWellFormedLine() throws {
+    // 對照組。沒有這條，下面每一條「拒絕」都可能只是因為基準本身就不合法。
+    let line = try canonicalLine()
+    #expect(throws: Never.self) {
+        _ = try CanonicalCoding.decodeCanonicalLine(Event.self, from: line)
+    }
+}
+
+@Test func theJSONSerializationRenderIsItselfCanonical() throws {
+    // **反同義反覆的對照。** 下面兩條注入測試用 `JSONSerialization` 重新產出
+    // bytes；如果那個 renderer 的輸出本來就與 `CanonicalCoding.encoder` 不同
+    // （數字格式、跳脫規則），注入測試會因為**格式差異**而通過，與注入無關。
+    // 這條先證明未經修改的重新產出仍然是 canonical 的。
+    let line = try canonicalLine()
+    let tree = try JSONSerialization.jsonObject(with: line)
+    let rerendered = try JSONSerialization.data(withJSONObject: tree, options: [.sortedKeys])
+    #expect(throws: Never.self, "renderer 本身就不 canonical，注入測試會是同義反覆") {
+        _ = try CanonicalCoding.decodeCanonicalLine(Event.self, from: rerendered)
+    }
+}
+
+@Test func everyObjectNodeRejectsAnInjectedUnknownKey() throws {
+    // **判準形狀的注入測試。** 上一版只在頂層物件尾巴掛一個 `"query"`，於是
+    // R5 從巢狀 `anchor` / `contentHash` 走進來（實測解碼成功、原文落進
+    // events.jsonl）。節點清單改成從編碼輸出走訪出來——包含陣列裡的物件。
+    let line = try canonicalLine()
+    let tree = try JSONSerialization.jsonObject(with: line)
+    let nodes = objectNodes(tree)
+    #expect(nodes.count >= 3, "只找到 \(nodes.count) 個物件節點，走訪可能壞了")
+
+    for node in nodes {
+        let mutated = mutating(tree, at: node) { value in
+            var object = value as! [String: Any]
+            object["leak"] = 原文
+            return object
+        }
+        let data = try JSONSerialization.data(withJSONObject: mutated, options: [.sortedKeys])
+        #expect(throws: (any Error).self, "物件節點 \(node) 收下了未宣告的鍵") {
+            _ = try CanonicalCoding.decodeCanonicalLine(Event.self, from: data)
+        }
+    }
+}
+
+@Test func everyArrayNodeRejectsAnInjectedExtraElement() throws {
+    // R5 的第二條路徑：`"span":[2,6,"…原文…"]` 解碼成功，因為 `Range<Int>` 的
+    // `init(from:)` 在 **Swift stdlib**、decode 兩個 Bound 之後不檢查 `isAtEnd`。
+    // 「給巢狀物件補未知鍵檢查」這個處方對它完全無效——那是 DA 推翻另外兩個
+    // lens 的地方。
+    let line = try canonicalLine()
+    let tree = try JSONSerialization.jsonObject(with: line)
+    let nodes = arrayNodes(tree)
+    #expect(!nodes.isEmpty, "沒找到任何陣列節點，走訪可能壞了")
+
+    for node in nodes {
+        let mutated = mutating(tree, at: node) { value in
+            var array = value as! [Any]
+            array.append(原文)
+            return array
+        }
+        let data = try JSONSerialization.data(withJSONObject: mutated, options: [.sortedKeys])
+        #expect(throws: (any Error).self, "陣列節點 \(node) 收下了多餘元素") {
+            _ = try CanonicalCoding.decodeCanonicalLine(Event.self, from: data)
+        }
+    }
+}
+
+@Test func aDuplicatedKeyCarryingFreeTextIsRejected() throws {
+    // R5 的第三條路徑。`"policy":"archival","policy":"…原文…"` 解碼成功
+    // （swift-foundation 取第一個），re-encode 與原本**逐字相同**，所以未知鍵
+    // 檢查在結構上看不見它——鍵就在 `CodingKeys.allCases` 裡。
+    // 只有 bytes 比對抓得到：原始 bytes 比 canonical 形式多了一段。
+    let line = String(decoding: try canonicalLine(), as: UTF8.self)
+    let duplicated = line.replacingOccurrences(
+        of: "\"policy\":\"archival\"",
+        with: "\"policy\":\"archival\",\"policy\":\"\(原文)\"")
+    #expect(duplicated != line, "替換沒生效，測試會 vacuously pass")
+
+    #expect(throws: (any Error).self) {
+        _ = try CanonicalCoding.decodeCanonicalLine(Event.self, from: Data(duplicated.utf8))
+    }
+}
+
+@Test func aUnicodeEscapedPayloadIsRejectedEvenThoughItDecodesToTheSameValue() throws {
+    // 第四條：`\uXXXX` 逃脫。解碼後的 Swift 值完全合法，但**檔案裡的 bytes**
+    // 與 canonical 形式不同——而隱私硬約束的標的是落地的 bytes。
+    // 這條是我沒有列舉到、判準卻自動涵蓋的那一種，留著當判準有效的證據。
+    let line = String(decoding: try canonicalLine(), as: UTF8.self)
+    let escaped = line.replacingOccurrences(of: "\"archival\"", with: "\"\\u0061rchival\"")
+    #expect(escaped != line)
+
+    #expect(throws: (any Error).self) {
+        _ = try CanonicalCoding.decodeCanonicalLine(Event.self, from: Data(escaped.utf8))
+    }
+}
+
+@Test func theStoreReadsSmuggledContentAsCorruptRatherThanHealthy() throws {
+    // 端到端：這正是 R5 實測「1 healthy event，51 個非 ASCII byte 留在檔裡」
+    // 的那條路徑。現在它必須是 corrupt。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-smuggle-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let path = dir.appendingPathComponent("events.jsonl")
+
+    let line = String(decoding: try canonicalLine(), as: UTF8.self)
+    let smuggled = line.replacingOccurrences(
+        of: "\"span\":[0,4]", with: "\"span\":[0,4],\"leak\":\"\(原文)\"")
+    #expect(smuggled != line)
+    try Data((smuggled + "\n").utf8).write(to: path)
+
+    let store = try FileEventStore(url: path)
+    #expect(throws: (any Error).self) { _ = try store.allEvents() }
+
+    let salvaged = try store.allEvents(skippingCorrupt: true)
+    #expect(salvaged.events.isEmpty)
+    #expect(salvaged.corruptLines == [1], "必須指名是哪一行，否則救不回來也修不掉")
+}
+
+// MARK: - decoder 層（bytes 之外的第二道，各自釘住）
+
+// 為什麼需要這一組：`CanonicalCoding.decodeCanonicalLine` 是**store 的**讀取路徑，
+// 但 `Event: Decodable` 是公開的，任何人都能直接 `JSONDecoder().decode`。A/B 實測
+// 顯示：把 decoder 層整個拿掉，上面那組 bytes 測試仍然全綠——也就是說 decoder 層
+// 當時沒有任何測試釘住，正是 R5 反覆抓到的那個形狀。這一組專走 plain decoder。
+
+@Test func plainDecodingRejectsAnUnknownKeyInsideAnchor() throws {
+    let line = String(decoding: try canonicalLine(), as: UTF8.self)
+    let hostile = line.replacingOccurrences(
+        of: "\"span\":[0,4]", with: "\"span\":[0,4],\"leak\":\"\(原文)\"")
+    #expect(hostile != line)
+    #expect(throws: (any Error).self) {
+        _ = try JSONDecoder().decode(Event.self, from: Data(hostile.utf8))
+    }
+}
+
+@Test func plainDecodingRejectsAnUnknownKeyInsideContentHash() throws {
+    let line = String(decoding: try canonicalLine(), as: UTF8.self)
+    // contentHash 物件的結尾：`"hex":"<64>"}`
+    let hostile = line.replacingOccurrences(
+        of: "\"contentHash\":{", with: "\"contentHash\":{\"leak\":\"\(原文)\",")
+    #expect(hostile != line)
+    #expect(throws: (any Error).self) {
+        _ = try JSONDecoder().decode(Event.self, from: Data(hostile.utf8))
+    }
+}
+
+@Test func plainDecodingRejectsAnExtraElementInTheSpanArray() throws {
+    // `Range<Int>` 的 stdlib decoder 不檢查 `isAtEnd`，所以這條靠的是 `Anchor`
+    // 自己讀 unkeyed 容器並要求長度恰為 2。
+    let line = String(decoding: try canonicalLine(), as: UTF8.self)
+    let hostile = line.replacingOccurrences(of: "\"span\":[0,4]", with: "\"span\":[0,4,\"\(原文)\"]")
+    #expect(hostile != line)
+    #expect(throws: (any Error).self) {
+        _ = try JSONDecoder().decode(Event.self, from: Data(hostile.utf8))
+    }
+}
+
+@Test func theErrorForAnUndeclaredKeyDoesNotEchoTheKeyName() throws {
+    // R5（security lens）：未知鍵的錯誤訊息原本把攻擊者控制的鍵名原樣印出來
+    // ——擋原文進 store 的機制，自己把原文帶進 log。現在只回報數量。
+    let violation = CanonicalCoding.Violation.undeclaredKeys(type: "Event", count: 1)
+    #expect(!"\(violation)".contains(原文))
+    let bytes = CanonicalCoding.Violation.bytesNotCanonical(byteCount: 300)
+    #expect(!"\(bytes)".contains(原文))
 }

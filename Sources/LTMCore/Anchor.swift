@@ -76,6 +76,10 @@ public struct ContentHash: Sendable, Hashable, Codable, CustomStringConvertible 
         case illegalCharacter(Character)
     }
 
+    /// 顯式宣告：`rejectUnknownKeys` 需要 `allCases`，而 `init(from:)` 逐一具名
+    /// 引用每個 key，所以少一個 case 是編譯錯誤而不是靜默少一個欄位。
+    enum CodingKeys: String, CodingKey, CaseIterable { case hex }
+
     /// 字面值常數用（測試 fixture、內部計算結果）。非法值是程式錯誤 → trap。
     public init(hex: String) {
         do {
@@ -92,6 +96,13 @@ public struct ContentHash: Sendable, Hashable, Codable, CustomStringConvertible 
     }
 
     public init(from decoder: any Decoder) throws {
+        // R5：`Event` 的未知鍵檢查只裝在頂層，於是 `contentHash` 這一層可以夾帶
+        // `"leak":"…原文…"` 而整筆解碼成功。修法不是「再列舉一個入口」——那是
+        // 前四輪的做法——而是**每一個我們自己寫的 keyed decoder 都呼叫它**，
+        // 外加 bytes 層的判準檢查（見 `CanonicalCoding`）。
+        try CanonicalCoding.rejectUnknownKeys(
+            in: decoder, declared: Set(CodingKeys.allCases.map(\.stringValue)),
+            type: "ContentHash")
         let c = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(validating: try c.decode(String.self, forKey: .hex))
     }
@@ -118,6 +129,11 @@ public struct Anchor: Sendable, Hashable, Codable {
     public let turnID: String
     public let contentHash: ContentHash
     public let span: Range<Int>
+
+    /// 顯式宣告，理由同 `ContentHash.CodingKeys`。
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case source, turnID, contentHash, span
+    }
 
     public enum SpanValidationError: Error, Sendable, Equatable {
         case empty(Range<Int>)
@@ -157,6 +173,9 @@ public struct Anchor: Sendable, Hashable, Codable {
 
     /// 外來資料（解碼）用：非法值 throw 而不是 trap。
     public init(from decoder: any Decoder) throws {
+        try CanonicalCoding.rejectUnknownKeys(
+            in: decoder, declared: Set(CodingKeys.allCases.map(\.stringValue)),
+            type: "Anchor")
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let source = try c.decode(String.self, forKey: .source)
         let turnID = try c.decode(String.self, forKey: .turnID)
@@ -165,7 +184,18 @@ public struct Anchor: Sendable, Hashable, Codable {
         self.source = source
         self.turnID = turnID
         self.contentHash = try c.decode(ContentHash.self, forKey: .contentHash)
-        let span = try c.decode(Range<Int>.self, forKey: .span)
+        // **不用 `Range<Int>` 的 stdlib 解碼**。它 decode 兩個 Bound 之後從不檢查
+        // `isAtEnd`，所以 `"span":[2,6,"…第三方原文…"]` 會解碼成功、原文永久留在
+        // canonical 檔的 bytes 裡（#1 verify R5 實測，1,600 字照樣過）。那個
+        // decoder 在 Swift stdlib，不是我能改的——所以這裡自己讀 unkeyed 容器
+        // 並要求長度恰為 2。
+        var spanBounds = try c.nestedUnkeyedContainer(forKey: .span)
+        let lower = try spanBounds.decode(Int.self)
+        let upper = try spanBounds.decode(Int.self)
+        guard spanBounds.isAtEnd else {
+            throw CanonicalCoding.Violation.unexpectedArrayLength(field: "span", expected: 2)
+        }
+        let span = lower..<upper
         // 解碼邊界同樣擋空 span 與負位移：外來檔案裡一筆 `span: [3,3]` 的紀錄
         // 會是一個對任何文字都成立的萬用 anchor。span 是會被原樣序列化的欄位，
         // 所以它跟識別碼一樣需要形狀約束——R3 指出「每個被原樣序列化的欄位」

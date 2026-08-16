@@ -171,16 +171,15 @@ public struct Event: Sendable, Hashable, Codable {
     /// 解碼一律走驗證後的 init：外來檔案寫進來的第六種 kind、或 kind 與
     /// noteRef 不相稱的紀錄，都在邊界上被擋掉而不是進到 store 裡。
     public init(from decoder: any Decoder) throws {
-        // **拒絕未知欄位。** Swift 的 `JSONDecoder` 預設忽略它們，所以一行只要
-        // 帶齊合法欄位、再多加一個 `"query": "第三方未發表原文"`，就會解碼成功、
-        // 被視為正常紀錄——而 `events.jsonl` 的**實際 bytes** 永久保留那段原文
-        // （#1 verify R4）。
+        // 拒絕未知欄位。這一層只是**防禦縱深**，不是判準的執行點——R5 實測它
+        // 擋不掉三件事：巢狀容器（這條檢查只看一層）、`span` 陣列多餘元素
+        // （`Range<Int>` 的 decoder 在 stdlib）、以及重複鍵（鍵在清單內）。
         //
-        // 這是「每個會被原樣序列化的欄位都要有形狀約束」這條判準的**結構性缺口**：
-        // 未知欄位根本不是欄位，所以形狀約束管不到它。隱私硬約束的標的是落地的
-        // bytes，不是 decode 之後的 Swift 值——判準因此要再往前推一步：
-        // **canonical 檔裡不得存在 schema 沒有定義的東西。**
-        try Event.rejectUnknownKeys(in: decoder)
+        // 判準（**canonical 檔裡不得存在 schema 沒有定義的東西**）的執行點在
+        // bytes 層：`CanonicalCoding.decodeCanonicalLine`。R2–R5 每一輪的修法
+        // 都是再列舉一次入口，每一輪都有下一種——見 `CanonicalCoding` 的說明。
+        try CanonicalCoding.rejectUnknownKeys(
+            in: decoder, declared: Set(CodingKeys.allCases.map(\.stringValue)), type: "Event")
 
         let c = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
@@ -207,31 +206,6 @@ extension Event {
         case kind, anchor, timestamp, generation, policy, noteRef, presentation
     }
 
-    /// 任意鍵容器，用來看見 `CodingKeys` 之外的 key。
-    private struct AnyKey: CodingKey {
-        let stringValue: String
-        let intValue: Int? = nil
-        init?(stringValue: String) { self.stringValue = stringValue }
-        init?(intValue: Int) { nil }
-    }
-
-    /// canonical 紀錄不得含 schema 沒有定義的欄位。
-    ///
-    /// 外來寫入者或被竄改的備份可以在合法紀錄旁邊掛一個 `"query"` 欄位；解碼
-    /// 會成功、讀取端判定「健康」，而原文留在檔案裡。這條把那扇門關上。
-    static func rejectUnknownKeys(in decoder: any Decoder) throws {
-        let known = Set(CodingKeys.allCases.map(\.stringValue))
-        let all = try decoder.container(keyedBy: AnyKey.self)
-        let unknown = all.allKeys.map(\.stringValue).filter { !known.contains($0) }
-        guard unknown.isEmpty else {
-            throw DecodingError.dataCorrupted(
-                .init(
-                    codingPath: all.codingPath,
-                    debugDescription:
-                        "canonical 紀錄含 schema 未定義的欄位 \(unknown.sorted())"
-                        + "——未知欄位是原文外洩的路徑，不得放行"))
-        }
-    }
 }
 
 /// 非 pin 的四種 kind。存在的理由是讓 `Event.interaction` 在型別上就不可能
