@@ -85,14 +85,17 @@ Requiring the argument without offering the rule is insufficient: an earlier dra
 
 ### Requirement: An event is either scored, legitimately skipped, or rejected
 
-When scoring, each interaction event SHALL fall into exactly one of four dispositions. This is a closed enumeration; no fifth disposition SHALL be inferred by analogy.
+When scoring, each interaction event SHALL fall into exactly one of **three** dispositions:
 
 1. **Scored** — the event names a presentation present in the supplied records, that presentation is attributed, and the event's anchor is among its attributed anchors.
-2. **Skipped, no presentation** — the event names no presentation at all. Legitimate: an interaction can originate outside a presented list.
-3. **Skipped, null comparison** — the event's presentation is a null comparison. Legitimate and required by the attribution rules above.
-4. **Rejected** — the event names a presentation absent from the supplied records, or names an anchor that presentation never attributed. Both are data inconsistencies and SHALL fail loudly.
+2. **Legitimately skipped** — exactly two cases, and no third: the event names no presentation at all (an interaction can originate outside a presented list), or the event's presentation is a null comparison (required by the attribution rules above).
+3. **Rejected** — a data inconsistency; scoring SHALL fail loudly rather than skip. The causes are open to extension, and are currently: the named presentation is absent from the supplied records; the named anchor was never attributed by that presentation; the event's own generation disagrees with its presentation record's.
 
-The report SHALL carry the count of each legitimate skip so that the size of the scored population is readable from the report itself. An earlier implementation collapsed all four into a single silent skip, so a missing presentation record deflated the denominator with no trace in the output.
+The set of *dispositions* is closed at three; the set of *rejection causes* is not, and adding one does not change the contract. An earlier draft of this requirement declared a closed four-way enumeration that folded the rejection causes into the top level, and the implementation written against it rejected on a third cause twelve lines below its own closed-enumeration comment. Enumerate the axis that is genuinely closed, not the one that will grow.
+
+Record-level validation runs before any event is scored and SHALL reject: a duplicated presentation identifier, an attribution naming a strategy outside the compared pair, the same anchor appearing twice in one presentation, and records that do not all compare the same pair of strategies.
+
+The report SHALL carry the count of each legitimate skip so that the size of the scored population is readable from the report itself. An earlier implementation collapsed everything into a single silent skip, so a missing presentation record deflated the denominator with no trace in the output.
 
 #### Scenario: An event naming an unknown presentation is rejected
 
@@ -105,6 +108,18 @@ The report SHALL carry the count of each legitimate skip so that the size of the
 - **GIVEN** an attributed presentation and an event referencing it with an anchor absent from its attribution
 - **WHEN** the report is computed
 - **THEN** scoring fails and names the presentation and the anchor
+
+#### Scenario: Records comparing different strategy pairs are rejected
+
+- **GIVEN** one presentation record comparing A with B and another comparing B with C
+- **WHEN** a single report is computed over both
+- **THEN** scoring fails rather than presenting the three strategies in one table
+
+#### Scenario: Two strategies with the same identifier cannot be interleaved
+
+- **GIVEN** two strategy instances that report the same policy identifier
+- **WHEN** the harness is asked to interleave them
+- **THEN** the invocation fails, because attribution is recorded per identifier and would credit neither side distinguishably
 
 #### Scenario: Legitimate skips are counted
 

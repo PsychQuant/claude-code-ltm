@@ -361,3 +361,25 @@ private func event(
     #expect(report.skipped.notFromAPresentation == 1)
     #expect(report.skipped.fromNullComparison == 1)
 }
+
+
+@Test func recordsComparingDifferentStrategyPairsAreRejected() throws {
+    // R5：先前不檢查，於是 A/B 與 B/C 的紀錄會被靜默併成一張表，把從未互相
+    // 比較過的兩個策略並列——與同一函式為 generation 建的防護是同一個缺陷類別。
+    let ab = try presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"))
+    let third = RankingPolicyID("conservative")
+    let bc = try PresentationRecord(
+        id: .random(), queryClass: .cjk2char,
+        strategyA: humanLike, strategyB: third, generation: evalGeneration,
+        attribution: [AnchorAttribution(anchor: evalAnchor("c"), creditedTo: humanLike)],
+        startingSide: .a, isNullComparison: false)
+
+    #expect(throws: (any Error).self) {
+        _ = try ComparisonScorer.report(records: [ab, bc], events: [])
+    }
+    // 對照：同一對策略的兩筆紀錄照常合併。
+    let ab2 = try presentation(.cjk4plus, a: evalAnchor("d"), b: evalAnchor("e"))
+    #expect(throws: Never.self) {
+        _ = try ComparisonScorer.report(records: [ab, ab2], events: [])
+    }
+}

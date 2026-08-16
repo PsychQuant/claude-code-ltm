@@ -12,6 +12,15 @@ public struct Interleaving: Sendable, Equatable {
 public enum InterleavingViolation: Error, Sendable, Equatable {
     /// 候選清單裡有重複的 anchor。
     case duplicateCandidate(Anchor)
+    /// 兩個被比較的策略有同一個識別碼。
+    ///
+    /// team-draft 的歸屬是**按策略識別碼**記的，所以 A 與 B 同 id 時每個位置
+    /// 記給誰都一樣——報告會產出一份看似有結論、實際上什麼都沒量到的表
+    /// （#1 verify R5）。這也涵蓋「同一策略配不同 bound」的情形：那**刻意**是
+    /// 同一個 id（策略由訊號與條件定義、不由幅度定義），所以要拿兩個 bound
+    /// 對打，得先讓報告能表達「同 id 不同設定」——那是 #16 的事，在那之前
+    /// 這種比較必須失敗而不是靜默合併。
+    case strategiesShareAnIdentifier(RankingPolicyID)
     /// 某個策略違反了 seam 的契約（非排列、跨帶、謊報位移…）。
     ///
     /// 為什麼要包一層而不是讓 `StrategyViolation` 直接往上拋：一次呈現同時跑
@@ -93,6 +102,9 @@ public struct InterleavingHarness: Sendable {
         b: some MemoryStrategy,
         startingSide: Side
     ) throws -> Interleaving {
+        guard a.id != b.id else {
+            throw InterleavingViolation.strategiesShareAnIdentifier(a.id)
+        }
         let queryClass = QueryClassifier.classify(query)
         let presentationID = PresentationID.random()
 

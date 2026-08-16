@@ -92,6 +92,11 @@ public enum ComparisonDataError: Error, Sendable, Equatable {
     /// 要對某個子集計分是合理需求，但那要由呼叫端先篩事件，不能讓 scorer
     /// 用「找不到就跳過」去猜。
     case unknownPresentationReference(PresentationID)
+    /// 同一份報告裡的紀錄比較了不同的策略對。
+    ///
+    /// 併成一張表會讓從未互相比較過的兩個策略並列，而讀者無從得知。與
+    /// generation 的分軸是同一個道理：不可比的東西不得靜默合併。
+    case recordsCompareDifferentStrategyPairs(first: [String], second: [String])
     /// 事件的 anchor 不在它所宣稱那次呈現的 attribution 裡。
     ///
     /// 非 null 的紀錄現在保證每個 anchor 都有歸屬（見 `PresentationRecord`
@@ -112,12 +117,24 @@ public enum ComparisonScorer {
     ) throws -> ComparisonReport {
         // 先前用 `Dictionary(uniqueKeysWithValues:)`，重複 ID 會直接 trap
         // （fatalError）而不是回報錯誤。呈現紀錄來自檔案，重複是資料問題不是
-        // 程式錯誤，必須 throw。（#1 verify 2026-08-11）
+        // 紀錄層的拒絕原因。程式錯誤，必須 throw。（#1 verify 2026-08-11）
+        //
+        // R5：一份報告裡的紀錄**必須比較同一對策略**。先前不檢查，於是混入
+        // A/B 與 B/C 的紀錄會被靜默併成一張表，把從未互相比較過的兩個策略
+        // 並列——與同一函式為 generation 建的防護是同一個缺陷類別。
+        var pair: Set<RankingPolicyID>?
         var byID: [PresentationID: PresentationRecord] = [:]
         for record in records {
             guard byID.updateValue(record, forKey: record.id) == nil else {
                 throw ComparisonDataError.duplicatePresentationID(record.id)
             }
+            let thisPair: Set<RankingPolicyID> = [record.strategyA, record.strategyB]
+            if let existing = pair, existing != thisPair {
+                throw ComparisonDataError.recordsCompareDifferentStrategyPairs(
+                    first: existing.map(\.value).sorted(),
+                    second: thisPair.map(\.value).sorted())
+            }
+            pair = thisPair
             // 紀錄本身也要驗，不能只驗事件：損壞或偽造的 attribution 會讓分數
             // 記到沒參與比較的策略頭上，而報告照常產出（#1 verify R3）。
             var seen: Set<Anchor> = []
@@ -146,9 +163,19 @@ public enum ComparisonScorer {
         var skippedNullComparison = 0
 
         for event in events {
-            // 四種情形先前擠在同一個 `guard ... else { continue }` 裡。它們的
-            // 意義完全不同：兩種是合法略過、兩種是資料不一致。**封閉列舉，
-            // 只有這四種**，不得依性質相似類推第五種。
+            // **每個事件的處置只有三種：計分、合法略過、拒絕。**
+            //
+            // 上一版寫「封閉列舉，只有這四種，不得類推第五種」，而第五種
+            // （`generationMismatch`）就在同一個迴圈往下 12 行——我在寫下封閉性
+            // 宣告的同一個函式裡違反了它（#1 verify R5，requirements 與
+            // devils-advocate 各自指出）。這次的寫法把「拒絕」當成**一種**處置、
+            // 底下列它的原因，於是新增一個拒絕原因不會讓封閉性宣告變成謊話。
+            //
+            // 合法略過恰有兩種：不屬於任何呈現、屬於 null comparison。
+            // 拒絕目前有三個原因：呈現紀錄不存在、anchor 不在該次呈現、
+            // 事件自報的 generation 與紀錄不符。另有三個**紀錄層**的拒絕原因
+            // 在迴圈之前（重複 PresentationID、歸屬指向第三方策略、同一次呈現
+            // 內 anchor 重複）。
             guard let presentationID = event.presentation else {
                 skippedNotFromAPresentation += 1  // 合法：不屬於任何呈現
                 continue
@@ -168,6 +195,7 @@ public enum ComparisonScorer {
             // 歸屬用**紀錄**的 generation，不是事件自報的。兩者不一致代表資料
             // 損壞（或事件被錯標），靜默採信事件會讓一次呈現被切成兩半、rate
             // 悄悄歸零。
+            // 拒絕原因之三。放在這裡而不是列進「四種」——見迴圈頂端的說明。
             guard event.generation == record.generation else {
                 throw ComparisonDataError.generationMismatch(presentation: record.id)
             }

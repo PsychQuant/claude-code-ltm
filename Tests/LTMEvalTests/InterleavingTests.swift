@@ -219,3 +219,19 @@ func evalProjection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
     // 字串欄位不是識別碼字元集就是 UUID 或封閉集合標籤。
     #expect(bytes.allSatisfy { $0 <= 0x7F }, "紀錄含非 ASCII byte")
 }
+
+
+@Test func twoStrategiesWithTheSameIdentifierCannotBeCompared() {
+    // R5：歸屬是按策略識別碼記的，同 id 時每個位置記給誰都一樣，報告會產出
+    // 一份看似有結論、實際什麼都沒量到的表。這也涵蓋「同一策略配不同 bound」
+    // ——那刻意是同一個 id，所以那種比較目前必須失敗而不是靜默合併（#16）。
+    let input = evalCandidates(["a", "b"])
+    #expect(throws: InterleavingViolation.strategiesShareAnIdentifier(
+        RankingPolicyID("human-like"))
+    ) {
+        _ = try InterleavingHarness(generation: evalGeneration).present(
+            query: "測試", candidates: input, projection: .empty(at: evalInstant),
+            a: HumanLikeStrategy(displacementBound: 1),
+            b: HumanLikeStrategy(displacementBound: 5), startingSide: .a)
+    }
+}
