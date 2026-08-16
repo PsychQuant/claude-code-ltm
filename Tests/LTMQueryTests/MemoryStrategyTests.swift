@@ -372,3 +372,59 @@ private struct NegativeBoundStrategy: MemoryStrategy {
         _ = try HumanLikeStrategy().rerank(candidates(["a", "b"]), with: p)
     }
 }
+
+
+// MARK: - R6：非有限只測過 NaN、壞統計只測過 reinforcement
+
+@Test func infinityIsRejectedEverywhereNaNIs() {
+    // R6：所有「非有限」測試都只用 NaN，於是一個只檢查 `isNaN` 的半吊子修法
+    // 會在每一處通過。±infinity 是同一個判準的另一半。
+    let badScore = [
+        Candidate(anchor: testAnchor("x"), baseScore: .infinity, band: RelevanceBand(rank: 0))
+    ]
+    #expect(throws: StrategyViolation.nonFiniteBaseScore(testAnchor("x"))) {
+        _ = try HumanLikeStrategy().rerank(badScore, with: .empty(at: instant))
+    }
+    let negative = [
+        Candidate(anchor: testAnchor("y"), baseScore: -.infinity, band: RelevanceBand(rank: 0))
+    ]
+    #expect(throws: StrategyViolation.nonFiniteBaseScore(testAnchor("y"))) {
+        _ = try ConservativeStrategy().rerank(negative, with: .empty(at: instant))
+    }
+}
+
+@Test func everyNumericStatisticFieldIsChecked() {
+    // R6：壞統計的測試只曾污染 `reinforcement`，於是 `suppression`、
+    // `impressions`、`deliberateCounts` 的檢查沒有任何測試釘住。
+    let cases: [(String, AnchorStatistics, AnchorStatistics.Malformation)] = [
+        ("suppression 非有限",
+         AnchorStatistics(
+            reinforcement: 0, suppression: .nan, impressions: 0,
+            lastDeliberateInteraction: instant),
+         .nonFinite(field: "suppression")),
+        ("suppression 負值",
+         AnchorStatistics(
+            reinforcement: 0, suppression: -1, impressions: 0,
+            lastDeliberateInteraction: instant),
+         .negative(field: "suppression")),
+        ("impressions 負值",
+         AnchorStatistics(
+            reinforcement: 0, suppression: 0, impressions: -1,
+            lastDeliberateInteraction: instant),
+         .negative(field: "impressions")),
+        ("deliberateCounts 負值",
+         AnchorStatistics(
+            reinforcement: 0, suppression: 0, impressions: 0,
+            lastDeliberateInteraction: instant, deliberateCounts: [.cited: -2]),
+         .negative(field: "deliberateCounts[cited]")),
+    ]
+    for (label, stats, expected) in cases {
+        let p = statsProjection([("a", stats)])
+        #expect(
+            throws: StrategyViolation.malformedStatistics(testAnchor("a"), expected),
+            "\(label) 沒有被擋下來"
+        ) {
+            _ = try HumanLikeStrategy().rerank(candidates(["a", "b"]), with: p)
+        }
+    }
+}

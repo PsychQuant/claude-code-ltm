@@ -470,11 +470,24 @@ private func canonicalLine() throws -> Data {
 
 @Test func theErrorForAnUndeclaredKeyDoesNotEchoTheKeyName() throws {
     // R5（security lens）：未知鍵的錯誤訊息原本把攻擊者控制的鍵名原樣印出來
-    // ——擋原文進 store 的機制，自己把原文帶進 log。現在只回報數量。
-    let violation = CanonicalCoding.Violation.undeclaredKeys(type: "Event", count: 1)
-    #expect(!"\(violation)".contains(原文))
-    let bytes = CanonicalCoding.Violation.bytesNotCanonical(byteCount: 300)
-    #expect(!"\(bytes)".contains(原文))
+    // ——擋原文進 store 的機制，自己把原文帶進 log。
+    //
+    // **R6：上一版是同義反覆**——它手工建一個不含原文的 error 值，再斷言那個值
+    // 不含原文。當然不含，原文從來沒進去過。要驗的是真的**用原文當鍵名**去觸發
+    // 那條路徑，再看拋出來的錯誤長什麼樣。
+    let line = String(decoding: try canonicalLine(), as: UTF8.self)
+    let hostile = line.replacingOccurrences(
+        of: "\"span\":[0,4]", with: "\"span\":[0,4],\"\(原文)\":1")
+    #expect(hostile != line, "替換沒生效，測試會 vacuously pass")
+
+    var description = ""
+    do {
+        _ = try JSONDecoder().decode(Event.self, from: Data(hostile.utf8))
+    } catch {
+        description = "\(error)"
+    }
+    #expect(!description.isEmpty, "必須真的拋出，否則下面的斷言是空的")
+    #expect(!description.contains(原文), "錯誤訊息回顯了攻擊者控制的鍵名")
 }
 
 

@@ -165,7 +165,7 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
     #expect(defaultBound.map(\.candidate.anchor) != input.map(\.anchor).reversed())
 }
 
-@Test func conservativeDoesNotHangOnNonFiniteBaseScores() throws {
+@Test(.timeLimit(.minutes(1))) func conservativeDoesNotHangOnNonFiniteBaseScores() throws {
     // #1 verify R3 的第二個 CRITICAL：`x.baseScore == x.baseScore` 對 NaN 為 false，
     // 於是區段掃描的游標不前進、rerank **無限迴圈**（不拋錯，直接掛住燒 CPU）
     // ——與 R1 修掉的交錯迴圈是同一個 failure class。

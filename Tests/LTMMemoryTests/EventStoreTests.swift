@@ -185,3 +185,47 @@ private func canonicalLineForLineNumberTest() throws -> Data {
         generation: GenerationID("build-1"), policy: RankingPolicyID("archival"))
     return try CanonicalCoding.encoder.encode(e)
 }
+
+
+@Test(.timeLimit(.minutes(1))) func appendFailsRatherThanBlockingWhenTheLockIsHeld() throws {
+    // R6：R5 加的 `flock` 沒有任何測試，而它當時用的是阻塞版 `LOCK_EX`——
+    // 註解寫「取不到鎖就拋」，code 卻會無限期停在那裡。這條同時釘住兩件事：
+    // 鎖真的存在（拿不到就失敗），以及**失敗而不是掛住**（時間上限在此）。
+    //
+    // `flock` 綁在 open file description 上，所以同一個 process 的第二個 fd
+    // 會真的衝突——不需要 spawn 子行程。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-lock-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let path = dir.appendingPathComponent("events.jsonl")
+    FileManager.default.createFile(atPath: path.path, contents: Data())
+
+    let holder = open(path.path, O_WRONLY)
+    #expect(holder >= 0)
+    defer { close(holder) }
+    #expect(flock(holder, LOCK_EX | LOCK_NB) == 0, "沒拿到鎖的話這條測試什麼都沒測")
+
+    let store = try FileEventStore(url: path)
+    #expect(throws: (any Error).self) {
+        try store.append(
+            .interaction(
+                .shown, anchor: anchorForLockTest(), at: Date(),
+                generation: GenerationID("g1"), policy: RankingPolicyID("archival")))
+    }
+
+    // 放開之後必須恢復正常——沒有這條，一個「永遠失敗」的 append 也會通過上面。
+    #expect(flock(holder, LOCK_UN) == 0)
+    #expect(throws: Never.self) {
+        try store.append(
+            .interaction(
+                .shown, anchor: anchorForLockTest(), at: Date(),
+                generation: GenerationID("g1"), policy: RankingPolicyID("archival")))
+    }
+}
+
+private func anchorForLockTest() -> Anchor {
+    Anchor(
+        source: "fixture-a",
+        turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
+        span: 0..<4)
+}

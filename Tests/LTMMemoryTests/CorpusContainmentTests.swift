@@ -166,7 +166,7 @@ import Testing
 // 一般化的教訓：**「這條測不了」的理由要跟著實作一起複查。** 它在寫下的當下
 // 可能是對的，而修掉那個原因的正是下一個 commit。
 
-@Test func aFifoIsRejectedRatherThanBlockingForever() throws {
+@Test(.timeLimit(.minutes(1))) func aFifoIsRejectedRatherThanBlockingForever() throws {
     // R4 的 CRITICAL：沒有 `O_NONBLOCK` 時，這一行會**永久阻塞**——生產路徑
     // 掛住而不是回錯。這條測試若回歸，症狀是測試套件跑不完，本身就是訊號。
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -184,7 +184,7 @@ import Testing
     }
 }
 
-@Test func aFifoWithAReaderIsStillRejectedBecauseItIsNotARegularFile() throws {
+@Test(.timeLimit(.minutes(1))) func aFifoWithAReaderIsStillRejectedBecauseItIsNotARegularFile() throws {
     // 上一條走的是 ENXIO（沒有讀者）。這條先開一個非阻塞的讀端，讓 open 成功，
     // 於是真正走到 `enforceOwnerOnlyRegularFile` 的 `S_IFREG` 拒絕分支——
     // 那個分支先前同樣沒有任何測試覆蓋。

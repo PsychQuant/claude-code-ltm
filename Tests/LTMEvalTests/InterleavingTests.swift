@@ -283,3 +283,40 @@ func evalProjection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
             b: HumanLikeStrategy(displacementBound: 5), startingSide: .a)
     }
 }
+
+
+// MARK: - conservative 走完整條比較路徑（#1 verify R6）
+
+@Test func conservativeWorksEndToEndThroughInterleavingAndScoring() throws {
+    // R6：`conservative` 在整個測試套件裡**只當過反例**——沒有任何一條測試讓它
+    // 走過交錯、呈現紀錄、計分。issue #1 要的是三檔並存且**可比較**，而
+    // 「可比較」到目前為止只對另外兩檔驗過。
+    //
+    // 用全平手輸入，因為那是這一檔唯一會作用的情形；否則它與 archival 同序，
+    // 交錯會退化成 null comparison 而什麼都測不到。
+    let tied = (0..<4).map {
+        Candidate(
+            anchor: evalAnchor("t\($0)"), baseScore: 0.5, band: RelevanceBand(rank: 0))
+    }
+    let projection = evalProjection([(evalAnchor("t3"), [.cited: 9])])
+
+    let result = try InterleavingHarness(generation: evalGeneration).present(
+        query: "釘選版本", candidates: tied, projection: projection,
+        a: ArchivalStrategy(), b: ConservativeStrategy(displacementBound: 3),
+        startingSide: .balanced(seed: "conservative-e2e"))
+
+    #expect(!result.record.isNullComparison, "全平手 + 有歷史時兩邊必須分歧")
+    #expect(result.presented.count == tied.count)
+    let credits = Set(result.record.attribution.compactMap(\.creditedTo))
+    #expect(credits.contains(RankingPolicyID("conservative")))
+
+    // 一路走到計分：conservative 貢獻的位置被點開時，分數要記到它頭上。
+    let itsAnchor = result.record.attribution
+        .first { $0.creditedTo == RankingPolicyID("conservative") }!.anchor
+    let opened = Event.interaction(
+        .opened, anchor: itsAnchor, at: evalInstant, generation: evalGeneration,
+        policy: RankingPolicyID("conservative"), presentation: result.record.id)
+
+    let report = try ComparisonScorer.report(records: [result.record], events: [opened])
+    #expect(report.classRows.first?.scores[RankingPolicyID("conservative")]?.credits == 1)
+}

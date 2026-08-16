@@ -26,7 +26,7 @@ private struct TruncatingStrategy: MemoryStrategy {
     }
 }
 
-@Test func duplicateAnchorsInCandidatesAreRejectedRatherThanSpinning() {
+@Test(.timeLimit(.minutes(1))) func duplicateAnchorsInCandidatesAreRejectedRatherThanSpinning() {
     let a = evalCandidates(["a"])[0]
     let b = evalCandidates(["b"])[0]
     let withDuplicate = [a, a, b]
@@ -38,7 +38,7 @@ private struct TruncatingStrategy: MemoryStrategy {
     }
 }
 
-@Test func aStrategyReturningANonPermutationIsRejected() {
+@Test(.timeLimit(.minutes(1))) func aStrategyReturningANonPermutationIsRejected() {
     let input = evalCandidates(["a", "b", "c"])
 
     // 錯誤由 seam 產生、交錯器只補上「是哪一邊」。這條同時釘住兩件事：
@@ -52,7 +52,7 @@ private struct TruncatingStrategy: MemoryStrategy {
     }
 }
 
-@Test func harnessTerminatesOnASingleCandidate() throws {
+@Test(.timeLimit(.minutes(1))) func harnessTerminatesOnASingleCandidate() throws {
     let input = evalCandidates(["only"])
     let result = try InterleavingHarness(generation: evalGeneration).present(
         query: "測試查詢", candidates: input, projection: .empty(at: evalInstant),
@@ -61,7 +61,7 @@ private struct TruncatingStrategy: MemoryStrategy {
     #expect(result.presented.count == 1)
 }
 
-@Test func harnessTerminatesOnAnEmptyCandidateList() throws {
+@Test(.timeLimit(.minutes(1))) func harnessTerminatesOnAnEmptyCandidateList() throws {
     let result = try InterleavingHarness(generation: evalGeneration).present(
         query: "測試查詢", candidates: [], projection: .empty(at: evalInstant),
         a: ArchivalStrategy(), b: HumanLikeStrategy(), startingSide: .a)
