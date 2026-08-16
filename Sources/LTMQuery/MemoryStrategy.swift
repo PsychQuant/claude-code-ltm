@@ -81,6 +81,12 @@ public enum StrategyViolation: Error, Sendable, Equatable {
     /// 無限迴圈（不拋錯，直接掛住燒 CPU），與 R1 修掉的交錯迴圈是同一個
     /// failure class。在 seam 入口一次擋掉，比讓每個迴圈各自防禦可靠。
     case nonFiniteBaseScore(Anchor)
+    /// 策略回報的 displacement 與實際位置變化不符。
+    ///
+    /// 這條的存在理由與 `crossedRelevanceBand` 一樣：provenance 若可以說謊，
+    /// 比較實驗讀到的就不是實際發生的事。先前沒有任何地方驗它——策略自己算
+    /// displacement、自己回報，守衛只看順序（#1 verify R4）。
+    case misreportedDisplacement(Anchor, reported: Int, actual: Int)
 }
 
 /// 所有策略共用的前置條件。
@@ -160,5 +166,48 @@ public protocol MemoryStrategy: Sendable {
     /// 不是 tie-breaking，兩者不是同一個機制的兩種強度。
     var consumedSignals: Set<EventKind> { get }
 
-    func rerank(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult]
+    /// **實作點，不是呼叫點。** 呼叫端一律用 `rerank`。
+    ///
+    /// 名字裡的 checked 指的是「呼叫它的人已經檢查過前置條件」：進到這裡時
+    /// base score 保證有限，離開之後排列性、帶保持與 displacement 誠實性
+    /// 會被無條件驗證。實作者不需要（也不應該）自己重複這些。
+    func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws
+        -> [RankedResult]
+}
+
+extension MemoryStrategy {
+    /// seam 的**唯一**呼叫點：前置條件、實作、後置條件。
+    ///
+    /// ## 為什麼是 extension 而不是 protocol requirement
+    ///
+    /// `rerank` 刻意**不在** protocol 的需求清單裡，所以它不是 customization
+    /// point：任何經由 `any MemoryStrategy` 的呼叫都必然走這裡，實作者無法用
+    /// 覆寫把檢查繞掉。這是型別層的事實，不是紀律。
+    ///
+    /// #1 verify R4 指出前一版把這叫做「seam 入口」是假的：
+    /// `requireFiniteBaseScores` 與 `RankingGuard` 都由每個策略**自願**呼叫，
+    /// 新策略只要不呼叫就完全不受約束——而 seam 的全部意義就是「不可繞過」。
+    /// 那時的「入口」只是一個約定俗成的第一行。
+    ///
+    /// **誠實邊界**：具體型別上若另外定義同名 `rerank`，對該具體型別的靜態
+    /// 呼叫會選到它自己的版本。擋得住的是「經由 seam 的呼叫」，擋不住「刻意
+    /// 繞過 seam 直接對具體型別下手」——後者與策略自己讀語料一樣，屬於 #14。
+    public func rerank(_ candidates: [Candidate], with projection: Projection) throws
+        -> [RankedResult]
+    {
+        try MemoryStrategySupport.requireFiniteBaseScores(candidates)
+        let results = try rerankChecked(candidates, with: projection)
+
+        // 後置條件：回傳的必須是輸入的排列、必須保持帶、而且每一筆自報的
+        // displacement 必須等於實際的位置變化。
+        let placements = try RankingGuard.verifyPermutation(
+            original: candidates, reordered: results.map(\.candidate))
+        for (result, placement) in zip(results, placements)
+        where result.displacement != placement.displacement {
+            throw StrategyViolation.misreportedDisplacement(
+                result.candidate.anchor,
+                reported: result.displacement, actual: placement.displacement)
+        }
+        return results
+    }
 }

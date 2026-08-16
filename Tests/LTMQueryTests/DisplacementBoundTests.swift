@@ -4,19 +4,29 @@ import Testing
 @testable import LTMCore
 @testable import LTMQuery
 
-// 這一檔記錄一段來回，因為結論看起來像退步：
+// 這一檔記錄一段來回。**結論是對稱上限**——中間那個「改成單向」的裁決後來被
+// 反例推翻，整段留著是因為推翻它的方式值得記住。
 //
 // - **R1**（2026-08-11）：verify 抓到 `HumanLikeStrategy` 對一般輸入拋
-//   `displacementBoundExceeded`——當時契約是**對稱**上限，演算法卻只約束提升。
+//   `displacementBoundExceeded`——契約是**對稱**上限，演算法卻只約束提升。
 // - **R1 的修法**：swap 前檢查被越過方的累計下移，超限就放棄提升。
-// - **R2**（2026-08-14）：量化證明那個修法選錯邊。對稱上限的算術讓「一條帶的
-//   提升總數上限＝bound，與帶大小無關」——32 個候選、31 個有歷史，bound 1 時
-//   實際上移總數是 **1**。策略差異量不到。
-// - **裁決**（#17，2026-08-15）：改契約——上限只約束**提升**，下移是他人提升的
-//   後果，據實回報但不另設限。圍住傷害的是相關性帶，不是位移上限。
+// - **R2**（2026-08-14）：量化到「32 個候選、31 個有歷史，bound 1 時實際上移
+//   總數是 1」，我讀成「對稱上限讓一條帶的提升總數 ≤ bound」。
+// - **裁決**（#17，2026-08-15）：據此改契約——上限只約束提升。
+// - **R3 推翻**：那句算術是錯的。bound=1、`[A,B,C,D] → [B,A,D,C]`，兩次提升、
+//   每筆位移都 ≤1。R2 量到的是 R1 那個「放棄提升」演算法的性質，不是對稱契約
+//   的性質。**被量測推翻的是實作，我卻改了契約。** 契約改回對稱，演算法換成
+//   `boundedReorderByStrength`（每輪每個元素最多參與一次交換，跑 bound 輪，
+//   雙向上限由構造保證）。R2 那個輸入的正解確實是 1 次提升，見
+//   `onePromotionIsTheOptimumWhenOnlyTheHeadIsMisplaced`。
 //
-// 所以本檔的斷言從 `abs(displacement) <= bound` 改為 `displacement <= bound`，
-// 並**明確斷言下移可以超過上限**——那是刻意的語意，不是漏網。
+// 所以本檔的斷言一律是 `abs(displacement) <= bound`。**沒有「下移可以超過上限」
+// 這回事**——先前這裡的檔頭這樣寫，而 30 行之下的 `demotionIsBoundedToo` 正好
+// 斷言相反（#1 verify R4）。
+//
+// 誠實邊界：`rerank` 內部已經過 `RankingGuard.check`，所以本檔的上限斷言不會
+// 在守衛還在的情況下失敗。它們擋的是「有人把守衛呼叫拿掉」，不是獨立的第二
+// 道驗算。真正對守衛本身下手的測試在 `RankingGuardTests`。
 
 private func multiStrengthProjection(_ entries: [(Anchor, Double)]) -> Projection {
     var stats: [Anchor: AnchorStatistics] = [:]
@@ -39,8 +49,8 @@ private func multiStrengthProjection(_ entries: [(Anchor, Double)]) -> Projectio
 
     for result in output {
         #expect(
-            result.displacement <= 1,
-            "\(result.candidate.anchor.turnID) 提升 \(result.displacement) 名，超過上限")
+            abs(result.displacement) <= 1,
+            "\(result.candidate.anchor.turnID) 位移 \(result.displacement) 名，超過上限")
     }
 }
 
@@ -160,8 +170,8 @@ func promotionBoundHoldsAcrossManyStrengthPatterns(bound: Int) throws {
         #expect(output.count == input.count)
         for result in output {
             #expect(
-                result.displacement <= bound,
-                "rotation \(rotation) bound \(bound)：\(result.candidate.anchor.turnID) 提升 \(result.displacement)")
+                abs(result.displacement) <= bound,
+                "rotation \(rotation) bound \(bound)：\(result.candidate.anchor.turnID) 位移 \(result.displacement)")
         }
         // 這裡**刻意不斷言排列性質**：`rerank` 內部已呼叫 `RankingGuard.check`，
         // 非排列會在到達斷言之前就拋出，所以那個 `#expect` 不可能失敗。

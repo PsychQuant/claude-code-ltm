@@ -25,8 +25,9 @@ public struct HumanLikeStrategy: MemoryStrategy {
         self.displacementBound = displacementBound
     }
 
-    public func rerank(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
-        try MemoryStrategySupport.requireFiniteBaseScores(candidates)
+    public func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws
+        -> [RankedResult]
+    {
         var reordered = candidates
 
         // 依帶切段後各自處理。段與段之間永遠不交換，所以帶的圍籬在演算法層

@@ -11,12 +11,13 @@ import Testing
 //
 // 這一檔的每條測試都必須在有限時間內返回——它們本身就是「不會掛住」的證據。
 
-/// 回傳非排列的策略。不呼叫 RankingGuard——`MemoryStrategy` 並不強制，
-/// 這正是問題所在。
+/// 回傳非排列的策略。**它照樣不呼叫任何守衛**——重點正在這裡：R4 之前
+/// `MemoryStrategy` 不強制，這種策略能一路跑到交錯器裡；現在 seam 的
+/// `rerank` 是 extension 上的非 customization point，它連出 seam 都出不去。
 private struct TruncatingStrategy: MemoryStrategy {
     let id = RankingPolicyID("truncating")
     let consumedSignals: Set<EventKind> = []
-    func rerank(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
+    func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
         candidates.dropLast().map {
             RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment)
         }
@@ -38,8 +39,10 @@ private struct TruncatingStrategy: MemoryStrategy {
 @Test func aStrategyReturningANonPermutationIsRejected() {
     let input = evalCandidates(["a", "b", "c"])
 
-    #expect(throws: InterleavingViolation.strategyReturnedNonPermutation(
-        policy: RankingPolicyID("truncating"))
+    // 錯誤由 seam 產生、交錯器只補上「是哪一邊」。這條同時釘住兩件事：
+    // 契約被強制（`candidateSetChanged`），以及歸屬沒有遺失（`truncating`）。
+    #expect(throws: InterleavingViolation.strategyMisbehaved(
+        policy: RankingPolicyID("truncating"), violation: .candidateSetChanged)
     ) {
         _ = try InterleavingHarness(generation: evalGeneration).present(
             query: "測試查詢", candidates: input, projection: .empty(at: evalInstant),

@@ -69,7 +69,7 @@ Two strategies each produce a ranking for the same query; the presented list int
 
 ## Implementation Contract
 
-**Behavior.** A caller asks the query layer for results and receives an ordered list in which every item carries its displacement relative to pure retrieval order and the reason for that displacement. Under `archival` every displacement is zero. Under `human-like`, an item may move within its relevance band by no more than the configured bound, and its reason names the events responsible.
+**Behavior.** A caller asks the query layer for results and receives an ordered list in which every item carries its displacement relative to pure retrieval order and the reason for that displacement. Under `archival` every displacement is zero. Under `conservative` an item moves only among candidates its base score ties with, and under `human-like` wherever recorded history differs; both move by no more than the configured bound, and the reason names the events responsible.
 
 **Interface and data shape.**
 
@@ -99,7 +99,7 @@ Two strategies each produce a ranking for the same query; the presented list int
 - A comparison report carries one row per query class with that class's observation count, and never an aggregate row on its own, asserted over synthetic events spanning several classes.
 - A serialized store of presentation records contains none of the fixture query strings, asserted by the same search-the-output test used for events.
 
-**In scope:** the anchor and event value types, the event store, the projection function, the strategy protocol, both strategies, the interleaving harness with its presentation record and per-class report, and their tests. Documentation updates recording the removal of the third tier and the interleaving decision.
+**In scope:** the anchor and event value types, the event store, the projection function, the strategy protocol, all three strategies, the interleaving harness with its presentation record and per-class report, and their tests. Documentation updates recording the history of the third tier (removed on a half-true argument, then restored as tie-breaker-only) and the interleaving decision.
 
 **Out of scope:** ingest, chunking, lexical and vector indexes, the encrypted note store, query expansion, and any user-facing command surface. Candidates are constructed synthetically in tests; no test reads the real corpus.
 

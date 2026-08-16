@@ -78,8 +78,9 @@ public struct ConservativeStrategy: MemoryStrategy {
         self.displacementBound = displacementBound
     }
 
-    public func rerank(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
-        try MemoryStrategySupport.requireFiniteBaseScores(candidates)
+    public func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws
+        -> [RankedResult]
+    {
         var reordered = candidates
 
         // 只在「同帶 + base score 完全相等」的連續區段內重排。區段之外一律不動。

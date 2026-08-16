@@ -146,7 +146,7 @@ private struct RogueStrategy: MemoryStrategy {
     let id = RankingPolicyID("rogue")
     let consumedSignals: Set<EventKind> = []
 
-    func rerank(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
+    func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
         switch mode {
         case .crossBand:
             let reordered = Array(candidates.reversed())  // 把第 1 帶推到第 0 帶前面

@@ -12,10 +12,11 @@ public struct ArchivalStrategy: MemoryStrategy {
 
     public init() {}
 
-    public func rerank(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
+    public func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws
+        -> [RankedResult]
+    {
         // 前置條件對三檔一致：非有限 base score 在 seam 入口就擋掉，不因為這一檔
         // 不重排就放行——放行會讓「哪一檔會擋」變成呼叫端要記得的事。
-        try MemoryStrategySupport.requireFiniteBaseScores(candidates)
         // 連看都不看 projection。這不是省事，是定義。
         return candidates.map {
             RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment)

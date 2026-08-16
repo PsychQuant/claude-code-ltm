@@ -12,24 +12,27 @@ public struct Interleaving: Sendable, Equatable {
 public enum InterleavingViolation: Error, Sendable, Equatable {
     /// 候選清單裡有重複的 anchor。
     case duplicateCandidate(Anchor)
-    /// 某個策略回傳的不是候選集合的排列。
-    case strategyReturnedNonPermutation(policy: RankingPolicyID)
+    /// 某個策略違反了 seam 的契約（非排列、跨帶、謊報位移…）。
+    ///
+    /// 為什麼要包一層而不是讓 `StrategyViolation` 直接往上拋：一次呈現同時跑
+    /// 兩個策略，seam 的錯誤不含策略身分，報告讀者無從判斷該懷疑哪一邊。
+    case strategyMisbehaved(policy: RankingPolicyID, violation: StrategyViolation)
 }
 
-/// 驗證某個策略的輸出確實是候選集合的排列。
-private func requirePermutation(
-    _ ranking: [Candidate], of candidates: [Candidate], from policy: RankingPolicyID
-) throws {
-    guard ranking.count == candidates.count else {
-        throw InterleavingViolation.strategyReturnedNonPermutation(policy: policy)
-    }
-    var unconsumed: [Anchor: Candidate] = [:]
-    for candidate in candidates { unconsumed[candidate.anchor] = candidate }
-    for candidate in ranking {
-        guard let expected = unconsumed.removeValue(forKey: candidate.anchor), expected == candidate
-        else {
-            throw InterleavingViolation.strategyReturnedNonPermutation(policy: policy)
-        }
+/// 呼叫策略，並把 seam 的違規轉譯成帶策略歸屬的錯誤。
+///
+/// 排列性本身**不在這裡驗**（#1 verify R4 之後）：`MemoryStrategy.rerank` 是
+/// extension 上的非 customization point，所有經由 protocol 的呼叫都必然通過
+/// `RankingGuard.verifyPermutation`，所以交錯器再驗一次是驗不到東西的死碼。
+/// 這裡只補 seam 給不出的一件事——**是哪一邊違規**。兩個策略在同一次呈現裡
+/// 各跑一次，錯誤若不帶 policy，報告讀者無從判斷該懷疑誰。
+private func ranking(
+    from strategy: some MemoryStrategy, over candidates: [Candidate], with projection: Projection
+) throws -> [Candidate] {
+    do {
+        return try strategy.rerank(candidates, with: projection).map(\.candidate)
+    } catch let violation as StrategyViolation {
+        throw InterleavingViolation.strategyMisbehaved(policy: strategy.id, violation: violation)
     }
 }
 
@@ -78,15 +81,13 @@ public struct InterleavingHarness: Sendable {
             throw InterleavingViolation.duplicateCandidate(candidate.anchor)
         }
 
-        let rankingA = try a.rerank(candidates, with: projection).map(\.candidate)
-        let rankingB = try b.rerank(candidates, with: projection).map(\.candidate)
+        let rankingA = try ranking(from: a, over: candidates, with: projection)
+        let rankingB = try ranking(from: b, over: candidates, with: projection)
 
         // 策略是可插拔的，而 `MemoryStrategy` 並不強制走 RankingGuard——
         // `ArchivalStrategy` 自己就沒呼叫。所以「回傳的是排列」在 seam 上只是慣例，
         // 必須在消費端自己驗一次。spec 的「presented list contains each candidate
         // exactly once」原本沒有任何執行點，違反時的表現是無限迴圈而不是 fail loudly。
-        try requirePermutation(rankingA, of: candidates, from: a.id)
-        try requirePermutation(rankingB, of: candidates, from: b.id)
 
         // 兩邊排序一樣 → 這次呈現無法分辨任何差異。硬記給某一邊會憑空製造
         // 偏好，所以標成 null comparison 讓計分整批略過。

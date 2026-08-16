@@ -48,7 +48,7 @@ func projection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
 private struct IdentityProbe: MemoryStrategy {
     let id = RankingPolicyID("identity-probe")
     let consumedSignals: Set<EventKind> = []
-    func rerank(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
+    func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws -> [RankedResult] {
         candidates.map { RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment) }
     }
 }
@@ -74,4 +74,64 @@ private struct IdentityProbe: MemoryStrategy {
 
 @Test func strategyIdentityIsAPolicyIdentifier() {
     #expect(IdentityProbe().id == RankingPolicyID("identity-probe"))
+}
+
+// MARK: - seam 是強制的，不是自願的（#1 verify R4）
+
+/// 什麼守衛都不呼叫、而且**謊報** displacement 的策略。
+///
+/// R4 之前這種策略完全合法：`requireFiniteBaseScores` 與 `RankingGuard` 都由
+/// 每個策略自己想起來呼叫，不呼叫就不受任何約束——而「seam」的定義就是不可
+/// 繞過。現在 `rerank` 在 extension 上、不是 customization point，所以下面
+/// 三條測的都不是這個型別的自律，是 seam 的強制。
+private struct LyingStrategy: MemoryStrategy {
+    let id = RankingPolicyID("lying")
+    let consumedSignals: Set<EventKind> = []
+    func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws
+        -> [RankedResult]
+    {
+        // 順序原封不動，卻宣稱每一筆都上移了三名。
+        candidates.map { RankedResult(candidate: $0, displacement: 3, reason: .noAdjustment) }
+    }
+}
+
+/// 把候選整個反轉、跨帶，同樣什麼都不驗。
+private struct BandCrossingStrategy: MemoryStrategy {
+    let id = RankingPolicyID("band-crossing")
+    let consumedSignals: Set<EventKind> = []
+    func rerankChecked(_ candidates: [Candidate], with projection: Projection) throws
+        -> [RankedResult]
+    {
+        candidates.reversed().map {
+            RankedResult(candidate: $0, displacement: 0, reason: .noAdjustment)
+        }
+    }
+}
+
+@Test func aStrategyCannotLieAboutItsOwnDisplacement() {
+    // provenance 若可以說謊，比較實驗讀到的就不是實際發生的事。
+    let input = candidates(["a", "b"])
+    #expect(
+        throws: StrategyViolation.misreportedDisplacement(
+            testAnchor("a"), reported: 3, actual: 0)
+    ) {
+        _ = try LyingStrategy().rerank(input, with: .empty(at: instant))
+    }
+}
+
+@Test func aStrategyThatChecksNothingStillCannotCrossABand() {
+    var input = candidates(["a"])
+    input += [Candidate(anchor: testAnchor("z"), baseScore: 0.1, band: RelevanceBand(rank: 1))]
+
+    #expect(throws: (any Error).self) {
+        _ = try BandCrossingStrategy().rerank(input, with: .empty(at: instant))
+    }
+}
+
+@Test func nonFiniteInputIsRejectedForAStrategyThatNeverChecksIt() {
+    // `LyingStrategy` 沒有一行在看 base score。前置條件由 seam 施加。
+    let bad = [Candidate(anchor: testAnchor("nan"), baseScore: .nan, band: RelevanceBand(rank: 0))]
+    #expect(throws: StrategyViolation.nonFiniteBaseScore(testAnchor("nan"))) {
+        _ = try LyingStrategy().rerank(bad, with: .empty(at: instant))
+    }
 }

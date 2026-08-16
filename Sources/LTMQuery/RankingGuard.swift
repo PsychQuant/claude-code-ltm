@@ -13,13 +13,16 @@ public struct GuardedPlacement: Sendable, Equatable {
 /// 這是**後置條件**不是修正器：發現違規就拋，不夾成合法值。夾了之後，一個
 /// 行為不合規的策略會偽裝成合規的策略，而比較實驗最不能容忍的就是這種失真。
 public enum RankingGuard {
-    public static func check(
+    /// 位移上限之外的**普遍**後置條件：排列性、帶保持、位移計算。
+    ///
+    /// 拆出來是因為這些性質對**每一個**策略都成立（spec 的「策略不得引入候選」
+    /// 與「只在帶內移動」沒有例外），而位移上限是 per-strategy 的設定
+    /// （`archival` 根本沒有上限可言）。拆開之後 seam 就能無條件強制前者，
+    /// 不必等策略自己想起來要呼叫（#1 verify R4：先前兩者都是自願的）。
+    public static func verifyPermutation(
         original: [Candidate],
-        reordered: [Candidate],
-        bound: Int
+        reordered: [Candidate]
     ) throws -> [GuardedPlacement] {
-        precondition(bound >= 0, "位移上限不得為負")
-
         // 先驗帶：重排後每個位置的帶必須與原順序逐位相同。帶是圍籬，
         // 位移上限只在圍籬內才有意義。
         guard original.count == reordered.count else {
@@ -59,6 +62,23 @@ public enum RankingGuard {
                 throw StrategyViolation.candidateSetChanged
             }
             let displacement = from - newIndex
+            placements.append(GuardedPlacement(candidate: candidate, displacement: displacement))
+        }
+
+        guard unconsumed.isEmpty else { throw StrategyViolation.candidateSetChanged }
+        return placements
+    }
+
+    public static func check(
+        original: [Candidate],
+        reordered: [Candidate],
+        bound: Int
+    ) throws -> [GuardedPlacement] {
+        precondition(bound >= 0, "位移上限不得為負")
+        let placements = try verifyPermutation(original: original, reordered: reordered)
+
+        for placement in placements {
+            let displacement = placement.displacement
             // 上限是**對稱**的：提升與下移都不得超過 bound。
             //
             // 這條改過兩次，紀錄留著因為第二次是錯的（#1 verify R3）：R2 量到
@@ -72,13 +92,7 @@ public enum RankingGuard {
                 throw StrategyViolation.displacementBoundExceeded(
                     bound: bound, attempted: abs(displacement))
             }
-            placements.append(GuardedPlacement(candidate: candidate, displacement: displacement))
         }
-
-        // 走到這裡 count 已相同且每筆都消耗掉一個相異的原候選，所以 unconsumed
-        // 必為空。留著這條斷言是為了讓「排列」這件事在 code 裡有一個明確的終點，
-        // 而不是散在三個 guard 的交集裡靠讀者自己推。
-        guard unconsumed.isEmpty else { throw StrategyViolation.candidateSetChanged }
         return placements
     }
 
