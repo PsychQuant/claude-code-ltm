@@ -97,7 +97,7 @@ Two strategies each produce a ranking for the same query; the presented list int
 - No event record contains chunk text, query text, or note text, asserted by a test that serializes a populated store and searches the output for known fixture strings.
 - The interleaving harness attributes an interaction to exactly one contributing strategy, asserted over a synthetic pair whose rankings differ.
 - A comparison report carries one row per query class with that class's observation count, and never an aggregate row on its own, asserted over synthetic events spanning several classes.
-- A serialized store of presentation records contains none of the fixture query strings, asserted by the same search-the-output test used for events.
+- A serialized presentation record contains none of the query's bytes, and every byte is ASCII, asserted by running a query through the harness and encoding the record it produces. Searching the output for a string that was never supplied to the store would be a vacuous assertion — that was the earlier formulation, and it was removed for that reason (#1 verify R4/R5). What is asserted instead is a property of an output produced from a real input.
 
 **In scope:** the anchor and event value types, the event store, the projection function, the strategy protocol, all three strategies, the interleaving harness with its presentation record and per-class report, and their tests. Documentation updates recording the history of the third tier (removed on a half-true argument, then restored as tie-breaker-only) and the interleaving decision.
 

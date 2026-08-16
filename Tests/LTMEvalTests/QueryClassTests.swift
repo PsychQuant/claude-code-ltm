@@ -48,3 +48,35 @@ func classifierAssignsOneOfTheClosedFiveValues(query: String, expected: QueryCla
     #expect(QueryClassifier.classify(query) == QueryClassifier.classify(query))
     #expect(QueryClassifier.classify(query) == .cjk4plus)
 }
+
+
+// MARK: - 只涵蓋漢字與 ASCII 英數（#1 verify R5）
+
+@Test func ordinaryJapaneseIsNotFiledAsAMixedCJKLatinQuery() {
+    // R5：latin 先前用 `CharacterSet.alphanumerics`，而那個集合**包含假名**。
+    // 於是「記憶する」被判成 `mixed`，而 spec 對 mixed 的定義是「CJK 與 Latin
+    // 同時出現」——那句話對這個輸入是假的。
+    #expect(QueryClassifier.classify("記憶する") == .cjk2char)
+    #expect(QueryClassifier.classify("検索") == .cjk2char)
+}
+
+@Test func kanaAndHangulOnlyQueriesLandInTheNonHanBucketAndThatIsAStatedLimitation() {
+    // 這條記錄的是**限制**，不是理想行為：五值集合來自只跑過中文與英文的量測，
+    // 假名與諺文沒有自己的桶，所以它們落在「不含漢字」那一格。標籤字面寫
+    // `latin-alnum`，而它實際的意思是「不含漢字」。
+    #expect(QueryClassifier.classify("ひらがな") == .latinAlnum)
+    #expect(QueryClassifier.classify("한글검색") == .latinAlnum)
+}
+
+@Test func hanBeyondExtensionFIsStillCountedAsHan() {
+    // R5：擴充 G 之後的漢字先前不在 `isHan` 的範圍清單裡，卻在
+    // `CharacterSet.alphanumerics` 裡，所以被算成 latin。
+    let extG = String(Unicode.Scalar(0x30000)!)  // 擴充 G
+    #expect(QueryClassifier.classify(extG + extG) == .cjk2char)
+}
+
+@Test func aMixedQueryStillNeedsBothHanAndASCII() {
+    #expect(QueryClassifier.classify("FTS5 分詞") == .mixed)
+    // 漢字＋假名不是 mixed；漢字＋全形標點也不是。
+    #expect(QueryClassifier.classify("分詞、比較") == .cjk4plus)
+}

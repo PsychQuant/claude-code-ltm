@@ -31,23 +31,65 @@ A second forcing function: the canonical store must hold usage history, which is
 - Affected specs: memory-events, memory-strategy, strategy-comparison
 - Affected code:
   - New: Package.swift
+  - New: Sources/LTMCore/Module.swift
   - New: Sources/LTMCore/Anchor.swift
+  - New: Sources/LTMCore/CanonicalCoding.swift
   - New: Sources/LTMCore/Event.swift
+  - New: Sources/LTMCore/OpaqueIdentifier.swift
+  - New: Sources/LTMCore/Projection.swift
+  - New: Sources/LTMMemory/Module.swift
   - New: Sources/LTMMemory/EventStore.swift
   - New: Sources/LTMMemory/Projection.swift
-  - New: Sources/LTMQuery/Candidate.swift
+  - New: Sources/LTMQuery/Module.swift
   - New: Sources/LTMQuery/MemoryStrategy.swift
+  - New: Sources/LTMQuery/RankingGuard.swift
   - New: Sources/LTMQuery/Strategies/ArchivalStrategy.swift
   - New: Sources/LTMQuery/Strategies/ConservativeStrategy.swift
   - New: Sources/LTMQuery/Strategies/HumanLikeStrategy.swift
-  - New: Sources/LTMQuery/RankingGuard.swift
+  - New: Sources/LTMEval/Module.swift
   - New: Sources/LTMEval/QueryClass.swift
   - New: Sources/LTMEval/PresentationRecord.swift
   - New: Sources/LTMEval/Interleaving.swift
   - New: Sources/LTMEval/ComparisonReport.swift
+  - New: Tests/LTMMemoryTests/AnchorTests.swift
+  - New: Tests/LTMMemoryTests/AnchorRebuildTests.swift
+  - New: Tests/LTMMemoryTests/CorpusContainmentTests.swift
   - New: Tests/LTMMemoryTests/EventStoreTests.swift
+  - New: Tests/LTMMemoryTests/EventTests.swift
+  - New: Tests/LTMMemoryTests/GuardPinningTests.swift
+  - New: Tests/LTMMemoryTests/ModuleGraphTests.swift
+  - New: Tests/LTMMemoryTests/PrivacyAdversarialTests.swift
+  - New: Tests/LTMMemoryTests/ProjectionTests.swift
+  - New: Tests/LTMQueryTests/ConservativeStrategyTests.swift
+  - New: Tests/LTMQueryTests/DisplacementBoundTests.swift
   - New: Tests/LTMQueryTests/MemoryStrategyTests.swift
+  - New: Tests/LTMQueryTests/ModuleGraphTests.swift
+  - New: Tests/LTMQueryTests/OrphanReasonTests.swift
+  - New: Tests/LTMQueryTests/RankingGuardTests.swift
+  - New: Tests/LTMQueryTests/StrategyTests.swift
+  - New: Tests/LTMEvalTests/ComparisonReportTests.swift
   - New: Tests/LTMEvalTests/InterleavingTests.swift
+  - New: Tests/LTMEvalTests/InterleavingTerminationTests.swift
+  - New: Tests/LTMEvalTests/ModuleGraphTests.swift
+  - New: Tests/LTMEvalTests/QueryClassTests.swift
   - Modified: docs/memory-systems/README.md
   - Modified: CLAUDE.md
   - Removed: (none)
+
+**Out-of-scope files this change also lands, declared rather than hidden.**
+Running the Spectra workflow for the first time in this repository writes its own
+scaffolding, and that scaffolding is now tracked. It has nothing to do with memory
+strategy and it is about 2,500 lines:
+
+- New: .spectra.yaml
+- New: openspec/config.yaml
+- New: .claude/settings.json
+- New: .claude/skills/ (thirteen Spectra skill definition files)
+- New: openspec/changes/pluggable-memory-strategy/ (this change's own artifacts)
+
+An earlier draft of this section named a file that was never created
+(Sources/LTMQuery/Candidate.swift — the type lives in Sources/LTMQuery/MemoryStrategy.swift),
+listed nine of the twenty-one shipped source files, three of the twenty test files, and
+omitted the scaffolding entirely (#1 verify R5). The list is now generated from what the
+change actually contains. Impact lists are read by people deciding whether a change is
+in scope; an incomplete one understates scope in exactly the direction that matters.

@@ -238,3 +238,25 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
     #expect(!ConservativeStrategy().consumedSignals.isEmpty)
     #expect(ConservativeStrategy().consumedSignals == HumanLikeStrategy().consumedSignals)
 }
+
+
+@Test func aBoundOfZeroDoesNotReproduceTieBreaking() throws {
+    // memory-strategy spec 的 scenario「A bound of zero does not reproduce
+    // tie-breaking」。R4 我把原本覆蓋它的測試刪掉（因為那條測試被誤用來支撐
+    // 一個更強的論證），卻沒有補回覆蓋 scenario 本身的版本——於是 tasks.md
+    // 宣稱有這條測試而它不存在（#1 verify R5）。
+    //
+    // **這條只宣稱它字面上宣稱的事**：bound=0 的 human-like 什麼都不做，
+    // 而 conservative 會做 tie-breaking。它**不**足以支撐「機制不是幅度」
+    // ——bound=0 的行為由一句 early return 保證，證不了整個值域。那個論證的
+    // 證據在 `noBoundMakesHumanLikeBehaveLikeConservativeOnNonTiedInput`。
+    let tied = tiedCandidates(["a", "b", "c"])
+    let projection = strengths([("c", 5), ("b", 2)])
+
+    let zeroBound = try HumanLikeStrategy(displacementBound: 0).rerank(tied, with: projection)
+    #expect(zeroBound.map(\.candidate.anchor) == tied.map(\.anchor))
+    #expect(zeroBound.allSatisfy { $0.displacement == 0 })
+
+    let conservative = try ConservativeStrategy().rerank(tied, with: projection)
+    #expect(conservative.map(\.candidate.anchor) != tied.map(\.anchor))
+}
