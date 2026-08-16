@@ -273,3 +273,53 @@ private func anchorForFifoTest() -> Anchor {
         _ = try FileEventStore(url: dir.appendingPathComponent("events.jsonl"))
     }
 }
+
+
+@Test(.timeLimit(.minutes(1))) func readingAFifoBackedStoreFailsRatherThanBlocking() throws {
+    // #1 verify R7 的 CRITICAL：R6 為 `append` 修掉的 FIFO 阻塞，讀取端原封不動
+    // ——`allEvents` 開了一個 `O_NONBLOCK` fd 只拿來上鎖，然後用
+    // `Data(contentsOf:)` **重新開啟**路徑；`serializedBytes` 連鎖都沒取。
+    // 兩條新的 FIFO 測試都只測了 append。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-fiforead-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let fifo = dir.appendingPathComponent("events.jsonl")
+    #expect(mkfifo(fifo.path, 0o600) == 0, "mkfifo 失敗，這條測試沒測到東西")
+
+    let store = try FileEventStore(url: fifo)
+    #expect(throws: (any Error).self) { _ = try store.allEvents() }
+    #expect(throws: (any Error).self) { _ = try store.allEvents(skippingCorrupt: true) }
+    #expect(throws: (any Error).self) { _ = try store.serializedBytes() }
+}
+
+@Test(.timeLimit(.minutes(1))) func readingAFifoWithAReaderStillFails() throws {
+    // 另一支：先開讀端讓 open 成功，於是真正走到 `fstat` 的 S_IFREG 拒絕分支。
+    // R7 實測指出 R6 的兩條 append 測試都因為 flock 對 FIFO 回 EOPNOTSUPP／ENXIO
+    // 而**碰不到** S_IFREG 分支——那個分支當時全套件零覆蓋。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-fiforead2-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let fifo = dir.appendingPathComponent("events.jsonl")
+    #expect(mkfifo(fifo.path, 0o600) == 0)
+
+    let writer = open(fifo.path, O_RDWR | O_NONBLOCK)  // 兩端都開，讓 open 必成功
+    #expect(writer >= 0)
+    defer { close(writer) }
+
+    let store = try FileEventStore(url: fifo)
+    #expect(throws: (any Error).self) { _ = try store.allEvents() }
+}
+
+@Test func readingAnOrdinaryStoreStillWorks() throws {
+    // 反向對照：上面兩條可以被「讀取永遠失敗」滿足。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-okread-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let store = try FileEventStore(url: dir.appendingPathComponent("events.jsonl"))
+    try store.append(
+        .interaction(
+            .shown, anchor: anchorForFifoTest(), at: Date(),
+            generation: GenerationID("g1"), policy: RankingPolicyID("archival")))
+    #expect(try store.allEvents().count == 1)
+    #expect(try !store.serializedBytes().isEmpty)
+}

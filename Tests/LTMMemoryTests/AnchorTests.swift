@@ -85,3 +85,24 @@ let fixtureText = "標記某個節點然後做對照，這是範例的基準文�
     let shortened = Turn(id: "t1", role: "user", timestamp: Date(), text: "短")
     #expect(anchor.dereference(in: FixtureCorpus.single(shortened)) == .orphaned(.spanOutOfBounds))
 }
+
+
+@Test func corpusTextEditedToWhitespaceOrphansRatherThanCrashing() {
+    // #1 verify R7 的 CRITICAL（四個 lens 各自報，DA 以 A/B 量到 pre-R6 回
+    // `.orphaned`）：R6 把「空內容摘要不得存在」做成 `ContentHash(hex:)` 的 trap，
+    // 而 `dereference` 對**當下的語料文字**算雜湊——語料被編輯成純空白時，
+    // 讀取路徑中止整個行程。語料不是我們能控制的輸入，而 spec 寫的是
+    // 「Altered source text dereferences as orphaned」。
+    let original = Turn(
+        id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "abcXYZdef")
+    let anchor = Anchor(source: "fixture-a", turn: original, span: 3..<6)
+
+    let edited = Turn(
+        id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "abc   def")
+    let corpus = FixtureCorpus(turns: ["fixture-a": ["t1": edited]])
+
+    #expect(anchor.dereference(in: corpus) == .orphaned(.contentNormalizesToNothing))
+    // 對照：未編輯時照常 resolve，否則上面可能只是「永遠 orphan」。
+    let intact = FixtureCorpus(turns: ["fixture-a": ["t1": original]])
+    #expect(anchor.dereference(in: intact).resolvedText == "XYZ")
+}

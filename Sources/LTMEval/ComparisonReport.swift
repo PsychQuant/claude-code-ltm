@@ -208,6 +208,13 @@ public enum ComparisonScorer {
         var penalties: [Key: Int] = [:]
         var presented: [Key: Int] = [:]
         var observations: [QueryClass: Int] = [:]
+        // **逐 (generation, class) 也要各自計數。** R6 修了 `scores` 的 pooling，
+        // 卻讓巢狀 `ClassRow.observations` 繼續讀全域的 `observations`，於是每一代
+        // 都回報全部世代的觀測數（#1 verify R7）。R6 自己的診斷寫「先前每一個
+        // ClassRow 仍然把所有 generation 的 credits／penalties／presented 加總」
+        // ——列了三個數字、修了三個，第四個 `observations` 沒被列到。
+        // 判準是「凡是掛在沒有 generation 欄位的列上的數字」，不是那三個名字。
+        var perGenerationObservations: [GenerationID: [QueryClass: Int]] = [:]
         var generationObservations: [GenerationID: Int] = [:]
         var generations: Set<GenerationID> = []
 
@@ -263,10 +270,14 @@ public enum ComparisonScorer {
                 credits[key, default: 0] += 1
                 observations[record.queryClass, default: 0] += 1
                 generationObservations[record.generation, default: 0] += 1
+                perGenerationObservations[record.generation, default: [:]][
+                    record.queryClass, default: 0] += 1
             case .dismissed:
                 penalties[key, default: 0] += 1
                 observations[record.queryClass, default: 0] += 1
                 generationObservations[record.generation, default: 0] += 1
+                perGenerationObservations[record.generation, default: [:]][
+                    record.queryClass, default: 0] += 1
             }
         }
 
@@ -306,7 +317,7 @@ public enum ComparisonScorer {
                         .map { queryClass in
                             ClassRow(
                                 queryClass: queryClass,
-                                observations: observations[queryClass] ?? 0,
+                                observations: perGenerationObservations[generation]?[queryClass] ?? 0,
                                 scores: table {
                                     $0.queryClass == queryClass && $0.generation == generation
                                 })

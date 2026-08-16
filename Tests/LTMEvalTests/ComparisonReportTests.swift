@@ -205,6 +205,10 @@ private func event(
         #expect(row.classRows.count == 1)
         #expect(row.classRows.first?.queryClass == .cjk2char)
         #expect(row.scores.values.reduce(0) { $0 + $1.credits } == 1)
+        // **R7**：R6 修了 scores 的 pooling，漏了同一列上的 observations——
+        // 每一代都回報兩代的觀測數。這條測試當時只驗 scores。
+        #expect(row.classRows.first?.observations == 1, "每一代的觀測數不得含另一代的")
+        #expect(row.observations == 1)
     }
 }
 

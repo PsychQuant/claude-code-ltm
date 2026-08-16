@@ -20,6 +20,63 @@ An anchor SHALL identify a region of the read-only corpus by the tuple (source f
 - **WHEN** an anchor is dereferenced and the normalized text at the addressed location hashes to a value other than the stored hash
 - **THEN** the dereference returns an orphaned result naming the mismatch, and does not return the text found at that location
 
+### Requirement: A canonical line is exactly the canonical encoding of its value
+
+Reading a line from the canonical store SHALL decode it, re-encode the decoded value with the same encoder the writer uses, and reject the line unless the result is byte-for-byte identical to the bytes read. Rejection SHALL name the line number so the record can be located and repaired.
+
+This is the operative form of "the store contains nothing the schema does not define". Field-level shape constraints are a second layer, not the criterion: they cannot see what the decoder discards. Four successive attempts to state the constraint as a list of field shapes each missed a case found later — nested unknown keys, extra array elements, duplicated keys — and two of those are unreachable by any field-level check, one because the decoder involved belongs to the standard library and one because the offending key is in the declared set.
+
+A line consisting of zero bytes SHALL be skipped without being treated as a record or as corruption; it carries nothing.
+
+#### Scenario: A line carrying anything the encoder would not produce is rejected
+
+- **WHEN** a stored line differs from the canonical encoding of the value it decodes to — by an unknown key at any object node, an extra element at any array node, a duplicated key, an escape form, key ordering, or whitespace
+- **THEN** reading rejects that line and names its line number
+
+#### Scenario: The salvage path survives one rejected line
+
+- **GIVEN** a store whose second line is not canonical
+- **WHEN** the store is read in salvage mode
+- **THEN** the first line is returned and the second is listed as corrupt
+
+### Requirement: Identifiers, hashes and spans have type-level shape constraints
+
+Every value that reaches a canonical record SHALL be constrained in its own type, at construction and at decoding: opaque identifiers to a fixed ASCII character set with a length ceiling; note and presentation references to a random-identifier storage type that admits no free text; content hashes to lowercase hexadecimal of fixed length, excluding the digest of the empty string; spans to a non-empty, non-negative, non-inverted pair of integers validated before the range is constructed.
+
+This layer cannot be the criterion — it sees only what the decoder kept — but without it the byte-level check is the sole line of defence and every malformed value reaches business logic before being noticed.
+
+#### Scenario: A free-text value is rejected at every string-valued field
+
+- **WHEN** each string leaf of an encoded event is replaced in turn with free text
+- **THEN** decoding fails for every one of them
+
+#### Scenario: An anchor cannot bind to nothing
+
+- **WHEN** a content hash equal to the digest of the empty string would be stored
+- **THEN** it is rejected, because such an anchor resolves against any text
+
+#### Scenario: Dereferencing text that normalizes to nothing reports an orphan
+
+- **GIVEN** a stored anchor whose corpus text has since been edited to whitespace only
+- **WHEN** the anchor is dereferenced
+- **THEN** the result is an orphan, not a crash
+
+### Requirement: The event store refuses to write inside the read-only corpus
+
+Constructing a store SHALL fail when its path resolves inside the read-only corpus, where "inside" is decided by filesystem identity of the containing directories rather than by path spelling, so that an alternate absolute path to the same directory is recognised. Construction SHALL also fail when the containing directory is group- or world-writable without the sticky bit. Appending SHALL create the file owner-readable only, SHALL refuse a target that is not a regular file, and no read or write operation SHALL block indefinitely.
+
+#### Scenario: An alternate path to the corpus is refused
+
+- **GIVEN** a second absolute path that resolves to the same directory as the corpus root
+- **WHEN** a store is constructed under it
+- **THEN** construction fails
+
+#### Scenario: A non-regular file is refused without hanging
+
+- **GIVEN** a path naming a FIFO
+- **WHEN** an append is attempted, and separately when a read is attempted
+- **THEN** each fails promptly rather than blocking
+
 ### Requirement: Event records carry pointers and statistics only
 
 An event SHALL consist of an event kind, an anchor, a timestamp, a generation identifier naming the index build that produced the result, a ranking policy identifier naming the strategy in force, and an optional presentation identifier naming the presentation the interaction originated in. A pin event SHALL additionally carry an opaque note reference generated as a random identifier. No event field SHALL contain corpus text, query text, or pin note text. A note reference SHALL NOT be derived from note content by hashing or by any other content-dependent function, and neither SHALL a presentation identifier.
@@ -34,7 +91,9 @@ The presentation identifier SHALL be absent for interactions that did not origin
 #### Scenario: Serialized event store contains no verbatim content
 
 - **WHEN** an event store populated from a fixture session is serialized in full
-- **THEN** the serialized output contains none of the fixture corpus strings, none of the fixture query strings, and none of the fixture note strings
+- **THEN** the serialized output contains none of the fixture corpus strings, and every byte is ASCII
+
+  (The fixture query string and note string are deliberately not asserted against. No parameter of the store accepts them, so searching the output for a string that was never supplied is a vacuous assertion. Their absence is established by the type-level constraints and the canonical-bytes requirement above.)
 
 #### Scenario: Pin note reference is content-independent
 

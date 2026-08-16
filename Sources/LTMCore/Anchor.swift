@@ -54,6 +54,16 @@ public enum OrphanReason: Sendable, Equatable {
     case turnMissing
     case spanOutOfBounds
     case contentHashMismatch(expected: ContentHash, found: ContentHash)
+    /// 該位置現在的文字正規化之後是空字串。
+    ///
+    /// 這是 orphan 的一種，不是崩潰。R6 把「空內容摘要不得存在」做成
+    /// `ContentHash(hex:)` 的 trap，而 `dereference` 會對**當下的語料文字**算
+    /// 雜湊——語料被編輯成純空白時，讀取路徑就中止行程（#1 verify R7，四個
+    /// lens 各自報，DA 以 A/B 量到 pre-R6 同一輸入回 `.orphaned`）。
+    ///
+    /// 建構路徑 trap 是對的（呼叫端給錯了），讀取路徑不行：語料不是我們能
+    /// 控制的輸入，而 spec 寫的是「Altered source text dereferences as orphaned」。
+    case contentNormalizesToNothing
 }
 
 /// 正規化後文字的 SHA-256，十六進位小寫。
@@ -293,6 +303,11 @@ public struct Anchor: Sendable, Hashable, Codable {
             return .orphaned(.spanOutOfBounds)
         }
         let normalized = Anchor.normalize(sliced)
+        // **算雜湊之前先擋空字串。** `Anchor.hash` 走 `ContentHash(hex:)`，而它對
+        // 空內容摘要 trap；那個 trap 屬於建構路徑，不該出現在讀取路徑上。
+        guard !normalized.isEmpty else {
+            return .orphaned(.contentNormalizesToNothing)
+        }
         let found = Anchor.hash(normalized)
         guard found == contentHash else {
             return .orphaned(.contentHashMismatch(expected: contentHash, found: found))

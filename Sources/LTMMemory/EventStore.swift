@@ -435,21 +435,14 @@ public struct FileEventStore: EventStore {
             //
             // 取不到就照讀：讀取沒有正確性風險（最壞是看到半行並回報損壞，
             // 與先前行為相同），為它引入一個新的阻塞點不划算。
-            let fd = open(url.path, O_RDONLY | O_NONBLOCK)
-            if fd >= 0 {
-                var attempts = 0
-                while flock(fd, LOCK_SH | LOCK_NB) != 0, errno == EWOULDBLOCK, attempts < 200 {
-                    attempts += 1
-                    usleep(10_000)
-                }
-                defer {
-                    flock(fd, LOCK_UN)
-                    close(fd)
-                }
-                bytes = try Data(contentsOf: url)
-            } else {
-                bytes = try Data(contentsOf: url)
-            }
+            //
+            // **從這個 fd 讀，不要另開一次路徑**（#1 verify R7 的 CRITICAL）。
+            // R6 開了一個 `O_NONBLOCK` 的 fd、在它上面取鎖，然後用
+            // `Data(contentsOf: url)` **重新開啟**——新的 descriptor 既不保證
+            // 非阻塞、也沒經過 `S_IFREG` 檢查。對 FIFO 而言那是無限阻塞：
+            // 與同一輪為 `append` 修掉的 non-termination 是同一個 failure class
+            // 的另一側，而那兩條 FIFO 測試只測了 `append`。
+            bytes = try Self.readRegularFile(at: url)
         } catch {
             throw EventStoreError.readFailed(path: url.path, underlying: "\(error)")
         }
@@ -485,14 +478,56 @@ public struct FileEventStore: EventStore {
         return (result, corrupt)
     }
 
+    /// 開啟、驗形、上共享鎖、從**同一個 fd** 讀完。
+    ///
+    /// 三件事必須在同一個 descriptor 上完成，否則檢查與讀取看的是不同的東西：
+    /// `O_NONBLOCK` 讓 FIFO 的 open 立刻失敗而不是掛住、`fstat` 確認是一般檔案、
+    /// 共享鎖避免讀到進行中的 append 半行。
+    static func readRegularFile(at url: URL) throws -> Data {
+        let fd = open(url.path, O_RDONLY | O_NONBLOCK)
+        guard fd >= 0 else {
+            throw EventStoreError.readFailed(
+                path: url.path, underlying: "open 失敗：errno \(errno)")
+        }
+        defer { close(fd) }
+
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            throw EventStoreError.readFailed(
+                path: url.path, underlying: "不是一般檔案——拒絕讀取而不是阻塞")
+        }
+
+        var attempts = 0
+        while flock(fd, LOCK_SH | LOCK_NB) != 0, errno == EWOULDBLOCK, attempts < 200 {
+            attempts += 1
+            usleep(10_000)
+        }
+        defer { flock(fd, LOCK_UN) }
+
+        var out = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+            if n > 0 {
+                out.append(contentsOf: buffer[0..<n])
+            } else if n == 0 {
+                break
+            } else if errno == EINTR {
+                continue
+            } else {
+                throw EventStoreError.readFailed(
+                    path: url.path, underlying: "read 失敗：errno \(errno)")
+            }
+        }
+        return out
+    }
+
     /// 檔案的原始 bytes。給「序列化輸出不得含任何原文」那條測試用——
     /// 斷言要下在真正落地的 bytes 上，不是下在某個重新編碼過的複本上。
     public func serializedBytes() throws -> Data {
         guard FileManager.default.fileExists(atPath: url.path) else { return Data() }
-        do {
-            return try Data(contentsOf: url)
-        } catch {
-            throw EventStoreError.readFailed(path: url.path, underlying: "\(error)")
-        }
+        // 走與 `allEvents` 同一條受檢查的讀取路徑——先前它直接
+        // `Data(contentsOf:)`，連鎖都沒取，對 FIFO 同樣會阻塞（#1 verify R7）。
+        return try Self.readRegularFile(at: url)
     }
 }
