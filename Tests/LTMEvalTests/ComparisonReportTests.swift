@@ -303,3 +303,61 @@ private func event(
     #expect(!report.spansGenerations)
     #expect(report.generationRows.isEmpty)
 }
+
+// MARK: - 略過的四種情形是封閉列舉（#1 verify R4）
+
+@Test func anEventPointingAtAnUnknownPresentationIsRejected() throws {
+    // 先前這與「事件本來就不屬於任何呈現」共用同一個 `continue`：缺一筆紀錄
+    // 的後果是分母悄悄變小，而報告照常產出、看不出少算了什麼。
+    let r = try presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"))
+    let orphanID = PresentationID.random()
+    let stray = Event.interaction(
+        .opened, anchor: evalAnchor("a"), at: evalInstant,
+        generation: evalGeneration, policy: archival, presentation: orphanID)
+
+    #expect(throws: ComparisonDataError.unknownPresentationReference(orphanID)) {
+        _ = try ComparisonScorer.report(records: [r], events: [stray])
+    }
+}
+
+@Test func anEventWhoseAnchorWasNeverPresentedIsRejected() throws {
+    // 非 null 的紀錄保證每個 anchor 都有歸屬，所以查不到只有一個意思：
+    // 這次呈現根本沒出示過這個 anchor。
+    let r = try presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"))
+    let unseen = evalAnchor("never-shown")
+    let stray = Event.interaction(
+        .opened, anchor: unseen, at: evalInstant,
+        generation: evalGeneration, policy: archival, presentation: r.id)
+
+    #expect(throws: ComparisonDataError.anchorNotInPresentation(
+        presentation: r.id, anchor: unseen)
+    ) {
+        _ = try ComparisonScorer.report(records: [r], events: [stray])
+    }
+}
+
+@Test func legitimateSkipsAreCountedInTheReport() throws {
+    // 合法略過只有兩種。數出來，是為了讓「這份報告用掉了多少事件」在報告
+    // 本身讀得到，而不是只存在於讀 code 的人腦中。
+    let a = evalAnchor("a")
+    let real = try presentation(.cjk2char, a: a, b: evalAnchor("b"))
+    let null = try PresentationRecord(
+        id: .random(), queryClass: .cjk2char,
+        strategyA: archival, strategyB: humanLike, generation: evalGeneration,
+        attribution: [AnchorAttribution(anchor: a, creditedTo: nil)],
+        startingSide: .b, isNullComparison: true)
+
+    let events: [Event] = [
+        event(.opened, a, real),
+        // 不屬於任何呈現。
+        .interaction(.cited, anchor: a, at: evalInstant, generation: evalGeneration,
+                     policy: archival, presentation: nil),
+        // 屬於 null comparison。
+        .interaction(.opened, anchor: a, at: evalInstant, generation: evalGeneration,
+                     policy: archival, presentation: null.id),
+    ]
+
+    let report = try ComparisonScorer.report(records: [real, null], events: events)
+    #expect(report.skipped.notFromAPresentation == 1)
+    #expect(report.skipped.fromNullComparison == 1)
+}

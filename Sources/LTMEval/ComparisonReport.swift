@@ -48,6 +48,25 @@ public struct ComparisonReport: Sendable, Equatable {
     public let spansGenerations: Bool
     /// 只在 `spansGenerations` 為真時非空。
     public let generationRows: [GenerationRow]
+    /// 被**合法**略過的事件數。
+    ///
+    /// 略過只有兩種合法理由，沒有第三種（#1 verify R4：先前這兩種與兩種資料
+    /// 不一致共用同一個 `continue`，四件事一起消失在同一行）。把它們數出來
+    /// 是為了讓「這份報告只用到了多少事件」在報告本身讀得到——分母的來源
+    /// 不該只存在於讀 code 的人腦中。
+    public let skipped: SkippedEvents
+
+    public struct SkippedEvents: Sendable, Equatable {
+        /// 事件不屬於任何一次呈現（例如從別處直接引用某段）。
+        public let notFromAPresentation: Int
+        /// 事件所屬的呈現是 null comparison，依 spec 整批不計分。
+        public let fromNullComparison: Int
+
+        public init(notFromAPresentation: Int, fromNullComparison: Int) {
+            self.notFromAPresentation = notFromAPresentation
+            self.fromNullComparison = fromNullComparison
+        }
+    }
 
     public typealias StrategyScoreTable = [RankingPolicyID: StrategyScore]
 }
@@ -66,6 +85,19 @@ public enum ComparisonDataError: Error, Sendable, Equatable {
     case attributionNamesAThirdStrategy(presentation: PresentationID, policy: RankingPolicyID)
     /// 同一個 anchor 在一次呈現裡出現多次。
     case duplicateAnchorInPresentation(presentation: PresentationID, anchor: Anchor)
+    /// 事件指向一個不在 `records` 裡的呈現。
+    ///
+    /// #1 verify R4：先前這種事件與「本來就不屬於任何呈現的事件」共用同一個
+    /// `continue`，於是缺一筆紀錄的後果是**分母悄悄變小**、報告照常產出。
+    /// 要對某個子集計分是合理需求，但那要由呼叫端先篩事件，不能讓 scorer
+    /// 用「找不到就跳過」去猜。
+    case unknownPresentationReference(PresentationID)
+    /// 事件的 anchor 不在它所宣稱那次呈現的 attribution 裡。
+    ///
+    /// 非 null 的紀錄現在保證每個 anchor 都有歸屬（見 `PresentationRecord`
+    /// 的形狀約束），所以查不到只有一個意思：這次呈現根本沒有出示過這個
+    /// anchor。那是損壞或偽造，不是略過。
+    case anchorNotInPresentation(presentation: PresentationID, anchor: Anchor)
 }
 
 public enum ComparisonScorer {
@@ -110,12 +142,28 @@ public enum ComparisonScorer {
         var generationObservations: [GenerationID: Int] = [:]
         var generations: Set<GenerationID> = []
 
+        var skippedNotFromAPresentation = 0
+        var skippedNullComparison = 0
+
         for event in events {
-            guard let presentationID = event.presentation,
-                let record = byID[presentationID],
-                !record.isNullComparison,
-                let policy = record.credit(for: event.anchor)
-            else { continue }
+            // 四種情形先前擠在同一個 `guard ... else { continue }` 裡。它們的
+            // 意義完全不同：兩種是合法略過、兩種是資料不一致。**封閉列舉，
+            // 只有這四種**，不得依性質相似類推第五種。
+            guard let presentationID = event.presentation else {
+                skippedNotFromAPresentation += 1  // 合法：不屬於任何呈現
+                continue
+            }
+            guard let record = byID[presentationID] else {
+                throw ComparisonDataError.unknownPresentationReference(presentationID)
+            }
+            guard !record.isNullComparison else {
+                skippedNullComparison += 1  // 合法：兩邊排序相同，不得歸屬
+                continue
+            }
+            guard let policy = record.credit(for: event.anchor) else {
+                throw ComparisonDataError.anchorNotInPresentation(
+                    presentation: presentationID, anchor: event.anchor)
+            }
 
             // 歸屬用**紀錄**的 generation，不是事件自報的。兩者不一致代表資料
             // 損壞（或事件被錯標），靜默採信事件會讓一次呈現被切成兩半、rate
@@ -180,7 +228,10 @@ public enum ComparisonScorer {
             // 跨 generation 時**不產出**整體數字，而不是產出一個標了警語的數字。
             aggregate: spans ? nil : table { _ in true },
             spansGenerations: spans,
-            generationRows: generationRows)
+            generationRows: generationRows,
+            skipped: ComparisonReport.SkippedEvents(
+                notFromAPresentation: skippedNotFromAPresentation,
+                fromNullComparison: skippedNullComparison))
     }
 
     private struct Key: Hashable {

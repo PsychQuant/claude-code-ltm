@@ -83,6 +83,35 @@ Requiring the argument without offering the rule is insufficient: an earlier dra
 - **WHEN** the balancing rule is applied to a run of two hundred sequential seeds
 - **THEN** each side is chosen for half of them
 
+### Requirement: An event is either scored, legitimately skipped, or rejected
+
+When scoring, each interaction event SHALL fall into exactly one of four dispositions. This is a closed enumeration; no fifth disposition SHALL be inferred by analogy.
+
+1. **Scored** — the event names a presentation present in the supplied records, that presentation is attributed, and the event's anchor is among its attributed anchors.
+2. **Skipped, no presentation** — the event names no presentation at all. Legitimate: an interaction can originate outside a presented list.
+3. **Skipped, null comparison** — the event's presentation is a null comparison. Legitimate and required by the attribution rules above.
+4. **Rejected** — the event names a presentation absent from the supplied records, or names an anchor that presentation never attributed. Both are data inconsistencies and SHALL fail loudly.
+
+The report SHALL carry the count of each legitimate skip so that the size of the scored population is readable from the report itself. An earlier implementation collapsed all four into a single silent skip, so a missing presentation record deflated the denominator with no trace in the output.
+
+#### Scenario: An event naming an unknown presentation is rejected
+
+- **GIVEN** an event whose presentation identifier appears in no supplied record
+- **WHEN** the report is computed
+- **THEN** scoring fails and names that presentation identifier
+
+#### Scenario: An event naming an anchor the presentation never showed is rejected
+
+- **GIVEN** an attributed presentation and an event referencing it with an anchor absent from its attribution
+- **WHEN** the report is computed
+- **THEN** scoring fails and names the presentation and the anchor
+
+#### Scenario: Legitimate skips are counted
+
+- **GIVEN** one event with no presentation and one event belonging to a null comparison
+- **WHEN** the report is computed
+- **THEN** the report reports one skip of each kind
+
 ### Requirement: Comparison results are reported per query class
 
 A comparison report SHALL present per-class results alongside any aggregate figure. A report SHALL NOT present an aggregate figure alone. Each class SHALL carry its observation count so that classes with too few observations are visible as such.
