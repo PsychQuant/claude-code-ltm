@@ -99,7 +99,10 @@ private struct LyingStrategy: MemoryStrategy {
     }
 }
 
-/// 把候選整個反轉、跨帶，同樣什麼都不驗。
+/// 把候選整個反轉、跨帶，且**據實回報**位移與 movement。
+///
+/// R6：上一版對反轉後的每一筆都回報 `displacement: 0`，於是它先撞上
+/// `misreportedDisplacement`——把帶檢查整個拿掉，測試照樣（因為別的理由）變綠。
 private struct BandCrossingStrategy: MemoryStrategy {
     let id = RankingPolicyID("band-crossing")
     let consumedSignals: Set<EventKind> = []
@@ -108,8 +111,32 @@ private struct BandCrossingStrategy: MemoryStrategy {
         -> [RankedResult]
     {
         let candidates = input.candidates
-        return candidates.reversed().map {
-            RankedResult(candidate: $0, displacement: 0, reason: RankingReason(history: .none, movement: .unmoved))
+        var index: [Anchor: Int] = [:]
+        for (i, c) in candidates.enumerated() { index[c.anchor] = i }
+        return candidates.reversed().enumerated().map { newIndex, candidate in
+            let displacement = index[candidate.anchor]! - newIndex
+            return RankedResult(
+                candidate: candidate, displacement: displacement,
+                reason: RankingReason.describing(
+                    candidate.anchor, displacement: displacement, in: projection))
+        }
+    }
+}
+
+/// 丟掉一筆候選、重複另一筆。**不呼叫任何守衛**，走 seam 的正常入口。
+private struct SetChangingStrategy: MemoryStrategy {
+    let id = RankingPolicyID("set-changing")
+    let consumedSignals: Set<EventKind> = []
+    let displacementBound = 99
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        let first = input.candidates[0]
+        return input.candidates.map {
+            RankedResult(
+                candidate: $0.anchor == input.candidates.last?.anchor ? first : $0,
+                displacement: 0,
+                reason: RankingReason(history: .none, movement: .unmoved))
         }
     }
 }
@@ -126,11 +153,25 @@ private struct BandCrossingStrategy: MemoryStrategy {
 }
 
 @Test func aStrategyThatChecksNothingStillCannotCrossABand() {
+    // **具名錯誤，不是「有拋就好」**（#1 verify R6）：上一版只斷言有 error，
+    // 而這個 double 當時回報的位移是假的，所以它撞的是 `misreportedDisplacement`
+    // ——把帶檢查拿掉測試照樣綠。現在 double 據實回報，錯誤必須是帶違規。
     var input = candidates(["a"])
     input += [Candidate(anchor: testAnchor("z"), baseScore: 0.1, band: RelevanceBand(rank: 1))]
 
-    #expect(throws: (any Error).self) {
+    #expect(throws: StrategyViolation.crossedRelevanceBand(
+        expected: RelevanceBand(rank: 0), found: RelevanceBand(rank: 1))
+    ) {
         _ = try BandCrossingStrategy().rerank(input, with: .empty(at: instant))
+    }
+}
+
+@Test func theSeamRejectsAChangedCandidateSetEndToEnd() {
+    // R6：排列性的對抗測試全部**直接呼叫 `RankingGuard.check`**，沒有一條
+    // 經由 `MemoryStrategy.rerank`。於是 seam 不再呼叫守衛時，沒有任何測試會紅
+    // ——而 seam 的全部理由就是「第三方策略不可繞過」。
+    #expect(throws: StrategyViolation.candidateSetChanged) {
+        _ = try SetChangingStrategy().rerank(candidates(["a", "b", "c"]), with: .empty(at: instant))
     }
 }
 
