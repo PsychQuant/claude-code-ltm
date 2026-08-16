@@ -50,29 +50,77 @@ public enum CorpusLocation {
     /// 改法：從根開始逐段拼接，每拼一段就 resolve 一次，`..` 在解析後的路徑上
     /// 才做消解。這與 kernel 實際走路徑的順序一致。
     ///
-    /// **誠實邊界——這條擋得住什麼、擋不住什麼：**
+    /// **身分比對用 `(st_dev, st_ino)`，不是路徑元件**（#1 verify R5）。
     ///
-    /// - **擋得住**：直接指進語料的路徑、`..` 穿過 symlink、單層與多層 dangling
-    ///   symlink 鏈、相對路徑（建構子先正規化成絕對路徑）。
-    /// - **擋不住 hardlink。** hardlink 在檔案系統層與原檔**無法區分**——沒有
-    ///   「指向」可以解析，兩個名字是同一個 inode。所以先前寫的「擋的是誤用與
-    ///   既存的錯誤佈局」是過度宣稱（#1 verify R3）：一個指向語料檔的 hardlink
-    ///   就是既存的錯誤佈局，而這裡看不出來。要擋得先比對 `st_dev`/`st_ino`
-    ///   與語料樹的內容，成本與收益不成比例。
-    /// - **擋不住 TOCTOU。** 檢查與開檔之間，任何一段都可能被換成 symlink。
+    /// 路徑元件比對假設「同一個目錄只有一條絕對路徑」，而 macOS 上那是假的：
+    /// firmlink 讓 `~/.claude/projects` 與
+    /// `/System/Volumes/Data/Users/…/.claude/projects` 是**同一個 inode 的兩條
+    /// 穩定路徑**，且 `realpath(3)` 不會把後者正規化掉。R5 實測：守衛對後者
+    /// 判「在語料外」，建構子照收，而寫進去的檔案出現在 `~/.claude/projects/`
+    /// ——不變式 1 被違反且沒有任何錯誤。
     ///
-    /// 後兩者的結構解是同一個：開檔時用 `openat` + `O_NOFOLLOW` 逐段開，並在
-    /// 開到之後以 `fstat` 確認 inode 不在語料樹裡。那需要重寫 append 路徑，
-    /// 追蹤於 follow-up。**在那之前，這條守衛防的是意外，不是有意的攻擊者。**
+    /// 這不是 hardlink 也不是 TOCTOU，所以先前那段誠實邊界的封閉列舉**漏了它**
+    /// ——而且漏掉的案例逐字否證它自己的第一個 bullet（「擋得住直接指進語料的
+    /// 路徑」）。改用 inode 身分之後，「同一個目錄的另一條路徑」這整類一次擋掉，
+    /// 不論它是 firmlink、bind mount 還是我還沒遇過的機制。
+    ///
+    /// **誠實邊界（縮小後）：**
+    ///
+    /// - **擋得住**：任何解析後落在語料樹內的路徑，不論用哪條路徑抵達；`..`
+    ///   穿過 symlink；單層與多層 dangling symlink 鏈；相對路徑。
+    /// - **擋不住指向語料檔的 hardlink。** 它的父目錄在語料樹外，往上走永遠碰
+    ///   不到語料根；而 hardlink 與原檔在檔案系統層無法區分。要擋得列舉語料樹
+    ///   內所有 inode，成本與收益不成比例。
+    /// - **擋不住 TOCTOU。** 檢查與開檔之間任何一段都可能被換掉。
+    /// - **語料根不存在時退回元件比對**：沒有 inode 可比。此時它只擋字面前綴。
+    ///
+    /// 後兩者的結構解是 `openat` + `O_NOFOLLOW` 逐段開 + `fstat`，需要重寫
+    /// append 路徑，追蹤於 #14。**在那之前，這條守衛防的是意外，不是攻擊者。**
     public static func isInsideReadOnlyCorpus(_ url: URL) -> Bool {
-        let root = Self.realpath(readOnlyRoot.path) ?? readOnlyRoot.path
-        guard let resolved = Self.fullyResolve(url.path) else { return false }
+        isInside(url, root: readOnlyRoot)
+    }
 
-        // 用元件比對而非字串前綴：`/a/bc` 不該被 `/a/b` 判成在內。
-        let rootParts = URL(fileURLWithPath: root).pathComponents
+    /// 同上，但語料根可指定。
+    ///
+    /// 存在的理由是測試（#1 verify R5）：先前每一條守衛測試都拿**真實的**
+    /// `~/.claude/projects` 當標的，於是 (a) 能不能驗到取決於那棵樹當下的內容
+    /// ——A4 那條就是因此退化成恆真斷言的；(b) 測試離「碰真實語料」只差一步，
+    /// 而 CLAUDE.md 要求 fixture 用合成資料。改成可注入之後，行為測試全部
+    /// 在合成樹上跑，真實語料只出現在一條刻意針對本機檔案系統佈局的測試裡。
+    static func isInside(_ url: URL, root: URL) -> Bool {
+        // 解析不出來 → **當成在裡面**（fail closed）。不變式 1 的方向是
+        // 「不確定就不要寫」，而不是「不確定就放行」。
+        guard let resolved = Self.fullyResolve(url.path) else { return true }
+
+        if let rootID = Self.identity(root.path) {
+            // 從解析後的目標往上走：任何一層與語料根同 inode 就是在裡面。
+            // 目標檔案通常還不存在（append 會建它），所以第一次 stat 失敗是正常的，
+            // 迴圈自然往上走到最近的存在祖先。
+            var current = URL(fileURLWithPath: resolved)
+            var depth = 0
+            while depth < 256 {
+                if let id = Self.identity(current.path), id == rootID { return true }
+                let parent = current.deletingLastPathComponent()
+                if parent.path == current.path { break }
+                current = parent
+                depth += 1
+            }
+        }
+
+        // 語料根不存在（或走到根都沒對上）→ 元件比對當第二層。
+        // 用元件而非字串前綴：`/a/bc` 不該被 `/a/b` 判成在內。
+        let rootPath = Self.realpath(root.path) ?? root.path
+        let rootParts = URL(fileURLWithPath: rootPath).pathComponents
         let targetParts = URL(fileURLWithPath: resolved).pathComponents
         guard targetParts.count >= rootParts.count else { return false }
         return Array(targetParts.prefix(rootParts.count)) == rootParts
+    }
+
+    /// 檔案系統身分。`nil` 代表這條路徑目前不存在。
+    static func identity(_ path: String) -> (dev: dev_t, ino: ino_t)? {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return nil }
+        return (info.st_dev, info.st_ino)
     }
 
     /// 把路徑解析成 kernel 實際會走到的最終位置。
