@@ -66,12 +66,20 @@ The event store SHALL expose append and range-read operations. It SHALL NOT expo
 
 ### Requirement: Projection derives per-anchor statistics without persisting them
 
-Per-anchor statistics SHALL be computed from the event sequence and an evaluation instant by a projection function. The resulting statistics SHALL NOT be written back into the event store as canonical records. Changing the projection formula SHALL change subsequent results without requiring modification of any stored event.
+Per-anchor statistics SHALL be computed by a projection function from **three** inputs: the event sequence, an evaluation instant, and a corpus reader. The resulting statistics SHALL NOT be written back into the event store as canonical records. Changing the projection formula SHALL change subsequent results without requiring modification of any stored event.
 
-#### Scenario: Projection is a pure function of events and instant
+The corpus reader is not optional. Orphan filtering happens inside projection, and deciding whether an anchor still resolves requires dereferencing it. An earlier wording named only the first two inputs, which made the purity scenario below false of the shipped function: the same events at the same instant yield different statistics against two corpus snapshots that differ in one edited message. Reproducing a projection therefore requires pinning the corpus, not only the events.
 
-- **WHEN** the same event sequence is projected twice at the same evaluation instant
+#### Scenario: Projection is a pure function of its three inputs
+
+- **WHEN** the same event sequence is projected twice at the same evaluation instant against the same corpus
 - **THEN** the two results are equal
+
+#### Scenario: A changed corpus changes the projection
+
+- **GIVEN** an event sequence and an evaluation instant
+- **WHEN** the same projection is run against a corpus in which the addressed message has been edited
+- **THEN** the affected anchor is reported as orphaned and contributes no strength
 
 #### Scenario: Events for anchors absent from the current index are inert
 

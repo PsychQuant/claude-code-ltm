@@ -229,3 +229,38 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     #expect(ok.futureDatedEventsIgnored == 0)
     #expect(ok[a] != nil)
 }
+
+
+@Test func theSameEventContributesLessAtALaterInstant() {
+    // R6：spec 只寫了「哪些 kind 增強、哪些壓抑」，沒有任何 scenario 要求
+    // **衰減**——一個線性計數、完全不讀 timestamp 的實作能通過全部既有 scenario，
+    // 而 decay 正是這一檔命名的由來。
+    let text = "合成語料內容夠長"
+    let c = corpus([turn("t1", text)])
+    let a = anchor("t1", text)
+    let e = Event.interaction(
+        .cited, anchor: a, at: instant.addingTimeInterval(-86_400),
+        generation: gen, policy: policy)
+
+    let now = project([e], at: instant, resolvedBy: c)
+    let later = project([e], at: instant.addingTimeInterval(86_400 * 30), resolvedBy: c)
+
+    #expect(now.reinforcement(for: a) > 0)
+    #expect(later.reinforcement(for: a) < now.reinforcement(for: a), "同一筆事件必須隨時間衰減")
+}
+
+@Test func aChangedCorpusChangesTheProjection() {
+    // spec 的純函式 scenario 先前只列了兩個輸入（事件、時點），而實作需要三個。
+    // 這條把第三個輸入真的有影響釘住。
+    let text = "合成語料內容夠長"
+    let a = anchor("t1", text)
+    let e = Event.interaction(.cited, anchor: a, at: instant.addingTimeInterval(-60),
+                              generation: gen, policy: policy)
+
+    let intact = project([e], at: instant, resolvedBy: corpus([turn("t1", text)]))
+    let edited = project([e], at: instant, resolvedBy: corpus([turn("t1", "完全不同的內容")]))
+
+    #expect(intact.reinforcement(for: a) > 0)
+    #expect(edited.orphanedAnchors.contains(a))
+    #expect(edited.reinforcement(for: a) == 0)
+}

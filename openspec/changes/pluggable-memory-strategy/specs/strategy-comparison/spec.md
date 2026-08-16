@@ -78,10 +78,19 @@ Requiring the argument without offering the rule is insufficient: an earlier dra
 - **WHEN** the balancing rule is applied to the same seed in two separate processes
 - **THEN** both yield the same side
 
-#### Scenario: The balancing rule splits evenly
+#### Scenario: The balancing rule splits evenly across structurally different seed families
 
-- **WHEN** the balancing rule is applied to a run of two hundred sequential seeds
-- **THEN** each side is chosen for half of them
+- **WHEN** the balancing rule is applied to each of several structurally different seed families — sequential identifiers, even-numbered identifiers, seeds composed only of even-valued bytes, and CJK seeds
+- **THEN** neither side takes more than three quarters of any family
+
+  (An earlier wording required exactly half of two hundred sequential seeds. An avalanched hash meets that only by coincidence — about a one-in-eighteen chance — whereas the defective parity implementation met it necessarily. The exact figure was evidence of the bug, so the specification must not require it.)
+
+#### Scenario: Reordering a seed can change the side it is assigned
+
+- **WHEN** the balancing rule is applied to every permutation of a five-character seed
+- **THEN** both sides occur
+
+  (The defective implementation reduced to the parity of the seed's odd-valued bytes, which is invariant under reordering; every permutation landed on one side.)
 
 ### Requirement: An event is either scored, legitimately skipped, or rejected
 

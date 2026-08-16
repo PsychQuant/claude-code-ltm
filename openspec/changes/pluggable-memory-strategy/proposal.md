@@ -57,20 +57,17 @@ A second forcing function: the canonical store must hold usage history, which is
   - New: Tests/LTMMemoryTests/EventStoreTests.swift
   - New: Tests/LTMMemoryTests/EventTests.swift
   - New: Tests/LTMMemoryTests/GuardPinningTests.swift
-  - New: Tests/LTMMemoryTests/ModuleGraphTests.swift
   - New: Tests/LTMMemoryTests/PrivacyAdversarialTests.swift
   - New: Tests/LTMMemoryTests/ProjectionTests.swift
   - New: Tests/LTMQueryTests/ConservativeStrategyTests.swift
   - New: Tests/LTMQueryTests/DisplacementBoundTests.swift
   - New: Tests/LTMQueryTests/MemoryStrategyTests.swift
-  - New: Tests/LTMQueryTests/ModuleGraphTests.swift
   - New: Tests/LTMQueryTests/OrphanReasonTests.swift
   - New: Tests/LTMQueryTests/RankingGuardTests.swift
   - New: Tests/LTMQueryTests/StrategyTests.swift
   - New: Tests/LTMEvalTests/ComparisonReportTests.swift
   - New: Tests/LTMEvalTests/InterleavingTests.swift
   - New: Tests/LTMEvalTests/InterleavingTerminationTests.swift
-  - New: Tests/LTMEvalTests/ModuleGraphTests.swift
   - New: Tests/LTMEvalTests/QueryClassTests.swift
   - Modified: docs/memory-systems/README.md
   - Modified: CLAUDE.md
@@ -90,6 +87,7 @@ strategy and it is about 2,500 lines:
 An earlier draft of this section named a file that was never created
 (Sources/LTMQuery/Candidate.swift — the type lives in Sources/LTMQuery/MemoryStrategy.swift),
 listed nine of the twenty-one shipped source files, three of the twenty test files, and
-omitted the scaffolding entirely (#1 verify R5). The list is now generated from what the
-change actually contains. Impact lists are read by people deciding whether a change is
+omitted the scaffolding entirely (#1 verify R5). A later draft listed three
+`ModuleGraphTests.swift` files that the same change deletes (#1 verify R6). The list is
+checked against `git ls-files` rather than written from memory. Impact lists are read by people deciding whether a change is
 in scope; an incomplete one understates scope in exactly the direction that matters.

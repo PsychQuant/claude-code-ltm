@@ -85,7 +85,9 @@ An intermediate draft of this requirement made the bound apply to promotion only
 
 - **GIVEN** a band of two in which the second candidate has recorded history and the first has none
 - **WHEN** `human-like` reorders the band
-- **THEN** the first is reported with a displacement of minus one and a reason stating it was displaced by a peer, not a reason stating no adjustment was applied
+- **THEN** the first is reported with a displacement of minus one, a history of none, and a movement of receded — not a movement of unmoved
+
+  (An earlier wording required the reason to state "it was displaced by a peer". That is a causal claim, which the same specification forbids two requirements above, and which the implementation cannot support: a bounded reordering does not retain who overtook whom. The observable facts are the direction and the absence of the candidate's own counted history.)
 
 #### Scenario: Promotions occur wherever they are needed, not only at the head of the band
 
@@ -115,6 +117,24 @@ A candidate is promoted past peers whose strength is strictly lower, up to the b
 | 3                | 5              | 0                  | none                   | 5                  |
 
 The last column is exact only for the single-promoter case shown. With several reinforced candidates competing for the same positions, each still moves at most `bound`, but which of them advances depends on their relative strengths — a symmetric bound cannot let two candidates both pass the same peer when that peer may sink only one place. That is a property of the bound, not a defect: it is the sense in which the bound limits how far memory may override retrieval order.
+
+### Requirement: The human-like tier's reinforcement decays with age
+
+`human-like` SHALL weight each deliberate event by a factor that is non-increasing in the event's age at the evaluation instant, so that the same event contributes strictly less at a later evaluation instant than at an earlier one, all else equal. The decay's form is power-law and its exponent SHALL be configuration, not a compiled-in constant.
+
+Without this requirement an implementation that counts deliberate events linearly and never reads a timestamp satisfies every other `human-like` scenario — and decay is the mechanism the tier is named for. The exponent's default is taken from an external source (`PsychQuant/ai4o`, tuned per Wixted & Ebbesen 1991 on a different corpus) and is therefore unvalidated here; that is a calibration gap, not a licence to omit the mechanism.
+
+#### Scenario: The same event contributes less later
+
+- **GIVEN** one `cited` event on an anchor
+- **WHEN** the projection is taken at two evaluation instants a day apart
+- **THEN** the anchor's reinforcement at the later instant is strictly smaller
+
+#### Scenario: A recent citation outranks an older one
+
+- **GIVEN** two candidates in one band, each with exactly one `cited` event, one recent and one much older
+- **WHEN** `human-like` reorders the band
+- **THEN** the recently cited candidate is ordered above the other
 
 ### Requirement: Orphaned anchors do not influence ranking
 
