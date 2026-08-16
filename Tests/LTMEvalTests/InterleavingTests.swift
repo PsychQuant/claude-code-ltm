@@ -118,3 +118,71 @@ func evalProjection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
     #expect(fromA.record.attribution.first?.creditedTo == RankingPolicyID("archival"))
     #expect(fromB.record.attribution.first?.creditedTo == RankingPolicyID("human-like"))
 }
+
+// MARK: - 起手方：平衡機制與紀錄（#1 verify R4）
+
+@Test func theStartingSideIsRecordedSoThePositionEffectStaysCheckable() throws {
+    let input = evalCandidates(["a", "b", "c"])
+    let projection = Projection(
+        statistics: [evalAnchor("c"): AnchorStatistics(
+            reinforcement: 5, suppression: 0, impressions: 0,
+            lastDeliberateInteraction: evalInstant, deliberateCounts: [.cited: 5])],
+        instant: evalInstant)
+
+    for side in [InterleavingHarness.Side.a, .b] {
+        let result = try InterleavingHarness(generation: evalGeneration).present(
+            query: "測試", candidates: input, projection: projection,
+            a: ArchivalStrategy(), b: HumanLikeStrategy(), startingSide: side)
+        #expect(result.record.startingSide == side)
+    }
+}
+
+@Test func balancedStartingSideIsReproducibleAcrossProcesses() {
+    // **golden 值，刻意寫死。** 這條擋的是「有人把 FNV-1a 換成 `hashValue`」：
+    // Swift 的 `Hasher` 每個 process 隨機種子化，換過去之後這些斷言會在**某些**
+    // 執行失敗——而分派不可重現這件事本身不會有任何其他症狀。
+    #expect(InterleavingHarness.Side.balanced(seed: "presentation-0") == .a)
+    #expect(InterleavingHarness.Side.balanced(seed: "presentation-1") == .b)
+    #expect(InterleavingHarness.Side.balanced(seed: "presentation-10") == .b)
+    #expect(InterleavingHarness.Side.balanced(seed: "presentation-11") == .a)
+}
+
+@Test func balancedStartingSideActuallySplitsEvenly() {
+    // 平衡是這個機制存在的理由，所以要量而不是相信。
+    let aCount = (0..<200).count { InterleavingHarness.Side.balanced(seed: "p\($0)") == .a }
+    #expect(aCount == 100)
+}
+
+// MARK: - 歸屬的形狀只有兩種（#1 verify R4）
+
+@Test func aNullComparisonCannotCarryAnAttributedAnchor() {
+    #expect(throws: PresentationRecord.ShapeViolation.nullComparisonWithAttributedAnchor(
+        evalAnchor("a"))
+    ) {
+        _ = try PresentationRecord(
+            id: .random(), queryClass: .cjk2char,
+            strategyA: RankingPolicyID("archival"), strategyB: RankingPolicyID("human-like"),
+            generation: evalGeneration,
+            attribution: [AnchorAttribution(
+                anchor: evalAnchor("a"), creditedTo: RankingPolicyID("archival"))],
+            startingSide: .a, isNullComparison: true)
+    }
+}
+
+@Test func aRealComparisonCannotCarryAnUnattributedAnchor() {
+    // 混合形狀會讓 per-presentation rate 的分母沒有定義——spec 的全稱句與
+    // null comparison 情境先前在字面上互斥，這條把封閉列舉釘成可執行的事實。
+    #expect(throws: PresentationRecord.ShapeViolation.realComparisonWithUnattributedAnchor(
+        evalAnchor("b"))
+    ) {
+        _ = try PresentationRecord(
+            id: .random(), queryClass: .cjk2char,
+            strategyA: RankingPolicyID("archival"), strategyB: RankingPolicyID("human-like"),
+            generation: evalGeneration,
+            attribution: [
+                AnchorAttribution(anchor: evalAnchor("a"), creditedTo: RankingPolicyID("archival")),
+                AnchorAttribution(anchor: evalAnchor("b"), creditedTo: nil),
+            ],
+            startingSide: .a, isNullComparison: false)
+    }
+}

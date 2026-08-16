@@ -17,7 +17,14 @@ Two strategies SHALL be compared by having each produce a ranking for the same c
 
 ### Requirement: Each presented position is attributed to exactly one strategy
 
-The harness SHALL produce a presentation record mapping each presented anchor to exactly one contributing strategy. When both strategies would place the same anchor at the same rank, attribution SHALL be assigned deterministically from the presentation record's own ordering rather than left ambiguous.
+The harness SHALL produce a presentation record whose attribution takes exactly one of two shapes. There are only these two, and no third shape SHALL be inferred by analogy:
+
+1. **Attributed** — every presented anchor is credited to exactly one of the two strategies under comparison. This is the shape whenever the two rankings differ.
+2. **Unattributed** — no presented anchor is credited to any strategy. This is the shape when, and only when, the two rankings are identical (a null comparison).
+
+A record mixing the two SHALL be rejected at construction and at decoding. An earlier draft of this requirement stated the attributed shape as a universal, while the null-comparison scenario below required the unattributed shape; the two were contradictory as written. Mixing them also leaves the per-presentation rate without a defined denominator.
+
+When both strategies would place the same anchor at the same rank within an attributed record, attribution SHALL be assigned deterministically from the presentation record's own ordering rather than left ambiguous.
 
 #### Scenario: An interaction credits one side
 
@@ -33,12 +40,17 @@ The harness SHALL produce a presentation record mapping each presented anchor to
 
 ### Requirement: Presentation records carry a query class label and no query text
 
-A presentation record SHALL carry an opaque random presentation identifier, a query class label drawn from a closed set, the pair of strategy identifiers being compared, the generation identifier of the index build, and the per-anchor attribution. Interactions SHALL reference that presentation identifier so that scoring resolves credit exactly rather than by inference. The query class label SHALL be computed from the query at presentation time and the query text SHALL NOT be persisted. The closed set SHALL be: `cjk-2char`, `cjk-3char`, `cjk-4plus`, `latin-alnum`, `mixed`.
+A presentation record SHALL carry an opaque random presentation identifier, a query class label drawn from a closed set, the pair of strategy identifiers being compared, the generation identifier of the index build, the per-anchor attribution, and the interleaving's starting side. Interactions SHALL reference that presentation identifier so that scoring resolves credit exactly rather than by inference. The query class label SHALL be computed from the query at presentation time and the query text SHALL NOT be persisted. The closed set SHALL be: `cjk-2char`, `cjk-3char`, `cjk-4plus`, `latin-alnum`, `mixed`.
 
 #### Scenario: Serialized presentation records contain no query text
 
 - **WHEN** a store of presentation records is serialized in full
 - **THEN** the serialized output contains none of the fixture query strings
+
+#### Scenario: The starting side is recorded
+
+- **WHEN** a presentation is produced with a given starting side
+- **THEN** the record reports that same side
 
 #### Scenario: Class label is assigned from a closed set
 
@@ -54,6 +66,22 @@ A presentation record SHALL carry an opaque random presentation identifier, a qu
 | Four-or-more-character CJK term     | `cjk-4plus`   |
 | ASCII word or identifier            | `latin-alnum` |
 | CJK and Latin runs in one query     | `mixed`       |
+
+### Requirement: The interleaving's starting side is chosen by a reproducible balancing rule
+
+The first presented position receives disproportionate attention, so the team-draft starting side is a known confound. The harness SHALL require the starting side as an explicit argument with no default, and SHALL offer a balancing rule that derives the side deterministically from a caller-supplied seed. That rule SHALL NOT depend on any per-process randomised hash, because a comparison report must be reproducible from its records.
+
+Requiring the argument without offering the rule is insufficient: an earlier draft removed the default in order to eliminate a systematic bias toward the first strategy, but supplied no mechanism, so the most likely caller behaviour remained a hard-coded first side — with the bias intact and, because the side was not recorded, no longer visible.
+
+#### Scenario: The balancing rule is stable across runs
+
+- **WHEN** the balancing rule is applied to the same seed in two separate processes
+- **THEN** both yield the same side
+
+#### Scenario: The balancing rule splits evenly
+
+- **WHEN** the balancing rule is applied to a run of two hundred sequential seeds
+- **THEN** each side is chosen for half of them
 
 ### Requirement: Comparison results are reported per query class
 

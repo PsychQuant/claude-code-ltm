@@ -42,7 +42,28 @@ private func ranking(
 /// 交錯只需要已經同意記錄的事件（shown/opened/cited），代價是它只能比較「現在
 /// 這兩個策略」，不能回溯比較。這個代價是隱私最小化的直接後果，不是疏忽。
 public struct InterleavingHarness: Sendable {
-    public enum Side: Sendable, Equatable { case a, b }
+    public enum Side: Sendable, Equatable, Codable {
+        case a, b
+
+        /// 由種子決定的平衡起手方。
+        ///
+        /// 存在的理由（#1 verify R4）：R3 拿掉 `startingSide` 的預設值，理由是
+        /// 預設 `.a` 讓每次呈現都系統性偏向 A。那個診斷對，但修法只是把責任
+        /// 推給呼叫端而沒有給它任何工具——**沒有平衡機制的「必須自己決定」，
+        /// 最可能的結果是呼叫端自己寫死 `.a`**，偏誤原封不動。
+        ///
+        /// 用 FNV-1a 而不是 `hashValue`：Swift 的 `Hasher` 每個 process 隨機
+        /// 種子化，同一個字串在兩次執行會得到不同雜湊。實驗分派必須可重現，
+        /// 否則重跑報告會換到另一組起手方，而紀錄裡看不出發生過這件事。
+        public static func balanced(seed: String) -> Side {
+            var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+            for byte in seed.utf8 {
+                hash ^= UInt64(byte)
+                hash = hash &* 0x0000_0100_0000_01b3
+            }
+            return hash & 1 == 0 ? .a : .b
+        }
+    }
 
     public let generation: GenerationID
 
@@ -58,9 +79,12 @@ public struct InterleavingHarness: Sendable {
     /// `startingSide` **沒有預設值**，這是刻意的。team-draft 的起手方決定誰拿到
     /// 第 1 個位置，而第 1 個位置的點擊率遠高於其後——先前它預設 `.a`，於是
     /// 每一次呈現都系統性地偏向 A，比較實驗量到的一部分是位置效應而不是策略差異
-    /// （#1 verify R3）。拿掉預設值就讓呼叫端**必須**決定，而那個決定應該來自
-    /// 外部種子的平衡分派（例如依 presentation id 的雜湊決定），不是這裡的隨機
-    /// ——結果必須可重現。
+    /// （#1 verify R3）。
+    ///
+    /// 但「拿掉預設值」只完成了一半（#1 verify R4）：它把責任推給呼叫端，卻
+    /// 既沒給平衡機制、也沒把實際用了哪一邊記下來。前者見 `Side.balanced(seed:)`；
+    /// 後者現在寫進 `PresentationRecord.startingSide`——**沒記下來的話，位置效應
+    /// 連事後檢查都做不到**，而分派是否平衡正是最需要被檢查的東西。
     public func present(
         query: String,
         candidates: [Candidate],
@@ -84,22 +108,18 @@ public struct InterleavingHarness: Sendable {
         let rankingA = try ranking(from: a, over: candidates, with: projection)
         let rankingB = try ranking(from: b, over: candidates, with: projection)
 
-        // 策略是可插拔的，而 `MemoryStrategy` 並不強制走 RankingGuard——
-        // `ArchivalStrategy` 自己就沒呼叫。所以「回傳的是排列」在 seam 上只是慣例，
-        // 必須在消費端自己驗一次。spec 的「presented list contains each candidate
-        // exactly once」原本沒有任何執行點，違反時的表現是無限迴圈而不是 fail loudly。
-
         // 兩邊排序一樣 → 這次呈現無法分辨任何差異。硬記給某一邊會憑空製造
         // 偏好，所以標成 null comparison 讓計分整批略過。
         if rankingA.map(\.anchor) == rankingB.map(\.anchor) {
             return Interleaving(
                 presented: rankingA,
-                record: PresentationRecord(
+                record: try PresentationRecord(
                     id: presentationID,
                     queryClass: queryClass,
                     strategyA: a.id, strategyB: b.id,
                     generation: generation,
                     attribution: rankingA.map { AnchorAttribution(anchor: $0.anchor, creditedTo: nil) },
+                    startingSide: startingSide,
                     isNullComparison: true))
         }
 
@@ -137,12 +157,13 @@ public struct InterleavingHarness: Sendable {
 
         return Interleaving(
             presented: presented,
-            record: PresentationRecord(
+            record: try PresentationRecord(
                 id: presentationID,
                 queryClass: queryClass,
                 strategyA: a.id, strategyB: b.id,
                 generation: generation,
                 attribution: attribution,
+                startingSide: startingSide,
                 isNullComparison: false))
     }
 }

@@ -25,8 +25,29 @@ public struct PresentationRecord: Sendable, Equatable, Codable {
     public let strategyB: RankingPolicyID
     public let generation: GenerationID
     public let attribution: [AnchorAttribution]
+    /// team-draft 的起手方。
+    ///
+    /// 第 1 個位置的點擊率遠高於其後，所以起手方是**已知的混淆變項**。記下來
+    /// 才能事後檢查分派是否平衡、必要時分層計分（#1 verify R4：R3 拿掉了它的
+    /// 預設值以消除偏誤，卻沒有把實際用了哪一邊留下來，於是偏誤是否真的消除
+    /// 變成無法驗證的宣稱）。
+    public let startingSide: InterleavingHarness.Side
     /// 兩邊排序完全相同。此時不得把互動記給任何一方。
     public let isNullComparison: Bool
+
+    /// 歸屬的形狀只有兩種，沒有第三種。
+    ///
+    /// - `isNullComparison == false`：**每一個** anchor 都恰好記在某一邊。
+    /// - `isNullComparison == true`：**每一個** anchor 都沒有歸屬。
+    ///
+    /// 這是封閉列舉，不得依性質相似類推出「部分歸屬」的第三種。spec 先前寫
+    /// 「每個 anchor 對應到恰好一個策略」這句全稱，而同一條需求底下的 null
+    /// comparison 情境要求不得記給任何一方——兩句在字面上互斥（#1 verify R4）。
+    /// 混合形狀會讓 per-presentation rate 的分母沒有定義。
+    public enum ShapeViolation: Error, Sendable, Equatable {
+        case nullComparisonWithAttributedAnchor(Anchor)
+        case realComparisonWithUnattributedAnchor(Anchor)
+    }
 
     public init(
         id: PresentationID,
@@ -35,15 +56,40 @@ public struct PresentationRecord: Sendable, Equatable, Codable {
         strategyB: RankingPolicyID,
         generation: GenerationID,
         attribution: [AnchorAttribution],
+        startingSide: InterleavingHarness.Side,
         isNullComparison: Bool
-    ) {
+    ) throws {
+        for entry in attribution {
+            switch (isNullComparison, entry.creditedTo) {
+            case (true, .some):
+                throw ShapeViolation.nullComparisonWithAttributedAnchor(entry.anchor)
+            case (false, nil):
+                throw ShapeViolation.realComparisonWithUnattributedAnchor(entry.anchor)
+            default: break
+            }
+        }
         self.id = id
         self.queryClass = queryClass
         self.strategyA = strategyA
         self.strategyB = strategyB
         self.generation = generation
         self.attribution = attribution
+        self.startingSide = startingSide
         self.isNullComparison = isNullComparison
+    }
+
+    /// 解碼走同一條驗證：外來紀錄不得帶著混合形狀進到計分。
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            id: try c.decode(PresentationID.self, forKey: .id),
+            queryClass: try c.decode(QueryClass.self, forKey: .queryClass),
+            strategyA: try c.decode(RankingPolicyID.self, forKey: .strategyA),
+            strategyB: try c.decode(RankingPolicyID.self, forKey: .strategyB),
+            generation: try c.decode(GenerationID.self, forKey: .generation),
+            attribution: try c.decode([AnchorAttribution].self, forKey: .attribution),
+            startingSide: try c.decode(InterleavingHarness.Side.self, forKey: .startingSide),
+            isNullComparison: try c.decode(Bool.self, forKey: .isNullComparison))
     }
 
     /// 呈現順序。

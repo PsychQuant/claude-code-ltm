@@ -14,8 +14,8 @@ private func presentation(
     a: Anchor,
     b: Anchor,
     generation: GenerationID = evalGeneration
-) -> PresentationRecord {
-    PresentationRecord(
+) throws -> PresentationRecord {
+    try PresentationRecord(
         id: .random(),
         queryClass: queryClass,
         strategyA: archival, strategyB: humanLike,
@@ -24,6 +24,7 @@ private func presentation(
             AnchorAttribution(anchor: a, creditedTo: archival),
             AnchorAttribution(anchor: b, creditedTo: humanLike),
         ],
+        startingSide: .a,
         isNullComparison: false)
 }
 
@@ -44,9 +45,9 @@ private func event(
     let aLatin = evalAnchor("aL")
     let bLatin = evalAnchor("bL")
 
-    let r2 = presentation(.cjk2char, a: a2, b: b2)
-    let r4 = presentation(.cjk4plus, a: a4, b: b4)
-    let rLatin = presentation(.latinAlnum, a: aLatin, b: bLatin)
+    let r2 = try presentation(.cjk2char, a: a2, b: b2)
+    let r4 = try presentation(.cjk4plus, a: a4, b: b4)
+    let rLatin = try presentation(.latinAlnum, a: aLatin, b: bLatin)
 
     let events = [
         event(.shown, a2, r2), event(.shown, b2, r2), event(.opened, b2, r2),
@@ -66,7 +67,7 @@ private func event(
 @Test func aggregateNeverAppearsWithoutPerClassRows() throws {
     let a = evalAnchor("a")
     let b = evalAnchor("b")
-    let r = presentation(.cjk2char, a: a, b: b)
+    let r = try presentation(.cjk2char, a: a, b: b)
     let report = try ComparisonScorer.report(
         records: [r], events: [event(.shown, a, r), event(.shown, b, r), event(.opened, b, r)])
 
@@ -82,14 +83,14 @@ private func event(
     for i in 0..<10 {
         let a = evalAnchor("t2a\(i)")
         let b = evalAnchor("t2b\(i)")
-        let r = presentation(.cjk2char, a: a, b: b)
+        let r = try presentation(.cjk2char, a: a, b: b)
         records.append(r)
         events += [event(.shown, a, r), event(.shown, b, r), event(.opened, b, r)]
     }
     for i in 0..<90 {
         let a = evalAnchor("t4a\(i)")
         let b = evalAnchor("t4b\(i)")
-        let r = presentation(.cjk4plus, a: a, b: b)
+        let r = try presentation(.cjk4plus, a: a, b: b)
         records.append(r)
         events += [event(.shown, a, r), event(.shown, b, r)]
     }
@@ -110,7 +111,7 @@ private func event(
 @Test func impressionsFormTheDenominatorNotTheNumerator() throws {
     let a = evalAnchor("a")
     let b = evalAnchor("b")
-    let r = PresentationRecord(
+    let r = try PresentationRecord(
         id: .random(), queryClass: .cjk2char,
         strategyA: archival, strategyB: humanLike, generation: evalGeneration,
         attribution: [
@@ -118,6 +119,7 @@ private func event(
             AnchorAttribution(anchor: b, creditedTo: humanLike),
             AnchorAttribution(anchor: evalAnchor("c"), creditedTo: archival),
         ],
+        startingSide: .a,
         isNullComparison: false)
 
     // archival 貢獻兩個位置、human-like 一個；各自只有一次 credit。
@@ -136,7 +138,7 @@ private func event(
 @Test func dismissalCountsAgainstTheCreditingStrategy() throws {
     let a = evalAnchor("a")
     let b = evalAnchor("b")
-    let r = presentation(.cjk2char, a: a, b: b)
+    let r = try presentation(.cjk2char, a: a, b: b)
     let report = try ComparisonScorer.report(
         records: [r],
         events: [event(.shown, a, r), event(.shown, b, r), event(.dismissed, b, r)])
@@ -149,13 +151,14 @@ private func event(
 @Test func nullComparisonsAreExcludedFromScoring() throws {
     let a = evalAnchor("a")
     let b = evalAnchor("b")
-    let null = PresentationRecord(
+    let null = try PresentationRecord(
         id: .random(), queryClass: .cjk2char,
         strategyA: archival, strategyB: humanLike, generation: evalGeneration,
         attribution: [
             AnchorAttribution(anchor: a, creditedTo: nil),
             AnchorAttribution(anchor: b, creditedTo: nil),
         ],
+        startingSide: .b,
         isNullComparison: true)
 
     let report = try ComparisonScorer.report(
@@ -175,8 +178,8 @@ private func event(
     // 整體數字」，只讀 aggregate 的消費端會拿到被明文禁止的混合結論。
     let genA = GenerationID("build-1")
     let genB = GenerationID("build-2")
-    let r1 = presentation(.cjk2char, a: evalAnchor("a1"), b: evalAnchor("b1"), generation: genA)
-    let r2 = presentation(.cjk2char, a: evalAnchor("a2"), b: evalAnchor("b2"), generation: genB)
+    let r1 = try presentation(.cjk2char, a: evalAnchor("a1"), b: evalAnchor("b1"), generation: genA)
+    let r2 = try presentation(.cjk2char, a: evalAnchor("a2"), b: evalAnchor("b2"), generation: genB)
 
     let report = try ComparisonScorer.report(
         records: [r1, r2],
@@ -196,29 +199,31 @@ private func event(
     // 先前用 Dictionary(uniqueKeysWithValues:)，重複 ID 直接 fatalError。
     // 呈現紀錄來自檔案，重複是資料問題不是程式錯誤。
     let shared = PresentationID.random()
-    func record(_ anchor: Anchor) -> PresentationRecord {
-        PresentationRecord(
+    func record(_ anchor: Anchor) throws -> PresentationRecord {
+        try PresentationRecord(
             id: shared, queryClass: .cjk2char,
             strategyA: archival, strategyB: humanLike, generation: evalGeneration,
             attribution: [AnchorAttribution(anchor: anchor, creditedTo: archival)],
-            isNullComparison: false)
+            startingSide: .a,
+        isNullComparison: false)
     }
 
     #expect(throws: ComparisonDataError.duplicatePresentationID(shared)) {
         _ = try ComparisonScorer.report(
-            records: [record(evalAnchor("a")), record(evalAnchor("b"))], events: [])
+            records: [try record(evalAnchor("a")), try record(evalAnchor("b"))], events: [])
     }
 }
 
-@Test func attributionNamingAStrategyOutsideTheComparisonIsRejected() {
+@Test func attributionNamingAStrategyOutsideTheComparisonIsRejected() throws {
     // #1 verify R3：scorer 先前直接信任 `credit(for:)` 回來的任何 policy id，
     // 於是損壞或偽造的紀錄可以把分數記到根本沒參與這次比較的策略頭上，
     // 而報告照常產出。
     let third = RankingPolicyID("some-other-strategy")
-    let r = PresentationRecord(
+    let r = try PresentationRecord(
         id: .random(), queryClass: .cjk2char,
         strategyA: archival, strategyB: humanLike, generation: evalGeneration,
         attribution: [AnchorAttribution(anchor: evalAnchor("a"), creditedTo: third)],
+        startingSide: .a,
         isNullComparison: false)
 
     #expect(throws: ComparisonDataError.attributionNamesAThirdStrategy(
@@ -228,16 +233,17 @@ private func event(
     }
 }
 
-@Test func anAnchorAppearingTwiceInOnePresentationIsRejected() {
+@Test func anAnchorAppearingTwiceInOnePresentationIsRejected() throws {
     // 一次呈現裡同一個 anchor 出現兩次 → 分母會被灌水，而報告看不出來。
     let a = evalAnchor("a")
-    let r = PresentationRecord(
+    let r = try PresentationRecord(
         id: .random(), queryClass: .cjk2char,
         strategyA: archival, strategyB: humanLike, generation: evalGeneration,
         attribution: [
             AnchorAttribution(anchor: a, creditedTo: archival),
             AnchorAttribution(anchor: a, creditedTo: humanLike),
         ],
+        startingSide: .a,
         isNullComparison: false)
 
     #expect(throws: ComparisonDataError.duplicateAnchorInPresentation(
@@ -247,8 +253,8 @@ private func event(
     }
 }
 
-@Test func anEventMislabelledWithAnotherGenerationIsReported() {
-    let r = presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"), generation: GenerationID("build-1"))
+@Test func anEventMislabelledWithAnotherGenerationIsReported() throws {
+    let r = try presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"), generation: GenerationID("build-1"))
     // 事件自報 build-2，但它所屬的呈現是 build-1。靜默採信會讓一次呈現被切成
     // 兩半、rate 悄悄歸零。
     let mislabelled = Event.interaction(
@@ -269,8 +275,8 @@ private func event(
     let a2 = evalAnchor("a2")
     let b2 = evalAnchor("b2")
 
-    let r1 = presentation(.cjk2char, a: a1, b: b1, generation: genA)
-    let r2 = presentation(.cjk2char, a: a2, b: b2, generation: genB)
+    let r1 = try presentation(.cjk2char, a: a1, b: b1, generation: genA)
+    let r2 = try presentation(.cjk2char, a: a2, b: b2, generation: genB)
 
     let events = [
         event(.shown, a1, r1, generation: genA), event(.shown, b1, r1, generation: genA),
@@ -290,7 +296,7 @@ private func event(
 @Test func singleGenerationDataIsNotFlagged() throws {
     let a = evalAnchor("a")
     let b = evalAnchor("b")
-    let r = presentation(.cjk2char, a: a, b: b)
+    let r = try presentation(.cjk2char, a: a, b: b)
     let report = try ComparisonScorer.report(
         records: [r], events: [event(.shown, a, r), event(.opened, b, r)])
 
