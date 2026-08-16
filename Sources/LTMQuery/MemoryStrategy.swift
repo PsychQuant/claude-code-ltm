@@ -177,16 +177,32 @@ public enum StrategyViolation: Error, Sendable, Equatable {
 
 /// 進到 `rerankChecked` 的入場券。
 ///
-/// 存在的唯一理由是**讓 seam 不可繞過**（#1 verify R5）：R4 把 `rerank` 移到
-/// extension，但 `rerankChecked` 是 public protocol requirement，所以
-/// `strategy.rerankChecked(candidates, with: projection)` 一行就繞過了全部檢查
-/// ——而交錯器已經因為相信那個宣稱刪掉了自己的防線。
+/// ## 它是 capability，不是 proof——**seam 仍然可以被繞過**
 ///
-/// `init` 是 internal，所以模組外**造不出這個型別的值**，也就呼叫不到
-/// `rerankChecked`。這不是命名慣例上的「請勿呼叫」，是型別層的不可達。
+/// R5 在這裡寫的是「`init` 是 internal，所以模組外造不出這個型別的值，也就
+/// 呼叫不到 `rerankChecked`……是型別層的不可達」。**第二個子句不從第一個推出，
+/// 而且是假的**（#1 verify R6，devils-advocate 在 worktree 外另建一個沒有
+/// `@testable` 的 package 實測）：
 ///
-/// **誠實邊界**：LTMQuery 模組內部（含 `@testable` 的測試）造得出來。擋的是
-/// 外部呼叫端，不是作者自己——後者與「策略自建 reader 讀語料」同屬 #14。
+/// 這個型別的設計就是把 token 交給**每一個** conformer。一個合法的外部
+/// conformer 在自己的 `rerankChecked` 裡把收到的 `input` 存進一個 box——
+/// `ValidatedCandidates` 是 `public` 且 `Sendable`，這是合法無警告的一行——
+/// 之後模組外就能拿那個 token 直接呼叫任何策略的 `rerankChecked`，
+/// 前置條件、排列性、帶保持、位移上限、displacement 誠實性**全部跳過**。
+/// 實測一個回傳 3 筆（輸入 5 筆）的策略沒有觸發 `candidateSetChanged`。
+///
+/// ## 所以正確的陳述是
+///
+/// **前置與後置條件只在呼叫端走 `rerank` 時成立。** 走 `rerankChecked` 的
+/// 呼叫端不受任何約束。這個型別把「不小心繞過」變得需要刻意為之（要先取得
+/// token），但它擋不住刻意。
+///
+/// 要真正關掉，token 必須綁死在該次呼叫上（不可儲存、不可轉手），或者
+/// `rerankChecked` 完全不能是 public requirement。兩者都是介面層的重新設計，
+/// 追蹤於 #14（該 issue 已在追蹤「seam 的 SHALL NOT 沒有執行點」）。
+///
+/// 在那之前，**消費端不得因為「seam 保證過了」而省掉自己的檢查**——交錯器
+/// 正是這樣刪掉自己那道排列檢查的，而它依據的就是上面那句假宣稱。
 public struct ValidatedCandidates: Sendable {
     public let candidates: [Candidate]
     init(_ candidates: [Candidate]) { self.candidates = candidates }
@@ -295,15 +311,20 @@ public protocol MemoryStrategy: Sendable {
 
     /// 這個策略最多能把一筆結果移動幾個名次（雙向）。
     ///
-    /// **在 protocol 上，不在各策略自己身上**（#1 verify R5）：R4 把前置條件與
-    /// 排列檢查提升成 seam 強制，卻把位移上限留在原地由各策略自願呼叫守衛。
-    /// 於是一個新策略可以把同帶五筆從 `[A,B,C,D,E]` 排成 `[E,A,B,C,D]`、
-    /// 據實回報位移 `[4,-1,-1,-1,-1]`，通過 public `rerank`——同一個檔案裡
-    /// 同一個缺陷只修了一半。spec 的「Displacement is bounded in both directions」
-    /// 是對**任何會重排的策略**下的全稱要求，所以執行點必須在 seam。
+    /// ## 這條**改善了兩件事，沒有改善第三件**，說清楚以免再被誤述
     ///
-    /// `archival` 宣告 0（它從不重排）。tie-run 之類的額外條件仍由該策略自己加，
-    /// 那是**加**在這條之上，不是替代。
+    /// 改善的：(a) 上限現在對**每一個**策略都會被套用，不需要策略自己記得
+    /// 呼叫守衛；(b) `archival` 宣告 0，於是「它從不重排」變成守衛會擋的事。
+    ///
+    /// **沒有改善的**：值仍然由策略自己給。R5 的 doc 寫「上限不再由被約束者
+    /// 提供……那個洞在結構上關掉了」——那是錯的（#1 verify R6 實測）。
+    /// 「從 protocol 讀」就是「從策略讀」：R4 是策略把值當引數傳給守衛，
+    /// R5 是 seam 讀策略的欄位，**來源相同，只換了管線**。R5 自己寫在下面
+    /// 當作論證的那個反例（`[A,B,C,D,E]` → `[E,A,B,C,D]`、回報
+    /// `[4,-1,-1,-1,-1]`）現在仍然通過——策略宣告 `displacementBound = 4` 即可。
+    ///
+    /// 要真的關掉，spec 得先回答「**誰有權決定上限**」（設定檔／呼叫端／
+    /// 註冊表），而不是讓策略自報。那是尚未做出的設計決定，記在 #16。
     var displacementBound: Int { get }
 
     /// **實作點，不是呼叫點。** 呼叫端一律用 `rerank`。
@@ -330,16 +351,24 @@ extension MemoryStrategy {
     /// 新策略只要不呼叫就完全不受約束——而 seam 的全部意義就是「不可繞過」。
     /// 那時的「入口」只是一個約定俗成的第一行。
     ///
-    /// **誠實邊界**：擋得住的是**模組外**的呼叫端——`rerankChecked` 收的
-    /// `ValidatedCandidates` 只有 LTMQuery 內部造得出來。模組內部（含
-    /// `@testable` 測試）仍可繞過，具體型別上另外定義同名 `rerank` 也仍會被
-    /// 靜態呼叫選中。這兩者與「策略自建 reader 讀語料」同屬 #14。
+    /// **誠實邊界**：這些檢查只在呼叫端走 `rerank` 時執行。`rerankChecked` 是
+    /// public requirement，任何持有 `ValidatedCandidates` 的人都能直接呼叫它而
+    /// 跳過全部檢查——那個 token 可儲存、可轉手（見該型別的說明，R6 實測）。
+    /// 具體型別上另外定義同名 `rerank` 也仍會被靜態呼叫選中。追蹤於 #14。
     public func rerank(_ candidates: [Candidate], with projection: Projection) throws
         -> [RankedResult]
     {
         try MemoryStrategySupport.requireFiniteBaseScores(candidates)
-        try MemoryStrategySupport.requireWellFormedStatistics(projection)
         try MemoryStrategySupport.requireBandsInOrder(candidates)
+        // **只有會消費歷史的策略才受 projection 形狀約束。**
+        //
+        // R5 把這條寫成無條件，於是 `archival` 會因為一筆它從不讀取的統計而
+        // 失敗——而它的契約逐字是「不論給它什麼 projection 都產出相同輸出」，
+        // 它存在的理由就是當記憶層本身可疑時仍然可用的對照組（#1 verify R6）。
+        // 判準：**一個策略只受它能消費的資料的約束**。
+        if !consumedSignals.isEmpty {
+            try MemoryStrategySupport.requireWellFormedStatistics(projection)
+        }
         let results = try rerankChecked(ValidatedCandidates(candidates), with: projection)
 
         // 後置條件：排列性、帶保持、**位移上限**、以及每一筆自報的 displacement

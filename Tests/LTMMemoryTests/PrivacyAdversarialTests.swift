@@ -476,3 +476,72 @@ private func canonicalLine() throws -> Data {
     let bytes = CanonicalCoding.Violation.bytesNotCanonical(byteCount: 300)
     #expect(!"\(bytes)".contains(原文))
 }
+
+
+// MARK: - 反序 span 與空內容雜湊（#1 verify R6 的 CRITICAL）
+
+@Test func anInvertedSpanIsReportedAsCorruptRatherThanAbortingTheProcess() throws {
+    // R6：`lower..<upper` 在 `lower > upper` 時觸發 stdlib 的 precondition 並
+    // **中止行程**，所以 `validate(span:)` 永遠看不到反序輸入——它要驗的值
+    // 構造不出來。一行壞資料因此讓整份 canonical store 連 skippingCorrupt 都
+    // 讀不回來。修法是在**還沒組成 Range 的整數**上驗。
+    #expect(throws: Anchor.SpanValidationError.inverted(lower: 9, upper: 3)) {
+        try Anchor.validate(lower: 9, upper: 3)
+    }
+
+    let line = String(decoding: try canonicalLine(), as: UTF8.self)
+    let inverted = line.replacingOccurrences(of: "\"span\":[0,4]", with: "\"span\":[9,3]")
+    #expect(inverted != line)
+    #expect(throws: (any Error).self) {
+        _ = try JSONDecoder().decode(Event.self, from: Data(inverted.utf8))
+    }
+}
+
+@Test func theRepairPathSurvivesAnInvertedSpanLine() throws {
+    // 這條才是 CRITICAL 的核心：崩在**修復路徑**上。
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-inverted-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let path = dir.appendingPathComponent("events.jsonl")
+
+    let good = String(decoding: try canonicalLine(), as: UTF8.self)
+    let bad = good.replacingOccurrences(of: "\"span\":[0,4]", with: "\"span\":[9,3]")
+    try Data((good + "\n" + bad + "\n").utf8).write(to: path)
+
+    let store = try FileEventStore(url: path)
+    let salvaged = try store.allEvents(skippingCorrupt: true)
+    #expect(salvaged.events.count == 1, "好的那一行必須救得回來")
+    #expect(salvaged.corruptLines == [2])
+}
+
+@Test func theEmptyContentDigestCannotBeStoredByAnyPath() throws {
+    // R3 用「span 不得為空」擋萬用 anchor、R4 補了漏掉的入口、R6 找到第三條
+    // 路徑：**純空白的 span**——`normalize` 去掉空白之後仍是空字串，雜湊仍是
+    // `sha256("")`，於是它對任何文字都 resolve 成功。
+    //
+    // 前兩次擋的是入口，這次擋的是**那個值本身**：任何路徑產出的
+    // `sha256("")` 都不合法，包括我還沒想到的路徑。
+    #expect(throws: ContentHash.ValidationError.emptyContentDigest) {
+        try ContentHash.validate(ContentHash.emptyContentDigestHex)
+    }
+    #expect(Anchor.normalize("   ") == "", "前提：純空白正規化後是空字串")
+
+    // 解碼邊界。
+    let line = String(decoding: try canonicalLine(), as: UTF8.self)
+    let hostile = line.replacingOccurrences(
+        of: "\"hex\":\"", with: "\"hex\":\"\(ContentHash.emptyContentDigestHex)")
+    #expect(throws: (any Error).self) {
+        _ = try JSONDecoder().decode(Event.self, from: Data(hostile.prefix(hostile.count).utf8))
+    }
+}
+
+@Test func aWhitespaceOnlySpanCannotProduceAnAnchor() async {
+    // 上一條的入口側：從 turn 造 anchor 時，純空白的 span 現在會被擋下來
+    // （雜湊等於空內容摘要 → `ContentHash(hex:)` trap）。
+    await #expect(processExitsWith: .failure) {
+        let turn = Turn(
+            id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1),
+            text: "abc   def")
+        _ = Anchor(source: "s", turn: turn, span: 3..<6)  // 只涵蓋三個空白
+    }
+}

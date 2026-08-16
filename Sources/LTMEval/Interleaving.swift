@@ -28,18 +28,27 @@ public enum InterleavingViolation: Error, Sendable, Equatable {
     case strategyMisbehaved(policy: RankingPolicyID, violation: StrategyViolation)
 }
 
-/// 呼叫策略，並把 seam 的違規轉譯成帶策略歸屬的錯誤。
+/// 呼叫策略、驗排列性、並把違規轉譯成帶策略歸屬的錯誤。
 ///
-/// 排列性本身**不在這裡驗**（#1 verify R4 之後）：`MemoryStrategy.rerank` 是
-/// extension 上的非 customization point，所有經由 protocol 的呼叫都必然通過
-/// `RankingGuard.verifyPermutation`，所以交錯器再驗一次是驗不到東西的死碼。
-/// 這裡只補 seam 給不出的一件事——**是哪一邊違規**。兩個策略在同一次呈現裡
-/// 各跑一次，錯誤若不帶 policy，報告讀者無從判斷該懷疑誰。
+/// ## 這裡的排列檢查被刪過一次，現在裝回來了
+///
+/// R4 刪掉它，理由是「`rerank` 是 extension 上的非 customization point，所有
+/// 經由 protocol 的呼叫都必然通過 `RankingGuard.verifyPermutation`，所以交錯器
+/// 再驗一次是驗不到東西的死碼」。**那句話是假的**（#1 verify R6 實測）：
+/// `rerankChecked` 是 public requirement，而它收的 `ValidatedCandidates` 是可
+/// 儲存、可轉手的 token，所以模組外可以完全繞過 `rerank`。
+///
+/// 一般化的教訓，值得記在這裡而不是只記在被推翻的那一段旁邊：
+/// **不要因為「上游保證過了」而刪掉自己的檢查**，除非那個保證是型別層的
+/// 不可達——而「不可達」這種宣稱本身要能被實測。這次刪掉防線的成本是：
+/// 假宣稱失效的同時，它掩護的那道檢查也一起不見了。
 private func ranking(
     from strategy: some MemoryStrategy, over candidates: [Candidate], with projection: Projection
 ) throws -> [Candidate] {
     do {
-        return try strategy.rerank(candidates, with: projection).map(\.candidate)
+        let ranking = try strategy.rerank(candidates, with: projection).map(\.candidate)
+        _ = try RankingGuard.verifyPermutation(original: candidates, reordered: ranking)
+        return ranking
     } catch let violation as StrategyViolation {
         throw InterleavingViolation.strategyMisbehaved(policy: strategy.id, violation: violation)
     }

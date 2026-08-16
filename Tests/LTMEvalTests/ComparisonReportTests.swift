@@ -179,6 +179,45 @@ private func event(
     #expect(report.skipped.fromNullComparison == 1, "而那筆互動要看得見是被略過了")
 }
 
+@Test func crossGenerationReportPoolsNothingAtAllNotEvenPerClass() throws {
+    // **R6 的 CRITICAL：先前只有 `aggregate` 變 nil，`classRows` 照樣跨 generation
+    // 加總**——而 `ClassRow` 沒有 generation 欄位，所以那些數字正是 spec 禁止的
+    // single figure。舊的這條測試（名字叫「no pooled aggregate at all」）建的
+    // 正是這個輸入：兩筆紀錄、不同 generation、**同一個 query class**，而它只
+    // 斷言 `aggregate == nil`，對 classRows 一字未提。
+    let genA = GenerationID("build-1")
+    let genB = GenerationID("build-2")
+    let a = evalAnchor("a")
+    let c = evalAnchor("c")
+    let r1 = try presentation(.cjk2char, a: a, b: evalAnchor("b"), generation: genA)
+    let r2 = try presentation(.cjk2char, a: c, b: evalAnchor("d"), generation: genB)
+
+    let report = try ComparisonScorer.report(
+        records: [r1, r2],
+        events: [event(.opened, a, r1, generation: genA), event(.opened, c, r2, generation: genB)])
+
+    #expect(report.spansGenerations)
+    #expect(report.aggregate == nil)
+    #expect(report.classRows.isEmpty, "跨 generation 時頂層逐類列必須是空的")
+    #expect(report.generationRows.count == 2)
+    // 逐類數字改由每個 generation 自己提供，且各自只含自己的資料。
+    for row in report.generationRows {
+        #expect(row.classRows.count == 1)
+        #expect(row.classRows.first?.queryClass == .cjk2char)
+        #expect(row.scores.values.reduce(0) { $0 + $1.credits } == 1)
+    }
+}
+
+@Test func singleGenerationReportStillHasPerClassRows() throws {
+    // 反向對照：沒有這條，上面可以被「classRows 永遠空」滿足。
+    let a = evalAnchor("a")
+    let r = try presentation(.cjk2char, a: a, b: evalAnchor("b"))
+    let report = try ComparisonScorer.report(records: [r], events: [event(.opened, a, r)])
+    #expect(!report.spansGenerations)
+    #expect(report.classRows.count == 1)
+    #expect(report.aggregate != nil)
+}
+
 @Test func crossGenerationReportHasNoPooledAggregateAtAll() throws {
     // spec: "Results from different generations SHALL NOT be silently pooled into
     // a single figure"。先前 aggregate 是非 optional，型別上無法表達「這裡不該有

@@ -74,7 +74,18 @@ public struct ContentHash: Sendable, Hashable, Codable, CustomStringConvertible 
     public enum ValidationError: Error, Sendable, Equatable {
         case wrongLength(Int)
         case illegalCharacter(Character)
+        /// 這是 `sha256("")`。
+        case emptyContentDigest
     }
+
+    /// 空字串的 SHA-256。
+    ///
+    /// 一個雜湊等於這個值的 anchor 綁的是「沒有內容」，因此對任何文字都
+    /// resolve 成功——萬用 anchor。R3 用「span 不得為空」擋它、R4 補了漏掉的
+    /// 入口、R6 又找到第三條路徑（純空白的 span：`normalize` 去掉空白之後仍是
+    /// 空字串）。前兩次擋的是入口，這次擋的是那個值本身。
+    public static let emptyContentDigestHex =
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
     /// 顯式宣告：`rejectUnknownKeys` 需要 `allCases`，而 `init(from:)` 逐一具名
     /// 引用每個 key，所以少一個 case 是編譯錯誤而不是靜默少一個欄位。
@@ -109,6 +120,9 @@ public struct ContentHash: Sendable, Hashable, Codable, CustomStringConvertible 
 
     public static func validate(_ hex: String) throws {
         guard hex.count == 64 else { throw ValidationError.wrongLength(hex.count) }
+        guard hex != ContentHash.emptyContentDigestHex else {
+            throw ValidationError.emptyContentDigest
+        }
         for character in hex {
             guard character.isASCII, character.isHexDigit, !character.isUppercase else {
                 throw ValidationError.illegalCharacter(character)
@@ -138,22 +152,27 @@ public struct Anchor: Sendable, Hashable, Codable {
     public enum SpanValidationError: Error, Sendable, Equatable {
         case empty(Range<Int>)
         case negativeLowerBound(Range<Int>)
+        /// `lower > upper`。這個值連 `Range` 都組不出來，只在原始整數上驗得到。
+        case inverted(lower: Int, upper: Int)
     }
 
-    /// span 的形狀約束，**所有建構路徑共用這一個**。
-    ///
-    /// #1 verify R4 的 CRITICAL：R3 抓到「空 span 的雜湊是 `sha256("")`，於是對
-    /// 任何文字都 resolve 成功」之後，我的修法是逐一補入口——補了 `init(from:)`
-    /// 與 `init(source:turn:span:)`，**漏掉 memberwise 這一個**。萬用 anchor 仍然
-    /// 造得出來。
-    ///
-    /// 這與 R1「列舉六個識別碼型別、漏掉 ContentHash」是同一個形狀，而
-    /// CLAUDE.md 自己寫著「列舉會漏，判準不會」——我第二次違反自己寫的那句話。
-    /// 所以這次不是再補一個入口，是把判準抽成一個函式，讓「新增建構路徑卻忘了
-    /// 驗證」在結構上更難發生。
+    /// span 的形狀約束，所有建構路徑共用。
     public static func validate(span: Range<Int>) throws {
-        guard !span.isEmpty else { throw SpanValidationError.empty(span) }
-        guard span.lowerBound >= 0 else { throw SpanValidationError.negativeLowerBound(span) }
+        try validate(lower: span.lowerBound, upper: span.upperBound)
+    }
+
+    /// 同上，但驗的是**還沒組成 `Range` 的兩個整數**。
+    ///
+    /// 解碼路徑必須用這一個：`lower..<upper` 在 `lower > upper` 時觸發 stdlib 的
+    /// precondition 並中止行程，所以 `validate(span:)` 看不到反序的輸入——它要
+    /// 驗的值構造不出來。#1 verify R6 以編譯後的 probe 實測，包含
+    /// `allEvents(skippingCorrupt:)` 這條修復路徑也一起崩。
+    public static func validate(lower: Int, upper: Int) throws {
+        guard lower <= upper else {
+            throw SpanValidationError.inverted(lower: lower, upper: upper)
+        }
+        guard lower != upper else { throw SpanValidationError.empty(lower..<upper) }
+        guard lower >= 0 else { throw SpanValidationError.negativeLowerBound(lower..<upper) }
     }
 
     public init(source: String, turnID: String, contentHash: ContentHash, span: Range<Int>) {
@@ -194,6 +213,13 @@ public struct Anchor: Sendable, Hashable, Codable {
         let upper = try spanBounds.decode(Int.self)
         guard spanBounds.isAtEnd else {
             throw CanonicalCoding.Violation.unexpectedArrayLength(field: "span", expected: 2)
+        }
+        // **先驗整數，再組 `Range`。** 反序的 span 會讓 `lower..<upper` 中止行程。
+        do {
+            try Anchor.validate(lower: lower, upper: upper)
+        } catch {
+            throw DecodingError.dataCorruptedError(
+                forKey: .span, in: c, debugDescription: "\(error)")
         }
         let span = lower..<upper
         // 解碼邊界同樣擋空 span 與負位移：外來檔案裡一筆 `span: [3,3]` 的紀錄

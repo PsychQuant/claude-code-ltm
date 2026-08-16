@@ -39,6 +39,11 @@ public struct GenerationRow: Sendable, Equatable {
     public let generation: GenerationID
     public let observations: Int
     public let scores: [RankingPolicyID: StrategyScore]
+    /// 這個 generation 內的逐類拆解。
+    ///
+    /// 跨 generation 時頂層 `classRows` 是空的，逐類數字改由這裡提供——
+    /// 見 `ComparisonReport.classRows` 的說明。
+    public let classRows: [ClassRow]
 }
 
 /// 兩策略的比較結果。
@@ -47,6 +52,16 @@ public struct GenerationRow: Sendable, Equatable {
 /// 伴隨它出現。理由是 #2 的實測——向量融合的整體 +1pp 全部集中在中文雙字桶，
 /// 只看整體會判成「沒有差異」。
 public struct ComparisonReport: Sendable, Equatable {
+    /// 逐類的一列。**跨 generation 時為空**。
+    ///
+    /// #1 verify R6 的 CRITICAL：先前只有 `aggregate` 在跨 generation 時變 nil，
+    /// 而每一個 `ClassRow` 仍然把所有 generation 的 credits／penalties／presented
+    /// 加總——`ClassRow` 沒有 generation 欄位，所以那些數字正是 spec 禁止的
+    /// 「single figure」。同一份 diff 裡名為
+    /// `crossGenerationReportHasNoPooledAggregateAtAll` 的測試，產出的正是一個
+    /// 跨兩個 generation 的 `.cjk2char` 列，而它只斷言 `aggregate == nil`。
+    ///
+    /// 診斷對、只修了兩條聚合路徑中的一條——與 R4／R5 是同一個形狀。
     public let classRows: [ClassRow]
     /// 整體數字。**跨 generation 時為 nil**——spec 寫的是 "Results from different
     /// generations SHALL NOT be silently pooled into a single figure"，而先前把它
@@ -284,12 +299,24 @@ public enum ComparisonScorer {
                 GenerationRow(
                     generation: generation,
                     observations: generationObservations[generation] ?? 0,
-                    scores: table { $0.generation == generation })
+                    scores: table { $0.generation == generation },
+                    classRows: Set(allKeys.filter { $0.generation == generation }.map(\.queryClass))
+                        .sorted { $0.rawValue < $1.rawValue }
+                        .map { queryClass in
+                            ClassRow(
+                                queryClass: queryClass,
+                                observations: observations[queryClass] ?? 0,
+                                scores: table {
+                                    $0.queryClass == queryClass && $0.generation == generation
+                                })
+                        })
             }
             : []
 
         return ComparisonReport(
-            classRows: classRows,
+            // 跨 generation 時頂層逐類列必須是空的：`ClassRow` 沒有 generation
+            // 欄位，一個橫跨兩個 generation 的列就是 spec 禁止的 single figure。
+            classRows: spans ? [] : classRows,
             // 跨 generation 時**不產出**整體數字，而不是產出一個標了警語的數字。
             // **`classRows` 空時 aggregate 也必須是 nil**（#1 verify R5）。
             // doc、design.md 與 spec 三處都寫「不存在只有整體數字的形態」，

@@ -276,6 +276,31 @@ private func statsProjection(_ entries: [(String, AnchorStatistics)]) -> Project
     #expect(throws: StrategyViolation.malformedStatistics(
         testAnchor("unused"), .nonFinite(field: "reinforcement"))
     ) {
-        _ = try ArchivalStrategy().rerank(candidates(["a", "b"]), with: p)
+        _ = try HumanLikeStrategy().rerank(candidates(["a", "b"]), with: p)
+    }
+}
+
+@Test func archivalIsNotDisabledByAMalformedProjectionItNeverReads() throws {
+    // **R5 的修法在這裡越界了**（#1 verify R6 的 CRITICAL）：無條件驗 projection
+    // 讓 `archival` 因為一筆它從不讀取的統計而失敗。它的契約逐字是「不論給它
+    // 什麼 projection 都產出相同輸出」，而它存在的理由正是當記憶層本身可疑時
+    // 仍然可用的對照組——壞掉的記憶資料把對照組關掉，等於在最需要比較的那一刻
+    // 不能比較。
+    //
+    // 判準：一個策略只受**它能消費的資料**的約束。`archival` 的
+    // `consumedSignals` 是空集合。
+    let poisoned = statsProjection([
+        ("a", AnchorStatistics(
+            reinforcement: .nan, suppression: -5, impressions: -1,
+            lastDeliberateInteraction: instant))
+    ])
+    let input = candidates(["a", "b"])
+    let output = try ArchivalStrategy().rerank(input, with: poisoned)
+    #expect(output.map(\.candidate) == input)
+    #expect(output.allSatisfy { $0.displacement == 0 })
+
+    // 而同一份 projection 對會消費歷史的策略仍然必須擋。
+    #expect(throws: (any Error).self) {
+        _ = try HumanLikeStrategy().rerank(input, with: poisoned)
     }
 }
