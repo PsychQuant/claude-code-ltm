@@ -220,7 +220,7 @@ cited、用指數衰減」的策略目前寫不出來，除非同時改 `AnchorS
 這是介面形狀的限制，不只是實作沒做完（#1 verify R7 的跨模型審查是這樣判的，
 而這個判讀被接受）。issue #1 要的是記憶模型不該是寫死的架構前提——排序層做到了，
 projection 層沒有。要擴大這個軸，得讓 seam 收保留 kind/timestamp 的策略中立
-evidence，或讓一個 policy 同時描述 projection 與重排。列為 follow-up。
+evidence，或讓一個 policy 同時描述 projection 與重排。追蹤於 #19。
 
 ## 待決問題
 
