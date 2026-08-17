@@ -71,9 +71,13 @@ public enum Segmentation {
 
     /// 對一段純 CJK 文字取詞。
     ///
-    /// `NLTokenizer` 會丟字（同一份量測紀錄量到的行為），所以這裡**額外把整段
-    /// 原文也放進輸出**：丟掉的字仍然能被 trigram 那一路撈到，而重複的內容對
-    /// FTS5 的 BM25 只是提高該欄位的詞頻，不會讓它命中別的東西。
+    /// `NLTokenizer` 會丟字（`docs/measurements/2026-08-10-fts5-tokenizer.md` 量到的
+    /// 行為）。**本函式只回傳斷出的詞，不額外附上整段原文**——被丟掉的字由 trigram
+    /// 那一條通道涵蓋，那正是雙欄位配置的用意。
+    ///
+    /// （先前這則註解寫著「額外把整段原文也放進輸出」，而實作從來沒有那樣做。
+    /// 那句話還被用來當作「丟字沒關係」的理由，於是一個不存在的機制變成了一個
+    /// 決定的依據。）
     static func cjkTokens(_ text: String) -> [String] {
         let tokenizer = NLTokenizer(unit: .word)
         tokenizer.string = text

@@ -75,6 +75,10 @@ private struct CLIWorkspace {
             "LTM_CORPUS_ROOT": corpus.path,
             "LTM_DERIVED_ROOT": derived.path,
             "LTM_MEMORY_ROOT": memory.path,
+            // **HOME 也要隔離**。三個 LTM_* 變數若因為改名或打錯而失效，程式會
+            // 回退到 `NSHomeDirectory()` —— 也就是使用者真實的 `~/.claude/projects`
+            // 與 `~/.claude-ltm/`。那時測試會安靜地讀寫真實資料，而且看起來是綠的。
+            "HOME": base.path,
         ]
     }
 
@@ -204,17 +208,21 @@ func eventRecordingIsOptIn() throws {
     #expect(lines.count == hits, "shown 事件數必須等於呈現的命中數")
 }
 
-@Test("寫下的事件只含指標與類別，不含語料原文")
+@Test("寫下的事件只含指標與類別，不含語料原文，也不含查詢原文")
 func recordedEventsContainNoCorpusText() throws {
     let secret = "這段文字不應該出現在事件檔裡"
+    // 查詢用的字串必須**單獨**斷言。先前只斷言完整的 secret，而實際下的查詢是它的
+    // 子字串——真的洩漏 query 原文時，斷言的 needle 比洩漏的內容長，抓不到。
+    let queryText = "不應該出現"
     let workspace = try CLIWorkspace.make(texts: [secret])
     defer { workspace.cleanup() }
     _ = try runCLI(["build"], environment: workspace.environment)
     _ = try runCLI(
-        ["query", "這段文字", "--all-projects", "--record"], environment: workspace.environment)
+        ["query", queryText, "--all-projects", "--record"], environment: workspace.environment)
 
     let raw = try String(contentsOf: workspace.eventsFile, encoding: .utf8)
     #expect(!raw.contains(secret), "事件檔含語料原文 —— 違反記憶層的硬約束")
+    #expect(!raw.contains(queryText), "事件檔含查詢原文 —— 同一條硬約束的另一半")
     #expect(raw.contains("shown"))
     // 帶得動的只有 anchor（指標 + 內容雜湊）與類別標籤。
     #expect(raw.contains("contentHash"))
@@ -230,4 +238,78 @@ func unknownOptionIsReported() throws {
 
     #expect(result.code == LTMCommandLine.ExitCode.usageError.rawValue)
     #expect(result.err.contains("jsno"), "打錯的旗標必須被指名，否則使用者以為它生效了")
+}
+
+@Test("--strategy 不帶 --record 時仍讀得到歷史，且不寫入任何事件")
+func strategyReadsHistoryWithoutRecording() throws {
+    let workspace = try CLIWorkspace.make(texts: [
+        "記憶策略的內容", "檢索量測的內容", "第三段內容", "第四段內容",
+    ])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    // 先用 --record 造出歷史，再確認不帶 --record 的查詢讀得到它。
+    _ = try runCLI(["query", "內容", "--all-projects", "--record"], environment: workspace.environment)
+    #expect(FileManager.default.fileExists(atPath: workspace.eventsFile.path))
+    let before = try Data(contentsOf: workspace.eventsFile)
+
+    let result = try runCLI(
+        ["query", "內容", "--all-projects", "--strategy", "human-like"],
+        environment: workspace.environment)
+
+    #expect(result.code == 0)
+    if result.code != 0 { Issue.record("stderr: \(result.err)") }
+    #expect(result.out.contains("human-like"), "輸出應報出實際套用的策略")
+    // 關鍵：沒帶 --record 就不該寫入任何事件（讀歷史 ≠ 寫歷史）。
+    #expect(try Data(contentsOf: workspace.eventsFile) == before,
+            "--strategy 不該順帶寫事件；讀與寫是兩件事")
+}
+
+@Test("memory root 指進語料時拒絕，且語料下沒有任何目錄被建立")
+func memoryRootInsideCorpusIsRefusedBeforeCreation() throws {
+    let workspace = try CLIWorkspace.make(texts: ["內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    let before = try FileManager.default.subpathsOfDirectory(atPath: workspace.corpus.path).sorted()
+
+    var env = workspace.environment
+    env["LTM_MEMORY_ROOT"] = workspace.corpus.path  // 指進正在被掃描的語料
+    let result = try runCLI(["query", "內容", "--all-projects", "--record"], environment: env)
+
+    #expect(result.code != 0)
+    let after = try FileManager.default.subpathsOfDirectory(atPath: workspace.corpus.path).sorted()
+    #expect(after == before, "語料下多出了東西 —— 守衛跑在 mkdir 之後就等於沒守衛")
+}
+
+@Test("derived root 指進被覆寫的語料根時同樣被拒")
+func derivedRootInsideOverriddenCorpusIsRefused() throws {
+    let workspace = try CLIWorkspace.make(texts: ["內容"])
+    defer { workspace.cleanup() }
+    var env = workspace.environment
+    env["LTM_DERIVED_ROOT"] = workspace.corpus.appendingPathComponent("derived").path
+    let before = try FileManager.default.subpathsOfDirectory(atPath: workspace.corpus.path).sorted()
+
+    let result = try runCLI(["build"], environment: env)
+
+    #expect(result.code != 0, "守衛必須跟著**當下使用中的**語料根走，不是只看預設根")
+    let after = try FileManager.default.subpathsOfDirectory(atPath: workspace.corpus.path).sorted()
+    #expect(after == before, "語料下多出了索引產物")
+}
+
+@Test("--k 負值被拒且不 crash；非數值不靜默改用預設")
+func invalidKIsRefused() throws {
+    let workspace = try CLIWorkspace.make(texts: ["內容一", "內容二"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let negative = try runCLI(
+        ["query", "內容", "--all-projects", "--k", "-1"], environment: workspace.environment)
+    #expect(negative.code == LTMCommandLine.ExitCode.usageError.rawValue,
+            "負值先前會以 stdlib precondition 中止行程")
+    #expect(negative.err.contains("1000"), "訊息要指名接受範圍")
+
+    let nonNumeric = try runCLI(
+        ["query", "內容", "--all-projects", "--k", "abc"], environment: workspace.environment)
+    #expect(nonNumeric.code == LTMCommandLine.ExitCode.usageError.rawValue)
+    #expect(nonNumeric.out.isEmpty, "不得靜默改用預設然後回報成功")
 }

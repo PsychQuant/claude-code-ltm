@@ -194,31 +194,33 @@ public struct RetrievalEngine {
         try database.query(
             """
             SELECT project, session_id, uuid, timestamp, text,
-                   anchor_hash, anchor_span_lower, anchor_span_upper
+                   anchor_hash, anchor_span_lower, anchor_span_upper, project_fingerprint
             FROM chunks WHERE id = ?
             """, bind: [.integer(rowID)]
         ) { statement in
-            func text(_ column: Int32) -> String {
-                sqlite3_column_text(statement, column).map { String(cString: $0) } ?? ""
-            }
+            func text(_ column: Int32) -> String { columnText(statement, column) }
             let sessionID = text(1)
             let uuid = text(2)
             let hashHex = text(5)
+            let fingerprint = text(8)
             let lower = Int(sqlite3_column_int64(statement, 6))
             let upper = Int(sqlite3_column_int64(statement, 7))
             // 索引裡的值理論上都是寫入時驗過的，但它是磁碟上的外來資料——
             // 損壞的列跳過，不 trap。
             guard let hash = try? ContentHash(validating: hashHex),
                 (try? Anchor.validate(lower: lower, upper: upper)) != nil,
-                (try? OpaqueIdentifier.validate(sessionID)) != nil,
+                (try? OpaqueIdentifier.validate(fingerprint)) != nil,
                 (try? OpaqueIdentifier.validate(uuid)) != nil
             else { return }
             found = StoredChunk(
                 project: text(0), sessionID: sessionID, uuid: uuid,
                 timestamp: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
                 text: text(4),
+                // source 是 **project 指紋**，與寫入端（`CorpusScanner`）一致。
+                // 用 sessionID 重建 anchor 會讓同一則 turn 在 resume 前後得到不同的
+                // anchor，於是既有事件全部對不上——B3 的病灶就在讀寫兩端不一致。
                 anchor: Anchor(
-                    source: sessionID, turnID: uuid, contentHash: hash, span: lower..<upper))
+                    source: fingerprint, turnID: uuid, contentHash: hash, span: lower..<upper))
         }
         return found
     }

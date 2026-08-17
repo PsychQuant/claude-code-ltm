@@ -56,7 +56,25 @@ public struct IndexBuilder: Sendable {
         try database.probeTokenizers()
         try database.createSchema()
 
-        let previousState = rebuildFromScratch ? ScanState() : (try? readState()) ?? ScanState()
+        // state 讀不到而 DB 存在 → **不可**當成空 state 繼續。
+        //
+        // 那會在既有索引上重掃全語料 upsert（見 FTS 重複索引那條），而且使用者不會
+        // 知道發生過什麼。`stateUnreadable` 先前宣告了卻從未被丟出——那條錯誤路徑
+        // 是死的，CLI 的處理分支也因此永遠到不了。
+        var previousState = ScanState()
+        if !rebuildFromScratch {
+            let stateExists = FileManager.default.fileExists(atPath: location.stateURL.path)
+            let databaseExists = FileManager.default.fileExists(atPath: location.databaseURL.path)
+            if stateExists {
+                do { previousState = try readState() } catch {
+                    throw BuildError.stateUnreadable(detail: "\(location.stateURL.path)：\(error)")
+                }
+            } else if databaseExists {
+                throw BuildError.stateUnreadable(
+                    detail: "索引存在但 \(location.stateURL.lastPathComponent) 不見了；"
+                        + "用 `ltm build --full` 從零重建")
+            }
+        }
         let scan = try scanner.scan(previous: previousState)
 
         var vectorRow = rebuildFromScratch ? 0 : (try database.meta("vector_count").flatMap(Int.init) ?? 0)
@@ -66,8 +84,17 @@ public struct IndexBuilder: Sendable {
         try truncateSidecar(toRows: vectorRow)
 
         var newVectors: [[Float]] = []
+        var pendingRowUpdates: [(chunkRowID: Int64, vectorRow: Int)] = []
         var indexed = 0
 
+        // 第一階段（交易外）：算向量、決定 row 編號，但**還不提交任何指標**。
+        // 第二階段：側車落地並 fsync。第三階段：交易內一次提交 chunk 與指標。
+        //
+        // 順序是刻意的，而且先前寫反了：舊實作在交易內就提交了 `vector_count`，
+        // 交易外才 append 側車。崩潰落在兩者之間會留下「DB 宣稱 N 個向量、檔案只有
+        // N−k 個」，而下一輪的 `truncateSidecar` 對**較短**的檔案呼叫 ftruncate 會
+        // **補零延長**（POSIX 語意）而不是重建缺口，接著從較大的 row 繼續 append
+        // ——永久且靜默的 row 錯位：A 的向量被算到 B 身上。
         try database.transaction {
             for sourceKey in scan.invalidatedSources {
                 try database.deleteChunks(sourceKey: sourceKey)
@@ -81,24 +108,28 @@ public struct IndexBuilder: Sendable {
                     // 是可查詢的事實，不是猜測。
                     guard let vector = try embedder.vector(for: chunk.text) else { continue }
                     newVectors.append(vector)
-                    try database.execute(
-                        "UPDATE chunks SET vector_row = ? WHERE id = ?",
-                        bind: [.integer(Int64(vectorRow)), .integer(rowIDs[offset])])
+                    pendingRowUpdates.append((chunkRowID: rowIDs[offset], vectorRow: vectorRow))
                     vectorRow += 1
                 }
                 indexed += chunks.count
+            }
+        }
+
+        // 側車先完整落地並 fsync，**之後**才提交指向它的指標。這樣崩潰最多留下
+        // 多餘的 bytes（下一輪 truncate 得掉），而不會留下指向不存在向量的指標。
+        try appendVectors(newVectors)
+
+        try database.transaction {
+            for update in pendingRowUpdates {
+                try database.execute(
+                    "UPDATE chunks SET vector_row = ? WHERE id = ?",
+                    bind: [.integer(Int64(update.vectorRow)), .integer(update.chunkRowID)])
             }
             try database.setMeta("vector_count", String(vectorRow))
             try database.setMeta("vector_dimension", String(embedder.dimension))
             try database.writeStamps(embeddingRevision: embedder.revision)
         }
 
-        // 順序是刻意的：**先落地側車檔，再寫 state**。
-        //
-        // 讀者看得到的向量筆數來自 SQLite 的 `vector_count`，而那是交易的一部分，
-        // 所以它一定 ≤ 已完整寫入的 bytes；反過來（先記 count 再寫檔）會讓一次
-        // 中止留下「索引宣稱有 N 個向量、檔案裡只有 N-k 個」的狀態。
-        try appendVectors(newVectors)
         try writeState(scan.state)
 
         return BuildReport(
@@ -123,8 +154,11 @@ public struct IndexBuilder: Sendable {
 
     private func discardDerivedArtifacts() throws {
         let fm = FileManager.default
+        // **刪除失敗必須終止**：`--full` 的契約是「從零開始」，而 `try?` 會讓一個
+        // 刪不掉的舊產物安靜地留下來，之後的建置疊在它上面。
         for url in [location.databaseURL, location.vectorsURL, location.stateURL] {
-            try? fm.removeItem(at: url)
+            guard fm.fileExists(atPath: url.path) else { continue }
+            try fm.removeItem(at: url)
         }
         // SQLite 的 WAL 與 shared-memory 檔要一起清，否則新開的資料庫會接上
         // 舊索引的未完成交易。
@@ -156,6 +190,12 @@ public struct IndexBuilder: Sendable {
             let temporary = location.vectorsURL.appendingPathExtension("tmp")
             try data.write(to: temporary, options: [.atomic])
             _ = try FileManager.default.replaceItemAt(location.vectorsURL, withItemAt: temporary)
+            // rename 之後再 fsync 一次目錄項次：`.atomic` 保證的是「不會看到半份」，
+            // 不保證 bytes 已經到磁碟。
+            if let handle = try? FileHandle(forWritingTo: location.vectorsURL) {
+                try? handle.synchronize()
+                try? handle.close()
+            }
         }
     }
 

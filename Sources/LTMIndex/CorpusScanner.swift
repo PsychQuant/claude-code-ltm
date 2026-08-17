@@ -20,6 +20,11 @@ public struct CorpusChunk: Sendable, Equatable {
     /// 舊文字繼續留在索引裡而且不報錯。
     public let sourceKey: String
     public let project: String
+    /// `project` 的穩定指紋。**這是 anchor 的 source，也是 chunk 身分的一半。**
+    ///
+    /// `project` 本身留著是為了導航（人要看得懂命中來自哪個專案），但它不參與
+    /// 定址——理由見 `ProjectFingerprint` 的文件。
+    public let projectFingerprint: String
     public let sessionID: String
     public let uuid: String
     public let timestamp: Date
@@ -33,6 +38,7 @@ public struct CorpusChunk: Sendable, Equatable {
     ) {
         self.sourceKey = sourceKey
         self.project = project
+        self.projectFingerprint = ProjectFingerprint.of(project)
         self.sessionID = sessionID
         self.uuid = uuid
         self.timestamp = timestamp
@@ -69,6 +75,11 @@ public struct ScanResult: Sendable {
     /// 分開回報而不是讓呼叫端自己比對 state：舊 chunk 沒清掉的話，被改寫的
     /// 內容會以兩個版本同時留在索引裡，而檢索不會報錯——只會安靜地回舊文字。
     public let invalidatedSources: Set<String>
+    /// 本輪讀不到的來源（列目錄失敗、開檔失敗）。
+    ///
+    /// **與「消失」嚴格區分**：讀不到可能只是權限暫時失效，把它當成消失會刪掉
+    /// 不該刪的東西，而那個刪除無法從索引本身還原。
+    public let unreadableSources: Set<String>
     public let state: ScanState
     /// 掃描期間跳過的紀錄數，依原因分類。
     public let skipped: SkipTally
@@ -89,11 +100,15 @@ public struct SkipTally: Sendable, Equatable {
     public var noIndexableText = 0
     /// 這一行不是合法 JSON。
     public var unparseableLine = 0
+    /// 檔案結尾的半行（正在被寫入）。**與 malformed 分開記**：把並行寫入報成
+    /// 語料損壞會讓真正的損壞淹沒在噪音裡。
+    public var incompleteTrailingRecord = 0
 
     public init() {}
 
     public var total: Int {
         notATurn + missingPointerField + malformedIdentifier + noIndexableText + unparseableLine
+            + incompleteTrailingRecord
     }
 }
 
@@ -171,11 +186,20 @@ public struct CorpusScanner: Sendable {
     public func scan(previous: ScanState = ScanState()) throws -> ScanResult {
         var chunks: [CorpusChunk] = []
         var invalidated: Set<String> = []
+        var unreadable: Set<String> = []
         var nextState = ScanState()
         var tally = SkipTally()
+        var seenKeys: Set<String> = []
 
         for (project, url, key) in try sourceFiles() {
-            guard let handle = try? FileHandle(forReadingFrom: url) else { continue }
+            seenKeys.insert(key)
+            guard let handle = try? FileHandle(forReadingFrom: url) else {
+                unreadable.insert(key)
+                // 讀不到的來源**保留上一輪的狀態**：既不作廢它的 chunk，也不讓
+                // 新 state 少掉這個鍵——否則下一輪會把它誤判成「消失」。
+                if let prior = previous.files[key] { nextState.files[key] = prior }
+                continue
+            }
             defer { try? handle.close() }
 
             let size = (try? handle.seekToEnd()).map(Int.init) ?? 0
@@ -193,19 +217,32 @@ public struct CorpusScanner: Sendable {
             }
 
             guard let tail = try? readBytes(handle, from: startOffset, count: size - startOffset)
-            else { continue }
-            chunks.append(
-                contentsOf: parse(data: tail, project: project, sourceKey: key, tally: &tally))
+            else {
+                unreadable.insert(key)
+                if let prior = previous.files[key] { nextState.files[key] = prior }
+                continue
+            }
+            let parsed = parse(data: tail, project: project, sourceKey: key, tally: &tally)
+            chunks.append(contentsOf: parsed.chunks)
 
-            // 新狀態的雜湊涵蓋**整個**已處理段落（含這次讀的尾巴），因為下次要用
-            // 它來驗證「前面那段沒被動過」。
-            let whole = (try? readBytes(handle, from: 0, count: size)) ?? Data()
+            // offset 只推進到**最後一個完整紀錄**之後；雜湊只涵蓋那一段。
+            // 半行留給下一輪從它的起點重讀。
+            let processed = startOffset + parsed.consumedBytes
+            let whole = (try? readBytes(handle, from: 0, count: processed)) ?? Data()
             nextState.files[key] = SourceFileState(
-                prefixHash: Self.hexDigest(whole), processedBytes: size)
+                prefixHash: Self.hexDigest(whole), processedBytes: processed)
+        }
+
+        // 上一輪有、這一輪沒看到、而且不是「讀不到」的來源 → 它消失了，作廢它的 chunk。
+        // 少了這一步，增量索引會保留全量重建不會產生的內容——直接違反不變式 2，
+        // 而且那些 chunk 指向已不存在的 turn。
+        for key in previous.files.keys where !seenKeys.contains(key) && !unreadable.contains(key) {
+            invalidated.insert(key)
         }
 
         return ScanResult(
-            chunks: chunks, invalidatedSources: invalidated, state: nextState, skipped: tally)
+            chunks: chunks, invalidatedSources: invalidated, unreadableSources: unreadable,
+            state: nextState, skipped: tally)
     }
 
     private func readBytes(_ handle: FileHandle, from offset: Int, count: Int) throws -> Data {
@@ -223,12 +260,23 @@ public struct CorpusScanner: Sendable {
     /// 不完整的最後一行（讀到的尾巴切在半行）會因為 JSON 解析失敗被跳過，並在
     /// 下一次掃描時因為 offset 前進而重新讀到——這是刻意的：寧可晚一輪索引到，
     /// 也不要把半行當成一筆內容。
+    /// - Returns: 解析出的 chunk，以及**已完整消費的 byte 數**。
+    ///
+    ///   後者讓呼叫端把 resume offset 停在最後一個完整紀錄之後。先前 offset 一律
+    ///   推到檔案結尾、`prefixHash` 也涵蓋那半行，於是下一輪 prefix 仍然吻合、
+    ///   只讀「後半段」——那段不含 JSON 前半，仍然解析失敗。**該 turn 就此永久
+    ///   從索引消失**，而註解卻宣稱它會被重讀。
     func parse(
         data: Data, project: String, sourceKey: String, tally: inout SkipTally
-    ) -> [CorpusChunk] {
-        guard !data.isEmpty else { return [] }
+    ) -> (chunks: [CorpusChunk], consumedBytes: Int) {
+        guard !data.isEmpty else { return ([], 0) }
         var chunks: [CorpusChunk] = []
-        for lineData in data.split(separator: UInt8(ascii: "\n")) {
+        // 最後一個換行之後的 bytes 是不完整的一行（除非檔案剛好以換行結尾）。
+        let lastNewline = data.lastIndex(of: UInt8(ascii: "\n"))
+        let consumed = lastNewline.map { data.distance(from: data.startIndex, to: $0) + 1 } ?? 0
+        if consumed < data.count { tally.incompleteTrailingRecord += 1 }
+        let complete = consumed > 0 ? data.prefix(consumed) : Data()
+        for lineData in complete.split(separator: UInt8(ascii: "\n")) {
             guard !lineData.isEmpty else { continue }
             guard
                 let object = try? JSONSerialization.jsonObject(with: Data(lineData))
@@ -243,7 +291,7 @@ public struct CorpusScanner: Sendable {
                 chunks.append(chunk)
             }
         }
-        return chunks
+        return (chunks, consumed)
     }
 
     /// 一筆 jsonl 紀錄 → chunk。任何不合語料預期的紀錄一律**跳過並記帳**，
@@ -263,8 +311,9 @@ public struct CorpusScanner: Sendable {
             tally.missingPointerField += 1
             return nil
         }
-        // 識別碼要先驗形狀再交給 `Anchor`——後者對非法值 `preconditionFailure`，
-        // 而語料裡出現預期外的值不是我們的程式錯誤。
+        // `uuid` 要先驗形狀再交給 `Anchor`——後者對非法值 `preconditionFailure`，
+        // 而語料裡出現預期外的值不是我們的程式錯誤。`sessionID` 不再進 anchor，
+        // 但它仍會被原樣存進索引，所以同樣要驗。
         guard (try? OpaqueIdentifier.validate(sessionID)) != nil,
             (try? OpaqueIdentifier.validate(uuid)) != nil
         else {
@@ -283,8 +332,12 @@ public struct CorpusScanner: Sendable {
             return nil
         }
         let turn = Turn(id: uuid, role: role, timestamp: timestamp, text: text)
+        // source 是 **project 指紋**，不是 sessionID。後者在 resume 時會變，
+        // 用它定址會讓使用歷史隨著每次 resume 蒸發（見 ProjectFingerprint 的文件）。
+        // sessionID 仍然保留在 chunk 上——它是導航資訊，不是身分。
         let anchor = Anchor(
-            source: sessionID, turn: turn, span: 0..<text.unicodeScalars.count)
+            source: ProjectFingerprint.of(project), turn: turn,
+            span: 0..<text.unicodeScalars.count)
         return CorpusChunk(
             sourceKey: sourceKey, project: project, sessionID: sessionID, uuid: uuid,
             timestamp: timestamp, role: role, text: text, anchor: anchor)

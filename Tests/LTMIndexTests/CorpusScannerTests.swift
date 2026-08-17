@@ -277,6 +277,94 @@ func fixtureCorpusYieldsOneChunkPerTurn() throws {
         #expect(chunk.timestamp.timeIntervalSince1970 > 0)
         // anchor 綁的內容必須真的能還原成該 chunk 的文字。
         #expect(chunk.anchor.turnID == chunk.uuid)
-        #expect(chunk.anchor.source == chunk.sessionID)
+        // source 是 **project 指紋**，不是 sessionID——後者在 session resume 時會變，
+        // 用它定址會讓使用歷史蒸發（見 ProjectFingerprint）。sessionID 仍在 chunk 上，
+        // 但只作導航用。
+        #expect(chunk.anchor.source == ProjectFingerprint.of(chunk.project))
+        #expect(chunk.anchor.source != chunk.sessionID)
     }
+}
+
+@Test("同一則 turn 經由兩個 session 檔觀察到時，anchor 相同（跨 resume 存活）")
+func anchorSurvivesSessionResume() throws {
+    let root = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    // 模擬 session resume：同一則 turn（相同 uuid、相同文字）被複製進第二個 session 檔，
+    // 但帶著新的 sessionId。實測 300 個真實語料檔有 5,722 個 turn 是這個形狀，
+    // 其中 4,337 個的 sessionId 不同。
+    let sharedTurn = "aaaaaaaa-0000-0000-0000-000000000001"
+    let text = "跨越 resume 的同一段內容"
+    _ = try writeSession(
+        in: root, project: "proj-one", file: "session-A.jsonl",
+        lines: [turnLine(uuid: sharedTurn, session: "11111111-1111-1111-1111-111111111111",
+                         role: "user", text: text)])
+    _ = try writeSession(
+        in: root, project: "proj-one", file: "session-B.jsonl",
+        lines: [
+            turnLine(uuid: sharedTurn, session: "22222222-2222-2222-2222-222222222222",
+                     role: "user", text: text),
+            turnLine(uuid: "aaaaaaaa-0000-0000-0000-000000000002",
+                     session: "22222222-2222-2222-2222-222222222222",
+                     role: "assistant", text: "resume 之後才有的新內容"),
+        ])
+
+    let result = try CorpusScanner(corpusRoot: root).scan()
+    let shared = result.chunks.filter { $0.uuid == sharedTurn }
+
+    #expect(shared.count == 2, "掃描階段兩個檔各產生一筆；去重是索引層的職責（task 2.2）")
+    // 關鍵斷言：兩筆的 sessionID 不同，但 anchor 完全相同——這正是舊實作壞掉的地方。
+    #expect(Set(shared.map(\.sessionID)).count == 2)
+    #expect(Set(shared.map(\.anchor)).count == 1, "同一則 turn 必須得到同一個 anchor，否則使用歷史會在 resume 後對不上")
+}
+
+@Test("來源檔消失時它的 chunk 被作廢")
+func deletedSourceIsInvalidated() throws {
+    let root = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: root) }
+    _ = try writeSession(in: root, project: "proj-one", file: "a.jsonl",
+        lines: [turnLine(uuid: "aaaaaaaa-0000-0000-0000-000000000001", session: sessionA,
+                         role: "user", text: "甲檔的內容")])
+    _ = try writeSession(in: root, project: "proj-one", file: "b.jsonl",
+        lines: [turnLine(uuid: "aaaaaaaa-0000-0000-0000-000000000002", session: sessionA,
+                         role: "user", text: "乙檔的內容")])
+    let scanner = CorpusScanner(corpusRoot: root)
+    let first = try scanner.scan()
+    #expect(first.chunks.count == 2)
+
+    try FileManager.default.removeItem(at: root.appendingPathComponent("proj-one/a.jsonl"))
+    let second = try scanner.scan(previous: first.state)
+
+    #expect(second.invalidatedSources.contains("proj-one/a.jsonl"),
+            "消失的來源必須被作廢，否則增量索引會保留全量重建不會有的內容（不變式 2）")
+    #expect(second.unreadableSources.isEmpty)
+    #expect(!second.state.files.keys.contains("proj-one/a.jsonl"))
+}
+
+@Test("不完整的最後一行不推進 offset，下一輪補完後被索引")
+func incompleteTrailingRecordIsRereadNextScan() throws {
+    let root = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let complete = turnLine(uuid: "aaaaaaaa-0000-0000-0000-000000000001", session: sessionA,
+                            role: "user", text: "完整的第一則")
+    let full = turnLine(uuid: "aaaaaaaa-0000-0000-0000-000000000002", session: sessionA,
+                        role: "user", text: "後來才寫完的第二則")
+    // 模擬「正在被 append」：第二行只寫了一半，且沒有結尾換行。
+    let url = root.appendingPathComponent("proj-one/s.jsonl")
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try (complete + "\n" + String(full.prefix(full.count / 2))).write(
+        to: url, atomically: true, encoding: .utf8)
+
+    let scanner = CorpusScanner(corpusRoot: root)
+    let first = try scanner.scan()
+    #expect(first.chunks.count == 1, "只有完整的那一則被索引")
+    #expect(first.skipped.incompleteTrailingRecord == 1, "半行要單獨記帳，不可混進 malformed")
+    #expect(first.skipped.unparseableLine == 0, "並行寫入不是語料損壞")
+
+    // 補完檔案後再掃：那一則必須被索引到。
+    try (complete + "\n" + full + "\n").write(to: url, atomically: true, encoding: .utf8)
+    let second = try scanner.scan(previous: first.state)
+    #expect(second.chunks.contains { $0.uuid == "aaaaaaaa-0000-0000-0000-000000000002" },
+            "半行補完後必須被索引 —— 先前它會永久消失且無錯誤訊息")
 }

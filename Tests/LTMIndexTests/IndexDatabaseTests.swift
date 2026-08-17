@@ -12,14 +12,18 @@ private func makeTempDatabasePath() -> String {
 
 private func makeChunk(
     uuid: String, text: String, project: String = "proj-one",
-    sourceKey: String = "proj-one/session.jsonl"
+    sourceKey: String = "proj-one/session.jsonl",
+    session: String = "11111111-2222-3333-4444-555555555555",
+    timestamp: TimeInterval = 1_760_000_000
 ) -> CorpusChunk {
-    let session = "11111111-2222-3333-4444-555555555555"
-    let turn = Turn(id: uuid, role: "user", timestamp: Date(timeIntervalSince1970: 1_760_000_000), text: text)
+    let when = Date(timeIntervalSince1970: timestamp)
+    let turn = Turn(id: uuid, role: "user", timestamp: when, text: text)
     return CorpusChunk(
         sourceKey: sourceKey, project: project, sessionID: session, uuid: uuid,
-        timestamp: turn.timestamp, role: "user", text: text,
-        anchor: Anchor(source: session, turn: turn, span: 0..<text.unicodeScalars.count))
+        timestamp: when, role: "user", text: text,
+        // source 是 project 指紋，不是 session——與 CorpusScanner 的實際行為一致。
+        anchor: Anchor(source: ProjectFingerprint.of(project), turn: turn,
+                       span: 0..<text.unicodeScalars.count))
 }
 
 @Test("首次建置就建好 schema，chunk 數從零開始")
@@ -140,4 +144,95 @@ func segmentationSplitsCJKAndKeepsLatin() {
     // 斷詞後 CJK 之間應該出現空白（否則 unicode61 整段當一個詞，等同沒斷）。
     #expect(segmented.contains(" "))
     #expect(segmented.contains("MemoryStrategy"))
+}
+
+@Test("同一則 turn 經由兩個 session 檔寫入時只留一個 chunk，pointer 報最新 session")
+func resumeDuplicateYieldsSingleChunk() throws {
+    let path = makeTempDatabasePath()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    let db = try IndexDatabase(path: path)
+    try db.probeTokenizers()
+    try db.createSchema()
+
+    let uuid = "aaaaaaaa-0000-0000-0000-000000000001"
+    let text = "跨越 resume 的同一段內容"
+    // 先寫 session-A 觀察到的版本，再寫 session-B（resume）觀察到的同一則 turn。
+    try db.insert(
+        chunks: [makeChunk(uuid: uuid, text: text, session: "11111111-1111-1111-1111-111111111111",
+                           timestamp: 1_760_000_000)],
+        sourceKey: "proj-one/session-A.jsonl")
+    try db.insert(
+        chunks: [makeChunk(uuid: uuid, text: text, session: "22222222-2222-2222-2222-222222222222",
+                           timestamp: 1_760_000_100)],
+        sourceKey: "proj-one/session-B.jsonl")
+
+    #expect(try db.chunkCount() == 1, "resume 複製的同一則 turn 是一段記憶，不是兩段")
+    var session = ""
+    try db.query("SELECT session_id FROM chunks") { statement in
+        session = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? ""
+    }
+    #expect(session == "22222222-2222-2222-2222-222222222222", "pointer 應報最近觀察到的 session")
+}
+
+@Test("不同 project 的相同 turn 識別碼各自成立，不互相覆蓋")
+func sameUUIDInDifferentProjectsStaysSeparate() throws {
+    let path = makeTempDatabasePath()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    let db = try IndexDatabase(path: path)
+    try db.probeTokenizers()
+    try db.createSchema()
+
+    let uuid = "aaaaaaaa-0000-0000-0000-000000000001"
+    try db.insert(chunks: [makeChunk(uuid: uuid, text: "甲專案的內容", project: "proj-one")],
+                  sourceKey: "proj-one/s.jsonl")
+    try db.insert(chunks: [makeChunk(uuid: uuid, text: "乙專案的內容", project: "proj-two")],
+                  sourceKey: "proj-two/s.jsonl")
+
+    // 實測顯示跨 project 的 uuid 重複為零，但那是對外來資料的觀察、不是 schema 能保證的事。
+    #expect(try db.chunkCount() == 2)
+}
+
+@Test("同一則 turn 內容被改寫後，舊文字不再命中（upsert 路徑）")
+func upsertRemovesStaleFTSRows() throws {
+    let path = makeTempDatabasePath()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    let db = try IndexDatabase(path: path)
+    try db.probeTokenizers()
+    try db.createSchema()
+
+    let uuid = "aaaaaaaa-0000-0000-0000-000000000001"
+    try db.insert(chunks: [makeChunk(uuid: uuid, text: "改寫前的獨特內容")],
+                  sourceKey: "proj-one/s.jsonl")
+    // 同一則 turn 的內容被修正（例如來源被重寫後重掃）。
+    try db.insert(chunks: [makeChunk(uuid: uuid, text: "改寫後的全新內容")],
+                  sourceKey: "proj-one/s.jsonl")
+
+    #expect(try db.chunkCount() == 1)
+    var stale = 0
+    try db.query("SELECT rowid FROM chunks_trigram WHERE chunks_trigram MATCH ?",
+                 bind: [.text("改寫前")]) { _ in stale += 1 }
+    #expect(stale == 0, "upsert 未清舊 FTS 列 ⇒ 檢索安靜地回舊文字（contentless 表不會報錯）")
+    var fresh = 0
+    try db.query("SELECT rowid FROM chunks_trigram WHERE chunks_trigram MATCH ?",
+                 bind: [.text("改寫後")]) { _ in fresh += 1 }
+    #expect(fresh == 1)
+}
+
+@Test("含內嵌 NUL 的文字不被截斷，索引內容與 anchor 一致")
+func embeddedNulSurvivesRoundTrip() throws {
+    let path = makeTempDatabasePath()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    let db = try IndexDatabase(path: path)
+    try db.probeTokenizers()
+    try db.createSchema()
+
+    // JSON 字串合法地可以含 U+0000（工具輸出、二進位轉義）。
+    let text = "前半段" + String(UnicodeScalar(0)!) + "後半段的獨特內容"
+    let chunk = makeChunk(uuid: "aaaaaaaa-0000-0000-0000-000000000001", text: text)
+    try db.insert(chunks: [chunk], sourceKey: "proj-one/s.jsonl")
+
+    var stored = ""
+    try db.query("SELECT text FROM chunks") { statement in stored = columnText(statement, 0) }
+    #expect(stored == text,
+            "bind_text(-1) 與 String(cString:) 會在 NUL 處截斷，使 DB 內容與 anchor 的 contentHash 不一致")
 }

@@ -11,10 +11,14 @@ enum CommandSupport {
     ///
     /// embedding assets 不可用時**明確失敗**：少了向量通道的檢索仍然「能跑」，
     /// 只是 recall 掉一路而且看不出來。
-    static func makeService(recordEvents: Bool) throws -> LTMService {
+    /// - Parameter needsEventStore: 這次呼叫是否需要事件存放。
+    ///
+    ///   **讀歷史與寫歷史是兩件事**。先前這個參數叫 `recordEvents`，於是
+    ///   `--strategy human-like` 不帶 `--record` 時 `eventStore` 是 nil，策略拿到
+    ///   空投影、輸出卻照樣宣稱跑了那個策略——靜默失效。現在只要「要用策略」或
+    ///   「要記錄」任一成立就開存放，`--record` 只決定事後要不要 append。
+    static func makeService(needsEventStore: Bool) throws -> LTMService {
         let embedder = try ContextualEmbeddingProvider()
-        let eventStore: (any EventStore)? =
-            recordEvents ? try FileEventStore(url: memoryEventsURL()) : nil
         // 路徑可由環境變數覆寫。這**不是**為了測試才加的後門：多語料（另一台
         // 機器的備份、匯出的歷史）本來就需要它，而端到端測試需要的正是同一個
         // 能力——一個只能指向真實 `~/.claude/projects` 的 CLI，它的行為只能在
@@ -30,20 +34,32 @@ enum CommandSupport {
             ProcessInfo.processInfo.environment["LTM_DERIVED_ROOT"].map {
                 URL(fileURLWithPath: $0)
             } ?? DerivedLocation.defaultRoot
-        return LTMService(
-            location: try DerivedLocation(root: derivedRoot, policy: MemoryCorpusPolicy()),
-            corpusRoot: corpusRoot, embedder: embedder, eventStore: eventStore)
+        let memoryRoot = memoryRootURL()
+        // 先驗 root（不建立任何東西），通過後才開事件存放。
+        let probe = try LTMService.make(
+            corpusRoot: corpusRoot, derivedRoot: derivedRoot,
+            embedder: embedder, eventStore: nil, memoryRoot: memoryRoot)
+        guard needsEventStore else { return probe }
+        let store = try FileEventStore(url: memoryEventsURL(validatedRoot: memoryRoot))
+        return try LTMService.make(
+            corpusRoot: corpusRoot, derivedRoot: derivedRoot,
+            embedder: embedder, eventStore: store, memoryRoot: memoryRoot)
+    }
+
+    /// 事件根（尚未建立任何目錄）。
+    static func memoryRootURL() -> URL {
+        let base =
+            ProcessInfo.processInfo.environment["LTM_MEMORY_ROOT"].map { URL(fileURLWithPath: $0) }
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude-ltm")
+        return base.appendingPathComponent("memory")
     }
 
     /// 使用歷史的存放位置：`~/.claude-ltm/memory/events.jsonl`。
     ///
     /// 與衍生索引分開（`derived/`）是刻意的：索引可以隨時刪掉重建，記憶層不行
     /// ——它記的是 jsonl 記不得的事（CLAUDE.md 的例外條款）。
-    static func memoryEventsURL() throws -> URL {
-        let base =
-            ProcessInfo.processInfo.environment["LTM_MEMORY_ROOT"].map { URL(fileURLWithPath: $0) }
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude-ltm")
-        let root = base.appendingPathComponent("memory")
+    /// 事件檔路徑。**呼叫端必須先確認 root 不在語料裡**（見 `LTMService.make`）。
+    static func memoryEventsURL(validatedRoot root: URL) throws -> URL {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root.appendingPathComponent("events.jsonl")
     }
@@ -113,7 +129,7 @@ enum BuildCommand {
         }
 
         do {
-            let service = try CommandSupport.makeService(recordEvents: false)
+            let service = try CommandSupport.makeService(needsEventStore: false)
             let report = try service.build(full: arguments.has("full"))
             print(
                 """
@@ -204,14 +220,32 @@ enum QueryCommand {
             return LTMCommandLine.ExitCode.usageError.rawValue
         }
 
+        // `--k` 在進入檢索之前就要驗。
+        //
+        // 未驗的負值會一路傳到 `prefix(limit)`，那裡的 stdlib precondition 會**中止
+        // 行程**——使用者看到的是 crash，不是錯誤訊息。非數值先前被靜默改成預設，
+        // 那同樣糟：命令回報成功，做的卻不是使用者要求的事。
+        let limit: Int
+        if let raw = arguments.value("k") {
+            guard let parsed = Int(raw), (1...1000).contains(parsed) else {
+                Output.error("✗ --k 必須是 1 到 1000 之間的整數（收到：\(raw)）")
+                return LTMCommandLine.ExitCode.usageError.rawValue
+            }
+            limit = parsed
+        } else {
+            limit = 20
+        }
+
         let record = arguments.has("record")
         do {
-            let service = try CommandSupport.makeService(recordEvents: record)
+            let strategy = try CommandSupport.strategy(named: arguments.value("strategy"))
+            // 要用會讀歷史的策略、或要記錄呈現，兩者任一都需要事件存放。
+            let needsStore = record || (strategy.map { !$0.consumedSignals.isEmpty } ?? false)
+            let service = try CommandSupport.makeService(needsEventStore: needsStore)
             let scope = try CommandSupport.resolveScope(
                 arguments: arguments, corpusRoot: service.corpusRoot)
-            let strategy = try CommandSupport.strategy(named: arguments.value("strategy"))
             let outcome = try service.query(
-                text: queryText, limit: arguments.integer("k") ?? 20, scope: scope,
+                text: queryText, limit: limit, scope: scope,
                 strategy: strategy, recordEvents: record)
 
             if arguments.has("json") {
@@ -249,6 +283,32 @@ enum QueryCommand {
         case .layoutVersionMismatch(let indexed, let expected):
             Output.error(
                 "✗ 索引結構版本不符（索引 \(indexed.map(String.init) ?? "未知")、需要 \(expected)）。請跑 `ltm build --full`。")
+            return LTMCommandLine.ExitCode.indexStateError.rawValue
+        case .anchorSourceRuleMismatch(let indexed, let expected):
+            Output.error(
+                """
+                ✗ 索引的 anchor 定址規則與這個版本不同
+                  索引：\(indexed)
+                  需要：\(expected)
+                舊規則算出的指紋不能拿來跟新規則比對——結果會是「解析到錯的 turn」或
+                「報成 orphan」，而兩者都看不出異常。請跑 `ltm build --full` 重建。
+                """)
+            return LTMCommandLine.ExitCode.indexStateError.rawValue
+        case .rootInsideCorpus(let path):
+            Output.error(
+                """
+                ✗ 這個路徑落在唯讀語料裡：\(path)
+                語料是 source of truth，任何寫入都是 bug。請把 LTM_DERIVED_ROOT /
+                LTM_MEMORY_ROOT 指到語料之外的位置。
+                """)
+            return LTMCommandLine.ExitCode.corpusError.rawValue
+        case .vectorSidecarMismatch(let declared, let found):
+            Output.error(
+                """
+                ✗ 向量側車檔與索引不一致（索引宣稱 \(declared) 筆、檔案有 \(found) 筆）
+                少一路向量通道的結果看起來完全正常，所以這裡拒答而不是降級。
+                請跑 `ltm build --full` 重建。
+                """)
             return LTMCommandLine.ExitCode.indexStateError.rawValue
         case .ambiguousScope(let detail):
             Output.error(
@@ -293,6 +353,7 @@ enum QueryCommand {
                 "snippet": hit.snippet,
                 "score": hit.score,
                 "band": hit.band,
+                "channels": hit.channels,
             ]
             // 位移與理由只在重排策略下才有意義；archival 一律 0，附上去只是噪音。
             if outcome.strategyID != "archival" {

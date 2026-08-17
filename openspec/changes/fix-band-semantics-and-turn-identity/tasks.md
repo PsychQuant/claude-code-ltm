@@ -1,0 +1,41 @@
+## 1. 先量測，再決定 band 規則
+
+- [x] 1.1 量測 channel-count 分層在真實語料上的帶內分佈，作為 design decision "Relevance band is the count of matched retrieval channels" 與 requirement "A candidate's relevance band is the number of retrieval channels it matched" 的採用前提：對真實語料建索引、跑一組查詢，記錄每個候選命中幾條通道、每一帶有幾個候選。Behavior：`docs/measurements/` 下多一份具名紀錄，說明帶內候選數的分佈。**若分佈退化**（幾乎全部只命中一條，或幾乎全部命中三條），本規則作廢、change 停下重新裁決，不得逕行實作。Verify：量測紀錄存在且被 retrieval spec 引用；分佈數字可從紀錄讀出。
+
+## 2. Anchor 與 turn 身分
+
+- [x] 2.1 `Anchor.source` 改為 project 指紋，實現 design decision "An anchor's source is a project fingerprint, not a session identifier" 與 requirement "Anchor addresses corpus text by content, not by index identity" 的修訂條款 "The source fingerprint SHALL be derived from a property of the corpus that does not change when the same turn is observed again through a different session file"：source 為 project 目錄名的 SHA-256 前 32 個小寫十六進位字元。Behavior：同一則 turn 經由兩個 session 檔觀察到時，anchor 相同；指紋符合 `OpaqueIdentifier`（實測 311 個 project 有 173 個名稱超過 64 字元，故不可直接存名稱）；canonical store 內不出現本機路徑。Verify：LTMCoreTests 的指紋穩定性與形狀測試。
+- [x] 2.2 chunk 身分改為 `(project 指紋, turn 識別碼)`，實現 design decisions "Turn de-duplication is by content, and the uniqueness key follows" 與 "`sessionId` is demoted from identity to navigation"，對應 requirement "Chunk granularity is one conversation turn with full pointer metadata" 的修訂條款 "A turn observed through several session files … SHALL yield one chunk"：唯一鍵改掉、upsert 不再改寫身分欄位、`session_id` 降為導航 metadata 並存最近觀察到的值。Behavior：同一 turn 出現在兩個 session 檔時索引只有一個 chunk，其 pointer 報最新的 session。Verify：LTMIndexTests 的 resume 去重測試（spec Example 的三列 fixture）。
+- [x] 2.3 舊格式 anchor 的拒絕路徑，實現 design decision "Existing anchors are discarded, and this is the only moment that is free" 與 requirement "Anchors recorded under a superseded source-fingerprint form are refused, not reinterpreted" 與 ltm-cli 的 "An index built under a superseded anchor format is refused"：索引記錄 anchor 格式版本；不符時查詢非零結束並指名 `ltm build --full`，事件層對舊格式紀錄具名拒絕而非重新詮釋。Behavior：兩條路徑都拒絕、都指名補救方式，且不隱式重建。Verify：LTMServiceTests 的格式不符拒絕測試；LTMMemoryTests 的舊格式紀錄拒絕測試。
+- [x] 2.4 跨 resume 的使用歷史存活測試，實現 memory-events 的 "Anchor survives a session resume"：fixture 為同一 turn 先後出現在兩個 session 檔（不同 sessionId）。Behavior：在只有第一個檔案時記錄的事件，在第二個檔案索引後仍解析得到，且被 projection 計入。Verify：具名的 LTMServiceTests 跨 resume 測試——這是 B3 的回歸鎖。
+
+## 3. Band 與策略生效
+
+- [x] 3.1 band 改由命中通道數決定，實現 design decision "Relevance band is the count of matched retrieval channels"，對應 requirement "A query fuses lexical and semantic channels by reciprocal rank" 的修訂條款 "The fused rank SHALL NOT be used as the candidate's relevance band"：`LTMService` 停止用 `fusedRank` 建 band，改用 `ScoredChunk.channels` 的數量分層（三條 > 兩條 > 一條）。Behavior：命中同樣通道數的候選共享同一帶；命中較多通道者的帶較高。Verify：LTMServiceTests 對照 spec Example 的四列表格（A/B/C/D 的帶配置）。
+- [x] 3.2 策略生效的端到端測試，實現 "A reordering strategy produces a different order from a non-reordering one when history exists"：測試必須穿過 `LTMService.query`，不是單獨測策略型別。Behavior：同一份候選 + 非空歷史，`human-like` 與 `archival` 產出不同順序，且至少一筆位移非零。Verify：具名的端到端測試——這是 B1 的回歸鎖，且刻意不走「單獨測策略」那條路，因為缺陷正是出在候選怎麼被建構。
+- [x] 3.3 `--strategy` 與 `--record` 解耦，實現 design decision "Reading usage history is decoupled from writing it"，對應 requirement "Event recording is opt-in and off by default" 的修訂條款 "Reading usage history SHALL NOT be conditioned on `--record`"：策略消費事件時就開事件存放讀取，`--record` 只管附加 `shown`。Behavior：`--strategy human-like` 不帶 `--record` 時排序反映歷史且不寫入任何事件。Verify：CLI 測試斷言排序受歷史影響且事件檔未變動。
+
+## 4. 寫入路徑的一致性
+
+- [x] 4.1 查詢路徑取單寫者鎖：`refreshIncrementally` 與 `IndexBuilder` 共用同一把鎖，取得後重讀 state 與 meta。Behavior：`ltm build` 與 `ltm query` 重疊、或兩個並行 query，不會產生 `vector_row` 指向他人向量的索引。Verify：並行寫入測試（一方持鎖時另一方明確失敗或等待，不靜默交錯）。
+- [x] 4.2 側車先落地再提交指標：`appendVectors` + fsync 完成後才提交 `vector_count`；啟動時驗證 `fileSize == vector_count * dimension * 4`，不符則拒答並指名 `ltm build --full`，絕不補零後續寫。Behavior：中止最多留下可截掉的多餘 bytes，不會出現「宣稱 N 個、實際 N−k 個」。Verify：截斷側車後查詢被拒的測試；並修正原本與程式碼相反的註解。
+- [x] 4.3 來源消失與不完整尾行，實現 corpus-indexing 的 "A source file that disappears has its chunks invalidated" 與 "An incomplete trailing record is re-read on the next scan"：作廢集合納入「上輪有、本輪未見」；resume offset 不越過最後一個完整紀錄；不完整與 malformed 分開記帳。Behavior：刪檔後增量結果等於全量重建；並行寫入時的半行在下一輪被索引且不報為損壞。Verify：兩條具名測試（刪檔作廢、半行重讀）。
+- [x] 4.4 upsert 前清 FTS 舊列、刪除錯誤不吞：`ON CONFLICT` 更新文字前先以舊文字送出 FTS5 `'delete'`；`deleteChunks` 的 FTS 錯誤外拋讓交易 rollback；無向量時明確寫入 `vector_row = NULL`。Behavior：改寫過的來源不再命中舊文字。Verify：SQLite 上的 upsert-then-search 測試（既有測試只覆蓋 delete 路徑，不覆蓋 upsert 路徑）。
+- [x] 4.5 state 遺失的處置：DB 存在而 state 無法可靠讀取時丟出 `stateUnreadable`（該錯誤目前宣告了但從未被丟出）要求 full rebuild；`discardDerivedArtifacts` 的刪除失敗必須終止而非 `try?` 吞掉；查詢端在 state 讀不到時拒答而非假裝沒有新內容。Behavior：`--full` 保證真的從零開始。Verify：state 損壞後 build 與 query 各自的行為測試。
+
+## 5. 守衛與輸入驗證
+
+- [x] 5.1 統一服務建構路徑，實現 design decision "The shipped path and the test path stop diverging"，對應 requirement "Roots are containment-checked before anything is created" 的條款 "The CLI and its tests SHALL construct the service through the same code path"：移除只有 production 用的 `LTMService.standard` 死碼，CLI 與測試共用同一個以 roots 參數化的建構子。Behavior：出貨的 containment policy 真的被測試執行到。Verify：至少一條測試走出貨守衛而非注入的 stub。
+- [x] 5.2 建立前先檢查 containment，實現 "Roots are containment-checked before anything is created" 與 "Containment follows an overridden corpus root"：memory root 與 derived root 在任何 `createDirectory` 之前都對**當下使用中的**語料根做檢查。Behavior：`LTM_MEMORY_ROOT` 指進語料時非零結束且語料下沒有任何目錄被建立；`LTM_CORPUS_ROOT` 與 `LTM_DERIVED_ROOT` 指向同一處時被拒。Verify：兩條 CLI 測試，各自斷言「沒有東西被建立」而不只是「回了錯誤」。
+- [x] 5.3 `--k` 驗證，實現 "Numeric options are validated before use"：範圍 1…1000，越界或非數值都非零結束並指名範圍，不得靜默改用預設。Behavior：`--k -1` 不再以 stdlib precondition 中止行程。Verify：負值與非數值兩條 CLI 測試。
+- [x] 5.4 SQLite 綁定改用明確 byte 長度：`sqlite3_bind_text` 傳入 UTF-8 byte count、讀取用 `sqlite3_column_bytes`，修正內嵌 NUL 造成的截斷。Behavior：含內嵌 NUL 的文字，其索引內容與 anchor 的 contentHash 一致。Verify：內嵌 NUL 的 round-trip 測試。
+
+## 6. 測試證明力與誠實邊界
+
+- [x] 6.1 換掉不會失敗的測試：RRF 測試改為呼叫 `search()` 而非在測試檔內重算公式；隱私測試的斷言改為真正出現在事件檔內的字串；revision 作廢測試的 stub 輸出必須依賴 revision。Behavior：每條被指認為恆真的測試，在其所述行為被刻意破壞時會失敗。Verify：逐條刻意破壞一次確認測試轉紅（結果記入 PR 描述或 commit message）。
+- [x] 6.2 CLI 測試隔離真實 HOME：測試行程不得因為環境變數缺漏而落到使用者的真實語料或真實 `~/.claude-ltm/`。Behavior：測試在任何機器上都只碰臨時目錄。Verify：測試在 `HOME` 被指向臨時目錄時仍全綠。
+- [x] 6.3 清除誠實邊界違規：移除 design.md 未指名量測的效能宣稱；修正把 `docs/measurements/2026-08-10-fts5-tokenizer.md` 的數字引到它沒有涵蓋的比較上的註解；補正所有與程式碼相反的註解（提交順序、守衛範圍、尾行重讀、`Segmentation.cjkTokens` 宣稱放進輸出但未放）。Behavior：repo 內每個效能數字都能指名一份涵蓋該比較的紀錄。Verify：對照 `docs/measurements/` 逐條檢查並在 PR 描述列出。
+
+## 7. 文件
+
+- [x] 7.1 更新 README 與 CLAUDE.md 的行為描述，使其與修正後的行為一致：band 的語意、turn 去重、`--strategy` 不再需要 `--record`、舊索引需要 `ltm build --full`。Behavior：文件所述與 CLI 實際行為一致，且不含任何無量測支撐的效能宣稱。Verify：對照 design.md 的 Implementation Contract 逐項核對。

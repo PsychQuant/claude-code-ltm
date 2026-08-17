@@ -19,8 +19,12 @@ struct StubEmbedder: EmbeddingProvider {
 
     func vector(for text: String) throws -> [Float]? {
         guard !refusing.contains(text) else { return nil }
-        // 內容決定向量：同樣的文字給同樣的值，不同文字給不同值。
-        var seed = Float(abs(text.hashValue % 1000)) / 1000
+        // 內容**與 revision** 共同決定向量。
+        //
+        // 先前只看內容，於是「換 revision → 索引重建」的測試證明不了任何事：
+        // 重建前後的向量位元相同，測試就算沒重建也會通過。revision 進 seed 之後，
+        // 舊向量若沒被替換，值就會對不上。
+        var seed = Float(abs((text + revision).hashValue % 1000)) / 1000
         return (0..<dimension).map { _ in
             seed = (seed * 1.7).truncatingRemainder(dividingBy: 1)
             return seed
@@ -137,6 +141,11 @@ func revisionChangeForcesFullRebuild() throws {
     defer { database.close() }
     #expect(try database.meta("vector_count") == "2", "跨 revision 的向量疊加會讓距離失去意義")
     #expect(try database.stamps().embeddingRevision == "rev-B")
+    // 舊向量必須真的被**替換**，不只是筆數對。revision 進了 seed，所以值會不同。
+    let sidecar = try VectorSidecar.open(url: derived.vectorsURL, dimension: 4)
+    let rebuilt = sidecar.vector(at: 0)
+    let underOldRevision = try StubEmbedder(revision: "rev-A").vector(for: "第一段內容")
+    #expect(rebuilt != underOldRevision, "側車裡仍是舊 revision 算出的向量 —— 重建沒有真的發生")
 }
 
 @Test("鎖被持有時第二個建置立刻失敗，不無限等待")
@@ -211,4 +220,29 @@ func staleSidecarBytesAreTruncated() throws {
     let declared = try database.meta("vector_count").flatMap(Int.init) ?? -1
     let sidecar = try VectorSidecar.open(url: derived.vectorsURL, dimension: 4)
     #expect(sidecar.count == declared, "側車檔筆數與索引宣稱的筆數必須一致")
+}
+
+@Test("state 遺失而索引存在時丟出 stateUnreadable，不在舊索引上疊加")
+func missingStateWithExistingIndexIsRefused() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+    let scanner = CorpusScanner(corpusRoot: corpus)
+    _ = try IndexBuilder(location: derived, scanner: scanner,
+                         embedder: StubEmbedder(revision: "rev-A")).build()
+
+    // state 不見了，但 DB 還在——先前這會被當成空 state、重掃全語料 upsert。
+    try FileManager.default.removeItem(at: derived.stateURL)
+
+    #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner,
+                             embedder: StubEmbedder(revision: "rev-A")).build()
+    }
+    // --full 仍然可用（那正是錯誤訊息指引的路）。
+    let recovered = try IndexBuilder(location: derived, scanner: scanner,
+                                     embedder: StubEmbedder(revision: "rev-A")).build(full: true)
+    #expect(recovered.wasFullRebuild)
 }

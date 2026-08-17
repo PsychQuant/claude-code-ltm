@@ -39,6 +39,29 @@ claude-LTM＝Claude Code 的長期記憶。在既有的 `~/.claude/projects/**/*
 定位見 [README.md](README.md)；量測基線見 [docs/measurements/](docs/measurements/)；
 記憶策略的比較框架見 [docs/memory-systems/](docs/memory-systems/)。
 
+## LTM 類比（設計判準；完整版在 `.claude/rules/ltm-analogy.md`）
+
+專案要達成的是**類似人類長期記憶的功能**，而「想起來」的性質可以當設計判準用。
+遇到設計決定時問兩個問題：
+
+1. **如果這是人類的長期記憶，這樣做合理嗎？** 不合理的話，是違反哪一條性質？
+2. **這條性質是「LTM 功能的必要條件」，還是「human-like 這個策略的特徵」？**
+   若是後者，它屬於策略，不屬於共用層。
+
+第二問是閘門：把某條性質當成唯一正確而寫死進共用層，等於把一個策略偷渡成前提
+——那正是 `pluggable-memory-strategy` 要拆掉的東西。
+
+五條性質（各自導出的決定見 rules 檔）：內容定址而非位置定址／相關度主導提取而
+使用強度只做微調／多重編碼提高可提取性／同一段經歷不因被重述而變成兩段記憶／
+**可以遺忘，不可以編造**。
+
+最後一條是類比的**邊界**而非延伸：人類記憶會重構，這個系統刻意不重構。不變式 3
+與「LLM 提取只能用於 routing」的推論都源自它。
+
+**「內容定址」這條已經被違反兩次**（chunk id 一次、`sessionId` 一次，後者是 #24
+verify 抓到的），兩次都是同一個形狀：拿一個**會變的東西**當定址的一部分。判準
+是「會不會變」這個性質，不是「哪些 id 不能用」這份清單——清單會漏，性質不會。
+
 ## 三條不變式（動任何 code 前先讀）
 
 1. **`~/.claude/projects/` 唯讀。** 不擁有 source of truth。出現任何寫入路徑就是 bug，
@@ -125,6 +148,16 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
   `preconditionFailure`（那是給呼叫端錯誤用的），所以 ingest 端必須先 `validate`
   再建構，不合法就跳過並記帳。跳過本身要能說出「跳了幾筆、為什麼」——沉默的跳過
   等於索引少了東西而沒人會發現。
+- **band 是相關度分層，不是名次**。融合名次每筆都不同，拿它當 band 會讓每個候選
+  自成一帶、任何策略都無處可移——而且**不會報錯**（沒有跨帶嘗試，guard 不 fire），
+  `human-like` 與 `archival` 逐字相同。現行規則是命中的通道數（多重編碼），零參數，
+  帶內分佈量測見 `docs/measurements/2026-08-17-band-population.md`。
+- **`sessionId` 不是身分，是導航資訊**。session resume 會把同一則 turn 複製進新檔案
+  並換上新的 sessionId（實測 300 檔 5,722 筆、內容全同、其中 4,337 筆 sessionId 不同）。
+  拿它當 anchor 的一部分，使用歷史會隨每次 resume 蒸發，而 orphan 原因會誤報成
+  「turn 不見了」。anchor 的 source 用 project 指紋。
+- **讀歷史與寫歷史是兩件事**。把「要不要記錄」與「要不要讀取」綁在同一個旗標上，
+  會讓策略在沒開記錄時安靜地拿到空投影，而輸出照樣宣稱跑了那個策略。
 - **索引層不知道語料在哪，也不自己判斷路徑是否在語料內**。語料根由 facade 傳入；
   「這條路徑在不在語料裡」的判定（inode 身分、symlink、firmlink）住在 LTMMemory 的
   `CorpusLocation`，索引層只宣告 `CorpusContainmentPolicy` 這個需求，由 facade 注入。

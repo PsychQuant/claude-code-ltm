@@ -94,7 +94,11 @@ public enum CorpusLocation {
     /// 它們只做路徑判斷與 symlink 佈局，不寫入語料，但確實碰真實路徑。
     /// 要全部搬到合成樹，`FileEventStore.init` 也得能收語料根（目前它直接用
     /// `CorpusLocation.readOnlyRoot`），那是介面改動，追蹤於 #14。
-    static func isInside(_ url: URL, root: URL) -> Bool {
+    /// 公開可見（原為 internal）：`LTMService.MemoryCorpusPolicy` 需要對**當下實際
+    /// 使用的**語料根做同一份判定。複製這段邏輯是不可接受的替代方案——它被
+    /// symlink、`..`、dangling link、firmlink 各咬過一次，兩份實作必然漂移，
+    /// 而漂移的方向是「放行了不該放行的路徑」且不報錯。
+    public static func isInside(_ url: URL, root: URL) -> Bool {
         // 解析不出來 → **當成在裡面**（fail closed）。不變式 1 的方向是
         // 「不確定就不要寫」，而不是「不確定就放行」。
         guard let resolved = Self.fullyResolve(url.path) else { return true }

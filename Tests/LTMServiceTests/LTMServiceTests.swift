@@ -100,8 +100,11 @@ func defaultStrategyLeavesRetrievalOrderIntact() throws {
     #expect(!outcome.hits.isEmpty)
     #expect(outcome.strategyID == "archival")
     #expect(outcome.hits.allSatisfy { $0.displacement == 0 })
-    // band 是融合名次，archival 不動它 → 依序遞增。
-    #expect(outcome.hits.map(\.band) == Array(0..<outcome.hits.count))
+    // band 是**相關度分層**（命中通道數），不是名次——所以它會有重複值，
+    // 而且不隨名次遞增。archival 不重排，所以順序仍等於純檢索順序。
+    #expect(outcome.hits.map(\.band).allSatisfy { (0...2).contains($0) })
+    #expect(outcome.hits.map(\.band) != Array(0..<outcome.hits.count),
+            "band 若等於名次，每筆自成一帶，策略 seam 就是空的（B1）")
 }
 
 @Test("embedding revision 不符時拒答，且錯誤指名 ltm build")
@@ -242,4 +245,178 @@ func buildAndQueryLeaveCorpusUntouched() throws {
     #expect(
         try FileManager.default.subpathsOfDirectory(atPath: workspace.corpus.path).sorted()
             == beforeEntries.sorted(), "語料樹不得多出或少掉任何項目")
+}
+
+@Test("索引的 anchor 規則與 binary 不同時拒答，不重新詮釋舊指紋")
+func anchorRuleMismatchRefusesTheQuery() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["內容一", "內容二"])
+    let service = try workspace.service()
+    try service.build()
+
+    // 模擬「上一版 binary 建的索引」：規則標記改成別的值。
+    let db = try IndexDatabase(path: workspace.derived.databaseURL.path)
+    try db.setMeta("anchor_source_rule", "session-id-as-source")
+    db.close()
+
+    var thrown: Error?
+    do { _ = try service.query(text: "內容", limit: 10, scope: .allProjects) }
+    catch { thrown = error }
+    guard case .some(LTMService.ServiceError.anchorSourceRuleMismatch(let indexed, let expected)) =
+        thrown as? LTMService.ServiceError
+    else {
+        Issue.record("舊 anchor 規則必須拒答，實際：\(String(describing: thrown))")
+        return
+    }
+    #expect(indexed == "session-id-as-source")
+    #expect(expected == IndexDatabase.anchorSourceRule)
+}
+
+@Test("跨 resume 的使用歷史仍解析得到——B3 的端到端回歸鎖")
+func usageHistorySurvivesSessionResume() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+
+    // 第一階段：只有 session-A，記錄使用歷史。
+    let sharedText = "跨越 resume 的同一段內容"
+    try workspace.writeSession(file: "session-A.jsonl", texts: [sharedText])
+    let service = try workspace.service(withEvents: true)
+    try service.build()
+    let first = try service.query(
+        text: "跨越 resume", limit: 10, scope: .allProjects, recordEvents: true)
+    #expect(first.eventsRecorded > 0, "前提：要有歷史可以蒸發")
+    let recordedAnchors = Set(first.hits.map(\.anchor))
+
+    // 第二階段：session 被 resume，同一則 turn 出現在新檔案、帶新的 sessionId。
+    let dir = workspace.corpus.appendingPathComponent("proj-one")
+    let resumed = """
+        {"type":"user","uuid":"00000000-aaaa-bbbb-cccc-dddddddddddd",\
+        "sessionId":"99999999-9999-9999-9999-999999999999",\
+        "timestamp":"2026-08-18T06:00:00.000Z",\
+        "message":{"role":"user","content":"\(sharedText)"}}
+        """
+    try (resumed + "\n").write(
+        to: dir.appendingPathComponent("session-B.jsonl"), atomically: true, encoding: .utf8)
+    try service.build()
+
+    // 關鍵：resume 之後，先前記錄的 anchor 仍然指向同一段內容。
+    let second = try service.query(text: "跨越 resume", limit: 10, scope: .allProjects)
+    let nowAnchors = Set(second.hits.map(\.anchor))
+    #expect(!recordedAnchors.isDisjoint(with: nowAnchors),
+            "resume 後 anchor 對不上 —— 使用歷史會安靜蒸發，正是 B3 的病灶")
+}
+
+// MARK: - Task 3.1/3.2：band 語意與策略生效（B1 的回歸鎖）
+
+@Test("band 由命中通道數決定：同通道數共享一帶，通道多者帶較高")
+func bandIsDerivedFromChannelCount() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    // 多筆內容，讓不同候選命中不同數量的通道。
+    try workspace.writeSession(texts: [
+        "記憶策略可插拔的比較軸", "記憶與檢索的關係", "完全不相干的第三段",
+        "另一段關於策略的討論", "第五段內容",
+    ])
+    let service = try workspace.service()
+    try service.build()
+
+    let outcome = try service.query(text: "記憶策略", limit: 10, scope: .allProjects)
+    #expect(!outcome.hits.isEmpty)
+
+    // 核心斷言：band 不再等於名次。名次必然 0,1,2,...；band 是分層，會有重複值。
+    let bands = outcome.hits.map(\.band)
+    #expect(bands != Array(0..<outcome.hits.count),
+            "band 等於名次 ⇒ 每筆自成一帶 ⇒ 任何策略都動不了任何東西（B1）")
+
+    // 命中通道數越多，band 越高（數值越小）。
+    for hit in outcome.hits {
+        let expectedBand = 3 - hit.channels.count
+        #expect(hit.band == expectedBand,
+                "band 應為 3 減去命中通道數（3 條→0、2 條→1、1 條→2）")
+    }
+}
+
+@Test("重排策略在有歷史時產出與 archival 不同的順序——B1 的端到端回歸鎖")
+func reorderingStrategyDiffersFromArchival() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: [
+        "記憶策略可插拔的比較軸", "記憶與檢索的關係", "另一段關於策略的討論",
+        "第四段內容", "第五段內容", "第六段內容",
+    ])
+    let service = try workspace.service(withEvents: true)
+    try service.build()
+
+    // 先取得候選，然後給**其中一筆**寫入 deliberate 事件。
+    //
+    // 刻意不用 `--record` 產生的 `shown`：shown 只計 impressions、不計
+    // reinforcement，所以全部候選都被 shown 過等於沒有差異——那是正確行為
+    // （被看到不代表有用），但它無法用來驗證重排。
+    let baseline = try service.query(text: "記憶", limit: 10, scope: .allProjects)
+    #expect(baseline.hits.count >= 2, "前提：同帶內要有多個候選才有得重排")
+    let promoted = baseline.hits[baseline.hits.count - 1].anchor  // 給最後一名強歷史
+    let store = try FileEventStore(url: workspace.eventsURL)
+    for _ in 0..<3 {
+        try store.append(
+            Event(kind: .cited, anchor: promoted, timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                  generation: GenerationID("g-test"), policy: RankingPolicyID("human-like"),
+                  noteRef: nil, presentation: nil))
+    }
+
+    let archival = try service.query(text: "記憶", limit: 10, scope: .allProjects)
+    let humanLike = try service.query(
+        text: "記憶", limit: 10, scope: .allProjects, strategy: HumanLikeStrategy())
+
+    #expect(archival.strategyID == "archival")
+    #expect(humanLike.strategyID == "human-like")
+    // 這是 B1 的核心：兩個策略必須真的能產出不同結果。
+    let orderDiffers = archival.hits.map(\.uuid) != humanLike.hits.map(\.uuid)
+    let anyDisplaced = humanLike.hits.contains { $0.displacement != 0 }
+    #expect(orderDiffers || anyDisplaced,
+            "human-like 與 archival 完全相同 ⇒ 策略 seam 是空的（B1）")
+    // 被引用的那一筆應該往上移（或至少報出非零位移）。
+    #expect(humanLike.hits.first(where: { $0.anchor == promoted })?.displacement ?? 0 != 0
+            || orderDiffers)
+}
+
+@Test("側車檔被截斷時拒答，不靜默降級成 lexical-only")
+func truncatedSidecarRefusesTheQuery() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["第一段內容", "第二段內容", "第三段內容"])
+    let service = try workspace.service()
+    try service.build()
+
+    // 砍掉側車檔的一半：索引仍宣稱有 N 個向量，檔案只剩 N/2。
+    let data = try Data(contentsOf: workspace.derived.vectorsURL)
+    try data.prefix(data.count / 2).write(to: workspace.derived.vectorsURL)
+
+    var thrown: Error?
+    do { _ = try service.query(text: "內容", limit: 10, scope: .allProjects) }
+    catch { thrown = error }
+    guard case .some(LTMService.ServiceError.vectorSidecarMismatch) =
+        thrown as? LTMService.ServiceError
+    else {
+        Issue.record("側車不一致必須拒答，實際：\(String(describing: thrown))")
+        return
+    }
+}
+
+@Test("查詢路徑與建置路徑共用同一把單寫者鎖")
+func queryPathHonoursTheBuildLock() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["最初的內容"])
+    let service = try workspace.service()
+    try service.build()
+
+    // 語料前進，但鎖被別人持有 → 查詢仍應回答（用既有索引），只是不併入新內容。
+    try workspace.writeSession(texts: ["最初的內容", "後來補上的內容"])
+    let held = try FileLock.acquire(at: workspace.derived.lockURL)
+    defer { held.release() }
+
+    let outcome = try service.query(text: "最初", limit: 10, scope: .allProjects)
+    #expect(outcome.refreshedSources == 0, "鎖被持有時不得寫入索引")
+    #expect(!outcome.hits.isEmpty, "查詢仍應以既有索引回答，不因為拿不到鎖而失敗")
 }

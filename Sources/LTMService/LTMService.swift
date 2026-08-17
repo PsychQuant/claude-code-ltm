@@ -1,6 +1,16 @@
 import Foundation
 import LTMCore
 import SQLite3
+
+/// 讀一個 TEXT 欄位，**用明確的 byte 長度**而不是 C-string 語意。
+///
+/// `String(cString:)` 在第一個 NUL 停下來，與寫入端 `bind_text(-1)` 是同一個截斷的
+/// 兩端。兩邊都改才有意義：只改寫入端，讀出來的仍然是半截。
+func columnText(_ statement: OpaquePointer, _ column: Int32) -> String {
+    guard let raw = sqlite3_column_text(statement, column) else { return "" }
+    let count = Int(sqlite3_column_bytes(statement, column))
+    return String(decoding: UnsafeBufferPointer(start: raw, count: count), as: UTF8.self)
+}
 import LTMIndex
 import LTMMemory
 import LTMQuery
@@ -37,12 +47,14 @@ struct PreloadedCorpusReader: CorpusReader {
         var turns: [String: Turn] = [:]
         for anchor in Set(anchors) {
             try database.query(
-                "SELECT role, timestamp, text FROM chunks WHERE uuid = ? AND session_id = ?",
+                // anchor.source 是 project 指紋，所以這裡用 project_fingerprint 比對，
+                // 不是 session_id。
+                "SELECT role, timestamp, text FROM chunks WHERE uuid = ? AND project_fingerprint = ?",
                 bind: [.text(anchor.turnID), .text(anchor.source)]
             ) { statement in
-                let role = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? ""
+                let role = columnText(statement, 0)
                 let timestamp = sqlite3_column_double(statement, 1)
-                let text = sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? ""
+                let text = columnText(statement, 2)
                 turns[key(source: anchor.source, turnID: anchor.turnID)] = Turn(
                     id: anchor.turnID, role: role,
                     timestamp: Date(timeIntervalSince1970: timestamp), text: text)
@@ -56,10 +68,24 @@ struct PreloadedCorpusReader: CorpusReader {
 ///
 /// 依賴反轉的另一端：判定的實作在 LTMMemory（`CorpusLocation`），需求宣告在
 /// LTMIndex（`CorpusContainmentPolicy`），而 facade 是唯一同時看得到兩者的地方。
+/// 綁定「當下實際使用的語料根」的 containment 判定。
+///
+/// 先前這個型別只問固定的 `~/.claude/projects`，於是語料根被環境變數覆寫時，
+/// 一個指向**正在被掃描的語料**的衍生根照樣通過檢查——而 code 註解當時寫著
+/// 「覆寫不會放寬任何守衛」。那句話是假的。
+///
+/// 現在它同時保護兩者：預設語料根**與**這次實際使用的語料根。少任何一邊都有洞：
+/// 只看預設 → 覆寫路徑沒守衛；只看當下 → 有人把 derived 指進預設語料。
 public struct MemoryCorpusPolicy: CorpusContainmentPolicy {
-    public init() {}
+    private let additionalRoots: [URL]
+
+    public init(corpusRoots: [URL] = []) {
+        self.additionalRoots = corpusRoots
+    }
+
     public func isInsideReadOnlyCorpus(_ url: URL) -> Bool {
-        CorpusLocation.isInsideReadOnlyCorpus(url)
+        if CorpusLocation.isInsideReadOnlyCorpus(url) { return true }
+        return additionalRoots.contains { CorpusLocation.isInside(url, root: $0) }
     }
 }
 
@@ -82,6 +108,12 @@ public struct QueryHit: Sendable, Equatable {
     /// 實際發生的位移方向與幅度。
     public let movementDescription: String
     public let anchor: Anchor
+    /// 這一筆是被哪幾條檢索通道找到的。
+    ///
+    /// 它同時是**解釋**（為什麼這筆會出現）與 **band 的來源**（見 retrieval spec
+    /// 的 "A candidate's relevance band is the number of retrieval channels it
+    /// matched"）。暴露它讓「band 從哪來」在輸出上看得見，而不是只能讀 code 推斷。
+    public let channels: [String]
 }
 
 /// 一次查詢的完整結果。
@@ -116,8 +148,17 @@ public struct LTMService {
         case embeddingRevisionMismatch(indexed: String, runtime: String)
         /// 索引的 layout 版本與這個 binary 不同。
         case layoutVersionMismatch(indexed: Int?, expected: Int)
+        /// 索引裡的 anchor 是用另一條 source 規則算的。
+        ///
+        /// **拒絕而非重新詮釋**：指紋不帶產生它的規則，把舊值拿去跟新規則比對，
+        /// 要嘛解析到錯的 turn、要嘛報 orphan，兩者都與正確行為分不出來。
+        case anchorSourceRuleMismatch(indexed: String, expected: String)
         /// 無法決定查詢範圍，而且沒有明示要跨 project。
         case ambiguousScope(detail: String)
+        /// 側車檔的向量筆數與索引宣稱的不符。
+        case vectorSidecarMismatch(declared: Int, found: Int)
+        /// 某個要寫入的根落在語料裡。
+        case rootInsideCorpus(path: String)
     }
 
     public init(
@@ -132,13 +173,27 @@ public struct LTMService {
         self.eventStore = eventStore
     }
 
-    /// 依預設路徑組出 facade（CLI 用）。
-    public static func standard(
-        embedder: any EmbeddingProvider, eventStore: (any EventStore)? = nil
+    /// 由 roots 參數化組出 facade。**CLI 與測試共用這一條路徑。**
+    ///
+    /// 先前有一個只有 production 走的 `standard()`，而 CLI 為了支援環境變數覆寫
+    /// 自己另建一條——於是出貨的守衛零測試覆蓋（測試全都注入 stub policy），
+    /// 而兩條路徑各自長出自己的 containment 缺陷。一條路徑，兩個呼叫端。
+    public static func make(
+        corpusRoot: URL,
+        derivedRoot: URL,
+        embedder: any EmbeddingProvider,
+        eventStore: (any EventStore)? = nil,
+        memoryRoot: URL? = nil
     ) throws -> LTMService {
-        LTMService(
-            location: try DerivedLocation(policy: MemoryCorpusPolicy()),
-            embedder: embedder, eventStore: eventStore)
+        let policy = MemoryCorpusPolicy(corpusRoots: [corpusRoot])
+        // **建立任何東西之前**先驗 memory root。`FileEventStore` 事後會拒絕語料內的
+        // 路徑，但目錄那時已經建好了——違反不變式 1 的是那個 mkdir，不是 append。
+        if let memoryRoot, policy.isInsideReadOnlyCorpus(memoryRoot) {
+            throw ServiceError.rootInsideCorpus(path: memoryRoot.path)
+        }
+        return LTMService(
+            location: try DerivedLocation(root: derivedRoot, policy: policy),
+            corpusRoot: corpusRoot, embedder: embedder, eventStore: eventStore)
     }
 
     // MARK: - 建置
@@ -185,21 +240,56 @@ public struct LTMService {
                 indexed: stamps.embeddingRevision ?? "(無)", runtime: embedder.revision)
         }
 
+        let indexedRule = stamps.anchorSourceRule ?? "(無)"
+        guard indexedRule == IndexDatabase.anchorSourceRule else {
+            throw ServiceError.anchorSourceRuleMismatch(
+                indexed: indexedRule, expected: IndexDatabase.anchorSourceRule)
+        }
+
         // 查詢時的 staleness 檢查：語料前進了就先把尾巴讀進來再回答。
         // 這裡**只做增量**——需要整份重建的情況（版本／revision 不符）在上面
         // 已經拒答了，不會走到這裡。
         let refreshed = try refreshIncrementally(database: database)
 
         let dimension = try database.meta("vector_dimension").flatMap(Int.init) ?? embedder.dimension
-        let vectors = try? VectorSidecar.open(url: location.vectorsURL, dimension: dimension)
+        let declaredVectors = try database.meta("vector_count").flatMap(Int.init) ?? 0
+        // 側車與索引宣稱的筆數必須對得上。
+        //
+        // 先前這裡是 `try? VectorSidecar.open(...)`，於是側車遺失或被截斷時 `vectors`
+        // 變成 nil、`vectorRanking` 直接回空陣列——檢索**靜默降級成 lexical-only**。
+        // 那與這份 code 自己在別處的宣示直接衝突：tokenizer 不可用時大聲中止，
+        // 向量不可用時卻無聲。少一路通道的結果看起來完全正常，這正是不能靜默的理由。
+        var vectors: VectorSidecar?
+        if declaredVectors > 0 {
+            guard let opened = try? VectorSidecar.open(url: location.vectorsURL, dimension: dimension),
+                opened.count == declaredVectors
+            else {
+                throw ServiceError.vectorSidecarMismatch(
+                    declared: declaredVectors,
+                    found: (try? VectorSidecar.open(url: location.vectorsURL, dimension: dimension))?
+                        .count ?? 0)
+            }
+            vectors = opened
+        }
         let engine = RetrievalEngine(database: database, vectors: vectors, embedder: embedder)
         let scored = try engine.search(query: text, limit: limit, scope: scope)
 
         let chosen = strategy ?? ArchivalStrategy()
+        // band 是**相關度分層**，不是名次。
+        //
+        // 先前這裡填的是 `fusedRank`，於是每個候選自成一帶，「同帶內的其他候選」
+        // 恆為空集合，任何策略都無處可移——而且是**靜默**的：沒有跨帶嘗試，
+        // `RankingGuard` 不會 fire，`human-like` 與 `archival` 逐字相同。
+        //
+        // 改用命中的通道數分層（多重編碼：多條線索都指向它 ⇒ 相關度證據更強）。
+        // 這個規則零參數——本專案在評估集（#16）出現之前沒有東西可以校準桶數或
+        // 分數邊界，而把未校準的參數寫進出貨的 spec 正是誠實邊界要擋的事。
+        //
+        // 帶內分佈已量測：`docs/measurements/2026-08-17-band-population.md`。
         let candidates = scored.map {
             Candidate(
                 anchor: $0.anchor, baseScore: $0.fusedScore,
-                band: RelevanceBand(rank: $0.fusedRank))
+                band: RelevanceBand(rank: 3 - $0.channels.count))
         }
         let projection = try makeProjection(database: database, strategy: chosen, now: now)
         let ranked = try chosen.rerank(candidates, with: projection)
@@ -216,7 +306,8 @@ public struct LTMService {
                     displacement: result.displacement,
                     historyDescription: String(describing: result.reason.history),
                     movementDescription: String(describing: result.reason.movement),
-                    anchor: result.candidate.anchor))
+                    anchor: result.candidate.anchor,
+                    channels: source.channels.map(\.rawValue).sorted()))
         }
 
         var recorded = 0
@@ -235,6 +326,24 @@ public struct LTMService {
     ///
     /// 回傳有新內容的來源檔數。整份重建需要的情況不在這裡處理——那是 `build`。
     private func refreshIncrementally(database: IndexDatabase) throws -> Int {
+        // 這條路徑**是寫者**：它改 SQLite、append 側車、覆寫 state。所以它必須拿
+        // 與 `IndexBuilder` 同一把單寫者鎖。
+        //
+        // 先前只有 build 拿鎖，於是兩個並行的 `ltm query`（或 query 與 build 重疊）
+        // 會各自讀到同一份舊 state、各自配置 vector row、各自 append 側車——即使
+        // SQLite 把交易序列化，**側車 append 的先後與 DB 配置 row 的先後不保證一致**，
+        // 結果是某個 chunk 的 `vector_row` 指向別人的向量。WAL 涵蓋不到外部側車檔。
+        //
+        // 拿不到鎖時**不等待也不失敗**：查詢仍可用既有索引回答，只是這一輪不併入
+        // 新內容。這與 build 不同——build 的工作就是寫入，拿不到鎖必須明確失敗。
+        let lock: FileLock
+        do {
+            lock = try FileLock.acquire(at: location.lockURL)
+        } catch {
+            return 0
+        }
+        defer { lock.release() }
+
         let statePath = location.stateURL
         guard let data = try? Data(contentsOf: statePath),
             let previous = try? JSONDecoder().decode(ScanState.self, from: data)

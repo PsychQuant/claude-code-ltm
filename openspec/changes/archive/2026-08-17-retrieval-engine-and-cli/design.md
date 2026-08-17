@@ -76,7 +76,15 @@ One chunk per jsonl turn: FTS5 row, one embedding vector, and pointer metadata p
 ## Risks / Trade-offs
 
 - [FTS5 trigram tokenizer availability varies with the system SQLite] → capability probe at startup; a missing feature fails loudly naming the SQLite version, never silently degrades to LIKE-scans
-- [Embedding 280k chunks is slow on first build] → incremental resume makes it one-time; no throughput number is promised anywhere until docs/measurements/ records one
+- [Embedding a full corpus on first build takes time] → incremental resume makes it one-time; no throughput number is promised anywhere until docs/measurements/ records one
+
+  > **勘誤（2026-08-17，change `fix-band-semantics-and-turn-identity` task 6.3）**：本行原文寫的是
+  > 「Embedding 280k chunks is slow on first build」。那是一個**沒有量測支撐的效能宣稱**——
+  > `docs/measurements/` 底下沒有任何紀錄涵蓋「280k chunks 的 embedding 有多慢」，連 chunk 總數
+  > 本身都不是量出來的。依 CLAUDE.md 的誠實邊界，這類句子不得出現在本 repo 的任何位置。
+  >
+  > 原句保留在此勘誤中而非直接抹去：歸檔文件是「當時做了什麼決定」的紀錄，把違規的句子悄悄
+  > 換掉會讓後來的人以為它從未發生。規則要防的是**讀者誤信一個無支撐的數字**，標註即可達成。
 - [Query while a build is running] → single-writer lock file under `~/.claude-ltm/derived`; queries read through SQLite WAL snapshots; vectors sidecar is swapped atomically (write-new + rename)
 - [Vector working set grows with corpus] → flat sidecar is mmap-ed, not eagerly loaded; brute-force stays the strategy until a measurement record justifies revisiting (per baseline doc's re-evaluation trigger)
 
