@@ -116,6 +116,19 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
   觸發見 `docs/measurements/2026-08-08-baseline.md`。
 - **jsonl 不假設 append-only，但利用它**。`state.json` 記 `prefixHash`，對得上就從
   `processedBytes` 續讀，對不上就整份重解。
+- **`FileManager` 的路徑形式不一致，別用字串前綴算相對路徑**。實測（2026-08-17）：
+  `temporaryDirectory` 與 `resolvingSymlinksInPath()` 都給 `/var/folders/…`，而
+  `contentsOfDirectory` 對同一棵樹給 `/private/var/folders/…`。前綴比對因此落空，
+  state 的鍵會退化成絕對路徑——換一台機器就整份語料重解，而且沒有任何錯誤訊息。
+  相對鍵要在**遍歷當下**由起點目錄構造。
+- **語料是外來資料，解析路徑一律不得 trap**。`Anchor` 與各識別碼型別對非法值是
+  `preconditionFailure`（那是給呼叫端錯誤用的），所以 ingest 端必須先 `validate`
+  再建構，不合法就跳過並記帳。跳過本身要能說出「跳了幾筆、為什麼」——沉默的跳過
+  等於索引少了東西而沒人會發現。
+- **索引層不知道語料在哪，也不自己判斷路徑是否在語料內**。語料根由 facade 傳入；
+  「這條路徑在不在語料裡」的判定（inode 身分、symlink、firmlink）住在 LTMMemory 的
+  `CorpusLocation`，索引層只宣告 `CorpusContainmentPolicy` 這個需求，由 facade 注入。
+  複製那份判定會漂移，而漂移的方向是「放行了不該放行的路徑」且不報錯。
 
 ## 工作流程
 

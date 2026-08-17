@@ -28,6 +28,9 @@ let package = Package(
         .library(name: "LTMMemory", targets: ["LTMMemory"]),
         .library(name: "LTMQuery", targets: ["LTMQuery"]),
         .library(name: "LTMEval", targets: ["LTMEval"]),
+        .library(name: "LTMIndex", targets: ["LTMIndex"]),
+        .library(name: "LTMService", targets: ["LTMService"]),
+        .executable(name: "ltm", targets: ["ltm"]),
     ],
     targets: [
         .target(name: "LTMCore"),
@@ -46,8 +49,26 @@ let package = Package(
         // LTMMemory-internal）。那是獨立的重構，追蹤於 follow-up issue。
         .target(name: "LTMQuery", dependencies: ["LTMCore"]),
         .target(name: "LTMEval", dependencies: ["LTMCore", "LTMMemory", "LTMQuery"]),
+        // 索引層：語料掃描、chunk、FTS5 + 向量。只依賴 LTMCore 的值型別
+        // （`Turn` / `Anchor` / `CorpusReader`），看不到策略也看不到事件儲存。
+        //
+        // 依賴清單刻意只有 LTMCore：索引不得因為「順手」而讀使用歷史——那會讓
+        // 不變式 2（索引是純衍生物）在型別層失去依據。系統庫（SQLite3、
+        // NaturalLanguage、Accelerate）由平台提供，不是套件依賴。
+        .target(name: "LTMIndex", dependencies: ["LTMCore"]),
+        // Facade：唯一同時看得到索引、策略與事件儲存的地方。CLI 與（Stage 2 的）
+        // MCP 都只是它的薄 adapter——邏輯寫進 adapter 就是缺陷，因為那會讓兩個
+        // 介面的行為漂移，而不變式測試只蓋得到其中一邊。
+        .target(name: "LTMService", dependencies: ["LTMCore", "LTMIndex", "LTMQuery", "LTMMemory"]),
+        // CLI。**不引入 swift-argument-parser**：零第三方依賴是隱私邊界的一部分
+        // （每一個依賴都是一條需要自己審的供應鏈），手寫解析的成本遠低於那個代價。
+        .executableTarget(name: "ltm", dependencies: ["LTMService", "LTMCore"]),
         .testTarget(name: "LTMMemoryTests", dependencies: ["LTMCore", "LTMMemory"]),
         .testTarget(name: "LTMQueryTests", dependencies: ["LTMCore", "LTMQuery"]),
         .testTarget(name: "LTMEvalTests", dependencies: ["LTMCore", "LTMMemory", "LTMQuery", "LTMEval"]),
+        .testTarget(name: "LTMIndexTests", dependencies: ["LTMCore", "LTMIndex"]),
+        .testTarget(
+            name: "LTMServiceTests",
+            dependencies: ["LTMCore", "LTMIndex", "LTMService", "LTMQuery", "LTMMemory", "ltm"]),
     ]
 )

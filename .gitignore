@@ -10,6 +10,8 @@ DerivedData/
 # 索引與記憶資料一律不進 repo（它們住 ~/.claude-ltm/）
 *.sqlite
 *.sqlite-*
+*.sqlite3
+*.sqlite3-*
 vectors.bin
 state.json
 
@@ -26,3 +28,7 @@ fixtures/real/
 
 # Claude Code worktrees（隔離用的暫時 checkout，不進版控）
 .claude/worktrees/
+
+# IDD 的本機工作檔：repo 指向設定與下載回來的 issue 附件。
+# 前者是每台機器各自的（檔名就叫 local），後者是 GitHub 上已有的東西的副本。
+.claude/.idd/

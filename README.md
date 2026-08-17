@@ -72,8 +72,32 @@ repo 能保證的事。
 
 ## 狀態
 
-構思與設計中。量測基線見 [`docs/measurements/`](docs/measurements/)，設計文件見
-[`docs/superpowers/specs/`](docs/superpowers/specs/)。
+**檢索路徑可以跑了**：`ltm build` 掃語料建索引，`ltm query` 查它。策略層、記憶層與
+比較層（LTMQuery／LTMMemory／LTMEval）在此之前就已存在，這一步補上的是它們的
+輸入端——語料掃描、chunk 切分、FTS5 與向量兩路檢索，以及把它們接起來的 facade。
+
+尚未實作：MCP server 與 plugin（追蹤於 issue #24 的 Stage 2）。
+
+```bash
+swift build                      # 產出 .build/debug/ltm
+ltm build                        # 掃語料、建索引（預設增量，--full 從零重建）
+ltm query "要找的內容" --json     # 查詢；預設只搜當前 project
+```
+
+`ltm query` 的行為有幾點是刻意的，不是暫時的：
+
+- **預設只搜當前 project**。工作目錄對應不到語料裡的 project 時，它會要求你用
+  `--project` 或 `--all-projects` 明示，而不是安靜地擴大到整份語料。
+- **預設不寫使用歷史**。`--record` 才會寫 `shown` 事件——開發與檢查用的查詢會污染
+  策略比較所依據的資料。
+- **索引過期時拒答而不降級**。embedding revision 與索引不同代時，跨代的向量距離
+  沒有意義卻不會報錯，所以它直接拒絕並要你跑 `ltm build --full`。
+- **查詢前會把語料的新內容併進索引**（前綴雜湊對得上就只讀尾巴）。
+
+量測基線見 [`docs/measurements/`](docs/measurements/)，設計文件見
+[`docs/superpowers/specs/`](docs/superpowers/specs/)。**本節不含任何效能宣稱**——
+速度、recall 之類的數字一律以 `docs/measurements/` 底下的紀錄為準，而那些紀錄
+涵蓋的是它們自己寫明的比較，不是這條剛落地的路徑。
 
 ## Related
 
