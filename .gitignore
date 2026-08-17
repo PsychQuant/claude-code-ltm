@@ -32,3 +32,4 @@ fixtures/real/
 # IDD 的本機工作檔：repo 指向設定與下載回來的 issue 附件。
 # 前者是每台機器各自的（檔名就叫 local），後者是 GitHub 上已有的東西的副本。
 .claude/.idd/
+openspec/.vector-search.db*
