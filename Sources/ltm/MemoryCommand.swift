@@ -1,0 +1,115 @@
+import Foundation
+import LTMCore
+import LTMMemory
+
+/// `ltm memory` —— 記憶層事件檔的檢查與修剪。
+///
+/// ## 為什麼需要這個命令
+///
+/// 記憶層是本 repo **唯一不可重建**的資料（索引隨時可以 `ltm build --full` 重來，
+/// 使用歷史不行）。而它有兩類「讀不回來」的紀錄：解不開的（一次半途中斷的 append
+/// 就會產生），以及用**舊定址規則**寫的（anchor 的 source 從 sessionId 換成 project
+/// 指紋那一次之後，換代前寫的每一筆都是）。
+///
+/// 兩者都會讓 `allEvents()` 具名拋錯——那是對的，安靜地少讀幾筆比讀不出來更糟。
+/// 但先前那個錯誤**指名不出補救方式**，因為修復路徑只有測試在呼叫、沒有任何使用者
+/// 可達的入口。一個必然觸發、又沒有出路的錯誤，實際效果等同「歷史從此鎖死」。
+///
+/// 所以這個命令存在的理由不是便利，是讓那句「失敗訊息要指名補救命令」有東西可以指。
+enum MemoryCommand {
+    static let usage = """
+        用法：ltm memory [--prune]
+
+        檢查記憶層事件檔，逐行報出讀不回來的紀錄：
+          - 損壞：解不開的行（半途中斷的 append、外來寫入者）
+          - 舊規則：用已被取代的 anchor 定址規則寫的行
+
+        選項：
+          --prune       把可用的紀錄寫回去，丟掉上面兩類。**先備份原檔**
+          -h, --help    顯示本說明
+
+        不帶 --prune 時只讀不寫。
+        """
+
+    static func run(arguments raw: [String]) -> Int32 {
+        let arguments = Arguments(raw, valueOptions: [])
+        if arguments.has("help") || arguments.has("h") {
+            print(usage)
+            return LTMCommandLine.ExitCode.success.rawValue
+        }
+
+        do {
+            let root = CommandSupport.memoryRootURL()
+            let url = root.appendingPathComponent("events.jsonl")
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                print("（沒有事件檔：\(url.path)）")
+                return LTMCommandLine.ExitCode.success.rawValue
+            }
+            let store = try FileEventStore(url: url)
+            let result = try store.allEvents(skippingUnusable: true)
+
+            print("事件檔：\(url.path)")
+            print("  可用紀錄：\(result.events.count)")
+            report("損壞", result.corruptLines)
+            report("舊定址規則", result.supersededLines)
+
+            let unusable = result.corruptLines.count + result.supersededLines.count
+            guard unusable > 0 else {
+                print("  ✓ 沒有讀不回來的紀錄")
+                return LTMCommandLine.ExitCode.success.rawValue
+            }
+            guard arguments.has("prune") else {
+                print("")
+                print("要丟掉這 \(unusable) 筆並保留其餘，跑 `ltm memory --prune`（會先備份原檔）。")
+                return LTMCommandLine.ExitCode.success.rawValue
+            }
+
+            // **先備份再改**。這是 canonical 資料，而被丟掉的那幾筆裡，「舊規則」
+            // 那一類的內容仍然是真的——只是指向一個已經不成立的定址方式。日後若
+            // 有人寫得出遷移，備份是唯一還原得回來的東西。
+            let backup = url.appendingPathExtension("bak-\(Int(Date().timeIntervalSince1970))")
+            try FileManager.default.copyItem(at: url, to: backup)
+            let rewritten = try store.rewrite(keeping: result.events)
+            print("")
+            print("  ✓ 已備份原檔：\(backup.lastPathComponent)")
+            print("  ✓ 寫回 \(rewritten) 筆可用紀錄，丟掉 \(unusable) 筆")
+            return LTMCommandLine.ExitCode.success.rawValue
+        } catch let error as EventStoreError {
+            Output.error("✗ \(describe(error))")
+            return LTMCommandLine.ExitCode.indexStateError.rawValue
+        } catch {
+            Output.error("✗ \(error)")
+            return LTMCommandLine.ExitCode.indexStateError.rawValue
+        }
+    }
+
+    private static func report(_ label: String, _ lines: [Int]) {
+        guard !lines.isEmpty else { return }
+        let shown = lines.prefix(20).map(String.init).joined(separator: ", ")
+        let more = lines.count > 20 ? "…（共 \(lines.count) 行）" : ""
+        print("  \(label)：\(lines.count) 筆，行號 \(shown)\(more)")
+    }
+
+    /// `EventStoreError` 的使用者可讀說明。**每一類都指名補救方式。**
+    static func describe(_ error: EventStoreError) -> String {
+        switch error {
+        case .supersededAnchorRule(let path, let lineNumbers):
+            return """
+                記憶層有 \(lineNumbers.count) 筆用舊定址規則寫的紀錄，讀取被拒絕。
+                檔案：\(path)
+                行號：\(lineNumbers.prefix(20).map(String.init).joined(separator: ", "))\
+                \(lineNumbers.count > 20 ? "…" : "")
+                anchor 的 source 已從 sessionId 換成 project 指紋，舊值無法對現行規則
+                解析——重新詮釋會指到錯的 turn 或誤報成 orphan，兩者與正確行為分不出來。
+                跑 `ltm memory` 看完整清單，或 `ltm memory --prune` 丟掉它們（會先備份）。
+                """
+        case .corruptRecord(let path, let lineNumber):
+            return """
+                記憶層第 \(lineNumber) 行解不開：\(path)
+                跑 `ltm memory` 看完整清單，或 `ltm memory --prune` 丟掉它（會先備份）。
+                """
+        default:
+            return "記憶層錯誤：\(error)"
+        }
+    }
+}

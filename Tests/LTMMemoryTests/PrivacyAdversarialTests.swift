@@ -303,7 +303,10 @@ private func mutating(_ value: Any, at path: [JSONStep], _ mutate: (Any) -> Any)
 /// 造一筆合法事件的 canonical bytes。
 private func canonicalLine() throws -> Data {
     let anchor = Anchor(
-        source: "fixture-a",
+        // 必須是**當前定址規則**的形狀（32 個小寫 hex）。不是的話，讀取路徑會把
+        // 這一行當成舊規則紀錄跳過——於是這個「合法事件」的對照組會變成讀不回來
+        // 的東西，而依賴它的每一條測試都改成在證明別的事。
+        source: ProjectFingerprint.of("fixture-a"),
         turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
         span: 0..<4)
     let event = Event.interaction(
@@ -424,7 +427,7 @@ private func canonicalLine() throws -> Data {
     let store = try FileEventStore(url: path)
     #expect(throws: (any Error).self) { _ = try store.allEvents() }
 
-    let salvaged = try store.allEvents(skippingCorrupt: true)
+    let salvaged = try store.allEvents(skippingUnusable: true)
     #expect(salvaged.events.isEmpty)
     #expect(salvaged.corruptLines == [1], "必須指名是哪一行，否則救不回來也修不掉")
 }
@@ -522,7 +525,7 @@ private func canonicalLine() throws -> Data {
     try Data((good + "\n" + bad + "\n").utf8).write(to: path)
 
     let store = try FileEventStore(url: path)
-    let salvaged = try store.allEvents(skippingCorrupt: true)
+    let salvaged = try store.allEvents(skippingUnusable: true)
     #expect(salvaged.events.count == 1, "好的那一行必須救得回來")
     #expect(salvaged.corruptLines == [2])
 }

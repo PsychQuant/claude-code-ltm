@@ -6,7 +6,7 @@ Indexing SHALL create exactly one chunk per conversation turn. A turn observed t
 
 The chunk's identity SHALL be `(project fingerprint, turn identifier)`, matching the identity of the anchor that addresses it, so that one anchor corresponds to exactly one chunk. The session identifier SHALL NOT participate in chunk identity; it is navigation metadata. When a turn has been observed through several session files, the stored `sessionId` SHALL be the most recently observed one, because that is the session a reader is most likely able to open.
 
-An earlier form of this requirement said "exactly one chunk per jsonl conversation turn", which read as one chunk per turn per file and was implemented with a global uniqueness constraint on the turn identifier alone. Measured over 300 real corpus files, 5,722 turn identifiers appear in more than one file with identical content, 4,337 of them under different session identifiers — so that constraint caused an upsert to overwrite the stored session identifier, which in turn orphaned every anchor recorded against the earlier value.
+An earlier form of this requirement said "exactly one chunk per jsonl conversation turn", which read as one chunk per turn per file and was implemented with a global uniqueness constraint on the turn identifier alone. Measured over the whole corpus of 8,324 files (`docs/measurements/2026-08-18-resume-duplication.md`), 12,488 turn identifiers appear in more than one file, 100% of them with identical content and 98.9% under different session identifiers — so that constraint caused an upsert to overwrite the stored session identifier, which in turn orphaned every anchor recorded against the earlier value.
 
 #### Scenario: Every chunk is pointered
 

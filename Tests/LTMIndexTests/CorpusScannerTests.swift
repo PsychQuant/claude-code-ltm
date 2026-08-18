@@ -291,7 +291,8 @@ func anchorSurvivesSessionResume() throws {
     defer { try? FileManager.default.removeItem(at: root) }
 
     // 模擬 session resume：同一則 turn（相同 uuid、相同文字）被複製進第二個 session 檔，
-    // 但帶著新的 sessionId。實測 300 個真實語料檔有 5,722 個 turn 是這個形狀，
+    // 但帶著新的 sessionId。全語料 8,324 檔有 12,488 個 turn 是這個形狀（見
+    // `docs/measurements/2026-08-18-resume-duplication.md`），
     // 其中 4,337 個的 sessionId 不同。
     let sharedTurn = "aaaaaaaa-0000-0000-0000-000000000001"
     let text = "跨越 resume 的同一段內容"

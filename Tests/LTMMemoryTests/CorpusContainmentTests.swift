@@ -288,7 +288,7 @@ private func anchorForFifoTest() -> Anchor {
 
     let store = try FileEventStore(url: fifo)
     #expect(throws: (any Error).self) { _ = try store.allEvents() }
-    #expect(throws: (any Error).self) { _ = try store.allEvents(skippingCorrupt: true) }
+    #expect(throws: (any Error).self) { _ = try store.allEvents(skippingUnusable: true) }
     #expect(throws: (any Error).self) { _ = try store.serializedBytes() }
 }
 

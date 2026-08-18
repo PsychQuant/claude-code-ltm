@@ -116,3 +116,95 @@ func eventStoreAcceptsCurrentRuleAnchors() throws {
 
     #expect(try store.allEvents().count == 1)
 }
+
+// MARK: - 舊規則紀錄的行號、修復路徑與非重新詮釋（round-3 verify HIGH）
+
+private func supersededFixture() throws -> (URL, FileEventStore) {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-sup-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let url = dir.appendingPathComponent("events.jsonl")
+    return (dir, try FileEventStore(url: url))
+}
+
+private func event(source: String, id: String) throws -> Event {
+    let text = "被 anchor 指向的內容"
+    let turn = Turn(id: id, role: "user", timestamp: Date(timeIntervalSince1970: 1), text: text)
+    return try Event(
+        kind: .shown, anchor: Anchor(source: source, turn: turn, span: 0..<6),
+        timestamp: Date(timeIntervalSince1970: 10), generation: GenerationID("g-1"),
+        policy: RankingPolicyID("archival"), noteRef: nil, presentation: nil)
+}
+
+@Test("舊規則紀錄回報的是**檔案行號**，空行不會讓它偏移")
+func supersededLineNumbersAreTrueFileLineNumbers() throws {
+    let (dir, store) = try supersededFixture()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let legacy = "11111111-2222-3333-4444-555555555555"
+
+    // 手工鋪一份含空行的檔案：第 1 行合法、第 2 行空、第 3 行是舊規則。
+    let good = String(
+        decoding: try CanonicalCoding.encoder.encode(
+            try event(source: ProjectFingerprint.of("proj"), id: "aaaaaaaa-0000-0000-0000-000000000001")),
+        as: UTF8.self)
+    let old = String(
+        decoding: try CanonicalCoding.encoder.encode(
+            try event(source: legacy, id: "aaaaaaaa-0000-0000-0000-000000000002")),
+        as: UTF8.self)
+    try Data((good + "\n\n" + old + "\n").utf8).write(to: store.url)
+
+    var thrown: Error?
+    do { _ = try store.allEvents() } catch { thrown = error }
+    guard case .some(EventStoreError.supersededAnchorRule(_, let lines)) =
+        thrown as? EventStoreError
+    else {
+        Issue.record("必須具名拒絕，實際：\(String(describing: thrown))")
+        return
+    }
+    // 舊規則那筆是**第 3 行**。先前的實作對解碼後的陣列做 enumerated()，
+    // 空行不入陣列，於是回報 2——照著它去編輯檔案會刪錯紀錄。
+    #expect(lines == [3], "空行佔一個行號，這才是行號有意義的前提")
+}
+
+@Test("修復路徑跳過舊規則紀錄並回報，不把它原樣交出去")
+func repairPathSkipsSupersededRatherThanReinterpreting() throws {
+    let (dir, store) = try supersededFixture()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try store.append(try event(source: ProjectFingerprint.of("proj"), id: "aaaaaaaa-0000-0000-0000-000000000001"))
+    let good = try Data(contentsOf: store.url)
+    let old = try CanonicalCoding.encoder.encode(
+        try event(source: "11111111-2222-3333-4444-555555555555",
+              id: "aaaaaaaa-0000-0000-0000-000000000002"))
+    try (good + old + Data("\n".utf8)).write(to: store.url)
+
+    let salvaged = try store.allEvents(skippingUnusable: true)
+    #expect(salvaged.events.count == 1, "好的那一筆必須救得回來")
+    #expect(salvaged.supersededLines == [2])
+    #expect(salvaged.corruptLines.isEmpty, "舊規則紀錄不是損壞，兩類要分開報")
+    #expect(
+        salvaged.events.allSatisfy { ProjectFingerprint.hasCurrentRuleShape($0.anchor.source) },
+        "spec 的主語是 reading——修復路徑也不得把舊規則 anchor 原樣交給呼叫端")
+}
+
+@Test("修剪之後歷史讀得回來，且只丟掉讀不回來的那些")
+func rewriteKeepsUsableRecordsOnly() throws {
+    let (dir, store) = try supersededFixture()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try store.append(try event(source: ProjectFingerprint.of("proj"), id: "aaaaaaaa-0000-0000-0000-000000000001"))
+    let good = try Data(contentsOf: store.url)
+    let old = try CanonicalCoding.encoder.encode(
+        try event(source: "11111111-2222-3333-4444-555555555555",
+              id: "aaaaaaaa-0000-0000-0000-000000000002"))
+    try (good + old + Data("\n".utf8) + Data("{壞掉的一行}\n".utf8)).write(to: store.url)
+
+    // 修剪前：整份讀不出來。
+    #expect(throws: (any Error).self) { _ = try store.allEvents() }
+
+    let salvaged = try store.allEvents(skippingUnusable: true)
+    #expect(salvaged.supersededLines == [2] && salvaged.corruptLines == [3])
+    #expect(try store.rewrite(keeping: salvaged.events) == 1)
+
+    // 修剪後：讀得回來，而且寫回去的東西自己通得過 canonical 往返檢查。
+    #expect(try store.allEvents().count == 1)
+    #expect(try store.allEvents(skippingUnusable: true).supersededLines.isEmpty)
+}

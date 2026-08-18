@@ -46,13 +46,27 @@ public struct IndexBuilder: Sendable {
         /// **補零延長**（POSIX 語意），不是重建缺口。補出來的零向量與任何查詢
         /// 的點積都是 0——向量通道因此靜默失效，而筆數核對會通過。
         case sidecarShorterThanDeclared(declared: Int, found: Int)
+        /// 需要整份重建，但呼叫端不允許（查詢路徑）。
+        case fullRebuildRequired(detail: String)
         case stateUnreadable(detail: String)
     }
 
     /// 建置索引。
     ///
     /// - Parameter full: 略過增量、從零重建。
-    public func build(full: Bool = false) throws -> BuildReport {
+    /// - Parameter refusingFullRebuild: `true` 時，若判定需要整份重建就**拋錯而不是
+    ///   重建**。查詢路徑用它。
+    ///
+    ///   `refreshIncrementally` 的註解曾經宣稱「查詢路徑不可能觸發整份重建」，理由是
+    ///   `query` 前段已檢查過三個 stamp。那個推理有個洞：`query` 讀 stamp 時**不持鎖**，
+    ///   而這裡拿到鎖之後會**重讀**一次。兩次讀之間若有另一個行程完成一次會改
+    ///   `layout_version` 的建置（升級後的 `ltm` 與還在跑的舊 `ltm query` 併存就夠），
+    ///   第二次讀就會 mismatch ⇒ `discardDerivedArtifacts()` 從**查詢路徑**刪掉
+    ///   DB、側車與 state。
+    ///
+    ///   規則叫呼叫端別走某條路，遠弱於把那條路拆掉。所以這裡不是把註解寫清楚，
+    ///   是讓那個前提變成呼叫端可以強制的東西。
+    public func build(full: Bool = false, refusingFullRebuild: Bool = false) throws -> BuildReport {
         try location.createRootIfNeeded()
         let lock = try FileLock.acquire(at: location.lockURL)
         defer { lock.release() }
@@ -76,6 +90,12 @@ public struct IndexBuilder: Sendable {
                     || $0.embeddingRevision != embedder.revision
             } ?? false
         let rebuildFromScratch = full || stampsMismatch
+        if rebuildFromScratch && refusingFullRebuild {
+            throw BuildError.fullRebuildRequired(
+                detail: full
+                    ? "呼叫端要求整份重建，但這條路徑不允許"
+                    : "索引的版本戳記與執行期不符（可能是另一個行程剛完成一次會改版本的建置）")
+        }
 
         if rebuildFromScratch { try discardDerivedArtifacts() }
 
@@ -208,8 +228,22 @@ public struct IndexBuilder: Sendable {
     /// 檔案比宣稱的短，代表向量真的不見了。那是拒答的理由，不是修補的機會。
     private func truncateSidecar(toRows rows: Int) throws {
         let path = location.vectorsURL.path
-        guard FileManager.default.fileExists(atPath: path) else { return }
         let rowBytes = embedder.dimension * MemoryLayout<Float>.size
+        guard FileManager.default.fileExists(atPath: path) else {
+            // **檔案整個不見 = 找到 0 列，不是「沒事可做」。**
+            //
+            // 這裡先前是無條件早退，於是「向量真的不見了」的最極端情形恰好是唯一
+            // 沒被下面那道守衛涵蓋的。後果正是 `build()` 那段順序註解逐字宣稱要防的：
+            // `vectorRow` 仍從 `vector_count` 起算、`appendVectors` 重建一個新檔，
+            // 舊 chunk 的 `vector_row = 0` 於是指到新檔的第 0 列——**A 的相似度用
+            // B 的向量算**，而 `ltm build` 印出「✓ 索引完成」。
+            //
+            // `rows == 0` 才是真的沒事：索引本來就沒宣稱任何向量。
+            guard rows == 0 else {
+                throw BuildError.sidecarShorterThanDeclared(declared: rows, found: 0)
+            }
+            return
+        }
         let target = UInt64(rows * rowBytes)
         let handle = try FileHandle(forUpdating: location.vectorsURL)
         defer { try? handle.close() }

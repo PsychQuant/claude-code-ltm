@@ -11,6 +11,7 @@ public enum LTMCommandLine {
         子命令：
           build     掃描語料並建立衍生索引（預設增量）
           query     對索引下查詢
+          memory    檢查記憶層事件檔，必要時修剪不可用的紀錄
 
         選項：
           -h, --help    顯示本說明
@@ -42,6 +43,8 @@ public enum LTMCommandLine {
             return BuildCommand.run(arguments: Array(arguments.dropFirst()))
         case "query":
             return QueryCommand.run(arguments: Array(arguments.dropFirst()))
+        case "memory":
+            return MemoryCommand.run(arguments: Array(arguments.dropFirst()))
         default:
             FileHandle.standardError.write(Data("未知子命令：\(first)\n\n\(usage)\n".utf8))
             return ExitCode.usageError.rawValue

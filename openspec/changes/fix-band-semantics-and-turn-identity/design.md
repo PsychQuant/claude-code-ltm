@@ -5,7 +5,7 @@ Stage 1 of #24 shipped a retrieval engine, an `LTMService` facade and an `ltm` C
 Both design errors were reproduced in isolation before any fix was proposed (`superpowers:systematic-debugging`, Phase 1–3):
 
 - **Band**: with `band = fusedRank`, one probe over the same projection and strategy produced displacements `[0,0,0]`; with a shared band it produced `[1,-1,0]`. The retrieval spec mandates the broken form in prose — "The fused rank SHALL define each candidate's `RelevanceBand`" — so the spec is part of the defect.
-- **Turn identity**: 300 real corpus files contain 5,722 uuids appearing in more than one file, all with identical content, 4,337 of them under a different `sessionId`.
+- **Turn identity**: the whole corpus of 8,324 files contains 12,488 uuids appearing in more than one file, 100% with identical content, 98.9% under a different `sessionId` (`docs/measurements/2026-08-18-resume-duplication.md`).
 
 Two constraints shape what is possible here:
 

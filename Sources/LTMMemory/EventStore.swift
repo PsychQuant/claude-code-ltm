@@ -419,15 +419,52 @@ public struct FileEventStore: EventStore {
     }
 
     /// 全部事件，維持寫入順序。
+    /// 只保留 `keeping` 這些紀錄，把事件檔重寫一遍；回傳寫回幾筆。
+    ///
+    /// **這是唯一會從 canonical 儲存移除資料的方法。** 它存在的理由很窄：讀不回來
+    /// 的紀錄（損壞的、舊定址規則寫的）會讓整份歷史拒絕讀取，而記憶層是本 repo
+    /// 唯一不可重建的資料——沒有出路的話，那個拒絕實際等同「歷史從此鎖死」。
+    ///
+    /// 三個紀律：
+    ///
+    /// - **呼叫端必須先備份。** 這裡不自己備份，因為備份策略（放哪、留幾份）是
+    ///   呼叫端的決定，而把它藏在這裡會讓「這個方法會刪東西」變得不明顯。
+    /// - **原子替換**：寫暫存檔、fsync、rename。中途崩潰留下的是原檔或新檔，
+    ///   不會是半份——半份 canonical 歷史比丟掉那幾筆糟得多。
+    /// - **走同一套 canonical 編碼**：寫回去的每一行都必須能通過
+    ///   `decodeCanonicalLine` 的逐字往返檢查，否則這個「修復」會製造出新的損壞。
+    @discardableResult
+    public func rewrite(keeping events: [Event]) throws -> Int {
+        var payload = Data()
+        for event in events {
+            do {
+                payload.append(try encoder.encode(event))
+                payload.append(Data("\n".utf8))
+            } catch {
+                throw EventStoreError.appendFailed(path: url.path, underlying: "\(error)")
+            }
+        }
+        let temporary = url.appendingPathExtension("rewrite-\(UUID().uuidString)")
+        do {
+            try payload.write(to: temporary, options: [.atomic])
+            // `.atomic` 保證的是「不會看到半份」，不保證已落盤——rename 之後補一次
+            // fsync 才讓回傳成功等於「已持久化」（同 `append` 的判準）。
+            let handle = try FileHandle(forWritingTo: temporary)
+            try handle.synchronize()
+            try handle.close()
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            throw EventStoreError.appendFailed(path: url.path, underlying: "\(error)")
+        }
+        return events.count
+    }
+
     public func allEvents() throws -> [Event] {
-        let result = try allEvents(skippingCorrupt: false)
-        // 舊規則的 anchor 一律具名拒絕。這條檢查放在**讀取**而不是寫入：寫入端
-        // 產生的一定是當前規則，會出現舊值的只有「這個檔案是改規則之前寫的」。
-        let superseded = result.events.enumerated()
-            .filter { !ProjectFingerprint.hasCurrentRuleShape($0.element.anchor.source) }
-            .map { $0.offset + 1 }
-        guard superseded.isEmpty else {
-            throw EventStoreError.supersededAnchorRule(path: url.path, lineNumbers: superseded)
+        let result = try allEvents(skippingUnusable: false)
+        guard result.supersededLines.isEmpty else {
+            throw EventStoreError.supersededAnchorRule(
+                path: url.path, lineNumbers: result.supersededLines)
         }
         return result.events
     }
@@ -443,10 +480,20 @@ public struct FileEventStore: EventStore {
     /// `skippingCorrupt: true`——它不會被排序或計分路徑呼叫，只給修復情境用：
     /// 讀得回來的部分先救出來，同時**明確回報跳過了哪幾行**，讓「損壞侷限在
     /// 那一筆」成為可觀察的事實而不是註解裡的宣稱。
-    public func allEvents(skippingCorrupt: Bool) throws -> (events: [Event], corruptLines: [Int]) {
+    /// - Parameter skippingUnusable: `true` 時跳過**兩類**不可用的紀錄並回報行號：
+    ///   解不開的（`corruptLines`）與舊定址規則寫的（`supersededLines`）。
+    ///
+    ///   兩類分開回報，因為處置不同：損壞的那幾行是壞資料，舊規則的那幾行是**好
+    ///   資料但指向已經不成立的定址方式**——後者的內容仍然是真的，只是解析不回去。
+    ///
+    ///   參數先前叫 `skippingCorrupt`，而舊規則紀錄並不損壞。一個名字說「跳過損壞」
+    ///   卻也跳過沒壞的東西，是這個 repo 反覆踩到的名實不符。
+    public func allEvents(skippingUnusable: Bool) throws
+        -> (events: [Event], corruptLines: [Int], supersededLines: [Int])
+    {
         let bytes: Data
         do {
-            guard FileManager.default.fileExists(atPath: url.path) else { return ([], []) }
+            guard FileManager.default.fileExists(atPath: url.path) else { return ([], [], []) }
             // **讀取要取共享鎖。** 寫入端用 `flock` 協調，而讀取端先前完全不參與，
             // 於是一次進行中的 append（多次 write 之間）會被讀成損壞——修復工具
             // 照著 `corruptLines` 去刪，刪掉的是一筆好紀錄（#1 verify R6）。
@@ -467,6 +514,7 @@ public struct FileEventStore: EventStore {
 
         var result: [Event] = []
         var corrupt: [Int] = []
+        var superseded: [Int] = []
         // **不略過空行**（#1 verify R5）。舊版用 `omittingEmptySubsequences: true`，
         // 於是 `corruptLines` 回報的是「第幾個非空行」而不是「檔案第幾行」——
         // 每一個空行都會讓後面的行號往前偏。這個方法存在的全部理由是修復情境
@@ -484,16 +532,35 @@ public struct FileEventStore: EventStore {
                 // 解碼會靜默丟掉 JSON 文法允許而 schema 沒定義的東西——巢狀未知鍵、
                 // 陣列多餘元素、重複鍵、`\uXXXX` 逃脫——而那些東西**留在檔案裡**。
                 // 隱私硬約束的標的是落地的 bytes，所以檢查也必須在 bytes 上。
-                result.append(
-                    try CanonicalCoding.decodeCanonicalLine(Event.self, from: Data(line.utf8)))
+                let event = try CanonicalCoding.decodeCanonicalLine(
+                    Event.self, from: Data(line.utf8))
+                // 舊規則的 anchor 一律具名拒絕，**而且用真實檔案行號**。
+                //
+                // 這條檢查先前在 `allEvents()` 對解碼後的陣列做 `enumerated()`，
+                // 於是回報的是「第幾筆事件」而不是「檔案第幾行」——每一個空行都讓
+                // 後面的行號往前偏。同一個偏移在 `corruptLines` 上已經被修過一次
+                // （#1 verify R5），而使用者拿到行號的唯一用途就是去編輯那個檔案。
+                //
+                // 放在讀取而不是寫入：寫入端產生的一定是當前規則，會出現舊值的只有
+                // 「這個檔案是改規則之前寫的」。
+                guard ProjectFingerprint.hasCurrentRuleShape(event.anchor.source) else {
+                    superseded.append(index + 1)
+                    continue
+                }
+                result.append(event)
             } catch {
-                guard skippingCorrupt else {
+                guard skippingUnusable else {
                     throw EventStoreError.corruptRecord(path: url.path, lineNumber: index + 1)
                 }
                 corrupt.append(index + 1)
             }
         }
-        return (result, corrupt)
+        // 舊規則的紀錄**兩條讀取路徑都不會原樣交出去**。
+        //
+        // spec 的條款主語是 reading 而不是某一個方法，而「原樣交給呼叫端拿去對現行
+        // 規則解析」正是它逐字禁止的 reinterpretation。修復路徑跳過它們並回報行號，
+        // 嚴格路徑由呼叫端 `allEvents()` 具名拋錯——兩者都不重新詮釋。
+        return (result, corrupt, superseded)
     }
 
     /// 開啟、驗形、上共享鎖、從**同一個 fd** 讀完。

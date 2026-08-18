@@ -124,12 +124,13 @@ public final class IndexDatabase {
         // 唯一鍵與 anchor 的 (source, turnID) 對齊，所以一個 anchor 恰好對應一個 chunk。
         //
         // 先前是 `uuid` 單獨 UNIQUE。那假設 turn 識別碼在整份語料裡唯一，而實測
-        // 300 個真實檔有 5,722 個 uuid 出現在一個以上的檔案。單獨 UNIQUE 的後果是
+        // 全語料 8,324 檔有 12,488 個 uuid 出現在一個以上的檔案，內容 100% 相同
+        // （`docs/measurements/2026-08-18-resume-duplication.md`）。單獨 UNIQUE 的後果是
         // upsert 改寫身分欄位，使既有事件的 anchor 全部 orphan。
         try execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS chunks_identity ON chunks(project_fingerprint, uuid)")
-        // 一則 turn 可以出現在**多個**來源檔——session resume 就是這樣（實測 300 檔
-        // 5,722 筆）。所以「這個 chunk 來自哪裡」是多對多的事實，不能存成 chunks
+        // 一則 turn 可以出現在**多個**來源檔——session resume 就是這樣（全語料 8,324 檔
+        // 12,488 筆，見 `docs/measurements/2026-08-18-resume-duplication.md`）。所以「這個 chunk 來自哪裡」是多對多的事實，不能存成 chunks
         // 的一個欄位。
         //
         // 先前正是一個欄位。它與去重（唯一鍵 `(project_fingerprint, uuid)`）交互

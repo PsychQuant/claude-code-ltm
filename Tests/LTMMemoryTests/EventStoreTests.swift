@@ -146,7 +146,7 @@ private let policy = RankingPolicyID("archival")
     #expect(throws: (any Error).self) { _ = try store.allEvents() }
 
     // 修復路徑：兩筆好的都救得回來，壞的那一行被具名回報。
-    let salvaged = try store.allEvents(skippingCorrupt: true)
+    let salvaged = try store.allEvents(skippingUnusable: true)
     #expect(salvaged.events.count == 2)
     #expect(salvaged.corruptLines == [2])
     #expect(salvaged.events.map(\.anchor.turnID) == ["t0", "t2"])
@@ -169,7 +169,7 @@ private let policy = RankingPolicyID("archival")
     try Data(contents.utf8).write(to: path)
 
     let store = try FileEventStore(url: path)
-    let result = try store.allEvents(skippingCorrupt: true)
+    let result = try store.allEvents(skippingUnusable: true)
     #expect(result.events.count == 2)
     #expect(result.corruptLines == [5], "回報的必須是檔案第 5 行，不是第 3 個非空行")
 }

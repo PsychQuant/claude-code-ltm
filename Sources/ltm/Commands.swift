@@ -174,6 +174,9 @@ enum BuildCommand {
                     請跑 `ltm build --full` 從零重建。
                     """)
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
+            case .fullRebuildRequired(let detail):
+                Output.error("✗ 需要整份重建但這條路徑不允許：\(detail)。請跑 `ltm build --full`。")
+                return LTMCommandLine.ExitCode.indexStateError.rawValue
             }
         } catch let error as CorpusScanner.ScanError {
             if case .corpusRootUnreadable(let path) = error {
@@ -274,6 +277,15 @@ enum QueryCommand {
             return LTMCommandLine.ExitCode.success.rawValue
         } catch let error as LTMService.ServiceError {
             return report(error)
+        } catch let error as EventStoreError {
+            // `--strategy human-like` / `conservative` 會讀使用歷史，所以記憶層的
+            // 錯誤從這裡出來。先前沒有這個分支，錯誤以裸 enum 形式吐給使用者
+            // （`supersededAnchorRule(path: "…", lineNumbers: [1, 2, 3])`），
+            // 而 anchor 定址規則換代之後，任何在換代前寫過事件的人第一次用會讀
+            // 歷史的策略就必然撞上——一個必然觸發又指名不出補救方式的錯誤，
+            // 實際效果等同「歷史從此鎖死」。
+            Output.error("✗ \(MemoryCommand.describe(error))")
+            return LTMCommandLine.ExitCode.indexStateError.rawValue
         } catch let error as IndexBuilder.BuildError {
             // 查詢路徑的增量續讀委派給 `IndexBuilder`，所以它的錯誤會從這裡出來。
             // `lockHeld` 到不了——facade 把它吞成「這一輪不併入新內容」。
@@ -291,6 +303,13 @@ enum QueryCommand {
                     ✗ 向量側車檔比索引宣稱的短（宣稱 \(declared) 筆、檔案有 \(found) 筆）
                     缺掉的向量無法補——補零會讓向量通道靜默失效而筆數核對照樣通過。
                     這裡拒答而不是降級成 lexical-only。請跑 `ltm build --full` 重建。
+                    """)
+            case .fullRebuildRequired(let detail):
+                Output.error(
+                    """
+                    ✗ 索引需要整份重建，查詢路徑不會代勞：\(detail)
+                    整份重建會刪掉 DB 與側車，而這條路徑上還有查詢正持有連線。
+                    請自己跑 `ltm build --full`。
                     """)
             case .lockHeld(let path):
                 Output.error("✗ 意外的鎖錯誤（\(path)）——查詢路徑本應吞掉它。這是 bug。")
@@ -377,9 +396,29 @@ enum QueryCommand {
             }
         }
         var footer = "策略 \(outcome.strategyID)"
-        if outcome.refreshedSources > 0 { footer += "　查詢前併入 \(outcome.refreshedSources) 筆新內容" }
+        // 「N 筆新內容」名實不符——那個數字是**來源檔數**。
+        if outcome.refresh.sourcesRefreshed > 0 {
+            footer += "　查詢前併入 \(outcome.refresh.sourcesRefreshed) 個來源檔的新內容"
+        }
         if outcome.eventsRecorded > 0 { footer += "　已記錄 \(outcome.eventsRecorded) 筆 shown 事件" }
         print("— \(footer)")
+
+        // 讀不到的來源**不會被作廢**（讀不到 ≠ 消失），但不作廢就必須說出來——
+        // 否則索引少了這些檔的新內容，而使用者看到的是一次成功的查詢。
+        //
+        // 這條路徑跑的是與 `ltm build` **完全相同**的那段掃描，所以兩邊說法不一致
+        // 沒有任何理由：先前 query 把診斷資訊整批丟掉，而它是使用者最常走的介面。
+        if !outcome.refresh.sourcesUnreadable.isEmpty {
+            Output.error(
+                "  ⚠ \(outcome.refresh.sourcesUnreadable.count) 個來源檔讀不到，本輪未更新（既有內容保留）")
+            for key in outcome.refresh.sourcesUnreadable.prefix(3) { Output.error("      \(key)") }
+            if outcome.refresh.sourcesUnreadable.count > 3 {
+                Output.error("      …另 \(outcome.refresh.sourcesUnreadable.count - 3) 個")
+            }
+        }
+        if outcome.refresh.skipped.total > 0 {
+            Output.error("  ⚠ 併入時跳過 \(outcome.refresh.skipped.total) 筆紀錄（`ltm build` 可看分類）")
+        }
     }
 
     static func printJSON(_ outcome: QueryOutcome) throws {

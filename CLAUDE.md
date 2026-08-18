@@ -153,7 +153,8 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
   `human-like` 與 `archival` 逐字相同。現行規則是命中的通道數（多重編碼），零參數，
   帶內分佈量測見 `docs/measurements/2026-08-17-band-population.md`。
 - **`sessionId` 不是身分，是導航資訊**。session resume 會把同一則 turn 複製進新檔案
-  並換上新的 sessionId（實測 300 檔 5,722 筆、內容全同、其中 4,337 筆 sessionId 不同）。
+  並換上新的 sessionId（全語料 8,324 檔 12,488 筆、內容 **100%** 相同、其中 98.9%
+  的 sessionId 不同——`docs/measurements/2026-08-18-resume-duplication.md`）。
   拿它當 anchor 的一部分，使用歷史會隨每次 resume 蒸發，而 orphan 原因會誤報成
   「turn 不見了」。anchor 的 source 用 project 指紋。
 - **讀歷史與寫歷史是兩件事**。把「要不要記錄」與「要不要讀取」綁在同一個旗標上，

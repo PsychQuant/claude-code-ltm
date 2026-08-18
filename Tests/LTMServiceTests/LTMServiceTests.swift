@@ -192,7 +192,7 @@ func queryPicksUpAppendedCorpusContent() throws {
 
     let outcome = try service.query(text: "後來補上", limit: 10, scope: .allProjects)
 
-    #expect(outcome.refreshedSources > 0, "查詢應該先把新內容併進索引")
+    #expect(outcome.refresh.sourcesRefreshed > 0, "查詢應該先把新內容併進索引")
     #expect(outcome.hits.contains { $0.snippet.contains("後來補上") })
 }
 
@@ -488,7 +488,7 @@ func queryPathHonoursTheBuildLock() throws {
     defer { held.release() }
 
     let outcome = try service.query(text: "最初", limit: 10, scope: .allProjects)
-    #expect(outcome.refreshedSources == 0, "鎖被持有時不得寫入索引")
+    #expect(outcome.refresh.sourcesRefreshed == 0, "鎖被持有時不得寫入索引")
     #expect(!outcome.hits.isEmpty, "查詢仍應以既有索引回答，不因為拿不到鎖而失敗")
 }
 
@@ -589,3 +589,59 @@ func truncationFollowsTheSameOrderAsDisplay() throws {
 // 都算數，於是那個性質看起來有人守。上面兩條在刻意構造的反轉語料上驗過會紅
 // （分別對應「不排」與「用分數截、用 band 排」兩種錯法），由它們接手。
 
+
+// MARK: - 查詢路徑的診斷資訊與「不得整份重建」（round-3 verify）
+
+@Test("查詢路徑回報讀不到的來源——它跑的是與 build 完全相同的那段掃描")
+func queryPathReportsUnreadableSources() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["會變成讀不到的內容", "另一段"])
+    let service = try workspace.service()
+    try service.build()
+
+    let file = workspace.corpus.appendingPathComponent("proj-one/s.jsonl")
+    try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+    defer {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+    }
+
+    let outcome = try service.query(text: "內容", limit: 10, scope: .allProjects)
+    #expect(!outcome.hits.isEmpty, "讀不到不等於消失——既有內容必須還在")
+    #expect(
+        outcome.refresh.sourcesUnreadable.count == 1,
+        "同一段掃描走 build 會說出讀不到哪些檔，走 query 不該一個字都不說")
+}
+
+@Test("查詢路徑拒絕整份重建，而不是從查詢裡刪掉 DB 與側車")
+func queryPathRefusesFullRebuild() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["內容一", "內容二"])
+    let service = try workspace.service()
+    try service.build()
+
+    // 模擬 TOCTOU：query 讀完 stamp 之後、build 重讀之前，另一個行程改了 layout。
+    // 直接把 layout_version 改成當前值以外的東西，等價於「第二次讀會 mismatch」。
+    let database = try IndexDatabase(path: workspace.derived.databaseURL.path)
+    try database.setMeta("layout_version", String(IndexDatabase.layoutVersion + 1))
+    database.close()
+
+    // query 前段的 layout 檢查會先擋下（那是對的），所以這裡直接驗 IndexBuilder
+    // 這一側的前置條件——它才是「從查詢路徑刪掉衍生檔」的實際入口。
+    var thrown: Error?
+    do {
+        _ = try IndexBuilder(
+            location: workspace.derived,
+            scanner: CorpusScanner(corpusRoot: workspace.corpus), embedder: FixedEmbedder()
+        ).build(refusingFullRebuild: true)
+    } catch { thrown = error }
+    guard case .some(IndexBuilder.BuildError.fullRebuildRequired) = thrown as? IndexBuilder.BuildError
+    else {
+        Issue.record("必須拒絕而不是重建，實際：\(String(describing: thrown))")
+        return
+    }
+    #expect(
+        FileManager.default.fileExists(atPath: workspace.derived.databaseURL.path),
+        "拒絕的意思是衍生檔還在——重建會先 discardDerivedArtifacts")
+}

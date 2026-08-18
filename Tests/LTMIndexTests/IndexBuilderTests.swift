@@ -260,7 +260,8 @@ func deletingOneResumeCopyKeepsTheTurn() throws {
         try? FileManager.default.removeItem(at: workspace.derived.root)
     }
     // 同一則 turn（同 uuid、同內容）出現在兩個檔——這正是 session resume
-    // 在真實語料裡的樣子（實測 300 檔 5,722 筆）。
+    // 在真實語料裡的樣子（全語料 8,324 檔 12,488 筆，見
+    // `docs/measurements/2026-08-18-resume-duplication.md`）。
     let uuid = "0000ffff-aaaa-bbbb-cccc-dddddddddddd"
     let text = "這一則會出現在兩個 session 檔裡"
     _ = try writeSession(
@@ -318,4 +319,62 @@ func unreadableSourcesAreReportedNotSilentlyKept() throws {
     #expect(
         report.sourcesUnreadable.count == 1,
         "不作廢就必須說出來；沉默地保留會讓這次建置看起來完整")
+}
+
+@Test("側車檔整個不見時拒絕建置，不把 vector_row 接到別人的向量上")
+func missingSidecarIsRefusedNotSilentlyRebuilt() throws {
+    let workspace = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: workspace.corpus)
+        try? FileManager.default.removeItem(at: workspace.derived.root)
+    }
+    try writeTurns(in: workspace.corpus, texts: ["第一段內容"])
+    let embedder = StubEmbedder(revision: "r1")
+    func builder() -> IndexBuilder {
+        IndexBuilder(
+            location: workspace.derived,
+            scanner: CorpusScanner(corpusRoot: workspace.corpus), embedder: embedder)
+    }
+    #expect(try builder().build().totalChunks == 1)
+
+    // 側車檔整個消失——這是「向量真的不見了」的極端情形，不是「沒有向量要處理」。
+    try FileManager.default.removeItem(at: workspace.derived.vectorsURL)
+    // 語料前進，讓下一輪真的會 append。
+    _ = try writeSession(
+        in: workspace.corpus, project: "proj-one", file: "session.jsonl",
+        lines: [
+            turnLine(uuid: "00000000-aaaa-bbbb-cccc-dddddddddddd",
+                     session: "11111111-2222-3333-4444-555555555555",
+                     role: "user", text: "第一段內容"),
+            turnLine(uuid: "00000001-aaaa-bbbb-cccc-dddddddddddd",
+                     session: "11111111-2222-3333-4444-555555555555",
+                     role: "assistant", text: "第二段內容"),
+        ])
+
+    var thrown: Error?
+    do { _ = try builder().build() } catch { thrown = error }
+    guard case .some(IndexBuilder.BuildError.sidecarShorterThanDeclared(let declared, let found)) =
+        thrown as? IndexBuilder.BuildError
+    else {
+        Issue.record("側車不見必須拒絕，實際：\(String(describing: thrown))")
+        return
+    }
+    #expect(declared > 0 && found == 0, "找到 0 列，不是「沒事可做」")
+}
+
+@Test("索引本來就沒有向量時，缺側車檔不算錯")
+func absentSidecarIsFineWhenNoVectorsAreDeclared() throws {
+    let workspace = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: workspace.corpus)
+        try? FileManager.default.removeItem(at: workspace.derived.root)
+    }
+    // embedder 對所有文字都產不出向量 → vector_count 恆為 0。
+    try writeTurns(in: workspace.corpus, texts: ["第一段內容"])
+    let embedder = StubEmbedder(revision: "r1", refusing: ["第一段內容"])
+    let report = try IndexBuilder(
+        location: workspace.derived, scanner: CorpusScanner(corpusRoot: workspace.corpus),
+        embedder: embedder
+    ).build()
+    #expect(report.totalChunks == 1, "沒有向量不影響 lexical 通道")
 }

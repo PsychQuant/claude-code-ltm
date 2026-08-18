@@ -107,3 +107,35 @@
 - [x] 9.8 **`defaultStrategyLeavesRetrievalOrderIntact` 改成真的比對兩份順序**。
   它的名字一直宣稱「順序等於純檢索順序」而斷言只有 displacement 與 band 值域；
   位移為零是策略對自己行為的自述，見證不到呼叫端做的重排。
+
+## 10. round-3 verify 的其餘 findings（2026-08-18）
+
+- [x] 10.1 **`truncateSidecar` 的守衛被 `fileExists` 早退整個繞過**。「側車檔整個
+  不見」是「向量真的不見了」的極端情形，卻是唯一沒被涵蓋的：`vectorRow` 仍從
+  `vector_count` 起算、`appendVectors` 重建新檔，舊 chunk 的 `vector_row = 0`
+  於是指到新檔第 0 列——**A 的相似度用 B 的向量算**，而 CLI 印「✓ 索引完成」。
+  改成 `rows == 0` 才允許早退。
+- [x] 10.2 **`supersededAnchorRule` 回報的是事件序號不是檔案行號**。空行每出現
+  一次就讓後面的行號往前偏一位，而同一個偏移在 `corruptLines` 上已經修過一次
+  （#1 verify R5），也有測試在守。改成逐行掃描時記錄真實行號。
+- [x] 10.3 **兩條讀取路徑都不得把舊規則 anchor 原樣交出去**。spec 的條款主語是
+  reading 而不是某一個方法，而 `allEvents(skippingCorrupt:)` 先前完全不檢查。
+  參數更名 `skippingUnusable`（舊規則紀錄並不損壞，兩類分開回報）。
+- [x] 10.4 **加 `ltm memory` 修復命令**。先前的錯誤訊息指名不出補救方式，因為
+  修復路徑只有測試在呼叫、沒有任何使用者可達的入口——而 anchor 規則換代後，
+  任何在換代前寫過事件的人第一次用會讀歷史的策略就必然撞上。一個必然觸發又沒有
+  出路的錯誤，實際效果等同「歷史從此鎖死」。`--prune` 先備份再原子替換。
+- [x] 10.5 **`EventStoreError` 在 CLI 有 handler 了**。先前以裸 enum 逸出。
+- [x] 10.6 **查詢路徑不再丟掉診斷資訊**。委派之後它跑的是與 `ltm build` 完全
+  相同的那段掃描，所以「走 build 會說出讀不到哪些檔、走 query 一個字都不說」
+  沒有任何理由——而 query 是使用者最常走的那條。`QueryOutcome.refresh` 帶回
+  `sourcesUnreadable` / `skipped` / `sourcesInvalidated`。
+- [x] 10.7 **「查詢路徑不可能觸發整份重建」從註解變成前置條件**。原本的推理有個
+  洞：`query` 讀 stamp 時不持鎖，而 `build` 拿到鎖後會重讀；兩次之間若有另一個
+  行程改了 `layout_version`，`discardDerivedArtifacts()` 會從查詢路徑刪掉 DB、
+  側車與 state。`build(refusingFullRebuild:)` 讓那個前提可以被強制。
+- [x] 10.8 **補上「300 檔 5,722 筆」的量測紀錄**。那個數字散在七處，是整個
+  turn-identity 改動的承重證據，而 `docs/measurements/` 下沒有任何紀錄——不合
+  誠實邊界。改成全語料量測（8,324 檔、12,488 筆、內容 100% 相同、98.9%
+  sessionId 不同），記錄在 `docs/measurements/2026-08-18-resume-duplication.md`，
+  七處全部改成引用它。

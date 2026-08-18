@@ -10,8 +10,9 @@ import Foundation
 /// 清單上——它不是索引產生的——**卻一樣會變**：使用者 resume 或 fork 一個 session
 /// 時，同一則 turn 會被複製進新檔案並帶上新的 sessionId。
 ///
-/// 實測（2026-08-17，300 個真實語料檔）：5,722 個 turn 識別碼出現在一個以上的檔案，
-/// 內容全部相同，其中 4,337 個的 sessionId 不同。以 sessionId 為 source 的 anchor
+/// 量測（`docs/measurements/2026-08-18-resume-duplication.md`，全語料 8,324 檔）：
+/// 12,488 個 turn 識別碼出現在一個以上的檔案，內容 **100%** 相同，其中 98.9%
+/// 的 sessionId 不同。以 sessionId 為 source 的 anchor
 /// 在 resume 之後全部解析不到，而 orphan 原因會報「turn 不見了」——但那則 turn
 /// 明明還在。使用歷史因此隨著每一次 resume 安靜蒸發。
 ///

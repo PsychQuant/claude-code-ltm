@@ -117,11 +117,38 @@ public struct QueryHit: Sendable, Equatable {
 }
 
 /// 一次查詢的完整結果。
+/// 查詢路徑上那一次增量續讀的結果。
+public struct RefreshReport: Sendable {
+    /// 有新內容的來源檔數。
+    public let sourcesRefreshed: Int
+    /// **讀不到**的來源（權限、I/O）。它們不會被作廢，但必須說出來。
+    public let sourcesUnreadable: [String]
+    /// 因為消失或內容變動而被作廢的來源數。
+    public let sourcesInvalidated: Int
+    /// 跳過的紀錄分類統計。
+    public let skipped: SkipTally
+
+    public init(
+        sourcesRefreshed: Int, sourcesUnreadable: [String], sourcesInvalidated: Int,
+        skipped: SkipTally
+    ) {
+        self.sourcesRefreshed = sourcesRefreshed
+        self.sourcesUnreadable = sourcesUnreadable
+        self.sourcesInvalidated = sourcesInvalidated
+        self.skipped = skipped
+    }
+}
+
 public struct QueryOutcome: Sendable {
     public let hits: [QueryHit]
     public let strategyID: String
-    /// 這次查詢是否有把新內容併進索引（增量續讀）。
-    public let refreshedSources: Int
+    /// 這次查詢的增量續讀做了什麼——**含它讀不到什麼**。
+    ///
+    /// 先前這裡只有一個 `refreshedSources: Int`，其餘（讀不到的來源、跳過的紀錄、
+    /// 作廢的來源）在委派給 `IndexBuilder` 之後被原地丟掉。那讓同一段掃描出現兩種
+    /// 說法：走 `ltm build` 會說出讀不到哪些檔，走 `ltm query` 一個字都不說——而
+    /// `ltm query` 是使用者最常走的那條，也就是那個「看起來成功」的介面。
+    public let refresh: RefreshReport
     /// 寫了幾筆 `shown` 事件（未開啟記錄時為 0）。
     public let eventsRecorded: Int
 }
@@ -319,7 +346,7 @@ public struct LTMService {
         }
 
         return QueryOutcome(
-            hits: hits, strategyID: chosen.id.value, refreshedSources: refreshed,
+            hits: hits, strategyID: chosen.id.value, refresh: refreshed,
             eventsRecorded: recorded)
     }
 
@@ -348,13 +375,22 @@ public struct LTMService {
     /// - **不可能觸發整份重建**：`query` 在呼叫這裡之前已經檢查過 layout 版本、
     ///   embedding revision 與 anchor 定址規則，三者不符都已拒答。所以
     ///   `build()` 內的 `stampsMismatch` 分支在這條路徑上到不了。
-    private func refreshIncrementally() throws -> Int {
+    private func refreshIncrementally() throws -> RefreshReport {
         let builder = IndexBuilder(
             location: location, scanner: CorpusScanner(corpusRoot: corpusRoot), embedder: embedder)
         do {
-            return try builder.build().sourcesRefreshed
+            // `refusingFullRebuild`：這條路徑上「整份重建」永遠是錯的答案——它會
+            // 在查詢持有連線時刪掉 DB 與側車。先前這是註解裡的推理，現在是前置條件。
+            let report = try builder.build(refusingFullRebuild: true)
+            return RefreshReport(
+                sourcesRefreshed: report.sourcesRefreshed,
+                sourcesUnreadable: report.sourcesUnreadable,
+                sourcesInvalidated: report.sourcesInvalidated,
+                skipped: report.skipped)
         } catch IndexBuilder.BuildError.lockHeld {
-            return 0
+            return RefreshReport(
+                sourcesRefreshed: 0, sourcesUnreadable: [], sourcesInvalidated: 0,
+                skipped: SkipTally())
         }
     }
 
