@@ -246,3 +246,45 @@ func missingStateWithExistingIndexIsRefused() throws {
                                      embedder: StubEmbedder(revision: "rev-A")).build(full: true)
     #expect(recovered.wasFullRebuild)
 }
+
+// MARK: - 刪檔作廢 × 去重的交互作用（round-2 verify HIGH）
+//
+// 去重把「同一則 turn 出現在多個檔」收斂成一列，而作廢的粒度是 `source_key`
+// ——一列只記得住一個。兩個機制各自正確，交互作用不正確。
+
+@Test("刪掉重複來源之一，不得刪掉另一個來源仍然持有的 turn")
+func deletingOneResumeCopyKeepsTheTurn() throws {
+    let workspace = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: workspace.corpus)
+        try? FileManager.default.removeItem(at: workspace.derived.root)
+    }
+    // 同一則 turn（同 uuid、同內容）出現在兩個檔——這正是 session resume
+    // 在真實語料裡的樣子（實測 300 檔 5,722 筆）。
+    let uuid = "0000ffff-aaaa-bbbb-cccc-dddddddddddd"
+    let text = "這一則會出現在兩個 session 檔裡"
+    _ = try writeSession(
+        in: workspace.corpus, project: "proj-one", file: "a.jsonl",
+        lines: [turnLine(uuid: uuid, session: "aaaaaaaa-1111-1111-1111-111111111111",
+                         role: "user", text: text)])
+    let laterFile = try writeSession(
+        in: workspace.corpus, project: "proj-one", file: "b.jsonl",
+        lines: [turnLine(uuid: uuid, session: "bbbbbbbb-2222-2222-2222-222222222222",
+                         role: "user", text: text)])
+
+    let embedder = StubEmbedder(revision: "r1")
+    func builder() -> IndexBuilder {
+        IndexBuilder(
+            location: workspace.derived,
+            scanner: CorpusScanner(corpusRoot: workspace.corpus), embedder: embedder)
+    }
+    #expect(try builder().build().totalChunks == 1, "去重之後只該有一列")
+
+    // 刪掉勝出的那個來源檔。另一個檔**沒有變動**，所以增量掃描不會重新產出它。
+    try FileManager.default.removeItem(at: laterFile)
+    let report = try builder().build()
+
+    #expect(
+        report.totalChunks == 1,
+        "turn 仍然存在於 a.jsonl；把它從索引刪掉會讓增量結果與全量重建不同（不變式 2）")
+}

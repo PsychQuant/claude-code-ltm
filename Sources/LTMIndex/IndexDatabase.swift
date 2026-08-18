@@ -29,7 +29,7 @@ public final class IndexDatabase {
     ///
     /// 版本不符時整份重建，而不是嘗試遷移：索引是純衍生物（不變式 2），重建的
     /// 代價是時間，遷移寫錯的代價是安靜的錯誤結果。
-    public static let layoutVersion = 2
+    public static let layoutVersion = 3
 
     public enum DatabaseError: Error, Sendable, Equatable {
         case openFailed(path: String, message: String)
@@ -108,7 +108,6 @@ public final class IndexDatabase {
             """
             CREATE TABLE IF NOT EXISTS chunks (
                 id INTEGER PRIMARY KEY,
-                source_key TEXT NOT NULL,
                 project TEXT NOT NULL,
                 project_fingerprint TEXT NOT NULL,
                 session_id TEXT NOT NULL,
@@ -129,7 +128,26 @@ public final class IndexDatabase {
         // upsert 改寫身分欄位，使既有事件的 anchor 全部 orphan。
         try execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS chunks_identity ON chunks(project_fingerprint, uuid)")
-        try execute("CREATE INDEX IF NOT EXISTS chunks_by_source ON chunks(source_key)")
+        // 一則 turn 可以出現在**多個**來源檔——session resume 就是這樣（實測 300 檔
+        // 5,722 筆）。所以「這個 chunk 來自哪裡」是多對多的事實，不能存成 chunks
+        // 的一個欄位。
+        //
+        // 先前正是一個欄位。它與去重（唯一鍵 `(project_fingerprint, uuid)`）交互
+        // 之後會**刪掉還存在的 turn**：兩個檔都有 T，去重後只有一列，欄位只記得住
+        // 其中一個檔；刪掉那個檔就把 T 從索引刪掉，而另一個檔沒有變動，增量掃描
+        // 不會重新產出它。結果是增量與全量重建不等價——違反不變式 2，且無聲。
+        //
+        // 兩個機制各自正確，交互作用不正確。所以改的是**形狀**，不是刪除邏輯。
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS chunk_sources (
+                chunk_id INTEGER NOT NULL,
+                source_key TEXT NOT NULL,
+                PRIMARY KEY (chunk_id, source_key)
+            )
+            """)
+        try execute(
+            "CREATE INDEX IF NOT EXISTS chunk_sources_by_source ON chunk_sources(source_key)")
         try execute("CREATE INDEX IF NOT EXISTS chunks_by_project ON chunks(project)")
         // 兩條 lexical 通道。`content=''` 表示外部內容表——FTS5 不自己存一份原文，
         // 由 `chunks.text` 當唯一來源，避免同一段文字在檔案裡出現兩次。
@@ -195,20 +213,35 @@ public final class IndexDatabase {
 
     // MARK: - chunk 寫入
 
-    /// 刪掉某來源檔的全部 chunk（prefix 不符 → 整份重解時用）。
+    /// 解除某來源檔對 chunk 的持有；**只有失去最後一個持有者的 chunk 才真的刪掉**。
+    ///
+    /// 「這個檔沒了」與「這則 turn 沒了」是兩件事。session resume 讓同一則 turn
+    /// 同時活在多個檔裡，所以刪掉其中一個檔不代表那則 turn 消失了——它還在別的
+    /// 檔裡，而那個檔沒有變動，增量掃描不會重新產出它。無條件刪除會讓增量結果與
+    /// 全量重建不同（不變式 2），而唯一的症狀是「以前找得到的東西現在找不到」。
     public func deleteChunks(sourceKey: String) throws {
+        // 先找出「只剩這一個持有者」的 chunk——它們才是真的要消失的。
+        var orphaned: [(rowID: Int64, text: String)] = []
+        try query(
+            """
+            SELECT c.id, c.text FROM chunks c
+            JOIN chunk_sources s ON s.chunk_id = c.id AND s.source_key = ?
+            WHERE (SELECT COUNT(*) FROM chunk_sources t WHERE t.chunk_id = c.id) = 1
+            """, bind: [.text(sourceKey)]
+        ) { statement in
+            orphaned.append(
+                (rowID: sqlite3_column_int64(statement, 0), text: columnText(statement, 1)))
+        }
         // FTS5 是 external-content 表，刪 chunk 前要先把它的 FTS 列刪掉，
         // 否則被作廢的舊文字仍然命中得到——那正是「安靜地回舊文字」的來源。
-        try query("SELECT id, text FROM chunks WHERE source_key = ?", bind: [.text(sourceKey)]) {
-            statement in
-            let rowID = sqlite3_column_int64(statement, 0)
-            let text = columnText(statement, 1)
+        for chunk in orphaned {
             // **不吞錯**：FTS 刪除失敗卻照樣刪掉 chunks 並提交，會讓殘留 token
             // 在 rowid 被重用時錯配到新 chunk。唯一防「安靜地回舊文字」的那一步
             // 本身不可以是靜默的。
-            try self.deleteFTSRows(rowID: rowID, text: text)
+            try deleteFTSRows(rowID: chunk.rowID, text: chunk.text)
+            try execute("DELETE FROM chunks WHERE id = ?", bind: [.integer(chunk.rowID)])
         }
-        try execute("DELETE FROM chunks WHERE source_key = ?", bind: [.text(sourceKey)])
+        try execute("DELETE FROM chunk_sources WHERE source_key = ?", bind: [.text(sourceKey)])
     }
 
     private func deleteFTSRows(rowID: Int64, text: String) throws {
@@ -248,9 +281,9 @@ public final class IndexDatabase {
             try execute(
                 """
                 INSERT INTO chunks(
-                    source_key, project, project_fingerprint, session_id, uuid, timestamp,
+                    project, project_fingerprint, session_id, uuid, timestamp,
                     role, text, anchor_hash, anchor_span_lower, anchor_span_upper)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_fingerprint, uuid) DO UPDATE SET
                     text=excluded.text,
                     role=excluded.role,
@@ -261,12 +294,10 @@ public final class IndexDatabase {
                     -- 它是「讀者最可能打得開的那個 session」，所以取最新的。
                     session_id=CASE WHEN excluded.timestamp >= chunks.timestamp
                                     THEN excluded.session_id ELSE chunks.session_id END,
-                    source_key=CASE WHEN excluded.timestamp >= chunks.timestamp
-                                    THEN excluded.source_key ELSE chunks.source_key END,
                     timestamp=MAX(excluded.timestamp, chunks.timestamp)
                 """,
                 bind: [
-                    .text(sourceKey), .text(chunk.project), .text(chunk.projectFingerprint),
+                    .text(chunk.project), .text(chunk.projectFingerprint),
                     .text(chunk.sessionID), .text(chunk.uuid),
                     .double(chunk.timestamp.timeIntervalSince1970),
                     .text(chunk.role), .text(chunk.text),
@@ -281,6 +312,10 @@ public final class IndexDatabase {
             ) { statement in
                 rowID = sqlite3_column_int64(statement, 0)
             }
+            // 這個來源檔持有這個 chunk。同一個檔重掃時 `OR IGNORE` 讓它是冪等的。
+            try execute(
+                "INSERT OR IGNORE INTO chunk_sources(chunk_id, source_key) VALUES(?, ?)",
+                bind: [.integer(rowID), .text(sourceKey)])
             try execute(
                 "INSERT INTO chunks_trigram(rowid, text) VALUES(?, ?)",
                 bind: [.integer(rowID), .text(chunk.text)])
