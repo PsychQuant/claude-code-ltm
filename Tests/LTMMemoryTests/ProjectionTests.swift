@@ -17,13 +17,13 @@ private func turn(_ id: String, _ text: String) -> Turn {
 }
 
 private func anchor(_ id: String, _ text: String) -> Anchor {
-    Anchor(source: "fixture-a", turn: turn(id, text), span: 0..<8)
+    Anchor(source: ProjectFingerprint.of("fixture-a"), turn: turn(id, text), span: 0..<8)
 }
 
 private func corpus(_ turns: [Turn]) -> FixtureCorpus {
     var map: [String: Turn] = [:]
     for t in turns { map[t.id] = t }
-    return FixtureCorpus(turns: ["fixture-a": map])
+    return FixtureCorpus(turns: [ProjectFingerprint.of("fixture-a"): map])
 }
 
 private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event {

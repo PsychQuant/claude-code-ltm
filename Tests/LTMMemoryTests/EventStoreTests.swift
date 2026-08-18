@@ -16,7 +16,7 @@ private func tempDir() throws -> URL {
 
 private func anchor(_ text: String, id: String = "t1") -> Anchor {
     Anchor(
-        source: "fixture-a",
+        source: ProjectFingerprint.of("fixture-a"),
         turn: Turn(id: id, role: "user", timestamp: Date(), text: text),
         span: 0..<min(10, text.unicodeScalars.count))
 }
@@ -177,7 +177,7 @@ private let policy = RankingPolicyID("archival")
 /// 與隱私測試那條同形，複製一份以免跨檔耦合。
 private func canonicalLineForLineNumberTest() throws -> Data {
     let a = Anchor(
-        source: "fixture-a",
+        source: ProjectFingerprint.of("fixture-a"),
         turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
         span: 0..<4)
     let e = Event.interaction(
@@ -225,7 +225,7 @@ private func canonicalLineForLineNumberTest() throws -> Data {
 
 private func anchorForLockTest() -> Anchor {
     Anchor(
-        source: "fixture-a",
+        source: ProjectFingerprint.of("fixture-a"),
         turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
         span: 0..<4)
 }

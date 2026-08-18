@@ -40,6 +40,20 @@ public enum ProjectFingerprint {
     /// 任何實際關切；同時遠在 `OpaqueIdentifier` 的 64 字元上限之內。
     public static let hexLength = 32
 
+    /// 這個值是不是**當前規則**產生的指紋形狀。
+    ///
+    /// 用於事件層的拒絕路徑（memory-events 的 "Anchors recorded under a superseded
+    /// source-fingerprint form are refused, not reinterpreted"）。指紋本身不帶
+    /// 「我是哪個規則算的」，所以只能從形狀判定：當前規則是 32 個小寫十六進位字元，
+    /// 而被它取代的舊規則（sessionId）是 36 字元、含連字號——兩者不可能混淆。
+    ///
+    /// **誠實邊界**：這是形狀判定，不是版本判定。若日後某個新規則也產生 32 hex，
+    /// 它與現行規則在這裡分不出來——屆時必須改成在紀錄裡帶明確的規則標記，
+    /// 而不是把這個函式再加一條分支。
+    public static func hasCurrentRuleShape(_ value: String) -> Bool {
+        value.count == hexLength && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+
     /// 由 project 目錄名算出指紋。
     ///
     /// 輸入是**目錄名**而不是完整路徑：語料根的位置可以被環境變數覆寫，把它算進去

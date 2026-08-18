@@ -145,9 +145,22 @@ public struct ContentHash: Sendable, Hashable, Codable, CustomStringConvertible 
 
 /// 指向語料某一段文字的 canonical 位址。
 ///
-/// 四元組刻意不含任何索引產生的識別碼（chunk id、rowid、向量位移）。chunker
-/// 一調，用 chunk id 的紀錄會**安靜地**指向別的文字；改用內容雜湊之後，同一
-/// 個失敗會變成明確的 `.orphaned(.contentHashMismatch)`。
+/// ## 定址的判準
+///
+/// **四元組的每一個成分都不得是「內容沒變它卻會變」的值。** 判準寫成性質，
+/// 不是寫成一份「哪些識別碼不能用」的清單——因為清單會漏，而它已經漏了兩次：
+///
+/// 1. **chunk id**（索引產生的）。chunker 一調，紀錄就**安靜地**指向別的文字。
+///    改用內容雜湊之後，同一個失敗變成明確的 `.orphaned(.contentHashMismatch)`。
+/// 2. **`sessionId`**（不是索引產生的，所以不在第一次那份清單上——卻一樣會變）。
+///    session resume 把同一則 turn 複製進新檔並換上新 id，既有事件的 anchor
+///    因此全部變成 orphan，而 orphan 原因會誤報成「turn 不見了」。
+///
+/// 第二次發生時，本註解的舊版本正寫著「不含任何**索引產生的**識別碼」並列出
+/// 三個例子——那句話讀起來像判準，實際上是一份清單，而 `sessionId` 落在清單外。
+/// 所以現在這裡放的是性質，例子只作為它被違反的紀錄，不作為它的定義。
+///
+/// 現行的 `source` 是 project 指紋，理由與它自己的誠實邊界見 `ProjectFingerprint`。
 public struct Anchor: Sendable, Hashable, Codable {
     public let source: String
     public let turnID: String

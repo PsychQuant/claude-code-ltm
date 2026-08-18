@@ -20,7 +20,7 @@ public struct ScoredChunk: Sendable, Equatable {
     /// 這一筆在哪些通道出現過。用於解釋，也用於測試融合行為。
     public let channels: Set<Channel>
 
-    public enum Channel: String, Sendable, Hashable {
+    public enum Channel: String, Sendable, Hashable, CaseIterable {
         case trigram
         case segment
         case vector

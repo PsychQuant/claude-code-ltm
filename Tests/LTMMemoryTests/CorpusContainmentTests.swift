@@ -145,7 +145,7 @@ import Testing
         .interaction(
             .shown,
             anchor: Anchor(
-                source: "fixture-a",
+                source: ProjectFingerprint.of("fixture-a"),
                 turn: Turn(id: "t1", role: "user", timestamp: Date(), text: "合成文字內容"),
                 span: 0..<4),
             at: Date(), generation: GenerationID("build-1"), policy: RankingPolicyID("archival")))
@@ -209,7 +209,7 @@ import Testing
 
 private func anchorForFifoTest() -> Anchor {
     Anchor(
-        source: "fixture-a",
+        source: ProjectFingerprint.of("fixture-a"),
         turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
         span: 0..<4)
 }
@@ -226,7 +226,7 @@ private func anchorForFifoTest() -> Anchor {
         .interaction(
             .shown,
             anchor: Anchor(
-                source: "fixture-a",
+                source: ProjectFingerprint.of("fixture-a"),
                 turn: Turn(id: "t1", role: "user", timestamp: Date(), text: "合成文字內容"),
                 span: 0..<4),
             at: Date(), generation: GenerationID("build-1"),

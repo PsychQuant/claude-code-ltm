@@ -420,3 +420,87 @@ func queryPathHonoursTheBuildLock() throws {
     #expect(outcome.refreshedSources == 0, "鎖被持有時不得寫入索引")
     #expect(!outcome.hits.isEmpty, "查詢仍應以既有索引回答，不因為拿不到鎖而失敗")
 }
+
+// MARK: - band 分層必須滿足 seam 的前置條件（round-2 verify CRITICAL）
+
+/// 造一個 ScoredChunk，只控制我們要測的兩個變數：命中通道數與融合名次。
+private func scoredChunk(rank: Int, channels: Set<ScoredChunk.Channel>, id: Int) -> ScoredChunk {
+    let uuid = String(format: "%08x-aaaa-bbbb-cccc-dddddddddddd", id)
+    let text = "候選 \(id) 的內容"
+    let turn = Turn(id: uuid, role: "user", timestamp: Date(timeIntervalSince1970: 1), text: text)
+    return ScoredChunk(
+        project: "proj-one", sessionID: "11111111-2222-3333-4444-555555555555", uuid: uuid,
+        timestamp: turn.timestamp, text: text,
+        anchor: Anchor(source: ProjectFingerprint.of("proj-one"), turn: turn,
+                       span: 0..<text.unicodeScalars.count),
+        fusedScore: 1.0 - Double(rank) * 0.01, fusedRank: rank, channels: channels)
+}
+
+@Test("band 分層後必然非遞減——seam 的前置條件")
+func layeringSatisfiesTheSeamPrecondition() throws {
+    // 融合順序與通道數**不單調相關**：名次 0 只命中一條，名次 2 命中三條。
+    // 這正是真實語料會出現的形狀（2 通道但各通道名次靠前 vs 3 通道但都很深）。
+    let unsorted = [
+        scoredChunk(rank: 0, channels: [.vector], id: 0),
+        scoredChunk(rank: 1, channels: [.trigram, .segment], id: 1),
+        scoredChunk(rank: 2, channels: [.trigram, .segment, .vector], id: 2),
+        scoredChunk(rank: 3, channels: [.segment], id: 3),
+    ]
+    // 未排序時 band 是 [2,1,0,2] —— 遞減，會讓 requireBandsInOrder 拋錯。
+    let rawBands = unsorted.map { LTMService.band(for: $0) }
+    #expect(rawBands == [2, 1, 0, 2])
+    #expect(!zip(rawBands, rawBands.dropFirst()).allSatisfy { $0 <= $1 },
+            "前提：未排序的輸入確實違反前置條件，否則這條測試證明不了任何事")
+
+    let layered = LTMService.layered(unsorted)
+    let bands = layered.map { LTMService.band(for: $0) }
+
+    // 三通道 → band 0；兩通道 → band 1；一通道 → band 2（兩筆）。
+    #expect(bands == [0, 1, 2, 2], "band 必須非遞減，且同帶為單一連續區段")
+    // 帶內維持融合次序：band 2 的兩筆原名次是 0 與 3，排序後仍是 0 在前。
+    let bandTwo = layered.filter { LTMService.band(for: $0) == 2 }.map(\.fusedRank)
+    #expect(bandTwo == [0, 3], "帶內必須保持融合順序")
+
+    // 直接把排序後的候選餵給 seam 的前置條件檢查——這才是它真正要滿足的契約。
+    let candidates = layered.map {
+        Candidate(anchor: $0.anchor, baseScore: $0.fusedScore,
+                  band: RelevanceBand(rank: LTMService.band(for: $0)))
+    }
+    #expect(throws: Never.self) {
+        try MemoryStrategySupport.requireBandsInOrder(candidates)
+    }
+}
+
+@Test("未經分層的候選會被 seam 拒絕——證明上一條測的不是恆真式")
+func unlayeredCandidatesAreRejectedBySeam() throws {
+    let unsorted = [
+        scoredChunk(rank: 0, channels: [.vector], id: 0),
+        scoredChunk(rank: 1, channels: [.trigram, .segment, .vector], id: 1),
+    ]
+    let candidates = unsorted.map {
+        Candidate(anchor: $0.anchor, baseScore: $0.fusedScore,
+                  band: RelevanceBand(rank: LTMService.band(for: $0)))
+    }
+    #expect(throws: StrategyViolation.self) {
+        try MemoryStrategySupport.requireBandsInOrder(candidates)
+    }
+}
+
+@Test("查詢輸出的 band 序列非遞減")
+func queryOutputBandsAreNonDecreasing() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: [
+        "記憶策略可插拔的比較軸", "記憶與檢索的關係", "完全不相干的第三段",
+        "另一段關於策略的討論", "第五段內容", "第六段其他內容",
+    ])
+    let service = try workspace.service()
+    try service.build()
+
+    for query in ["記憶", "策略", "內容", "檢索"] {
+        let outcome = try service.query(text: query, limit: 20, scope: .allProjects)
+        let bands = outcome.hits.map(\.band)
+        #expect(zip(bands, bands.dropFirst()).allSatisfy { $0 <= $1 },
+                "查詢 \(query) 的 band 序列遞減了：\(bands)")
+    }
+}

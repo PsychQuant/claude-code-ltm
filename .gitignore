@@ -33,3 +33,6 @@ fixtures/real/
 # 前者是每台機器各自的（檔名就叫 local），後者是 GitHub 上已有的東西的副本。
 .claude/.idd/
 openspec/.vector-search.db*
+
+# 編輯器本機設定（VSCode Swift extension 自動產生，機器相依）
+.vscode/

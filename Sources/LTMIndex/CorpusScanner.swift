@@ -9,8 +9,13 @@ import LTMCore
 ///
 /// `project` 刻意**不進** anchor：語料的 project 目錄名是路徑轉寫（可能很長、
 /// 可能含任意字元），而 `Anchor.source` 受 `OpaqueIdentifier` 約束（ASCII、≤64）。
-/// 把它塞進去會讓長路徑的專案整個索引不了。anchor 用 sessionID + uuid 定址就夠——
-/// 那兩個是 UUID，且在語料內唯一。
+/// 把它塞進去會讓長路徑的專案整個索引不了。anchor 改用 project 的**指紋**——
+/// 一個由目錄名算出的 32 字元雜湊，同時解掉長度與隱私兩個問題。
+///
+/// （這則註解先前寫著「anchor 用 sessionID + uuid 定址就夠——那兩個是 UUID，
+/// 且在語料內唯一」。**後半句是錯的**：session resume 會讓同一則 turn 帶著不同的
+/// sessionID 出現在多個檔案裡，於是「唯一」的是 uuid，不是這個組合。錯的理由
+/// 撐著一個錯的決定，而註解改起來不會編譯失敗——所以它比程式碼活得更久。）
 public struct CorpusChunk: Sendable, Equatable {
     /// 這個 chunk 來自哪個來源檔（state 的鍵）。
     ///

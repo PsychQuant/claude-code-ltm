@@ -21,6 +21,11 @@ public enum EventStoreError: Error, Sendable {
     case corruptRecord(path: String, lineNumber: Int)
     /// 指定的路徑落在唯讀語料內。
     case pathInsideReadOnlyCorpus(path: String)
+    /// 紀錄的 anchor source 是被取代的規則產生的。
+    ///
+    /// **具名拒絕，不重新詮釋**：指紋不帶產生它的規則，把舊值拿去跟新規則比對，
+    /// 要嘛解析到錯的 turn、要嘛報成 orphan，而兩者都與正確行為分不出來。
+    case supersededAnchorRule(path: String, lineNumbers: [Int])
     /// 存放目錄是 group／other 可寫且沒有 sticky bit。
     ///
     /// 檔案本身 0o600 在這種目錄裡保護不了什麼：別人換掉整個檔案即可。
@@ -415,7 +420,16 @@ public struct FileEventStore: EventStore {
 
     /// 全部事件，維持寫入順序。
     public func allEvents() throws -> [Event] {
-        try allEvents(skippingCorrupt: false).events
+        let result = try allEvents(skippingCorrupt: false)
+        // 舊規則的 anchor 一律具名拒絕。這條檢查放在**讀取**而不是寫入：寫入端
+        // 產生的一定是當前規則，會出現舊值的只有「這個檔案是改規則之前寫的」。
+        let superseded = result.events.enumerated()
+            .filter { !ProjectFingerprint.hasCurrentRuleShape($0.element.anchor.source) }
+            .map { $0.offset + 1 }
+        guard superseded.isEmpty else {
+            throw EventStoreError.supersededAnchorRule(path: url.path, lineNumbers: superseded)
+        }
+        return result.events
     }
 
     /// 讀取全部事件，可選擇是否跳過壞行。
