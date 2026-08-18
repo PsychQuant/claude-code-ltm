@@ -1,0 +1,435 @@
+import Foundation
+import SQLite3
+import Testing
+
+@testable import LTMCore
+@testable import LTMIndex
+
+// 不變式 2 的性質測試：**任何**語料變異序列之後，增量索引與全量重建的可觀察狀態相同。
+//
+// ## 為什麼是性質測試而不是再多幾條個案
+//
+// `/idd-verify #24` 跑了三輪，四個 findings 是同一條不變式的不同破法：
+//
+// | 破法 | 哪一輪抓到 | 怎麼抓到的 |
+// |---|---|---|
+// | 刪掉一個來源會刪掉別的來源還持有的 turn | round-2 | 人構造反例 |
+// | 活下來的 chunk 指標凍結在被刪的來源上 | round-3 | 人構造反例 |
+// | FTS 文件計數隨作廢單調膨脹 | round-3 | 人構造反例 |
+// | 首建就多算 FTS 文件（去重路徑不冪等） | round-3 | 人構造反例 |
+//
+// 四次都是靠人**臨場想到**一個反例。想不到的那些沒有任何機制會發現——而每一次
+// 「我覺得修好了」的準確率到目前為止是 0/3。
+//
+// 所以這裡不再補第五條個案，而是把不變式本身寫成可執行的性質：隨機生成變異序列、
+// 增量跑一遍、全量重建一遍、比對。破法不需要被想到，只需要被生成。
+//
+// ## 比較的是「可觀察狀態」，不是位元組
+//
+// 有些差異是合法的，把它們算進去會讓測試對真缺陷失去鑑別力：
+//
+// - **`chunks.id`（rowid）**：配置順序相依。anchor 不用 rowid 定址（用內容指紋 +
+//   turn 識別碼 + 內容雜湊），所以它不是身分的一部分。
+// - **`vector_row`**：側車的索引值。它指向的**向量內容**必須相同，值本身不必。
+// - **側車檔長度與 `vector_count`**：增量不回收被刪 chunk 的向量槽，所以檔案會比
+//   全量重建長。只要每個 chunk 解參考到的向量正確，這個差異不可觀察。
+//
+// 剩下的都必須相同——包括 FTS5 的內部統計，因為 bm25 的 idf 與 avgdl 是**全域**的：
+// 文件計數歪一格，整份索引的每一次 lexical 查詢名次都跟著歪，而名次進 RRF、
+// RRF 決定帶內次序。那是可觀察的。
+//
+// ## 這個性質測試**不**涵蓋什麼
+//
+// 寫下來是因為「有性質測試了」很容易被讀成「不變式 2 已經被守住了」。它守住的是
+// 生成器走得到的那一塊，不是全部：
+//
+// - **同一則 turn 在兩個來源裡文字不同**。生成器對同一個 identity 永遠產生相同的
+//   文字（真實 resume 也是複製，所以這是主要情形）。但檔案截斷、寫入中斷都可能
+//   讓兩份不一致，而 `text` / `anchor_hash` 目前是「最後寫的贏」且**不會**在來源
+//   被刪除後重算——那條路徑沒有被生成到，也就沒有被守住。
+// - **讀不到的來源**（權限、I/O 錯誤）。生成器只會建立、改寫、追加、刪除、resume，
+//   不會讓一個檔變成讀不到。目錄層級的列舉失敗同理（#26）。
+// - **並發寫入**。單執行緒依序套用變異。
+// - **真實 embedder**。用 `StubEmbedder`，所以向量比對驗的是「同樣的文字得到同樣的
+//   向量、且 `vector_row` 解參考正確」，不是 `NLContextualEmbedding` 的行為。
+// - **崩潰中止**。沒有在建置中途殺掉行程再續跑。
+//
+// 要加涵蓋範圍，加的是**變異種類**（生成器）或**比較面向**（`Snapshot`），不是
+// 再寫一條個案測試。這是這個檔案存在的理由。
+
+// MARK: - 可重現的隨機
+
+/// xorshift64。**種子式**——性質測試的失敗必須能用同一個種子重跑。
+struct SeededGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        // 0 是 xorshift 的吸收態，會讓整條序列變成常數。
+        state = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        if state == 0 { state = 0x9E37_79B9_7F4A_7C15 }
+    }
+
+    mutating func next() -> UInt64 {
+        state ^= state << 13
+        state ^= state >> 7
+        state ^= state << 17
+        return state
+    }
+}
+
+// MARK: - 語料變異
+
+/// 一則 turn 的身分與內容。同一個 `identity` 可以出現在多個檔（那就是 resume）。
+private struct TurnSpec {
+    let identity: Int
+    let session: String
+    let timestampOffset: Int
+
+    var uuid: String { String(format: "%08x-aaaa-bbbb-cccc-dddddddddddd", identity) }
+    var text: String { "第\(identity)則內容 keyword\(identity % 4) 共通詞" }
+    var timestamp: String {
+        let base = Date(timeIntervalSince1970: 1_770_000_000 + Double(timestampOffset) * 60)
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f.string(from: base)
+    }
+
+    var line: String {
+        turnLine(uuid: uuid, session: session, role: "user", text: text, timestamp: timestamp)
+    }
+}
+
+private enum Mutation: CustomStringConvertible {
+    case createFile(name: String, turns: [Int])
+    /// 整份改寫（前綴雜湊不符 → 該來源被作廢並整份重解）。
+    case rewriteFile(name: String, turns: [Int])
+    /// 追加（前綴對得上 → 只讀尾巴）。
+    case appendTurn(name: String, turn: Int)
+    case deleteFile(name: String)
+    /// session resume：把既有檔的一部分複製進新檔，換一個 sessionId。
+    case resumeCopy(from: String, to: String)
+
+    var description: String {
+        switch self {
+        case .createFile(let n, let t): return "create(\(n), \(t))"
+        case .rewriteFile(let n, let t): return "rewrite(\(n), \(t))"
+        case .appendTurn(let n, let t): return "append(\(n), #\(t))"
+        case .deleteFile(let n): return "delete(\(n))"
+        case .resumeCopy(let f, let t): return "resume(\(f) → \(t))"
+        }
+    }
+}
+
+/// 語料的當下狀態（檔名 → turn 序列）。用它產生變異，也用它把檔案寫到磁碟。
+private struct CorpusModel {
+    var files: [String: [TurnSpec]] = [:]
+    private var sessionCounter = 0
+
+    mutating func nextSession() -> String {
+        sessionCounter += 1
+        return String(format: "%08x-1111-2222-3333-444444444444", sessionCounter)
+    }
+}
+
+// MARK: - 索引快照
+
+private struct ChunkRow: Equatable, Comparable {
+    let fingerprint: String
+    let uuid: String
+    let project: String
+    let sessionID: String
+    let role: String
+    let text: String
+    let timestamp: Double
+    let anchorHash: String
+    let spanLower: Int
+    let spanUpper: Int
+    /// **解參考之後**的向量，不是 `vector_row`。
+    let vector: [Float]?
+
+    static func < (a: ChunkRow, b: ChunkRow) -> Bool {
+        (a.fingerprint, a.uuid) < (b.fingerprint, b.uuid)
+    }
+}
+
+private struct Snapshot {
+    var chunks: [ChunkRow]
+    var links: [String]
+    /// 兩張 FTS5 表的 averages 紀錄原文（含全域文件計數與平均長度）。
+    var ftsAverages: [String]
+    /// 每條 lexical 通道對每個探針查詢的名次序列。
+    var lexicalRanks: [String]
+}
+
+private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> Snapshot {
+    let database = try IndexDatabase(path: location.databaseURL.path)
+    defer { database.close() }
+
+    let dimension = try database.meta("vector_dimension").flatMap(Int.init) ?? 4
+    let sidecar = (try? VectorSidecar.open(url: location.vectorsURL, dimension: dimension))
+
+    var chunks: [ChunkRow] = []
+    try database.query(
+        """
+        SELECT project_fingerprint, uuid, project, session_id, role, text, timestamp,
+               anchor_hash, anchor_span_lower, anchor_span_upper, vector_row
+        FROM chunks
+        """
+    ) { statement in
+        func str(_ i: Int32) -> String {
+            sqlite3_column_text(statement, i).map { String(cString: $0) } ?? ""
+        }
+        let row =
+            sqlite3_column_type(statement, 10) == SQLITE_NULL
+            ? nil : Int(sqlite3_column_int64(statement, 10))
+        chunks.append(
+            ChunkRow(
+                fingerprint: str(0), uuid: str(1), project: str(2), sessionID: str(3),
+                role: str(4), text: str(5),
+                timestamp: sqlite3_column_double(statement, 6),
+                anchorHash: str(7),
+                spanLower: Int(sqlite3_column_int64(statement, 8)),
+                spanUpper: Int(sqlite3_column_int64(statement, 9)),
+                vector: row.flatMap { sidecar?.vector(at: $0) }))
+    }
+
+    var links: [String] = []
+    try database.query("SELECT chunk_id, source_key FROM chunk_sources") { statement in
+        // chunk_id 是 rowid，跨兩份索引不可比——換成該 chunk 的身分。
+        links.append("\(sqlite3_column_int64(statement, 0))|\(String(cString: sqlite3_column_text(statement, 1)))")
+    }
+    // 把 rowid 換成 (fingerprint, uuid)。
+    var identityByRowID: [Int64: String] = [:]
+    try database.query("SELECT id, project_fingerprint, uuid FROM chunks") { statement in
+        identityByRowID[sqlite3_column_int64(statement, 0)] =
+            "\(String(cString: sqlite3_column_text(statement, 1)))|\(String(cString: sqlite3_column_text(statement, 2)))"
+    }
+    links = links.map { entry in
+        let parts = entry.split(separator: "|", maxSplits: 1).map(String.init)
+        let identity = Int64(parts[0]).flatMap { identityByRowID[$0] } ?? "(orphan-link)"
+        return "\(identity)|\(parts[1])"
+    }.sorted()
+
+    var averages: [String] = []
+    for table in ["chunks_trigram", "chunks_segment"] {
+        var value = "(none)"
+        try database.query("SELECT quote(block) FROM \(table)_data WHERE id = 1") { statement in
+            value = String(cString: sqlite3_column_text(statement, 0))
+        }
+        averages.append("\(table)=\(value)")
+    }
+
+    var ranks: [String] = []
+    for table in ["chunks_trigram", "chunks_segment"] {
+        for probe in probes {
+            let pattern = RetrievalEngine.ftsPhrase(
+                table == "chunks_segment" ? Segmentation.segment(probe) : probe)
+            guard !pattern.isEmpty else { continue }
+            var hits: [String] = []
+            try database.query(
+                """
+                SELECT c.uuid FROM \(table) f JOIN chunks c ON c.id = f.rowid
+                WHERE f.\(table) MATCH ? ORDER BY bm25(\(table)), c.uuid
+                """, bind: [.text(pattern)]
+            ) { statement in
+                hits.append(String(cString: sqlite3_column_text(statement, 0)))
+            }
+            ranks.append("\(table)/\(probe) → \(hits.joined(separator: ","))")
+        }
+    }
+
+    return Snapshot(
+        chunks: chunks.sorted(), links: links, ftsAverages: averages, lexicalRanks: ranks)
+}
+
+/// 兩份快照的差異，逐面向命名——「不相等」對這個測試沒有用，要說出哪一面不相等。
+private func divergences(incremental a: Snapshot, fullRebuild b: Snapshot) -> [String] {
+    var out: [String] = []
+
+    let aIDs = a.chunks.map { "\($0.fingerprint.prefix(8))/\($0.uuid.prefix(8))" }
+    let bIDs = b.chunks.map { "\($0.fingerprint.prefix(8))/\($0.uuid.prefix(8))" }
+    if aIDs != bIDs {
+        out.append("chunk 集合不同：增量 \(aIDs) vs 全量 \(bIDs)")
+    } else {
+        for (x, y) in zip(a.chunks, b.chunks) where x != y {
+            var fields: [String] = []
+            if x.sessionID != y.sessionID { fields.append("session_id(\(x.sessionID.prefix(8)) vs \(y.sessionID.prefix(8)))") }
+            if x.text != y.text { fields.append("text") }
+            if x.anchorHash != y.anchorHash { fields.append("anchor_hash") }
+            if x.timestamp != y.timestamp { fields.append("timestamp") }
+            if x.role != y.role { fields.append("role") }
+            if x.project != y.project { fields.append("project") }
+            if x.spanLower != y.spanLower || x.spanUpper != y.spanUpper { fields.append("span") }
+            if x.vector != y.vector { fields.append("vector(解參考後)") }
+            out.append("chunk \(x.uuid.prefix(8)) 欄位不同：\(fields.joined(separator: ", "))")
+        }
+    }
+
+    if a.links != b.links {
+        out.append("chunk_sources 不同：增量 \(a.links) vs 全量 \(b.links)")
+    }
+    if a.ftsAverages != b.ftsAverages {
+        out.append("FTS 全域統計不同：增量 \(a.ftsAverages) vs 全量 \(b.ftsAverages)")
+    }
+    if a.lexicalRanks != b.lexicalRanks {
+        let diff = zip(a.lexicalRanks, b.lexicalRanks).filter { $0 != $1 }
+        out.append("lexical 名次不同：\(diff.map { "增量[\($0.0)] 全量[\($0.1)]" }.joined(separator: " ; "))")
+    }
+    return out
+}
+
+// MARK: - 性質
+
+private struct EquivalencePolicy: CorpusContainmentPolicy {
+    func isInsideReadOnlyCorpus(_ url: URL) -> Bool { false }
+}
+
+/// 生成一條變異序列，並在磁碟上逐步套用；每一步之後跑一次增量建置。
+/// 回傳 (語料根, 增量衍生根, 套用過的序列)。
+private func runIncremental(
+    seed: UInt64, steps: Int, embedder: StubEmbedder
+) throws -> (corpus: URL, derived: DerivedLocation, trace: [Mutation]) {
+    var rng = SeededGenerator(seed: seed)
+    let corpus = FileManager.default.temporaryDirectory
+        .appendingPathComponent("equiv-corpus-\(seed)-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: corpus, withIntermediateDirectories: true)
+    let derived = try DerivedLocation(
+        root: FileManager.default.temporaryDirectory
+            .appendingPathComponent("equiv-derived-\(seed)-\(UUID().uuidString)"),
+        policy: EquivalencePolicy())
+
+    var model = CorpusModel()
+    var trace: [Mutation] = []
+    let project = "proj-equiv"
+
+    func flush(_ name: String) throws {
+        let turns = model.files[name] ?? []
+        _ = try writeSession(
+            in: corpus, project: project, file: name, lines: turns.map(\.line))
+    }
+    func build() throws {
+        _ = try IndexBuilder(
+            location: derived, scanner: CorpusScanner(corpusRoot: corpus), embedder: embedder
+        ).build()
+    }
+
+    // 起手一定要有東西可以變異。
+    let first = "f0.jsonl"
+    model.files[first] = (0..<3).map {
+        TurnSpec(identity: $0, session: model.nextSession(), timestampOffset: $0)
+    }
+    trace.append(.createFile(name: first, turns: [0, 1, 2]))
+    try flush(first)
+    try build()
+
+    for step in 0..<steps {
+        let names = model.files.keys.sorted()
+        let choice = Int.random(in: 0..<5, using: &rng)
+        let mutation: Mutation
+
+        switch choice {
+        case 0:
+            let name = "f\(step + 1).jsonl"
+            // 刻意讓 identity 與既有檔重疊——多來源持有同一則 turn 是常態不是特例。
+            let turns = (0..<Int.random(in: 1...3, using: &rng)).map { _ in
+                Int.random(in: 0..<6, using: &rng)
+            }
+            model.files[name] = turns.map {
+                TurnSpec(identity: $0, session: model.nextSession(),
+                         timestampOffset: Int.random(in: 0..<6, using: &rng))
+            }
+            mutation = .createFile(name: name, turns: turns)
+            try flush(name)
+
+        case 1 where !names.isEmpty:
+            let name = names[Int.random(in: 0..<names.count, using: &rng)]
+            let turns = (0..<Int.random(in: 1...3, using: &rng)).map { _ in
+                Int.random(in: 0..<6, using: &rng)
+            }
+            model.files[name] = turns.map {
+                TurnSpec(identity: $0, session: model.nextSession(),
+                         timestampOffset: Int.random(in: 0..<6, using: &rng))
+            }
+            mutation = .rewriteFile(name: name, turns: turns)
+            try flush(name)
+
+        case 2 where !names.isEmpty:
+            let name = names[Int.random(in: 0..<names.count, using: &rng)]
+            let identity = Int.random(in: 0..<6, using: &rng)
+            model.files[name, default: []].append(
+                TurnSpec(identity: identity, session: model.nextSession(),
+                         timestampOffset: Int.random(in: 0..<6, using: &rng)))
+            mutation = .appendTurn(name: name, turn: identity)
+            try flush(name)
+
+        case 3 where names.count > 1:
+            let name = names[Int.random(in: 0..<names.count, using: &rng)]
+            model.files.removeValue(forKey: name)
+            mutation = .deleteFile(name: name)
+            try FileManager.default.removeItem(
+                at: corpus.appendingPathComponent(project).appendingPathComponent(name))
+
+        default:
+            // resume：既有檔的內容複製進新檔，換 sessionId。timestamp 保持不變
+            // ——真實 resume 複製的是同一則 turn，它的時間戳不會因為被複製而改變。
+            guard let source = names.first(where: { !(model.files[$0] ?? []).isEmpty }) else {
+                continue
+            }
+            let target = "r\(step + 1).jsonl"
+            let session = model.nextSession()
+            model.files[target] = (model.files[source] ?? []).map {
+                TurnSpec(identity: $0.identity, session: session, timestampOffset: $0.timestampOffset)
+            }
+            mutation = .resumeCopy(from: source, to: target)
+            try flush(target)
+        }
+
+        trace.append(mutation)
+        try build()
+    }
+    return (corpus, derived, trace)
+}
+
+@Test(
+    "性質：任何語料變異序列之後，增量索引與全量重建的可觀察狀態相同（不變式 2）",
+    arguments: [UInt64](1...100))
+func incrementalMatchesFullRebuild(seed: UInt64) throws {
+    let embedder = StubEmbedder(revision: "r1")
+    let probes = ["共通詞", "keyword0", "keyword1", "keyword2", "keyword3"]
+
+    let run = try runIncremental(seed: seed, steps: 12, embedder: embedder)
+    defer {
+        try? FileManager.default.removeItem(at: run.corpus)
+        try? FileManager.default.removeItem(at: run.derived.root)
+    }
+
+    // 同一份語料、乾淨的衍生根 → 全量重建。這就是不變式 2 的字面意思：
+    // `rm -rf ~/.claude-ltm/derived && ltm build`。
+    let fullRoot = try DerivedLocation(
+        root: FileManager.default.temporaryDirectory
+            .appendingPathComponent("equiv-full-\(seed)-\(UUID().uuidString)"),
+        policy: EquivalencePolicy())
+    defer { try? FileManager.default.removeItem(at: fullRoot.root) }
+    _ = try IndexBuilder(
+        location: fullRoot, scanner: CorpusScanner(corpusRoot: run.corpus), embedder: embedder
+    ).build()
+
+    let found = divergences(
+        incremental: try snapshot(run.derived, probes: probes),
+        fullRebuild: try snapshot(fullRoot, probes: probes))
+
+    guard found.isEmpty else {
+        Issue.record(
+            """
+            seed \(seed) 的變異序列讓增量與全量重建產生不同的可觀察狀態：
+
+            序列：
+            \(run.trace.map { "  - \($0)" }.joined(separator: "\n"))
+
+            差異：
+            \(found.map { "  ✗ \($0)" }.joined(separator: "\n"))
+            """)
+        return
+    }
+}

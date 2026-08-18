@@ -29,7 +29,7 @@ public final class IndexDatabase {
     ///
     /// 版本不符時整份重建，而不是嘗試遷移：索引是純衍生物（不變式 2），重建的
     /// 代價是時間，遷移寫錯的代價是安靜的錯誤結果。
-    public static let layoutVersion = 3
+    public static let layoutVersion = 4
 
     public enum DatabaseError: Error, Sendable, Equatable {
         case openFailed(path: String, message: String)
@@ -143,6 +143,8 @@ public final class IndexDatabase {
             CREATE TABLE IF NOT EXISTS chunk_sources (
                 chunk_id INTEGER NOT NULL,
                 source_key TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                timestamp REAL NOT NULL,
                 PRIMARY KEY (chunk_id, source_key)
             )
             """)
@@ -213,6 +215,30 @@ public final class IndexDatabase {
 
     // MARK: - chunk 寫入
 
+    /// 由尚存的 `chunk_sources` 連結重算一個 chunk 的導航欄位。
+    ///
+    /// 規則：**時間戳最新的那個來源勝出**；時間戳相同時由 `source_key` 的字典序
+    /// 決定（升冪，最小者勝）。
+    ///
+    /// 第二條不是「最近觀察到」的近似，是它在平手時的替代——而平手是常態不是例外：
+    /// resume 複製的是同一則 turn，時間戳不會因為被複製而改變，所以真實語料裡
+    /// 兩份副本的時間戳幾乎總是相同（#25）。先前沒有平手規則，勝負由插入順序
+    /// 決定，也就是由檔名字典序**偶然**決定；現在結果一樣，但它是寫下來的規則而
+    /// 不是副作用，因此增量與全量重建必然一致。
+    private func refreshNavigation(chunkID: Int64) throws {
+        try execute(
+            """
+            UPDATE chunks SET
+                session_id = (SELECT s.session_id FROM chunk_sources s
+                              WHERE s.chunk_id = chunks.id
+                              ORDER BY s.timestamp DESC, s.source_key ASC LIMIT 1),
+                timestamp  = (SELECT s.timestamp  FROM chunk_sources s
+                              WHERE s.chunk_id = chunks.id
+                              ORDER BY s.timestamp DESC, s.source_key ASC LIMIT 1)
+            WHERE id = ? AND EXISTS(SELECT 1 FROM chunk_sources s WHERE s.chunk_id = chunks.id)
+            """, bind: [.integer(chunkID)])
+    }
+
     /// 解除某來源檔對 chunk 的持有；**只有失去最後一個持有者的 chunk 才真的刪掉**。
     ///
     /// 「這個檔沒了」與「這則 turn 沒了」是兩件事。session resume 讓同一則 turn
@@ -241,7 +267,23 @@ public final class IndexDatabase {
             try deleteFTSRows(rowID: chunk.rowID, text: chunk.text)
             try execute("DELETE FROM chunks WHERE id = ?", bind: [.integer(chunk.rowID)])
         }
+        // 活下來的那些：先記住是誰，解除連結之後要重算導航欄位。
+        //
+        // 沒有這一步，chunk 會活下來但 `session_id` / `timestamp` 凍結在剛被解除
+        // 持有的那個來源上——指標指向一個已經不在磁碟上的 session 檔，而
+        // 「檢索負責導航」正是指標存在的唯一理由。
+        var survivors: [Int64] = []
+        try query(
+            """
+            SELECT s.chunk_id FROM chunk_sources s
+            WHERE s.source_key = ?
+              AND (SELECT COUNT(*) FROM chunk_sources t WHERE t.chunk_id = s.chunk_id) > 1
+            """, bind: [.text(sourceKey)]
+        ) { statement in
+            survivors.append(sqlite3_column_int64(statement, 0))
+        }
         try execute("DELETE FROM chunk_sources WHERE source_key = ?", bind: [.text(sourceKey)])
+        for chunkID in survivors { try refreshNavigation(chunkID: chunkID) }
     }
 
     private func deleteFTSRows(rowID: Int64, text: String) throws {
@@ -273,7 +315,17 @@ public final class IndexDatabase {
                 let old = columnText(statement, 1)
                 existing = (rowID, old)
             }
-            if let existing, existing.text != chunk.text {
+            // **只要那一列已經存在就先刪 FTS，不管文字有沒有變。**
+            //
+            // 先前的守衛是 `existing.text != chunk.text`，於是「同一則 turn 出現在
+            // 多個來源」這條路徑（session resume 的常態）不刪、卻照樣往下插——
+            // 同一個 rowid 的 postings 被加了第二次。回傳的命中列數看起來正常
+            // （FTS5 不會回重複 rowid），但**全域**文件計數多算了一格。
+            //
+            // bm25 的 idf 與 avgdl 是全域統計，所以歪掉的不是那一則 turn，是整份
+            // 索引的每一次 lexical 查詢；名次進 RRF、RRF 決定帶內次序。而且每重解
+            // 一次多算一格，單調增長、沒有上限、沒有任何訊號。
+            if let existing {
                 try deleteFTSRows(rowID: existing.rowID, text: existing.text)
             }
             // 同一個 uuid 重複出現（例如同一份檔案被重讀）時覆蓋既有列：
@@ -290,11 +342,15 @@ public final class IndexDatabase {
                     anchor_hash=excluded.anchor_hash,
                     anchor_span_lower=excluded.anchor_span_lower,
                     anchor_span_upper=excluded.anchor_span_upper,
-                    -- 導航欄位只在**觀察到更晚的那一份**時更新。session_id 不是身分，
-                    -- 它是「讀者最可能打得開的那個 session」，所以取最新的。
-                    session_id=CASE WHEN excluded.timestamp >= chunks.timestamp
-                                    THEN excluded.session_id ELSE chunks.session_id END,
-                    timestamp=MAX(excluded.timestamp, chunks.timestamp)
+                    -- 導航欄位（session_id / timestamp）**不在這裡決定**。
+                    --
+                    -- 它們是「這則 turn 目前還被哪些來源持有」的函數，所以住在
+                    -- `chunk_sources`，由 `refreshNavigation` 從尚存的連結重算。
+                    -- 先前它們是 upsert 的 CASE，於是一個來源被刪掉之後，勝出的
+                    -- 那份值就**凍結**在已不存在的檔案上——增量與全量重建因此不同
+                    -- （不變式 2），而回傳的指標指向一個打不開的 session 檔。
+                    session_id=chunks.session_id,
+                    timestamp=chunks.timestamp
                 """,
                 bind: [
                     .text(chunk.project), .text(chunk.projectFingerprint),
@@ -312,10 +368,20 @@ public final class IndexDatabase {
             ) { statement in
                 rowID = sqlite3_column_int64(statement, 0)
             }
-            // 這個來源檔持有這個 chunk。同一個檔重掃時 `OR IGNORE` 讓它是冪等的。
+            // 這個來源檔持有這個 chunk，**並記下它在這個來源裡看到的導航值**。
+            // 少了這兩欄，一個來源被刪掉之後就沒有任何地方知道其餘來源看到的是什麼。
             try execute(
-                "INSERT OR IGNORE INTO chunk_sources(chunk_id, source_key) VALUES(?, ?)",
-                bind: [.integer(rowID), .text(sourceKey)])
+                """
+                INSERT INTO chunk_sources(chunk_id, source_key, session_id, timestamp)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(chunk_id, source_key) DO UPDATE SET
+                    session_id=excluded.session_id, timestamp=excluded.timestamp
+                """,
+                bind: [
+                    .integer(rowID), .text(sourceKey), .text(chunk.sessionID),
+                    .double(chunk.timestamp.timeIntervalSince1970),
+                ])
+            try refreshNavigation(chunkID: rowID)
             try execute(
                 "INSERT INTO chunks_trigram(rowid, text) VALUES(?, ?)",
                 bind: [.integer(rowID), .text(chunk.text)])
