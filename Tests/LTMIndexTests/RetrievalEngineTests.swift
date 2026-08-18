@@ -33,7 +33,7 @@ func fusionRanksMultiChannelHitsHigher() throws {
                 "命中越多通道，RRF 分數應越高——這是融合實作的性質")
     }
     // 名次連續且與分數降冪一致。
-    #expect(hits.map(\.fusedRank) == Array(0..<hits.count))
+    #expect(hits.map(\.emittedRank) == Array(0..<hits.count))
     #expect(zip(hits, hits.dropFirst()).allSatisfy { $0.fusedScore >= $1.fusedScore })
 }
 
@@ -115,7 +115,7 @@ func everyHitCarriesFourFieldPointer() throws {
         #expect(hit.anchor.turnID == hit.uuid)
     }
     // 名次是連續的 0,1,2...，band 直接取用它。
-    #expect(hits.map(\.fusedRank) == Array(0..<hits.count))
+    #expect(hits.map(\.emittedRank) == Array(0..<hits.count))
 }
 
 @Test("查詢限定 project 時不會回其他 project 的內容")

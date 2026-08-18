@@ -74,3 +74,36 @@
 **未在本 change 處理、已開 follow-up**：sessionId「最近觀察到」的代理指標在
 真實語料裡永遠平手（見 issue）；目錄列舉失敗被當成來源消失；`FileEventStore`
 自己的語料根守衛只認固定預設；數條測試的判準仍過寬。
+
+## 9. round-3 verify 的補做（2026-08-18）
+
+- [x] 9.1 **不變式 2 從個案改成性質**。三輪裡有四個 findings 是同一條不變式的不同
+  破法，四次都靠人臨場想到反例。`Tests/LTMIndexTests/IncrementalEquivalenceTests.swift`
+  隨機生成語料變異序列（建立／改寫／追加／刪除／resume），增量與全量重建比對
+  可觀察狀態。首次執行 24/24 種子失敗。
+- [x] 9.2 **FTS 寫入改成冪等**。`insert` 只在文字有變時刪 FTS 列卻無條件往下插，
+  於是同一則 turn 出現在多個來源時 postings 被加第二次——全域文件計數多算，
+  而 bm25 的 idf/avgdl 是全域統計。實測 base `d6463ad` 與 HEAD 逐字相同，所以這是
+  去重（task 2.2）引入的，不是 `chunk_sources`。
+- [x] 9.3 **導航欄位改由 `chunk_sources` 重算**。`session_id` / `timestamp` 是
+  「還被哪些來源持有」的函數。先前由 upsert 的 CASE 決定，於是一個來源被刪掉後
+  值凍結在已不存在的檔案上。平手規則（時間戳相同時取 source key 最小者）順帶讓
+  #25 有了明確答案。layoutVersion 3 → 4。
+- [x] 9.4 **band 分層從 facade 搬進 `RetrievalEngine`**。retrieval spec 的
+  「SHALL NOT reorder outside that seam」是本 change 從未修改的既有 requirement，
+  而 facade 的 `layered()` 正是在 seam 之外重排。分帶與排帶屬於檢索——seam 的
+  前置條件 `requireBandsInOrder` 要求候選到達時已分好帶。同時把截斷改成走同一個
+  順序（先前選集用融合分數、顯示用 band，兩個判準）。
+- [x] 9.5 **band 分層在生產路徑上的回歸鎖**。先前三條測試全測在 helper 上，把
+  `query()` 裡呼叫 `layered` 那一行整行刪掉、293 個測試全綠。改成在**刻意構造的
+  跨帶反轉語料**（55 則；純融合序的反轉落在第 35 位）上鎖 `query()` 的輸出，並
+  分別對「不排」與「用分數截、用 band 排」兩種錯法驗過會紅。
+- [x] 9.6 **`ScoredChunk.fusedRank` 更名 `emittedRank`、新增 `band`**。輸出順序是
+  band-major 之後，「融合名次」這個名字裝的已經不是那個意思。band 規則收斂成
+  `ScoredChunk.band(matching:)` 單一定義處。
+- [x] 9.7 **刪掉一條不可能失敗的測試**（`queryOutputBandsAreNonDecreasing`）。它的
+  語料上不可能出現跨帶反轉，把引擎排序整個拿掉照樣綠。不可能失敗的測試比沒有測試
+  更糟——它在覆蓋率與閱讀上都算數。
+- [x] 9.8 **`defaultStrategyLeavesRetrievalOrderIntact` 改成真的比對兩份順序**。
+  它的名字一直宣稱「順序等於純檢索順序」而斷言只有 displacement 與 band 值域；
+  位移為零是策略對自己行為的自述，見證不到呼叫端做的重排。

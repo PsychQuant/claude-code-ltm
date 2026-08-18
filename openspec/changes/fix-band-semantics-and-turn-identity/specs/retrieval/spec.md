@@ -24,6 +24,25 @@ The fused rank SHALL NOT be used as the candidate's relevance band. A band is a 
 - **WHEN** a query returns more than one candidate
 - **THEN** at least two candidates share a relevance band whenever they matched the same number of channels, and no candidate's band is derived from its position in the fused ordering
 
+### Requirement: Strategy application goes through the MemoryStrategy seam with archival as default
+
+Retrieval SHALL hand its fused candidates to a `MemoryStrategy` for final ordering and SHALL NOT reorder outside that seam. When no strategy is named, the archival strategy (no reordering) SHALL be applied. Strategy outputs SHALL preserve the seam's contract: results carry displacement and reason as defined by the memory-strategy capability.
+
+The order retrieval hands to the seam SHALL be band-major: candidates ordered by relevance band first, and within a band by fused score. That ordering is part of what retrieval produces, not a reordering applied to it — the seam's own precondition requires candidates to arrive with bands already in non-decreasing order, and a seam that requires a property of its input is stating whose job that property is. Selection of the top k SHALL follow the same order as presentation; selecting by fused score while presenting by band would let a candidate in a higher band be truncated while a lower-band candidate is returned, from a list that presents itself as stratified by relevance.
+
+This requirement is restated rather than left alone because the phrase "fused retrieval order" was written when a candidate's band was its fused rank, so the two orderings were the same sequence and the phrase was unambiguous. Once the band became the count of matched channels the two came apart, and an implementation that satisfied the seam's precondition by sorting in the facade was reordering outside the seam — while every result still reported zero displacement, because the strategy really had not moved anything. Displacement is the strategy's account of its own behaviour; it cannot witness a reorder performed by the caller.
+
+#### Scenario: Default query order is pure retrieval order
+
+- **WHEN** a query runs without a named strategy
+- **THEN** the emitted order equals the order retrieval produced, candidate for candidate, and every result reports zero displacement
+
+#### Scenario: Presentation and truncation use one order
+
+- **GIVEN** a corpus where some candidate in a lower band outscores some candidate in a higher band
+- **WHEN** a query runs with a k smaller than the number of candidates
+- **THEN** the returned k are the first k of the band-major order, and their bands are non-decreasing
+
 ## ADDED Requirements
 
 ### Requirement: A candidate's relevance band is the number of retrieval channels it matched

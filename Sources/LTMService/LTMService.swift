@@ -205,27 +205,6 @@ public struct LTMService {
         ).build(full: full)
     }
 
-    /// 一筆候選的相關度帶：命中越多通道，帶越高（數值越小）。
-    ///
-    /// 單一來源——先前這個算式散在候選建構處，而排序也需要它，複製一份就會漂移。
-    /// 通道總數不寫死：`ScoredChunk.Channel.allCases.count` 讓第四條通道加入時
-    /// 不會靜默產生負數帶。
-    static func band(for chunk: ScoredChunk) -> Int {
-        ScoredChunk.Channel.allCases.count - chunk.channels.count
-    }
-
-    /// 依 band 分層排序，帶內維持融合次序。
-    ///
-    /// 抽成具名函式而不是 inline 排序：它承載一個**前置條件**（seam 要求同帶是
-    /// 單一連續區段），而前置條件需要能被單獨測到——inline 的話，唯一的測試途徑
-    /// 是碰巧構造出會觸發的語料。
-    public static func layered(_ chunks: [ScoredChunk]) -> [ScoredChunk] {
-        chunks.sorted { lhs, rhs in
-            let lb = band(for: lhs), rb = band(for: rhs)
-            return lb == rb ? lhs.fusedRank < rhs.fusedRank : lb < rb
-        }
-    }
-
     // MARK: - 查詢
 
     /// 執行查詢。
@@ -297,42 +276,26 @@ public struct LTMService {
 
         let chosen = strategy ?? ArchivalStrategy()
 
-        // **候選必須先依 band 分層排序，再送進 seam。**
+        // 檢索**已經**以 band-major 順序回傳（`RetrievalEngine.search`），所以
+        // 這裡逐筆映射、不重排。
         //
-        // `MemoryStrategySupport.requireBandsInOrder` 要求「同一個帶在輸入裡是單一
-        // 連續區段」——那是圍籬能成立的前提（逐位比對驗帶只在該前提下等價於
-        // 「不得跨帶移動」）。而融合分數與通道數**不單調相關**：一個命中兩條通道
-        // 但各通道名次都很前的候選，分數可以高於命中三條卻名次都很深的候選。
+        // 「不重排」是字面的：retrieval spec 的 requirement 寫
+        // 「SHALL NOT reorder outside that seam」，而它的 scenario 要求
+        // 「the emitted order equals the fused retrieval order」。分層曾經在這裡做
+        // ——那就是 seam 之外的重排，即使排序規則本身是對的。
         //
-        // 少了這一步，`ltm query` 會直接失敗。實測（99 個真實 project、k=20）：
-        // 15 個查詢中 1 個回 `bandsOutOfOrder(at: 3)`，exit 非零。band 改成分層之前
-        // （band = 融合名次，嚴格遞增）這個前置條件永遠不可能 fire，所以這是 band
-        // 改動**新引入**的失敗，不是既有缺陷。
-        //
-        // 排序本身也是語意上正確的：band 是相關度分層，高帶的候選本就該在前面；
-        // 融合分數只決定**帶內**次序。這就是「相關度主導提取、使用強度只做微調」
-        // 在檢索層的樣子。
-        let layered = LTMService.layered(scored)
-        // band 是**相關度分層**，不是名次。
-        //
-        // 先前這裡填的是 `fusedRank`，於是每個候選自成一帶，「同帶內的其他候選」
-        // 恆為空集合，任何策略都無處可移——而且是**靜默**的：沒有跨帶嘗試，
-        // `RankingGuard` 不會 fire，`human-like` 與 `archival` 逐字相同。
-        //
-        // 改用命中的通道數分層（多重編碼：多條線索都指向它 ⇒ 相關度證據更強）。
-        // 這個規則零參數——本專案在評估集（#16）出現之前沒有東西可以校準桶數或
-        // 分數邊界，而把未校準的參數寫進出貨的 spec 正是誠實邊界要擋的事。
-        //
-        // 帶內分佈已量測：`docs/measurements/2026-08-17-band-population.md`。
-        let candidates = layered.map {
+        // 分帶與排帶屬於檢索而不是策略，理由不是美學：`MemoryStrategy` 的前置條件
+        // `requireBandsInOrder` 要求候選**到達時**已經分好帶。一個 seam 要求它的
+        // 輸入具備某個性質，那個性質就是輸入方的職責。
+        let candidates = scored.map {
             Candidate(
                 anchor: $0.anchor, baseScore: $0.fusedScore,
-                band: RelevanceBand(rank: LTMService.band(for: $0)))
+                band: RelevanceBand(rank: $0.band))
         }
         let projection = try makeProjection(database: database, strategy: chosen, now: now)
         let ranked = try chosen.rerank(candidates, with: projection)
 
-        let byAnchor = Dictionary(layered.map { ($0.anchor, $0) }, uniquingKeysWith: { first, _ in first })
+        let byAnchor = Dictionary(scored.map { ($0.anchor, $0) }, uniquingKeysWith: { first, _ in first })
         var hits: [QueryHit] = []
         for result in ranked {
             guard let source = byAnchor[result.candidate.anchor] else { continue }

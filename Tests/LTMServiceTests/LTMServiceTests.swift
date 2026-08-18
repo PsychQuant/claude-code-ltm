@@ -3,6 +3,7 @@ import Testing
 
 @testable import LTMCore
 @testable import LTMIndex
+
 @testable import LTMMemory
 @testable import LTMQuery
 @testable import LTMService
@@ -13,8 +14,12 @@ import Testing
 struct FixedEmbedder: EmbeddingProvider {
     var revision: String = "test-rev-1"
     var dimension: Int = 8
+    /// 產不出向量的文字。用來把某一筆候選壓到**較低的帶**（少一條通道），
+    /// 這是構造跨帶反轉語料的唯一可控旋鈕。
+    var refusing: Set<String> = []
 
     func vector(for text: String) throws -> [Float]? {
+        guard !refusing.contains(text) else { return nil }
         // 依內容決定的確定性向量：同文字同向量，方便斷言可重現性。
         var value = Float(abs(text.hashValue % 997)) / 997
         var out: [Float] = []
@@ -72,12 +77,32 @@ struct Workspace {
             .write(to: dir.appendingPathComponent(file), atomically: true, encoding: .utf8)
     }
 
+    func service(refusingVectorsFor texts: Set<String>) throws -> LTMService {
+        var embedder = FixedEmbedder()
+        embedder.refusing = texts
+        return try service(embedder: embedder)
+    }
+
     func service(embedder: FixedEmbedder = FixedEmbedder(), withEvents: Bool = false) throws
         -> LTMService
     {
         LTMService(
             location: derived, corpusRoot: corpus, embedder: embedder,
             eventStore: withEvents ? try FileEventStore(url: eventsURL) : nil)
+    }
+
+    /// `RetrievalEngine` 直接交出來的順序（不經策略 seam）。
+    ///
+    /// 存在的理由是「archival 不重排」這條契約需要**兩份順序可以比對**——
+    /// 只看 displacement 驗不到它，那是策略對自己行為的自述。
+    func retrievalOrder(text: String, limit: Int) throws -> [String] {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        let dimension = try database.meta("vector_dimension").flatMap(Int.init) ?? 8
+        let vectors = try? VectorSidecar.open(url: derived.vectorsURL, dimension: dimension)
+        let engine = RetrievalEngine(
+            database: database, vectors: vectors, embedder: FixedEmbedder())
+        return try engine.search(query: text, limit: limit, scope: .allProjects).map(\.uuid)
     }
 
     func cleanup() {
@@ -100,11 +125,21 @@ func defaultStrategyLeavesRetrievalOrderIntact() throws {
     #expect(!outcome.hits.isEmpty)
     #expect(outcome.strategyID == "archival")
     #expect(outcome.hits.allSatisfy { $0.displacement == 0 })
-    // band 是**相關度分層**（命中通道數），不是名次——所以它會有重複值，
-    // 而且不隨名次遞增。archival 不重排，所以順序仍等於純檢索順序。
+
+    // **實際比對兩份順序**，不是只看位移為零。
+    //
+    // 這條測試的名字一直宣稱「順序等於純檢索順序」，而它從來沒有比對過——
+    // 斷言只有 displacement 與 band 的值域。位移為零是策略回報的**自述**；
+    // 契約要的是 facade 交出來的順序真的等於檢索交出來的那一份。兩者不同：
+    // facade 曾經在 seam 之外重排，而重排後每一筆的 displacement 仍然是 0
+    // （策略確實沒動它們）。
+    let engineOrder = try workspace.retrievalOrder(text: "記憶策略", limit: 10)
+    #expect(
+        outcome.hits.map(\.uuid) == engineOrder,
+        "archival 不重排，所以輸出順序必須逐筆等於 RetrievalEngine 交出來的順序")
+
+    // band 是**相關度分層**（命中通道數），不是名次——所以它會有重複值。
     #expect(outcome.hits.map(\.band).allSatisfy { (0...2).contains($0) })
-    #expect(outcome.hits.map(\.band) != Array(0..<outcome.hits.count),
-            "band 若等於名次，每筆自成一帶，策略 seam 就是空的（B1）")
 }
 
 @Test("embedding revision 不符時拒答，且錯誤指名 ltm build")
@@ -457,86 +492,100 @@ func queryPathHonoursTheBuildLock() throws {
     #expect(!outcome.hits.isEmpty, "查詢仍應以既有索引回答，不因為拿不到鎖而失敗")
 }
 
-// MARK: - band 分層必須滿足 seam 的前置條件（round-2 verify CRITICAL）
+// MARK: - band 分層屬於檢索層，且必須在生產路徑上被鎖住（round-3 verify HIGH）
+//
+// 上一版把分層做在 facade（`LTMService.layered`），而 retrieval spec 的
+// requirement 逐字寫「SHALL NOT reorder outside that seam」——那就是 seam 之外的
+// 重排，即使排序規則本身正確。分層現在住在 `RetrievalEngine`。
+//
+// 上一版的三條測試也全部測在 helper 上：把 `query()` 裡呼叫 `layered` 那一行整個
+// 刪掉，293 個測試仍然全綠。**頭號修法可以被整行刪掉而無人察覺。**
+// 所以這裡改成鎖生產路徑，並且刻意構造一份「純融合順序確實會出現跨帶反轉」的語料
+// ——沒有反轉的語料上，這條測試證明不了任何事。
 
-/// 造一個 ScoredChunk，只控制我們要測的兩個變數：命中通道數與融合名次。
-private func scoredChunk(rank: Int, channels: Set<ScoredChunk.Channel>, id: Int) -> ScoredChunk {
-    let uuid = String(format: "%08x-aaaa-bbbb-cccc-dddddddddddd", id)
-    let text = "候選 \(id) 的內容"
-    let turn = Turn(id: uuid, role: "user", timestamp: Date(timeIntervalSince1970: 1), text: text)
-    return ScoredChunk(
-        project: "proj-one", sessionID: "11111111-2222-3333-4444-555555555555", uuid: uuid,
-        timestamp: turn.timestamp, text: text,
-        anchor: Anchor(source: ProjectFingerprint.of("proj-one"), turn: turn,
-                       span: 0..<text.unicodeScalars.count),
-        fusedScore: 1.0 - Double(rank) * 0.01, fusedRank: rank, channels: channels)
+@Test("band 規則：命中通道數決定帶，0 最相關，通道總數不寫死")
+func bandRuleIsChannelCount() {
+    #expect(ScoredChunk.band(matching: [.trigram, .segment, .vector]) == 0)
+    #expect(ScoredChunk.band(matching: [.trigram, .vector]) == 1)
+    #expect(ScoredChunk.band(matching: [.segment]) == 2)
+    #expect(
+        ScoredChunk.band(matching: Set(ScoredChunk.Channel.allCases)) == 0,
+        "全部命中必為最高帶——加第四條通道時這條才不會靜默失效")
 }
 
-@Test("band 分層後必然非遞減——seam 的前置條件")
-func layeringSatisfiesTheSeamPrecondition() throws {
-    // 融合順序與通道數**不單調相關**：名次 0 只命中一條，名次 2 命中三條。
-    // 這正是真實語料會出現的形狀（2 通道但各通道名次靠前 vs 3 通道但都很深）。
-    let unsorted = [
-        scoredChunk(rank: 0, channels: [.vector], id: 0),
-        scoredChunk(rank: 1, channels: [.trigram, .segment], id: 1),
-        scoredChunk(rank: 2, channels: [.trigram, .segment, .vector], id: 2),
-        scoredChunk(rank: 3, channels: [.segment], id: 3),
-    ]
-    // 未排序時 band 是 [2,1,0,2] —— 遞減，會讓 requireBandsInOrder 拋錯。
-    let rawBands = unsorted.map { LTMService.band(for: $0) }
-    #expect(rawBands == [2, 1, 0, 2])
-    #expect(!zip(rawBands, rawBands.dropFirst()).allSatisfy { $0 <= $1 },
-            "前提：未排序的輸入確實違反前置條件，否則這條測試證明不了任何事")
+/// 一份**保證**在純融合順序上出現跨帶反轉的語料。
+///
+/// RRF 的每條通道貢獻介於 `1/(60+1)` 與 `1/(60+depth)` 之間，所以「兩通道」的上限
+/// （2/61 ≈ 0.0328）要壓過「三通道」的下限，三通道那筆必須在**每一條**通道都排得
+/// 很深。這需要夠多的競爭者——所以語料是 55 則而不是 6 則。
+///
+/// 構造：`inversionText` 只有它被 embedder 拒發向量（兩通道 → band 1），而它的文字
+/// 最短所以 bm25 名次最前；其餘 54 則長度遞增，最長那幾則在三條通道都墊底。
+private enum BandInversionCorpus {
+    static let term = "共通詞"
+    /// **不可以等於 `term`**：`refusing` 是依文字比對的，而查詢向量也走同一個
+    /// embedder——兩者相同的話連查詢都拿不到向量，整條 vector 通道會空掉，
+    /// 於是所有候選都變成兩通道、根本沒有跨帶反轉可測。（踩過。）
+    static let inversionText = "共通詞 短"
 
-    let layered = LTMService.layered(unsorted)
-    let bands = layered.map { LTMService.band(for: $0) }
-
-    // 三通道 → band 0；兩通道 → band 1；一通道 → band 2（兩筆）。
-    #expect(bands == [0, 1, 2, 2], "band 必須非遞減，且同帶為單一連續區段")
-    // 帶內維持融合次序：band 2 的兩筆原名次是 0 與 3，排序後仍是 0 在前。
-    let bandTwo = layered.filter { LTMService.band(for: $0) == 2 }.map(\.fusedRank)
-    #expect(bandTwo == [0, 3], "帶內必須保持融合順序")
-
-    // 直接把排序後的候選餵給 seam 的前置條件檢查——這才是它真正要滿足的契約。
-    let candidates = layered.map {
-        Candidate(anchor: $0.anchor, baseScore: $0.fusedScore,
-                  band: RelevanceBand(rank: LTMService.band(for: $0)))
-    }
-    #expect(throws: Never.self) {
-        try MemoryStrategySupport.requireBandsInOrder(candidates)
+    static func texts() -> [String] {
+        var out = [inversionText]
+        for i in 0..<54 {
+            out.append("共通詞 " + String(repeating: "填充內容\(i % 7) ", count: i + 2))
+        }
+        return out
     }
 }
 
-@Test("未經分層的候選會被 seam 拒絕——證明上一條測的不是恆真式")
-func unlayeredCandidatesAreRejectedBySeam() throws {
-    let unsorted = [
-        scoredChunk(rank: 0, channels: [.vector], id: 0),
-        scoredChunk(rank: 1, channels: [.trigram, .segment, .vector], id: 1),
-    ]
-    let candidates = unsorted.map {
-        Candidate(anchor: $0.anchor, baseScore: $0.fusedScore,
-                  band: RelevanceBand(rank: LTMService.band(for: $0)))
-    }
-    #expect(throws: StrategyViolation.self) {
-        try MemoryStrategySupport.requireBandsInOrder(candidates)
-    }
-}
-
-@Test("查詢輸出的 band 序列非遞減")
-func queryOutputBandsAreNonDecreasing() throws {
+@Test("生產路徑：查詢輸出的 band 序列非遞減——在確實有跨帶反轉的語料上")
+func queryOutputIsBandMajorOnInvertedCorpus() throws {
     let workspace = try Workspace.make()
     defer { workspace.cleanup() }
-    try workspace.writeSession(texts: [
-        "記憶策略可插拔的比較軸", "記憶與檢索的關係", "完全不相干的第三段",
-        "另一段關於策略的討論", "第五段內容", "第六段其他內容",
-    ])
-    let service = try workspace.service()
+    try workspace.writeSession(texts: BandInversionCorpus.texts())
+    let service = try workspace.service(refusingVectorsFor: [BandInversionCorpus.inversionText])
     try service.build()
 
-    for query in ["記憶", "策略", "內容", "檢索"] {
-        let outcome = try service.query(text: query, limit: 20, scope: .allProjects)
-        let bands = outcome.hits.map(\.band)
-        #expect(zip(bands, bands.dropFirst()).allSatisfy { $0 <= $1 },
-                "查詢 \(query) 的 band 序列遞減了：\(bands)")
-    }
+    let outcome = try service.query(
+        text: BandInversionCorpus.term, limit: 60, scope: .allProjects)
+
+    // 前提：這份語料真的產生了跨帶反轉，否則下面的斷言是恆真式。
+    let bandOnePositions = outcome.hits.enumerated()
+        .filter { $0.element.band > 0 }.map(\.offset)
+    let bandZeroPositions = outcome.hits.enumerated()
+        .filter { $0.element.band == 0 }.map(\.offset)
+    #expect(!bandOnePositions.isEmpty, "前提：語料裡必須有非最高帶的候選")
+    #expect(!bandZeroPositions.isEmpty, "前提：語料裡必須有最高帶的候選")
+
+    let bands = outcome.hits.map(\.band)
+    #expect(
+        zip(bands, bands.dropFirst()).allSatisfy { $0 <= $1 },
+        "band 序列遞減了：\(bands)")
 }
+
+@Test("生產路徑：截斷與排序用同一個判準——高帶候選不得被低帶候選擠掉")
+func truncationFollowsTheSameOrderAsDisplay() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: BandInversionCorpus.texts())
+    let service = try workspace.service(refusingVectorsFor: [BandInversionCorpus.inversionText])
+    try service.build()
+
+    // 先前是「用融合分數選 top-k、用 band 排顯示」——選集與排序用兩個判準。
+    //
+    // k 取 36 不是隨便挑的：實測純融合序裡那個 band 1 候選落在第 35 位（把引擎的
+    // band-major 排序拿掉，seam 會回 `bandsOutOfOrder(at: 35)`）。k 必須**跨過**
+    // 那個位置，否則用哪個判準截斷都選到同一批，測試證明不了任何事。
+    let small = try service.query(text: BandInversionCorpus.term, limit: 36, scope: .allProjects)
+    #expect(small.hits.count == 36, "前提：k 必須小到真的截斷")
+    #expect(
+        small.hits.allSatisfy { $0.band == 0 },
+        "截斷若走融合分數，低帶候選會擠進來：\(small.hits.map(\.band))")
+}
+
+// 這裡曾經有一條 `queryOutputBandsAreNonDecreasing`。它斷言的性質是對的，但它的
+// 語料上**不可能**出現跨帶反轉——把引擎的 band-major 排序整個拿掉，它照樣綠。
+//
+// 刪掉而不是留著，是因為一條不可能失敗的測試比沒有測試更糟：它在覆蓋率與閱讀上
+// 都算數，於是那個性質看起來有人守。上面兩條在刻意構造的反轉語料上驗過會紅
+// （分別對應「不排」與「用分數截、用 band 排」兩種錯法），由它們接手。
+

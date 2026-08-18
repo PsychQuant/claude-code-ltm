@@ -15,10 +15,31 @@ public struct ScoredChunk: Sendable, Equatable {
     public let anchor: Anchor
     /// RRF 融合分數。
     public let fusedScore: Double
-    /// 融合後的名次（0 起算），成為 `RelevanceBand` 的 rank。
-    public let fusedRank: Int
+    /// 在**輸出順序**裡的名次（0 起算）。
+    ///
+    /// 輸出順序是 band-major 的（見 `band`），所以這**不是**純融合分數的名次——
+    /// 兩者只在沒有跨帶反轉時一致。名字先前叫 `fusedRank`，而它在分層落地之後
+    /// 已經不是那個意思了；一個說「融合名次」卻裝著「輸出名次」的欄位，正是這個
+    /// repo 反覆踩到的「敘述與程式碼相反」。
+    public let emittedRank: Int
+    /// 相關度分層：**0 最相關**。
+    ///
+    /// 由命中的通道數決定（多重編碼——多條線索都指向它，相關度證據更強），
+    /// 定義是 `Channel.allCases.count - channels.count`，不寫死 3。
+    ///
+    /// 這個值住在檢索層而不是 facade：它是檢索對候選的判斷，而 `MemoryStrategy`
+    /// 的 seam 前置條件（`requireBandsInOrder`）要求候選**到達時**已經分好帶——
+    /// 也就是說分帶與排帶本來就是檢索的職責，不是策略的重排。先前它在 facade
+    /// 算並排序，於是 facade 在 seam 之外重排，違反 retrieval spec 的
+    /// 「SHALL NOT reorder outside that seam」。
+    public let band: Int
     /// 這一筆在哪些通道出現過。用於解釋，也用於測試融合行為。
     public let channels: Set<Channel>
+
+    /// 由命中通道數算出相關度帶。**band 規則的唯一定義處。**
+    public static func band(matching channels: Set<Channel>) -> Int {
+        Channel.allCases.count - channels.count
+    }
 
     public enum Channel: String, Sendable, Hashable, CaseIterable {
         case trigram
@@ -92,10 +113,18 @@ public struct RetrievalEngine {
             }
         }
 
-        // 名次相同時用 rowid 決勝，讓順序在同一份索引上可重現。
+        // **band-major**：先相關度層、層內才看融合分數，同分用 rowid 決勝（讓順序
+        // 在同一份索引上可重現）。
+        //
+        // 截斷也走同一個順序。先前是「用融合分數選 top-k、用 band 排顯示」——
+        // 選集與排序用兩個不同的判準，於是一個 band 1 的候選可能被截掉而 band 2
+        // 的照樣回傳，而使用者看到的是一份宣稱按相關度分層的清單。
         let ordered = fused.sorted { lhs, rhs in
-            lhs.value.score == rhs.value.score
-                ? lhs.key < rhs.key : lhs.value.score > rhs.value.score
+            let lb = ScoredChunk.band(matching: lhs.value.channels)
+            let rb = ScoredChunk.band(matching: rhs.value.channels)
+            if lb != rb { return lb < rb }
+            if lhs.value.score != rhs.value.score { return lhs.value.score > rhs.value.score }
+            return lhs.key < rhs.key
         }.prefix(limit)
 
         var results: [ScoredChunk] = []
@@ -105,7 +134,8 @@ public struct RetrievalEngine {
                 ScoredChunk(
                     project: chunk.project, sessionID: chunk.sessionID, uuid: chunk.uuid,
                     timestamp: chunk.timestamp, text: chunk.text, anchor: chunk.anchor,
-                    fusedScore: entry.value.score, fusedRank: offset,
+                    fusedScore: entry.value.score, emittedRank: offset,
+                    band: ScoredChunk.band(matching: entry.value.channels),
                     channels: entry.value.channels))
         }
         return results
