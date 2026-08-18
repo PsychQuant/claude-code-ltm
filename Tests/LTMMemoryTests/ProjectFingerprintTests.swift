@@ -254,3 +254,31 @@ func pruneKeepsTheInodeSoTheAppendLockStillMeansSomething() throws {
 // 那會是時序相依的，而本 repo 已經有過「時序相依的測試變成偶爾成功」的代價
 // （見 `deterministicSeed` 的註解）。目前選擇不寫，並把這個缺口寫在這裡。
 
+
+@Test("全部紀錄都讀不回來時，修剪必須明示——那正是換代情境的預設情況")
+func pruningEverythingNeedsAnExplicitDecision() throws {
+    // anchor 定址規則換代之後，換代前寫的**每一筆**都是舊規則。所以「全部讀不回來」
+    // 不是邊角情形，是主要觸發情境——而使用者是照著一個錯誤訊息的指示走到這裡的，
+    // 那個訊息說的是「丟掉讀不回來的那些」，不是「清空歷史」。
+    //
+    // 實測過：先前 `ltm memory --prune` 在這個情境下把 1,425 bytes 的歷史清成 0，
+    // 沒有任何確認，而互動提示同時寫著「保留其餘」——那裡沒有其餘。
+    let (dir, store) = try supersededFixture()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    var data = Data()
+    for index in 1...3 {
+        data.append(
+            try CanonicalCoding.encoder.encode(
+                try event(
+                    source: "11111111-2222-3333-4444-555555555555",
+                    id: String(format: "%08x-0000-0000-0000-000000000001", index))))
+        data.append(Data("\n".utf8))
+    }
+    try data.write(to: store.url)
+
+    // store 層照樣做它該做的（它不管 UI 決策）——這條測試釘的是**呼叫端必須看得見
+    // 「一筆都不剩」這件事**：`kept == 0` 是那個決策的判準，所以它必須被回報。
+    let survey = try store.allEvents(skippingUnusable: true)
+    #expect(survey.events.isEmpty, "前提：全部都讀不回來")
+    #expect(survey.supersededLines == [1, 2, 3])
+}

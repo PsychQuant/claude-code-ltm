@@ -32,9 +32,22 @@ func fusionRanksMultiChannelHitsHigher() throws {
         #expect(multi.fusedScore > single.fusedScore,
                 "命中越多通道，RRF 分數應越高——這是融合實作的性質")
     }
-    // 名次連續且與分數降冪一致。
+    // 名次連續。
     #expect(hits.map(\.emittedRank) == Array(0..<hits.count))
-    #expect(zip(hits, hits.dropFirst()).allSatisfy { $0.fusedScore >= $1.fusedScore })
+    // **band-major**：先相關度層，層內才是融合分數降冪。
+    //
+    // 這裡先前斷言的是「整份輸出依融合分數降冪」——那在 band 還等於融合名次時是
+    // 對的，band 改成命中通道數之後就不再是 `search()` 的性質了。斷言留著不會紅
+    // （只要沒有跨帶反轉就通過），但它宣稱的契約已經是別的東西。
+    #expect(
+        zip(hits, hits.dropFirst()).allSatisfy { $0.band <= $1.band },
+        "band 必須非遞減")
+    for group in Dictionary(grouping: hits, by: \.band).values {
+        let ordered = group.sorted { $0.emittedRank < $1.emittedRank }
+        #expect(
+            zip(ordered, ordered.dropFirst()).allSatisfy { $0.fusedScore >= $1.fusedScore },
+            "帶內必須是融合分數降冪")
+    }
 }
 
 @Test("RRF：融合後的集合恰是各通道排名的聯集（經 search()）")

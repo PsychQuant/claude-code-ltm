@@ -6,6 +6,14 @@ import LTMCore
 /// 只有 append 與 range read。**刻意沒有** update／delete 單筆事件的操作：
 /// 記憶層記的是「發生過什麼」，事後修改單筆紀錄等於改寫歷史，而不是修正
 /// 一個可重算的衍生值。
+///
+/// **這個 protocol 沒有例外；具體實作有一個，而它刻意不在這裡。**
+/// `FileEventStore.pruneUnusable()` 會移除**讀不回來**的紀錄（解不開的、舊定址
+/// 規則寫的）。它不在 protocol 上，因為那不是「存放介面」的能力而是修復工具的
+/// 能力——寫在這裡會讓每一個 `EventStore` 的使用者都拿得到一個刪除操作，而
+/// 「誰能刪」正是這條 requirement 要限制的東西。邊界寫在
+/// `memory-events` spec 的 MODIFIED requirement 裡：只能刪讀不回來的、不得接受
+/// 呼叫端指定哪一筆、鎖內完成、不得換 inode。
 public protocol EventStore: Sendable {
     /// 附加一筆事件。無法持久化時必須拋出——記憶層與索引不同，掉了就回不來。
     func append(_ event: Event) throws

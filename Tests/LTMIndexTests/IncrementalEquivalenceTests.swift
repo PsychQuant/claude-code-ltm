@@ -53,6 +53,17 @@ import Testing
 // - **真實 embedder**。用 `StubEmbedder`，所以向量比對驗的是「同樣的文字得到同樣的
 //   向量、且 `vector_row` 解參考正確」，不是 `NLContextualEmbedding` 的行為。
 // - **崩潰中止**。沒有在建置中途殺掉行程再續跑。
+// - **只有一個 project**。生成器所有檔案都在同一個 project 底下，所以複合唯一鍵
+//   `(project_fingerprint, uuid)` 的「跨 project 同 uuid 不得合併」這一半**完全沒被
+//   走到**——而那正是本 change 的核心改動之一。
+// - **`Snapshot` 不比對 `chunk_sources` 的 `session_id` / `timestamp`**，也不比對
+//   `state.json`。導航欄位是從連結重算的，所以連結本身錯了而重算結果碰巧相同時，
+//   這裡看不見。
+// - **生成語料裡 0% 是會被跳過的行**（工具呼叫、結果、摘要）。真實語料裡那是 46%
+//   （`docs/measurements/2026-08-18-resume-duplication.md`：677,913 解析 / 583,924
+//   跳過），所以跳過路徑與它的計數在這裡零覆蓋。
+// - **lexical 探針的 `ORDER BY` 多了 `c.uuid` 決勝**，生產路徑沒有。那是為了讓比對
+//   穩定，代價是 bm25 同分時 rowid 造成的名次分岔在這裡看不到。
 //
 // 要加涵蓋範圍，加的是**變異種類**（生成器）或**比較面向**（`Snapshot`），不是
 // 再寫一條個案測試。這是這個檔案存在的理由。

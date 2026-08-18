@@ -19,7 +19,7 @@ import LTMService
 /// 所以這個命令存在的理由不是便利，是讓那句「失敗訊息要指名補救命令」有東西可以指。
 enum MemoryCommand {
     static let usage = """
-        用法：ltm memory [--prune]
+        用法：ltm memory [--prune] [--force]
 
         檢查記憶層事件檔，逐行報出讀不回來的紀錄：
           - 損壞：解不開的行（半途中斷的 append、外來寫入者）
@@ -27,6 +27,7 @@ enum MemoryCommand {
 
         選項：
           --prune       把可用的紀錄寫回去，丟掉上面兩類。**先備份原檔**
+          --force       允許「一筆都不保留」的修剪（整份歷史都讀不回來時才需要）
           -h, --help    顯示本說明
 
         不帶 --prune 時只讀不寫。
@@ -37,6 +38,14 @@ enum MemoryCommand {
         if arguments.has("help") || arguments.has("h") {
             print(usage)
             return LTMCommandLine.ExitCode.success.rawValue
+        }
+        // 未知選項一律拒絕。少了這道檢查，`--prune=true` 會被解析成 values 而不是
+        // flags，於是 `has("prune")` 為假——**命令安靜地什麼都不做而回 0**。
+        // 現在多了 `--force`，打錯字的代價從「沒修剪」變成「以為加了保護其實沒加」。
+        let unknown = arguments.unknown(known: ["prune", "force", "help", "h"])
+        guard unknown.isEmpty else {
+            Output.error("✗ 未知選項：\(unknown.map { "--\($0)" }.joined(separator: ", "))\n\n\(usage)")
+            return LTMCommandLine.ExitCode.usageError.rawValue
         }
 
         do {
@@ -61,8 +70,33 @@ enum MemoryCommand {
             }
             guard arguments.has("prune") else {
                 print("")
-                print("要丟掉這 \(unusable) 筆並保留其餘，跑 `ltm memory --prune`（會先備份原檔）。")
+                if result.events.isEmpty {
+                    // **不要說「保留其餘」——這裡沒有其餘。** 而這正是主要觸發情境：
+                    // anchor 定址規則換代之後，換代前寫的每一筆都是舊規則，所以
+                    // 「全部讀不回來」是預設情況而不是邊角。
+                    print("這 \(unusable) 筆是**全部**的紀錄——修剪會讓事件檔變成空的。")
+                    print("確定要這麼做的話跑 `ltm memory --prune --force`（會先備份原檔）。")
+                } else {
+                    print(
+                        "要丟掉這 \(unusable) 筆、保留另外 \(result.events.count) 筆，"
+                            + "跑 `ltm memory --prune`（會先備份原檔）。")
+                }
                 return LTMCommandLine.ExitCode.success.rawValue
+            }
+
+            // 「一筆都不保留」需要明示。記憶層是唯一不可重建的資料，而使用者是照著
+            // 一個錯誤訊息的指示走到這裡的——那個訊息說的是「丟掉讀不回來的那些」，
+            // 不是「清空歷史」。兩者在換代情境下**恰好是同一件事**，所以必須讓使用者
+            // 看見這一點再決定。
+            if result.events.isEmpty && !arguments.has("force") {
+                Output.error(
+                    """
+                    ✗ 這會丟掉**全部** \(unusable) 筆紀錄，一筆都不保留——事件檔會變成空的。
+                    記憶層是這裡唯一不可重建的資料，所以這一步要明示：
+                        ltm memory --prune --force
+                    （仍然會先備份原檔。）
+                    """)
+                return LTMCommandLine.ExitCode.usageError.rawValue
             }
 
             // **先備份再改**。這是 canonical 資料，而被丟掉的那幾筆裡，「舊規則」
@@ -129,8 +163,30 @@ enum MemoryCommand {
                 記憶層第 \(lineNumber) 行解不開：\(path)
                 跑 `ltm memory` 看完整清單，或 `ltm memory --prune` 丟掉它（會先備份）。
                 """
-        default:
-            return "記憶層錯誤：\(error)"
+        case .readFailed(let path, let underlying):
+            return """
+                讀不到記憶層事件檔：\(path)
+                原因：\(underlying)
+                確認檔案存在且可讀；若它不是一般檔案（symlink 到 FIFO 之類），
+                把 LTM_MEMORY_ROOT 指到別處。
+                """
+        case .appendFailed(let path, let underlying):
+            return """
+                寫不進記憶層事件檔：\(path)
+                原因：\(underlying)
+                確認目錄可寫、磁碟有空間。**寫入失敗不會被吞掉**——記憶層掉了就回不來。
+                """
+        case .pathInsideReadOnlyCorpus(let path):
+            return """
+                這個路徑落在唯讀語料裡：\(path)
+                語料是 source of truth，任何寫入都是 bug。
+                請把 LTM_MEMORY_ROOT 指到語料之外的位置。
+                """
+        case .insecureDirectory(let path):
+            return """
+                記憶層目錄的權限太寬：\(path)
+                它存的是使用歷史，不該是 world-readable。改成 0700 後再試。
+                """
         }
     }
 }
