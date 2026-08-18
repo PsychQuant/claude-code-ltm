@@ -11,6 +11,12 @@ public struct BuildReport: Sendable, Equatable {
     /// 都是 `Int` 所以編譯器不會有意見。
     public let sourcesRefreshed: Int
     public let sourcesInvalidated: Int
+    /// 這一輪**讀不到**的來源檔（權限、I/O 錯誤）。
+    ///
+    /// 與「消失」嚴格區分：消失的來源會被作廢，讀不到的不會——把後者當成前者
+    /// 會刪掉還存在的內容。但**不作廢就必須說出來**，否則索引裡少了這些檔的
+    /// 新內容，而使用者看到的是一次成功的建置。
+    public let sourcesUnreadable: [String]
     public let skipped: SkipTally
     /// 這次是不是從零開始（版本／revision 不符或指定 `--full`）。
     public let wasFullRebuild: Bool
@@ -159,6 +165,7 @@ public struct IndexBuilder: Sendable {
             chunksIndexed: indexed,
             sourcesRefreshed: refreshedSourceKeys.count,
             sourcesInvalidated: scan.invalidatedSources.count,
+            sourcesUnreadable: scan.unreadableSources.sorted(),
             skipped: scan.skipped,
             wasFullRebuild: rebuildFromScratch,
             embeddingRevision: embedder.revision,

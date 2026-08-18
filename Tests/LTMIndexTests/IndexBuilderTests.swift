@@ -288,3 +288,34 @@ func deletingOneResumeCopyKeepsTheTurn() throws {
         report.totalChunks == 1,
         "turn 仍然存在於 a.jsonl；把它從索引刪掉會讓增量結果與全量重建不同（不變式 2）")
 }
+
+@Test("讀不到的來源不作廢，但必須出現在報告裡")
+func unreadableSourcesAreReportedNotSilentlyKept() throws {
+    let workspace = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: workspace.corpus)
+        try? FileManager.default.removeItem(at: workspace.derived.root)
+    }
+    let file = try writeSession(
+        in: workspace.corpus, project: "proj-one", file: "s.jsonl",
+        lines: [turnLine(uuid: "0000aaaa-aaaa-bbbb-cccc-dddddddddddd",
+                         session: "cccccccc-3333-3333-3333-333333333333",
+                         role: "user", text: "會變成讀不到的內容")])
+    let embedder = StubEmbedder(revision: "r1")
+    func builder() -> IndexBuilder {
+        IndexBuilder(
+            location: workspace.derived,
+            scanner: CorpusScanner(corpusRoot: workspace.corpus), embedder: embedder)
+    }
+    #expect(try builder().build().totalChunks == 1)
+
+    // 拿掉讀取權限：檔案還在，只是讀不到。
+    try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path) }
+
+    let report = try builder().build()
+    #expect(report.totalChunks == 1, "讀不到不等於消失——既有內容必須保留")
+    #expect(
+        report.sourcesUnreadable.count == 1,
+        "不作廢就必須說出來；沉默地保留會讓這次建置看起來完整")
+}

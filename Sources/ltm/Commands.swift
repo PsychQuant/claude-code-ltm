@@ -137,6 +137,16 @@ enum BuildCommand {
                   新增 chunk：\(report.chunksIndexed)　索引總計：\(report.totalChunks)
                   作廢來源：\(report.sourcesInvalidated)　embedding revision：\(report.embeddingRevision)
                 """)
+            if !report.sourcesUnreadable.isEmpty {
+                // 讀不到的來源**沒有**被作廢（那會刪掉還存在的內容），所以它們的
+                // 內容仍在索引裡、只是不會更新。沉默地繼續會讓這次建置看起來完整。
+                Output.error(
+                    "  ⚠ \(report.sourcesUnreadable.count) 個來源檔讀不到，本輪未更新（既有內容保留）：")
+                for key in report.sourcesUnreadable.prefix(5) { Output.error("      \(key)") }
+                if report.sourcesUnreadable.count > 5 {
+                    Output.error("      …另 \(report.sourcesUnreadable.count - 5) 個")
+                }
+            }
             if report.skipped.total > 0 {
                 // 跳過是正常的，但必須說得出跳了多少、為什麼——否則索引少了東西
                 // 沒有人會發現。
