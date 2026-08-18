@@ -208,6 +208,14 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 ## 工作流程
 
 本專案走 IDD（issue-driven development）：先開 issue、診斷、實作、驗證，commit 引用 `#N`。
+
+**`/idd-verify` 的 codex leg 目前跑不動——Codex 額度用完，不是設定問題。** 所以跑
+verify 時傳 `codexEnabled: false`，別再讓它失敗一次然後把 `cross-model pass
+incomplete` 報成 process gap（前四輪都這樣報，歸類是錯的）。
+
+這件事的實質後果要說清楚：**沒有跨模型盲驗**。ensemble 的 4 個 lens 加 devil's
+advocate 全是 Claude 家族，所以同家族的共同盲點沒有任何東西會抓到。額度回來之前，
+verify 的結論要以「同一家族的五個視角都沒看到」來理解，不是「兩個家族都沒看到」。
 設計討論走 Spectra／superpowers 的 spec 流程，spec 落在 `docs/superpowers/specs/`。
 
 ## 誠實邊界
