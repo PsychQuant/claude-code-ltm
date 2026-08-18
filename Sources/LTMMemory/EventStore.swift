@@ -337,7 +337,7 @@ public struct FileEventStore: EventStore {
         // **封口本身不足以讓損壞侷限在那一筆**（#1 verify R3 指出 R2 的註解在這裡
         // 過度宣稱）：讀取端對解不開的行是 fail-loud，所以檔案裡有一行壞掉，
         // 整份就讀不出來。封口只是讓壞的範圍停在一行、不吃掉下一筆。真正讓
-        // 「損壞侷限」成立的是讀取端的 `allEvents(skippingCorrupt:)`——見該方法。
+        // 「損壞侷限」成立的是讀取端的 `allEvents(skippingUnusable:)`——見該方法。
         var remaining = line[...]
         var wroteAnything = false
         while !remaining.isEmpty {
@@ -555,13 +555,13 @@ public struct FileEventStore: EventStore {
 
     /// 讀取全部事件，可選擇是否跳過壞行。
     ///
-    /// **預設 fail-loud**（`skippingCorrupt: false`）：解不開的紀錄一律外顯，
+    /// **預設 fail-loud**（`skippingUnusable: false`）：解不開的紀錄一律外顯，
     /// 因為靜默跳過會讓「外來寫入者塞了本 schema 不認得的東西」看起來像
     /// 「那天沒有事件」——記憶層是不可重建的資料，安靜地少讀幾筆比讀不出來更糟。
     ///
     /// 但那個預設有個代價，#1 verify R3 指出來了：一次半途中斷的 append 留下
     /// 一行壞資料，**整份 canonical store 從此讀不出來**。所以另外提供
-    /// `skippingCorrupt: true`——它不會被排序或計分路徑呼叫，只給修復情境用：
+    /// `skippingUnusable: true`——它不會被排序或計分路徑呼叫，只給修復情境用：
     /// 讀得回來的部分先救出來，同時**明確回報跳過了哪幾行**，讓「損壞侷限在
     /// 那一筆」成為可觀察的事實而不是註解裡的宣稱。
     /// - Parameter skippingUnusable: `true` 時跳過**兩類**不可用的紀錄並回報行號：

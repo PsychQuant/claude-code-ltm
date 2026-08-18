@@ -30,7 +30,7 @@ import Foundation
 ///
 /// canonical 檔從此**綁定編碼器的輸出形式**。Foundation 若改變數字格式或跳脫規則，
 /// 既有的每一行都會變成 corrupt——不是靜默讀錯，是全部讀不出來。這個方向是刻意選的
-/// （fail loud 勝過靜默接受夾帶內容），而 `allEvents(skippingCorrupt:)` 會逐行報出
+/// （fail loud 勝過靜默接受夾帶內容），而 `allEvents(skippingUnusable:)` 會逐行報出
 /// 是哪幾行，所以真的發生時是可診斷、可重寫的。
 ///
 /// 判準級的檢查在**位元組**層，我擁有的 decoder 仍各自嚴格化（下方

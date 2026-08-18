@@ -139,6 +139,9 @@ public struct RefreshReport: Sendable {
     }
 }
 
+/// 一次查詢的完整結果：命中、用了哪個策略、續讀做了什麼、寫了幾筆事件。
+///
+/// （這份 doc 曾經因為 `RefreshReport` 被插在它正上方而消失——型別還在，說明沒了。）
 public struct QueryOutcome: Sendable {
     public let hits: [QueryHit]
     public let strategyID: String

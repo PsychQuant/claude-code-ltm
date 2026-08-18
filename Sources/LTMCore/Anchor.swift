@@ -189,7 +189,7 @@ public struct Anchor: Sendable, Hashable, Codable {
     /// 解碼路徑必須用這一個：`lower..<upper` 在 `lower > upper` 時觸發 stdlib 的
     /// precondition 並中止行程，所以 `validate(span:)` 看不到反序的輸入——它要
     /// 驗的值構造不出來。#1 verify R6 以編譯後的 probe 實測，包含
-    /// `allEvents(skippingCorrupt:)` 這條修復路徑也一起崩。
+    /// `allEvents(skippingUnusable:)` 這條修復路徑也一起崩。
     public static func validate(lower: Int, upper: Int) throws {
         guard lower <= upper else {
             throw SpanValidationError.inverted(lower: lower, upper: upper)

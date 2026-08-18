@@ -127,7 +127,8 @@ func everyHitCarriesFourFieldPointer() throws {
         #expect(hit.timestamp.timeIntervalSince1970 > 0)
         #expect(hit.anchor.turnID == hit.uuid)
     }
-    // 名次是連續的 0,1,2...，band 直接取用它。
+    // 名次是連續的 0,1,2…。**band 不取用它**——band 是命中通道數，
+    // 「band 等於名次」正是這個 change 拆掉的那個缺陷（每筆自成一帶，seam 是空的）。
     #expect(hits.map(\.emittedRank) == Array(0..<hits.count))
 }
 
