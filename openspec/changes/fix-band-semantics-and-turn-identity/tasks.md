@@ -40,34 +40,34 @@
 
 - [x] 7.1 更新 README 與 CLAUDE.md 的行為描述，使其與修正後的行為一致：band 的語意、turn 去重、`--strategy` 不再需要 `--record`、舊索引需要 `ltm build --full`。Behavior：文件所述與 CLI 實際行為一致，且不含任何無量測支撐的效能宣稱。Verify：對照 design.md 的 Implementation Contract 逐項核對。
 
-## 5. round-2 verify 的補做（2026-08-18）
+## 8. round-2 verify 的補做（2026-08-18）
 
 上面的勾勾在第一次打上時**有兩個是假的**。`/idd-verify #24` 第二輪抓到，這一節
 記錄補做了什麼——保留這段而不是默默改掉勾勾，因為「勾勾曾經是假的」本身是
 這個 change 最該被記住的事實。
 
-- [x] 5.1 **2.3 的事件層那一半從未實作。** 索引層的拒絕有實作也有測試，事件層
+- [x] 8.1 **2.3 的事件層那一半從未實作。** 索引層的拒絕有實作也有測試，事件層
   兩者皆無——而 requirement 講的正是事件層。`anchorSourceRule` 在 LTMMemory 與
   LTMMemoryTests 是零命中，Verify 欄卻寫著一個不存在的測試。補上
   `ProjectFingerprint.hasCurrentRuleShape` 與 `EventStoreError.supersededAnchorRule`
   （具名到行號），三條 LTMMemoryTests。
-- [x] 5.2 **3.1 的 band 改動讓 `ltm query` 直接失敗。** 通道數 band 與 RRF 分數
+- [x] 8.2 **3.1 的 band 改動讓 `ltm query` 直接失敗。** 通道數 band 與 RRF 分數
   不單調相關，而候選仍按分數降冪送進 seam → `bandsOutOfOrder`，真實語料 15 個
   查詢中 1 個炸掉。加 `LTMService.layered(_:)` 依 `(band, fusedRank)` 排序。
   回歸鎖含 `unlayeredCandidatesAreRejectedBySeam`，證明主要那條不是恆真式。
-- [x] 5.3 **4.2 只修了兩個寫者中的一個。** `refreshIncrementally` 仍是舊順序，
+- [x] 8.3 **4.2 只修了兩個寫者中的一個。** `refreshIncrementally` 仍是舊順序，
   也沒有 `truncateSidecar`。修法不是照抄順序而是**刪掉那份平行實作**、委派
   `IndexBuilder`——兩個寫者就是兩份會漂移的規格。
-- [x] 5.4 **4.2 的「絕不補零後續寫」沒有實作。** `truncateSidecar` 對較短的檔案
+- [x] 8.4 **4.2 的「絕不補零後續寫」沒有實作。** `truncateSidecar` 對較短的檔案
   呼叫 `ftruncate` 正是補零延長（POSIX）。改成只縮不長，比宣稱短就丟具名的
   `sidecarShorterThanDeclared`。原本那條側車測試拆成兩條，分別鎖住兩道守衛
   守的**不同執行路徑**（持鎖時續讀整段跳過，建置端那道不會跑）。
-- [x] 5.5 **2.2 的去重與刪檔作廢交互作用會刪掉還存在的 turn。** 兩個機制各自
+- [x] 8.5 **2.2 的去重與刪檔作廢交互作用會刪掉還存在的 turn。** 兩個機制各自
   正確：去重把同一則 turn 收斂成一列，作廢刪掉消失來源的 chunk。但
   `chunks.source_key` 是一個欄位，而「這個 chunk 來自哪裡」是多對多。改成
   `chunk_sources` 連結表，只有失去最後一個持有者的 chunk 才真的刪掉。
   layoutVersion 2 → 3。
-- [x] 5.6 **`unreadableSources` 算出來但沒有消費者**，而 spec 寫 SHALL be
+- [x] 8.6 **`unreadableSources` 算出來但沒有消費者**，而 spec 寫 SHALL be
   reported。加進 `BuildReport` 並由 CLI 印出——不作廢就必須說出來，否則索引
   少了這些檔的新內容而使用者看到一次成功的建置。
 
