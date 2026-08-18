@@ -4,6 +4,12 @@ import LTMCore
 /// 一次建置的結果。
 public struct BuildReport: Sendable, Equatable {
     public let chunksIndexed: Int
+    /// 這一輪有新內容的**來源檔**數（distinct source key），不是 chunk 數。
+    ///
+    /// 兩者的差別曾經被混用：`QueryOutcome.refreshedSources` 的文件寫「來源檔數」，
+    /// 而它拿到的值是 `scan.chunks.count`。名字說一件事、值是另一件事，而型別
+    /// 都是 `Int` 所以編譯器不會有意見。
+    public let sourcesRefreshed: Int
     public let sourcesInvalidated: Int
     public let skipped: SkipTally
     /// 這次是不是從零開始（版本／revision 不符或指定 `--full`）。
@@ -28,6 +34,12 @@ public struct IndexBuilder: Sendable {
         /// 另一個建置正在進行。**不等待**：建置可能跑很久，讓第二個行程無限期
         /// 卡住比明確失敗更糟——呼叫端無從得知它是在做事還是在等。
         case lockHeld(path: String)
+        /// 側車檔比索引宣稱的短。
+        ///
+        /// 這**不能**靠 `ftruncate` 修：對較短的檔案指定較大的 offset 是
+        /// **補零延長**（POSIX 語意），不是重建缺口。補出來的零向量與任何查詢
+        /// 的點積都是 0——向量通道因此靜默失效，而筆數核對會通過。
+        case sidecarShorterThanDeclared(declared: Int, found: Int)
         case stateUnreadable(detail: String)
     }
 
@@ -41,6 +53,16 @@ public struct IndexBuilder: Sendable {
 
         // 版本／revision 判準先於任何寫入：不符就整份重來，而不是在舊索引上疊。
         // 混一份舊 revision 的向量進去不會報錯，只會讓距離失去意義。
+        //
+        // **注意這裡沒有檢查 `anchorSourceRule`。** 目前不會出事，但那是因為
+        // 定址規則換代時 `layoutVersion` 剛好也跟著升——換句話說，這個守衛的
+        // 完整性靠的是兩個常數碰巧一起改，不是靠這段程式碼。日後若有人只換
+        // 定址規則而沒動 layout，新舊規則的 anchor 會被疊進同一份索引，而
+        // 唯一的症狀是使用歷史對不上（全部報成 orphan）。
+        //
+        // 沒有現在就補進去，是因為補了會讓「同一件事有兩個真相來源」——
+        // 正確的修法是讓規則換代**必然**帶動 layout 升版，而那需要一個
+        // 目前不存在的機制。留這則註解，是為了讓下一個改定址規則的人看見。
         let existingStamps = try? currentStamps()
         let stampsMismatch =
             existingStamps.map {
@@ -76,6 +98,7 @@ public struct IndexBuilder: Sendable {
             }
         }
         let scan = try scanner.scan(previous: previousState)
+        let refreshedSourceKeys = Set(scan.chunks.map(\.sourceKey))
 
         var vectorRow = rebuildFromScratch ? 0 : (try database.meta("vector_count").flatMap(Int.init) ?? 0)
         // 上一輪若在寫側車檔途中中止，檔案會比 `vector_count` 記錄的長。先截回
@@ -134,6 +157,7 @@ public struct IndexBuilder: Sendable {
 
         return BuildReport(
             chunksIndexed: indexed,
+            sourcesRefreshed: refreshedSourceKeys.count,
             sourcesInvalidated: scan.invalidatedSources.count,
             skipped: scan.skipped,
             wasFullRebuild: rebuildFromScratch,
@@ -167,12 +191,27 @@ public struct IndexBuilder: Sendable {
         }
     }
 
+    /// 把側車檔截回索引宣稱的長度。
+    ///
+    /// **只縮不長。** `FileHandle.truncate(atOffset:)` 對較短的檔案指定較大的
+    /// offset 會補零延長而不是報錯，所以「截斷」這個名字在這個方向上是騙人的：
+    /// 缺掉的向量會被一堆零取代，與任何查詢的點積都是 0，而 `vector_count` 的
+    /// 核對從此永遠通過——向量通道靜默失效，沒有任何訊號。
+    ///
+    /// 檔案比宣稱的短，代表向量真的不見了。那是拒答的理由，不是修補的機會。
     private func truncateSidecar(toRows rows: Int) throws {
         let path = location.vectorsURL.path
         guard FileManager.default.fileExists(atPath: path) else { return }
+        let rowBytes = embedder.dimension * MemoryLayout<Float>.size
+        let target = UInt64(rows * rowBytes)
         let handle = try FileHandle(forUpdating: location.vectorsURL)
         defer { try? handle.close() }
-        try handle.truncate(atOffset: UInt64(rows * embedder.dimension * MemoryLayout<Float>.size))
+        let current = try handle.seekToEnd()
+        guard current >= target else {
+            throw BuildError.sidecarShorterThanDeclared(
+                declared: rows, found: rowBytes == 0 ? 0 : Int(current) / rowBytes)
+        }
+        try handle.truncate(atOffset: target)
     }
 
     private func appendVectors(_ vectors: [[Float]]) throws {

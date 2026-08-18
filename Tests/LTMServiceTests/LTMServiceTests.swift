@@ -392,13 +392,49 @@ func truncatedSidecarRefusesTheQuery() throws {
     let data = try Data(contentsOf: workspace.derived.vectorsURL)
     try data.prefix(data.count / 2).write(to: workspace.derived.vectorsURL)
 
+    // 這條路徑上先 fire 的是**建置端**的守衛：查詢的增量續讀會先把側車截回索引
+    // 宣稱的長度，而截斷只准縮不准長——檔案比宣稱的短就是拒答的理由。
+    //
+    // （不能靠補零「修好」：零向量與任何查詢的點積都是 0，向量通道會靜默失效
+    // 而筆數核對照樣通過。`FileHandle.truncate(atOffset:)` 對較短的檔案正是
+    // 補零延長，所以那個名字在這個方向上是騙人的。）
+    var thrown: Error?
+    do { _ = try service.query(text: "內容", limit: 10, scope: .allProjects) }
+    catch { thrown = error }
+    guard case .some(IndexBuilder.BuildError.sidecarShorterThanDeclared) =
+        thrown as? IndexBuilder.BuildError
+    else {
+        Issue.record("側車比宣稱的短必須拒答，實際：\(String(describing: thrown))")
+        return
+    }
+}
+
+@Test("另一個寫者持鎖時，側車不一致由 facade 自己的核對擋下")
+func truncatedSidecarRefusesEvenWhenRefreshIsSkipped() throws {
+    // 上一條測的是建置端的守衛。但拿不到鎖時**增量續讀整段被跳過**，那道守衛
+    // 就不會跑——所以 facade 必須有自己的核對，否則同一個損壞在「另一個 build
+    // 正在跑」的時候會安靜地降級成 lexical-only。
+    //
+    // 兩道守衛不是重複：它們守的是不同的執行路徑，而哪一道先 fire 取決於鎖。
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["第一段內容", "第二段內容", "第三段內容"])
+    let service = try workspace.service()
+    try service.build()
+
+    let data = try Data(contentsOf: workspace.derived.vectorsURL)
+    try data.prefix(data.count / 2).write(to: workspace.derived.vectorsURL)
+
+    let lock = try FileLock.acquire(at: workspace.derived.lockURL)
+    defer { lock.release() }
+
     var thrown: Error?
     do { _ = try service.query(text: "內容", limit: 10, scope: .allProjects) }
     catch { thrown = error }
     guard case .some(LTMService.ServiceError.vectorSidecarMismatch) =
         thrown as? LTMService.ServiceError
     else {
-        Issue.record("側車不一致必須拒答，實際：\(String(describing: thrown))")
+        Issue.record("跳過續讀時仍必須拒答，實際：\(String(describing: thrown))")
         return
     }
 }

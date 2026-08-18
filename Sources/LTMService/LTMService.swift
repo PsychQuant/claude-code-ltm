@@ -270,7 +270,7 @@ public struct LTMService {
         // 查詢時的 staleness 檢查：語料前進了就先把尾巴讀進來再回答。
         // 這裡**只做增量**——需要整份重建的情況（版本／revision 不符）在上面
         // 已經拒答了，不會走到這裡。
-        let refreshed = try refreshIncrementally(database: database)
+        let refreshed = try refreshIncrementally()
 
         let dimension = try database.meta("vector_dimension").flatMap(Int.init) ?? embedder.dimension
         let declaredVectors = try database.meta("vector_count").flatMap(Int.init) ?? 0
@@ -362,71 +362,37 @@ public struct LTMService {
 
     /// 把語料的新增內容併進索引（查詢路徑上的增量續讀）。
     ///
-    /// 回傳有新內容的來源檔數。整份重建需要的情況不在這裡處理——那是 `build`。
-    private func refreshIncrementally(database: IndexDatabase) throws -> Int {
-        // 這條路徑**是寫者**：它改 SQLite、append 側車、覆寫 state。所以它必須拿
-        // 與 `IndexBuilder` 同一把單寫者鎖。
-        //
-        // 先前只有 build 拿鎖，於是兩個並行的 `ltm query`（或 query 與 build 重疊）
-        // 會各自讀到同一份舊 state、各自配置 vector row、各自 append 側車——即使
-        // SQLite 把交易序列化，**側車 append 的先後與 DB 配置 row 的先後不保證一致**，
-        // 結果是某個 chunk 的 `vector_row` 指向別人的向量。WAL 涵蓋不到外部側車檔。
-        //
-        // 拿不到鎖時**不等待也不失敗**：查詢仍可用既有索引回答，只是這一輪不併入
-        // 新內容。這與 build 不同——build 的工作就是寫入，拿不到鎖必須明確失敗。
-        let lock: FileLock
+    /// 回傳有新內容的來源檔數。
+    ///
+    /// ## 為什麼是委派而不是自己寫一份
+    ///
+    /// 這裡曾經有一份**平行的**寫入實作：自己算向量、自己配 row、自己 append
+    /// 側車、自己覆寫 state。它與 `IndexBuilder` 做同一件事，卻是兩份程式碼——
+    /// 於是修好其中一份不會修好另一份，而且不會有任何訊號。
+    ///
+    /// 實際發生過：`IndexBuilder` 的寫入順序被改成「側車先落地並 fsync、之後
+    /// 才提交指向它的指標」，這一份沒有跟著改，仍然是先提交 `vector_count` 再
+    /// append。崩在兩者之間會留下「DB 宣稱 N 個向量、檔案只有 N−k 個」，而
+    /// 查詢路徑的側車核對會就此拒答，直到使用者跑 `ltm build --full`。這一份
+    /// 也沒有 `truncateSidecar`，所以殘留的多餘 bytes 永遠不會被清掉。
+    ///
+    /// 兩個寫者就是兩份會漂移的規格。刪掉一份是唯一不會再漂移的修法。
+    ///
+    /// ## 兩處刻意的差異
+    ///
+    /// - **拿不到鎖不失敗**：查詢仍可用既有索引回答，只是這一輪不併入新內容。
+    ///   `build` 相反——它的工作就是寫入，拿不到鎖必須明確失敗。
+    /// - **不可能觸發整份重建**：`query` 在呼叫這裡之前已經檢查過 layout 版本、
+    ///   embedding revision 與 anchor 定址規則，三者不符都已拒答。所以
+    ///   `build()` 內的 `stampsMismatch` 分支在這條路徑上到不了。
+    private func refreshIncrementally() throws -> Int {
+        let builder = IndexBuilder(
+            location: location, scanner: CorpusScanner(corpusRoot: corpusRoot), embedder: embedder)
         do {
-            lock = try FileLock.acquire(at: location.lockURL)
-        } catch {
+            return try builder.build().sourcesRefreshed
+        } catch IndexBuilder.BuildError.lockHeld {
             return 0
         }
-        defer { lock.release() }
-
-        let statePath = location.stateURL
-        guard let data = try? Data(contentsOf: statePath),
-            let previous = try? JSONDecoder().decode(ScanState.self, from: data)
-        else { return 0 }
-        let scan = try CorpusScanner(corpusRoot: corpusRoot).scan(previous: previous)
-        guard !scan.chunks.isEmpty || !scan.invalidatedSources.isEmpty else { return 0 }
-
-        var vectorRow = try database.meta("vector_count").flatMap(Int.init) ?? 0
-        var newVectors: [[Float]] = []
-        try database.transaction {
-            for sourceKey in scan.invalidatedSources {
-                try database.deleteChunks(sourceKey: sourceKey)
-            }
-            for (sourceKey, chunks) in Dictionary(grouping: scan.chunks, by: \.sourceKey)
-                .sorted(by: { $0.key < $1.key })
-            {
-                let rowIDs = try database.insert(chunks: chunks, sourceKey: sourceKey)
-                for (offset, chunk) in chunks.enumerated() {
-                    guard let vector = try embedder.vector(for: chunk.text) else { continue }
-                    newVectors.append(vector)
-                    try database.execute(
-                        "UPDATE chunks SET vector_row = ? WHERE id = ?",
-                        bind: [.integer(Int64(vectorRow)), .integer(rowIDs[offset])])
-                    vectorRow += 1
-                }
-            }
-            try database.setMeta("vector_count", String(vectorRow))
-        }
-        if !newVectors.isEmpty {
-            let handle: FileHandle
-            if FileManager.default.fileExists(atPath: location.vectorsURL.path) {
-                handle = try FileHandle(forWritingTo: location.vectorsURL)
-            } else {
-                FileManager.default.createFile(atPath: location.vectorsURL.path, contents: nil)
-                handle = try FileHandle(forWritingTo: location.vectorsURL)
-            }
-            defer { try? handle.close() }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: VectorSidecar.encode(newVectors))
-            try handle.synchronize()
-        }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        try? encoder.encode(scan.state).write(to: statePath, options: [.atomic])
-        return scan.chunks.isEmpty ? scan.invalidatedSources.count : scan.chunks.count
     }
 
     /// 把事件投影成策略要看的統計。

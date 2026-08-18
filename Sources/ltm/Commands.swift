@@ -156,6 +156,14 @@ enum BuildCommand {
             case .stateUnreadable(let detail):
                 Output.error("✗ 續讀狀態無法讀取：\(detail)。用 `ltm build --full` 從零重建。")
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
+            case .sidecarShorterThanDeclared(let declared, let found):
+                Output.error(
+                    """
+                    ✗ 向量側車檔比索引宣稱的短（宣稱 \(declared) 筆、檔案有 \(found) 筆）
+                    缺掉的向量無法補——補零會讓向量通道靜默失效而筆數核對照樣通過。
+                    請跑 `ltm build --full` 從零重建。
+                    """)
+                return LTMCommandLine.ExitCode.indexStateError.rawValue
             }
         } catch let error as CorpusScanner.ScanError {
             if case .corpusRootUnreadable(let path) = error {
@@ -256,6 +264,28 @@ enum QueryCommand {
             return LTMCommandLine.ExitCode.success.rawValue
         } catch let error as LTMService.ServiceError {
             return report(error)
+        } catch let error as IndexBuilder.BuildError {
+            // 查詢路徑的增量續讀委派給 `IndexBuilder`，所以它的錯誤會從這裡出來。
+            // `lockHeld` 到不了——facade 把它吞成「這一輪不併入新內容」。
+            switch error {
+            case .stateUnreadable(let detail):
+                Output.error(
+                    """
+                    ✗ 續讀狀態無法讀取：\(detail)
+                    索引還在，但無法判斷該從哪裡接著讀——照樣回答會安靜地漏掉新內容。
+                    請跑 `ltm build --full` 從零重建。
+                    """)
+            case .sidecarShorterThanDeclared(let declared, let found):
+                Output.error(
+                    """
+                    ✗ 向量側車檔比索引宣稱的短（宣稱 \(declared) 筆、檔案有 \(found) 筆）
+                    缺掉的向量無法補——補零會讓向量通道靜默失效而筆數核對照樣通過。
+                    這裡拒答而不是降級成 lexical-only。請跑 `ltm build --full` 重建。
+                    """)
+            case .lockHeld(let path):
+                Output.error("✗ 意外的鎖錯誤（\(path)）——查詢路徑本應吞掉它。這是 bug。")
+            }
+            return LTMCommandLine.ExitCode.indexStateError.rawValue
         } catch let error as ContextualEmbeddingProvider.EmbeddingError {
             Output.error("✗ embedding 模型不可用：\(error)")
             return LTMCommandLine.ExitCode.indexStateError.rawValue
