@@ -419,45 +419,121 @@ public struct FileEventStore: EventStore {
     }
 
     /// 全部事件，維持寫入順序。
-    /// 只保留 `keeping` 這些紀錄，把事件檔重寫一遍；回傳寫回幾筆。
+    /// 丟掉**讀不回來**的紀錄，把其餘寫回去；回傳保留幾筆與丟掉哪幾行。
     ///
-    /// **這是唯一會從 canonical 儲存移除資料的方法。** 它存在的理由很窄：讀不回來
-    /// 的紀錄（損壞的、舊定址規則寫的）會讓整份歷史拒絕讀取，而記憶層是本 repo
-    /// 唯一不可重建的資料——沒有出路的話，那個拒絕實際等同「歷史從此鎖死」。
+    /// ## 為什麼是「讀→篩→寫」一次做完，而不是收一份 `keeping` 清單
     ///
-    /// 三個紀律：
+    /// 先前的簽章是 `rewrite(keeping: [Event])`，呼叫端先讀一次、篩完再交回來。
+    /// 那有兩個問題，第二個是致命的：
     ///
-    /// - **呼叫端必須先備份。** 這裡不自己備份，因為備份策略（放哪、留幾份）是
-    ///   呼叫端的決定，而把它藏在這裡會讓「這個方法會刪東西」變得不明顯。
-    /// - **原子替換**：寫暫存檔、fsync、rename。中途崩潰留下的是原檔或新檔，
-    ///   不會是半份——半份 canonical 歷史比丟掉那幾筆糟得多。
-    /// - **走同一套 canonical 編碼**：寫回去的每一行都必須能通過
-    ///   `decodeCanonicalLine` 的逐字往返檢查，否則這個「修復」會製造出新的損壞。
+    /// 1. **read-modify-write race**：讀取結束後共享鎖就放掉了，到寫回為止的任何
+    ///    一筆 `append`（`ltm query --record`、Stage 2 的 MCP server）都會被丟掉。
+    ///    #24 的整個目的就是讓多個 session 同時用它，所以這不是理論情形。
+    /// 2. **它是「刪掉任意一筆事件」的公開 API**。`memory-events` 的既有
+    ///    requirement 逐字寫「It SHALL NOT expose an operation that updates or
+    ///    deletes an individual event」——`rewrite(keeping: events.filter { $0 != x })`
+    ///    正是那個操作。
+    ///
+    /// 現在的形狀兩個問題一起消失：篩選規則寫死在**這裡**（只丟讀不回來的），
+    /// 呼叫端無法指定丟哪一筆；而讀與寫在**同一個 fd 的同一段 `LOCK_EX` 內**完成，
+    /// 中間沒有窗口。
+    ///
+    /// ## 為什麼不換 inode
+    ///
+    /// `flock` 綁在 inode 上。先前用 `write(to: temp)` + `replaceItemAt` 落地，
+    /// 而那會換掉 inode——**實測**：另一個行程持有 `LOCK_EX` 時 replace 照樣成功，
+    /// 接著那個持鎖者的 `write(2)` 落進已被 unlink 的舊 inode，資料沒有任何錯誤
+    /// 地消失。所以這裡用 `ftruncate` + 就地覆寫。
+    ///
+    /// ## 代價，寫明
+    ///
+    /// 就地覆寫**不是原子的**：崩在 truncate 與 write 之間會留下半份檔案。這是
+    /// 拿原子性換鎖的正確性，而崩潰窗口由呼叫端的備份覆蓋——`ltm memory --prune`
+    /// 在呼叫這裡之前一定先備份。兩者相比，並發靜默丟資料比崩潰窗口糟得多：
+    /// 前者無聲、日常可達，後者有備份且需要剛好崩在幾毫秒內。
     @discardableResult
-    public func rewrite(keeping events: [Event]) throws -> Int {
-        var payload = Data()
-        for event in events {
-            do {
-                payload.append(try encoder.encode(event))
-                payload.append(Data("\n".utf8))
-            } catch {
-                throw EventStoreError.appendFailed(path: url.path, underlying: "\(error)")
+    public func pruneUnusable() throws -> (kept: Int, corruptLines: [Int], supersededLines: [Int]) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return (0, [], []) }
+        let fd = open(url.path, O_RDWR | O_NONBLOCK)
+        guard fd >= 0 else {
+            throw EventStoreError.readFailed(
+                path: url.path, underlying: "open 失敗：errno \(errno)")
+        }
+        defer { close(fd) }
+
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            throw EventStoreError.readFailed(
+                path: url.path, underlying: "不是一般檔案——拒絕而不是阻塞")
+        }
+        // **阻塞式 `LOCK_EX`**：這是使用者手動叫的維護命令，等一個進行中的 append
+        // 結束是對的；`append` 用 `LOCK_NB` 是因為它在熱路徑上。
+        guard flock(fd, LOCK_EX) == 0 else {
+            throw EventStoreError.appendFailed(
+                path: url.path, underlying: "取不到獨占鎖：errno \(errno)")
+        }
+        defer { flock(fd, LOCK_UN) }
+
+        var bytes = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+            if n > 0 { bytes.append(contentsOf: buffer[0..<n]) }
+            else if n == 0 { break }
+            else if errno == EINTR { continue }
+            else {
+                throw EventStoreError.readFailed(
+                    path: url.path, underlying: "read 失敗：errno \(errno)")
             }
         }
-        let temporary = url.appendingPathExtension("rewrite-\(UUID().uuidString)")
-        do {
-            try payload.write(to: temporary, options: [.atomic])
-            // `.atomic` 保證的是「不會看到半份」，不保證已落盤——rename 之後補一次
-            // fsync 才讓回傳成功等於「已持久化」（同 `append` 的判準）。
-            let handle = try FileHandle(forWritingTo: temporary)
-            try handle.synchronize()
-            try handle.close()
-            _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
-        } catch {
-            try? FileManager.default.removeItem(at: temporary)
-            throw EventStoreError.appendFailed(path: url.path, underlying: "\(error)")
+
+        var kept: [Event] = []
+        var corrupt: [Int] = []
+        var superseded: [Int] = []
+        for (index, line) in String(decoding: bytes, as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: false).enumerated()
+        {
+            if line.isEmpty { continue }
+            do {
+                let event = try CanonicalCoding.decodeCanonicalLine(
+                    Event.self, from: Data(line.utf8))
+                guard ProjectFingerprint.hasCurrentRuleShape(event.anchor.source) else {
+                    superseded.append(index + 1)
+                    continue
+                }
+                kept.append(event)
+            } catch {
+                corrupt.append(index + 1)
+            }
         }
-        return events.count
+        guard !corrupt.isEmpty || !superseded.isEmpty else { return (kept.count, [], []) }
+
+        var payload = Data()
+        for event in kept {
+            payload.append(try encoder.encode(event))
+            payload.append(Data("\n".utf8))
+        }
+        guard ftruncate(fd, 0) == 0, lseek(fd, 0, SEEK_SET) == 0 else {
+            throw EventStoreError.appendFailed(
+                path: url.path, underlying: "截斷失敗：errno \(errno)")
+        }
+        try payload.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                let n = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                if n > 0 { offset += n }
+                else if n < 0, errno == EINTR { continue }
+                else {
+                    throw EventStoreError.appendFailed(
+                        path: url.path, underlying: "write 失敗：errno \(errno)")
+                }
+            }
+        }
+        guard fsync(fd) == 0 else {
+            throw EventStoreError.appendFailed(
+                path: url.path, underlying: "fsync 失敗：errno \(errno)")
+        }
+        return (kept.count, corrupt, superseded)
     }
 
     public func allEvents() throws -> [Event] {

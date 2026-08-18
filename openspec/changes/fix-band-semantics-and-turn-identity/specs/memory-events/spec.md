@@ -48,3 +48,29 @@ Reinterpretation is forbidden because a fingerprint carries no marker of which r
 
 - **WHEN** the event store contains records whose source fingerprint is a session identifier rather than a project fingerprint
 - **THEN** reading refuses those records and names them, and does not resolve them against the current rule
+
+## MODIFIED Requirements
+
+### Requirement: The event store is append-only
+
+The event store SHALL expose append and range-read operations. It SHALL NOT expose an operation that updates or deletes an individual event. An append that cannot be persisted SHALL surface the failure to the caller rather than being dropped.
+
+The store MAY expose exactly one removal operation, and only this one: dropping the records that cannot be read back — those that fail canonical decoding, and those whose anchor was written under a superseded source-fingerprint rule. That operation SHALL NOT accept a caller-supplied list of records to remove; the selection rule lives in the store, so no caller can use it to delete a chosen event. It SHALL perform its own read, its selection, and its write within a single exclusive lock on the same file descriptor, and SHALL NOT replace the file's inode, because the lock other writers take is bound to that inode and replacing it makes their in-flight appends vanish without error.
+
+This exception exists because the refusal it repairs is otherwise terminal. The event log is the only data in this project that cannot be rebuilt from the corpus, and a single unreadable record makes every read of it fail. Without a way out, "refuse rather than reinterpret" would mean "history is locked shut", which is a worse outcome than dropping the records that could not be read in the first place.
+
+#### Scenario: Failed append is surfaced
+
+- **WHEN** an append cannot be persisted
+- **THEN** the caller receives an error rather than a silent success
+
+#### Scenario: Unreadable records can be dropped, chosen records cannot
+
+- **WHEN** the store contains one record that fails canonical decoding and one whose anchor uses a superseded rule, alongside readable records
+- **THEN** the removal operation drops exactly those two, reports their file line numbers, keeps every readable record, and offers no way to name a different record for removal
+
+#### Scenario: Removal does not replace the file
+
+- **GIVEN** another writer holds the store's exclusive lock
+- **WHEN** the removal operation runs
+- **THEN** it waits for that lock rather than proceeding, and the file it writes back has the same inode it read

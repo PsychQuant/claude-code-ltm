@@ -46,7 +46,30 @@ enum CommandSupport {
             embedder: embedder, eventStore: store, memoryRoot: memoryRoot)
     }
 
-    /// 事件根（尚未建立任何目錄）。
+    /// 記憶層根，**經過語料 containment 驗證**。
+    ///
+    /// `ltm memory` 需要它：那條路徑會寫入（備份與就地覆寫），但它不建 `LTMService`，
+    /// 所以拿不到 `make()` 內那道守衛。先前它直接用 `memoryRootURL()`，於是
+    /// `LTM_MEMORY_ROOT` 指進語料時，備份與改寫後的 canonical 檔會落在唯讀語料裡
+    /// ——直接違反不變式 1，而且是寫入。
+    ///
+    /// 判定沿用 `MemoryCorpusPolicy`（inode 身分、symlink、firmlink），不自己重寫
+    /// 一份：複製那份判定會漂移，而漂移的方向是「放行了不該放行的路徑」且不報錯。
+    static func validatedMemoryRoot() throws -> URL {
+        let corpusRoot =
+            ProcessInfo.processInfo.environment["LTM_CORPUS_ROOT"].map {
+                URL(fileURLWithPath: $0)
+            } ?? CorpusLocation.readOnlyRoot
+        let root = memoryRootURL()
+        let policy = MemoryCorpusPolicy(corpusRoots: [corpusRoot])
+        guard !policy.isInsideReadOnlyCorpus(root) else {
+            throw LTMService.ServiceError.rootInsideCorpus(path: root.path)
+        }
+        return root
+    }
+
+    /// 事件根（尚未建立任何目錄）。**未驗證**——寫入路徑一律用
+    /// `validatedMemoryRoot()`。
     static func memoryRootURL() -> URL {
         let base =
             ProcessInfo.processInfo.environment["LTM_MEMORY_ROOT"].map { URL(fileURLWithPath: $0) }
@@ -382,6 +405,11 @@ enum QueryCommand {
     static func printHuman(_ outcome: QueryOutcome) {
         if outcome.hits.isEmpty {
             print("（沒有命中）")
+            // **不 early return。** 零命中正是「讀不到的來源」最需要被說出來的那一刻
+            // ——使用者看到的症狀就是「這東西找不到東西」，而原因可能正是某幾個檔
+            // 這一輪讀不到、沒有被併進索引。先前這裡直接 return，於是那段警告在
+            // 唯一真正需要它的分支被跳過。
+            printRefreshDiagnostics(outcome)
             return
         }
         let formatter = ISO8601DateFormatter()
@@ -403,6 +431,15 @@ enum QueryCommand {
         if outcome.eventsRecorded > 0 { footer += "　已記錄 \(outcome.eventsRecorded) 筆 shown 事件" }
         print("— \(footer)")
 
+        printRefreshDiagnostics(outcome)
+    }
+
+    /// 增量續讀的診斷。**三條輸出路徑共用**（有命中、零命中、`--json`）。
+    ///
+    /// 抽成具名函式是因為先前它 inline 在有命中那條路徑的尾巴，於是另外兩條
+    /// 一個字都不說——而零命中正是最需要它的那一刻，`--json` 則是 #24 Stage 2 的
+    /// MCP server 要走的那條。
+    static func printRefreshDiagnostics(_ outcome: QueryOutcome) {
         // 讀不到的來源**不會被作廢**（讀不到 ≠ 消失），但不作廢就必須說出來——
         // 否則索引少了這些檔的新內容，而使用者看到的是一次成功的查詢。
         //
@@ -445,5 +482,14 @@ enum QueryCommand {
         let data = try JSONSerialization.data(
             withJSONObject: objects, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         print(String(data: data, encoding: .utf8) ?? "[]")
+
+        // 診斷走 **stderr**，所以 stdout 仍然是乾淨的 JSON 陣列——ltm-cli spec 逐字
+        // 要求「output SHALL be a JSON array」，改成物件需要一條 delta。
+        //
+        // **誠實邊界**：這只解決「不沉默」，沒有解決「機器讀得到」。stderr 的中文
+        // 警告對 #24 Stage 2 的 MCP server 不可消費。真正的修法是把輸出改成
+        // `{ "hits": [...], "diagnostics": {...} }`，而那是介面決定，屬於 Stage 2
+        // 那次改動，不該在這裡夾帶。
+        printRefreshDiagnostics(outcome)
     }
 }

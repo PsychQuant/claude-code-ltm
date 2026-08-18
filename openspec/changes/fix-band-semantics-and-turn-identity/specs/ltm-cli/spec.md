@@ -67,3 +67,31 @@ When the index's recorded anchor format differs from the running binary's, `ltm 
 
 - **WHEN** the index records an anchor format the binary no longer produces
 - **THEN** the query exits non-zero, the message contains `ltm build --full`, and no results are returned
+
+## ADDED Requirements
+
+### Requirement: A command exists to inspect and repair the event store
+
+`ltm memory` SHALL report, per event store file, how many records are readable and the file line numbers of those that are not, separating records that failed canonical decoding from records written under a superseded anchor rule. It SHALL print no record content — line numbers and counts only — because the store's privacy constraint is that nothing outside it ever carries record text.
+
+With `--prune` it SHALL copy the file to a backup before changing it, then drop exactly the unreadable records and report how many were kept and how many dropped. Without `--prune` it SHALL NOT write.
+
+The command's root SHALL be validated against the read-only corpus before any write, the same way the service validates it. A repair command that can write inside the corpus violates the corpus's read-only invariant with the one operation the invariant exists to prevent.
+
+This command exists because `Failure messages name their remediation` is otherwise unsatisfiable for the event store: the anchor-rule refusal fires for every user who recorded events before the rule changed, and before this command there was no remediation to name.
+
+#### Scenario: Inspection does not write
+
+- **WHEN** `ltm memory` runs without `--prune` on a store containing unreadable records
+- **THEN** it reports their line numbers and the file is unchanged
+
+#### Scenario: Repair backs up first
+
+- **WHEN** `ltm memory --prune` runs on a store containing unreadable records
+- **THEN** a backup copy exists before the store is modified, and the command reports the kept and dropped counts
+
+#### Scenario: The repair command refuses a root inside the corpus
+
+- **GIVEN** the memory root resolves inside the read-only corpus
+- **WHEN** `ltm memory --prune` runs
+- **THEN** it exits non-zero naming the path, and writes nothing

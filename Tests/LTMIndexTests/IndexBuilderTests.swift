@@ -1,9 +1,27 @@
+import CryptoKit
 import Foundation
 import SQLite3
 import Testing
 
 @testable import LTMCore
 @testable import LTMIndex
+
+
+/// 由文字導出的**確定性**種子。
+///
+/// **不可以用 `String.hashValue`。** Swift 的 `Hashable` 每個 process 用隨機種子
+/// （實測同一字串三次跑出 49 / 973 / 727），所以任何依賴向量順序的測試都會在不同
+/// 執行之間變動——它不是偶爾失敗，是**偶爾成功**。
+///
+/// 代價已經付過一次：`truncationFollowsTheSameOrderAsDisplay` 被宣稱「驗過破壞
+/// 會紅」，實測破壞後 8 次只紅 1 次。我只是剛好觀察到那一次。
+///
+/// 同一條教訓在 `Sources/LTMEval/Interleaving.swift` 已經記過（那裡改用 FNV-1a），
+/// 而它沒有轉移到這裡——寫在別處的註解攔不住下一次。
+func deterministicSeed(_ text: String) -> UInt64 {
+    let digest = SHA256.hash(data: Data(text.utf8))
+    return digest.withUnsafeBytes { $0.load(as: UInt64.self) }
+}
 
 /// 合成 embedding provider。
 ///
@@ -24,7 +42,7 @@ struct StubEmbedder: EmbeddingProvider {
         // 先前只看內容，於是「換 revision → 索引重建」的測試證明不了任何事：
         // 重建前後的向量位元相同，測試就算沒重建也會通過。revision 進 seed 之後，
         // 舊向量若沒被替換，值就會對不上。
-        var seed = Float(abs((text + revision).hashValue % 1000)) / 1000
+        var seed = Float(deterministicSeed(text + revision) % 1000) / 1000
         return (0..<dimension).map { _ in
             seed = (seed * 1.7).truncatingRemainder(dividingBy: 1)
             return seed
@@ -377,4 +395,49 @@ func absentSidecarIsFineWhenNoVectorsAreDeclared() throws {
         embedder: embedder
     ).build()
     #expect(report.totalChunks == 1, "沒有向量不影響 lexical 通道")
+}
+
+@Test("時間戳相同時，導航指標報 spec Example 指名的那個 session")
+func navigationTieBreakFollowsTheSpecExample() throws {
+    // corpus-indexing spec 的 Example 逐字：同一則 `t-1` 出現在 `s-A.jsonl` 與
+    // `s-B.jsonl` 時「`t-1`'s pointer reports session `s-B`」。
+    //
+    // 平手是**常態不是例外**（resume 複製不改時間戳），所以這條規則決定的是真實
+    // 語料裡絕大多數 resume 過的 turn 的指標，不是邊角情形。
+    //
+    // 這條測試存在的直接理由：`ORDER BY … source_key ASC` 與 `DESC` 互換時，
+    // 301 個測試沒有一條會紅——那個方向曾經被翻反過，而且是在一句宣稱
+    // 「現在結果一樣」的註解底下翻的。
+    let workspace = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: workspace.corpus)
+        try? FileManager.default.removeItem(at: workspace.derived.root)
+    }
+    let uuid = "0000ffff-aaaa-bbbb-cccc-dddddddddddd"
+    let stamp = "2026-08-17T06:00:00.000Z"
+    for (file, session) in [
+        ("s-A.jsonl", "aaaaaaaa-1111-1111-1111-111111111111"),
+        ("s-B.jsonl", "bbbbbbbb-2222-2222-2222-222222222222"),
+    ] {
+        _ = try writeSession(
+            in: workspace.corpus, project: "proj-one", file: file,
+            lines: [turnLine(uuid: uuid, session: session, role: "user",
+                             text: "同一則 turn 出現在兩個 session 檔",
+                             timestamp: stamp)])
+    }
+    _ = try IndexBuilder(
+        location: workspace.derived, scanner: CorpusScanner(corpusRoot: workspace.corpus),
+        embedder: StubEmbedder(revision: "r1")
+    ).build()
+
+    let database = try IndexDatabase(path: workspace.derived.databaseURL.path)
+    defer { database.close() }
+    var stored = "?"
+    try database.query("SELECT session_id FROM chunks WHERE uuid = ?", bind: [.text(uuid)]) {
+        statement in
+        stored = String(cString: sqlite3_column_text(statement, 0))
+    }
+    #expect(
+        stored.hasPrefix("bbbbbbbb"),
+        "spec Example 說指標報 s-B；實際 \(stored.prefix(8))")
 }

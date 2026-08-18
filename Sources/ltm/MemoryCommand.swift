@@ -1,6 +1,7 @@
 import Foundation
 import LTMCore
 import LTMMemory
+import LTMService
 
 /// `ltm memory` —— 記憶層事件檔的檢查與修剪。
 ///
@@ -39,7 +40,7 @@ enum MemoryCommand {
         }
 
         do {
-            let root = CommandSupport.memoryRootURL()
+            let root = try CommandSupport.validatedMemoryRoot()
             let url = root.appendingPathComponent("events.jsonl")
             guard FileManager.default.fileExists(atPath: url.path) else {
                 print("（沒有事件檔：\(url.path)）")
@@ -67,13 +68,33 @@ enum MemoryCommand {
             // **先備份再改**。這是 canonical 資料，而被丟掉的那幾筆裡，「舊規則」
             // 那一類的內容仍然是真的——只是指向一個已經不成立的定址方式。日後若
             // 有人寫得出遷移，備份是唯一還原得回來的東西。
-            let backup = url.appendingPathExtension("bak-\(Int(Date().timeIntervalSince1970))")
+            //
+            // 備份也是就地覆寫的崩潰窗口的唯一保險：`pruneUnusable` 為了不換 inode
+            // （換掉會讓 `append` 的 flock 失效）放棄了原子替換。
+            let backup = url.appendingPathExtension(
+                "bak-\(UUID().uuidString.prefix(8))-\(Int(Date().timeIntervalSince1970))")
             try FileManager.default.copyItem(at: url, to: backup)
-            let rewritten = try store.rewrite(keeping: result.events)
+
+            // **上面那次讀取的結果不拿來當寫入依據。** `pruneUnusable` 自己在
+            // 獨占鎖內重讀一次——先前是「讀完、放鎖、再把讀到的寫回去」，中間任何
+            // 一筆 append 都會被靜默丟掉。
+            let pruned = try store.pruneUnusable()
+            let dropped = pruned.corruptLines.count + pruned.supersededLines.count
             print("")
             print("  ✓ 已備份原檔：\(backup.lastPathComponent)")
-            print("  ✓ 寫回 \(rewritten) 筆可用紀錄，丟掉 \(unusable) 筆")
+            print("  ✓ 保留 \(pruned.kept) 筆可用紀錄，丟掉 \(dropped) 筆")
+            if dropped != unusable {
+                print("    （與上面的清單不同：修剪在獨占鎖內重讀了一次，期間檔案有變動）")
+            }
             return LTMCommandLine.ExitCode.success.rawValue
+        } catch LTMService.ServiceError.rootInsideCorpus(let path) {
+            Output.error(
+                """
+                ✗ 這個路徑落在唯讀語料裡：\(path)
+                語料是 source of truth，任何寫入都是 bug——而這條命令會寫（備份與改寫）。
+                請把 LTM_MEMORY_ROOT 指到語料之外的位置。
+                """)
+            return LTMCommandLine.ExitCode.corpusError.rawValue
         } catch let error as EventStoreError {
             Output.error("✗ \(describe(error))")
             return LTMCommandLine.ExitCode.indexStateError.rawValue

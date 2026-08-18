@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 
@@ -11,6 +12,22 @@ import Testing
 // 全部走合成語料。真實 `~/.claude/projects/` 在這些測試裡一次都沒被碰到——
 // 隱私邊界之外，那樣的測試也不可重現（語料每天都在長）。
 
+/// 由文字導出的**確定性**種子。
+///
+/// **不可以用 `String.hashValue`。** Swift 的 `Hashable` 每個 process 用隨機種子
+/// （實測同一字串三次跑出 49 / 973 / 727），所以任何依賴向量順序的測試都會在不同
+/// 執行之間變動——它不是偶爾失敗，是**偶爾成功**。
+///
+/// 代價已經付過一次：`truncationFollowsTheSameOrderAsDisplay` 被宣稱「驗過破壞
+/// 會紅」，實測破壞後 8 次只紅 1 次。我只是剛好觀察到那一次。
+///
+/// 同一條教訓在 `Sources/LTMEval/Interleaving.swift` 已經記過（那裡改用 FNV-1a），
+/// 而它沒有轉移到這裡——寫在別處的註解攔不住下一次。
+func deterministicSeed(_ text: String) -> UInt64 {
+    let digest = SHA256.hash(data: Data(text.utf8))
+    return digest.withUnsafeBytes { $0.load(as: UInt64.self) }
+}
+
 struct FixedEmbedder: EmbeddingProvider {
     var revision: String = "test-rev-1"
     var dimension: Int = 8
@@ -21,7 +38,7 @@ struct FixedEmbedder: EmbeddingProvider {
     func vector(for text: String) throws -> [Float]? {
         guard !refusing.contains(text) else { return nil }
         // 依內容決定的確定性向量：同文字同向量，方便斷言可重現性。
-        var value = Float(abs(text.hashValue % 997)) / 997
+        var value = Float(deterministicSeed(text) % 997) / 997
         var out: [Float] = []
         for _ in 0..<dimension {
             value = (value * 2.3).truncatingRemainder(dividingBy: 1)
@@ -644,4 +661,54 @@ func queryPathRefusesFullRebuild() throws {
     #expect(
         FileManager.default.fileExists(atPath: workspace.derived.databaseURL.path),
         "拒絕的意思是衍生檔還在——重建會先 discardDerivedArtifacts")
+}
+
+/// revision 在**第一次讀取之後**改變的 embedder。
+///
+/// 用來模擬 TOCTOU：`query` 讀 stamp 時不持鎖，`build` 拿到鎖後會重讀；兩次之間
+/// 若有另一個行程完成一次會改版本的建置，第二次讀就會 mismatch。單行程測試裡
+/// 造不出真的競態，但**兩次讀取看到不同的值**正是競態對這段程式碼的唯一表現。
+final class DriftingRevisionEmbedder: EmbeddingProvider, @unchecked Sendable {
+    private let lock = NSLock()
+    private var reads = 0
+    private let inner = FixedEmbedder()
+
+    var revision: String {
+        lock.lock()
+        defer { lock.unlock() }
+        reads += 1
+        return reads <= 1 ? "test-rev-1" : "test-rev-drifted"
+    }
+    var dimension: Int { inner.dimension }
+    func vector(for text: String) throws -> [Float]? { try inner.vector(for: text) }
+}
+
+@Test("生產接線：查詢路徑傳的是 refusingFullRebuild: true，不是預設值")
+func facadeRefusesFullRebuildFromTheQueryPath() throws {
+    // 上一版只測 `IndexBuilder` 那一側，於是把 `LTMService` 傳的 `true` 改成
+    // `false`，301 個測試全綠——被鎖住的是被呼叫者，不是呼叫點。
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["內容一", "內容二"])
+    try workspace.service().build()
+
+    let service = LTMService(
+        location: workspace.derived, corpusRoot: workspace.corpus,
+        embedder: DriftingRevisionEmbedder(), eventStore: nil)
+
+    var thrown: Error?
+    do { _ = try service.query(text: "內容", limit: 10, scope: .allProjects) }
+    catch { thrown = error }
+
+    guard case .some(IndexBuilder.BuildError.fullRebuildRequired) =
+        thrown as? IndexBuilder.BuildError
+    else {
+        Issue.record(
+            "查詢路徑必須拒絕整份重建，實際：\(String(describing: thrown))")
+        return
+    }
+    // 拒絕的意思是衍生檔還在——`refusingFullRebuild: false` 會走
+    // `discardDerivedArtifacts()`，從查詢路徑刪掉 DB、側車與 state。
+    #expect(FileManager.default.fileExists(atPath: workspace.derived.databaseURL.path))
+    #expect(FileManager.default.fileExists(atPath: workspace.derived.stateURL.path))
 }

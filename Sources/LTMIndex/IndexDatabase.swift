@@ -218,24 +218,41 @@ public final class IndexDatabase {
 
     /// 由尚存的 `chunk_sources` 連結重算一個 chunk 的導航欄位。
     ///
-    /// 規則：**時間戳最新的那個來源勝出**；時間戳相同時由 `source_key` 的字典序
-    /// 決定（升冪，最小者勝）。
+    /// 規則：**時間戳最新的那個來源勝出**；時間戳相同時取 `source_key` 字典序
+    /// **最大**者。
     ///
-    /// 第二條不是「最近觀察到」的近似，是它在平手時的替代——而平手是常態不是例外：
-    /// resume 複製的是同一則 turn，時間戳不會因為被複製而改變，所以真實語料裡
-    /// 兩份副本的時間戳幾乎總是相同（#25）。先前沒有平手規則，勝負由插入順序
-    /// 決定，也就是由檔名字典序**偶然**決定；現在結果一樣，但它是寫下來的規則而
-    /// 不是副作用，因此增量與全量重建必然一致。
+    /// ## 第二條為什麼是 DESC 而不是 ASC
+    ///
+    /// 因為 corpus-indexing spec 的 Example 逐字要求它：同一則 `t-1` 出現在
+    /// `s-A.jsonl` 與 `s-B.jsonl` 時，「`t-1`'s pointer reports session `s-B`」。
+    ///
+    /// 這一條曾經寫成 ASC，理由是「先前勝負由插入順序偶然決定，現在結果一樣、
+    /// 只是把副作用寫成規則」。**那句話是錯的，結果剛好相反**：舊的 upsert 是
+    /// `CASE WHEN excluded.timestamp >= chunks.timestamp`，而插入順序是 source key
+    /// 升冪，所以平手時勝出的是**最後插入者（source key 最大）**。實測 base 給
+    /// `b.jsonl`、改動後給 `a.jsonl`——每一則被 resume 複製過的 turn 的導航指標
+    /// 都換了一個值，而那個新值正是 spec Example 明文說不該有的那個。
+    ///
+    /// ## 誠實邊界：這仍然是任意的
+    ///
+    /// 平手是**常態不是例外**（resume 複製不改時間戳，量測見
+    /// `docs/measurements/2026-08-18-resume-duplication.md`），所以絕大多數情形下
+    /// 決定導航指標的是檔名字典序，而不是「最近觀察到」。字典序與「較晚觀察到」
+    /// 沒有因果關係——它只是碰巧與 spec Example 的期望一致。
+    ///
+    /// **這不是 #25 的解答**，#25 要的是一個真的代理指標（mtime／觀察序／回傳全部
+    /// 來源）或一次明確的介面決定。本函式只保證**確定性**：同一組連結必然算出
+    /// 同一個結果，所以增量與全量重建一致。決定性與正確性是兩件事。
     private func refreshNavigation(chunkID: Int64) throws {
         try execute(
             """
             UPDATE chunks SET
                 session_id = (SELECT s.session_id FROM chunk_sources s
                               WHERE s.chunk_id = chunks.id
-                              ORDER BY s.timestamp DESC, s.source_key ASC LIMIT 1),
+                              ORDER BY s.timestamp DESC, s.source_key DESC LIMIT 1),
                 timestamp  = (SELECT s.timestamp  FROM chunk_sources s
                               WHERE s.chunk_id = chunks.id
-                              ORDER BY s.timestamp DESC, s.source_key ASC LIMIT 1)
+                              ORDER BY s.timestamp DESC, s.source_key DESC LIMIT 1)
             WHERE id = ? AND EXISTS(SELECT 1 FROM chunk_sources s WHERE s.chunk_id = chunks.id)
             """, bind: [.integer(chunkID)])
     }

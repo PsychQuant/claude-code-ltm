@@ -23,7 +23,8 @@
 「重複」的定義是**同一個 `uuid` 出現在一個以上的檔案**——同一檔內的重複不算，
 那是另一回事。
 
-腳本：`/tmp` 下的一次性 python，邏輯逐字如下（無外部依賴，可重跑）：
+腳本：[`scripts/measure-resume-duplication.py`](../../scripts/measure-resume-duplication.py)
+（無外部依賴，可重跑）。核心邏輯：
 
 ```python
 seen[uuid].append((path, sessionId, sha256(content)))
@@ -43,6 +44,10 @@ diff_session = sum(1 for v in multi.values() if len({s for _, s, _ in v}) > 1)
 | **出現在一個以上檔案的 `uuid`** | **12,488** |
 | 其中內容完全相同 | 12,488（**100.0%**） |
 | 其中 `sessionId` 不同 | 12,351（**98.9%**） |
+
+**語料快照**：這份數字對應 2026-08-18 當下的 `~/.claude/projects/`。語料每天都在長，
+所以重跑會得到不同的絕對數字——**應該對照的是比例**（跨檔 uuid 的內容相同率、
+sessionId 相異率），那兩個才是這份紀錄要支撐的性質。
 
 ## 這份紀錄支撐什麼
 

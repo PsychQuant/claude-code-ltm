@@ -139,3 +139,43 @@
   誠實邊界。改成全語料量測（8,324 檔、12,488 筆、內容 100% 相同、98.9%
   sessionId 不同），記錄在 `docs/measurements/2026-08-18-resume-duplication.md`，
   七處全部改成引用它。
+
+## 11. round-4 verify 的補做（2026-08-18）
+
+- [x] 11.1 **測試用的 embedder 從 `String.hashValue` 換成 SHA-256 導出的種子**。Swift
+  的 `Hashable` 每個 process 隨機種子化（實測同一字串三次得 49 / 973 / 727），所以
+  任何依賴向量順序的測試都在不同執行之間變動。實測代價：舊 embedder 下把 band-major
+  排序拿掉，`truncationFollowsTheSameOrderAsDisplay` **10 次只紅 5 次**——它不是偶爾
+  失敗，是偶爾成功。修好後破壞 6/6 紅、正常 8/8 綠。同一條教訓
+  `Sources/LTMEval/Interleaving.swift` 已經記過，沒有轉移過來。
+- [x] 11.2 **平手規則的方向被我反轉了**。9.3 的註解宣稱「現在結果一樣，只是把副作用
+  寫成規則」——實測 base 給 `b.jsonl`、改動後給 `a.jsonl`，**剛好相反**，而 spec 的
+  Example 逐字要求指標報 `s-B`。改回 `source_key DESC` 並補上鎖住 Example 的測試
+  （ASC↔DESC 互換時先前 301 個測試沒有一條會紅）。
+- [x] 11.3 **`rewrite(keeping:)` 換成 `pruneUnusable()`**。前者有兩個問題：它不取
+  `append` 的 `flock`、且用 temp+rename 落地會**換掉 inode**（實測：持鎖者的後續
+  write 落進已 unlink 的舊 inode，資料無聲消失）；而且它是「刪掉任意一筆事件」的
+  公開 API，與 append-only requirement 正面衝突。新形狀在同一個 fd 的 `LOCK_EX` 內
+  完成讀→篩→寫、就地覆寫不換 inode，篩選規則寫死在 store 裡。
+- [x] 11.4 **`ltm memory` 補上語料 containment 驗證**。它會寫（備份與就地覆寫）卻
+  不建 `LTMService`，所以拿不到 `make()` 那道守衛——實測會把 canonical 檔寫進語料根。
+- [x] 11.5 **診斷資訊補到零命中與 `--json` 兩條路徑**。`printHuman` 在零命中時
+  early return，而零命中正是「讀不到的來源」最需要被說出來的那一刻。`--json` 走
+  stderr（spec 逐字要求 stdout 是 JSON 陣列）——**誠實邊界：這只解決「不沉默」，
+  沒解決「機器讀得到」**，後者是 Stage 2 的介面決定。
+- [x] 11.6 **`refusingFullRebuild` 的生產接線有測試了**。先前只測被呼叫者，把 facade
+  傳的 `true` 改成 `false` 全綠。用 revision 會在第二次讀取時改變的 embedder 模擬
+  TOCTOU，從 facade 進入。
+- [x] 11.7 **`ltm memory` 與修剪操作補上 spec**。先前零 requirement 覆蓋，且與已歸檔
+  的「The event store is append-only … SHALL NOT expose an operation that updates or
+  deletes an individual event」直接衝突。MODIFIED 那條寫明唯一例外的邊界（只能刪
+  讀不回來的、不得接受呼叫端指定、鎖內完成、不得換 inode），ltm-cli 補三條 scenario。
+- [x] 11.8 **量測腳本進 repo**（`scripts/measure-resume-duplication.py`），紀錄補上
+  語料快照的說明——語料每天在長，應該對照的是比例不是絕對數字。`CorpusScannerTests`
+  殘留的舊抽樣數字 4,337 一併清掉。
+- [x] 11.9 **刪掉一條不可能失敗的測試**（`pruneDoesNotSwallowConcurrentAppends`）。
+  新簽章沒有參數可以交進過期清單，所以那個回歸在型別上不可達；實測把寫入依據換成
+  鎖外快照它照樣綠。真正在守它的是簽章與鎖，型別層的保證比測試強。
+
+**未做、已記錄**：`--json` 的機器可讀診斷通道（需要改輸出形狀，屬 Stage 2）；
+真正的並發修剪測試（時序相依，本 repo 已為此付過代價）。

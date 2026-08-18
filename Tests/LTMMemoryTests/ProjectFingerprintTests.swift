@@ -202,9 +202,55 @@ func rewriteKeepsUsableRecordsOnly() throws {
 
     let salvaged = try store.allEvents(skippingUnusable: true)
     #expect(salvaged.supersededLines == [2] && salvaged.corruptLines == [3])
-    #expect(try store.rewrite(keeping: salvaged.events) == 1)
+
+    let pruned = try store.pruneUnusable()
+    #expect(pruned.kept == 1)
+    #expect(pruned.supersededLines == [2] && pruned.corruptLines == [3])
 
     // 修剪後：讀得回來，而且寫回去的東西自己通得過 canonical 往返檢查。
     #expect(try store.allEvents().count == 1)
     #expect(try store.allEvents(skippingUnusable: true).supersededLines.isEmpty)
 }
+
+@Test("修剪不換 inode——換掉會讓 append 的 flock 失效，並發寫入靜默消失")
+func pruneKeepsTheInodeSoTheAppendLockStillMeansSomething() throws {
+    let (dir, store) = try supersededFixture()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try store.append(
+        try event(source: ProjectFingerprint.of("proj"), id: "aaaaaaaa-0000-0000-0000-000000000001"))
+    let good = try Data(contentsOf: store.url)
+    let old = try CanonicalCoding.encoder.encode(
+        try event(source: "11111111-2222-3333-4444-555555555555",
+                  id: "aaaaaaaa-0000-0000-0000-000000000002"))
+    try (good + old + Data("\n".utf8)).write(to: store.url)
+
+    func inode() throws -> UInt64 {
+        let values = try store.url.resourceValues(forKeys: [.fileResourceIdentifierKey])
+        var info = stat()
+        _ = values
+        guard stat(store.url.path, &info) == 0 else { return 0 }
+        return UInt64(info.st_ino)
+    }
+    let before = try inode()
+    _ = try store.pruneUnusable()
+    let after = try inode()
+
+    // `flock` 綁在 inode 上。用 temp+rename 落地會換掉 inode，於是另一個行程持有
+    // 的 `LOCK_EX` 變成守著一個已被 unlink 的舊 inode——它接下來的 write 沒有任何
+    // 錯誤地消失。實測過：持鎖期間 replace 照樣成功。
+    #expect(before == after && before != 0, "修剪必須就地覆寫，不得換 inode")
+}
+
+// 這裡曾經有一條 `pruneDoesNotSwallowConcurrentAppends`。它斷言的性質是對的，
+// 但它**不可能失敗**：`pruneUnusable()` 沒有參數可以讓呼叫端交進一份過期的清單，
+// 所以「用了過期清單」這個回歸在型別上就不可達。實測也確認了——我把寫入依據換成
+// 鎖外先讀的快照，它照樣綠。
+//
+// 刪掉而不是留著：不可能失敗的測試在覆蓋率與閱讀上都算數，於是那個性質看起來
+// 有人守。真正在守它的是**簽章**（沒有 `keeping:` 參數）與 `LOCK_EX` 內的重讀，
+// 而型別層的保證比測試強。
+//
+// 要真的鎖住並發語意，需要一個在 prune 持鎖期間從另一條執行緒 append 的測試——
+// 那會是時序相依的，而本 repo 已經有過「時序相依的測試變成偶爾成功」的代價
+// （見 `deterministicSeed` 的註解）。目前選擇不寫，並把這個缺口寫在這裡。
+
