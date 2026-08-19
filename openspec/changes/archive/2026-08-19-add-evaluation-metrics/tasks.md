@@ -1,0 +1,22 @@
+## 1. Two-stage recall-then-ranking scoring
+
+- [x] 1.1 Add `RecallNDCGOutcome` (enum: `notRecalled`, `recalled(ndcgAt10: Double)`) as a new Sendable, Equatable type in `Sources/LTMEval/`, implementing the requirement that retrieval quality is scored as a two-stage recall-then-ranking metric, per design.md's decision that "Recall@20 → nDCG@10 is a two-stage function, not two independent metrics". Verify: `swift build` succeeds and the type is usable from `Tests/LTMEvalTests/`.
+- [x] 1.2 Implement `scoreRecallAndRanking(retrieved:expected:k:)` (or equivalently named pure function) that returns `.notRecalled` when the expected anchor is absent from the top-20 of `retrieved`, and `.recalled(ndcgAt10:)` with a correctly computed nDCG@10 (treating the expected anchor as the sole relevant item, discounted by its rank within the top 10) otherwise. Verify: new test `Tests/LTMEvalTests/` asserting nDCG@10 == 1.0 for rank-1, a strictly lower value for rank-10, and `.notRecalled` for an empty retrieved list and for a list of 20 items that excludes the expected anchor.
+
+## 2. Three-track channel breakdown
+
+- [x] 2.1 Add `ChannelBreakdown` (struct with `lexical`, `vector`, `fused` fields, each a `RecallNDCGOutcome`) as a new Sendable, Equatable type in `Sources/LTMEval/`, implementing the requirement that retrieval quality is reported per channel as well as fused, per design.md's decision that "Three-track reporting is a report shape, not three separate comparison runs". Verify: `swift build` succeeds.
+- [x] 2.2 Wire `ChannelBreakdown` construction to call `scoreRecallAndRanking` three times (once per channel's retrieved list) using the same function from Task 1.2. Verify: new test constructs a synthetic case where the lexical channel's retrieved list excludes the expected anchor while the vector and fused channels' lists include it, and asserts the resulting `ChannelBreakdown` shows `.notRecalled` for `lexical` and `.recalled` for both `vector` and `fused` — exercising single-channel degradation is visible in the per-channel breakdown.
+
+## 3. Starting-side correction
+
+- [x] 3.1 Implement a starting-side-corrected preference estimate function that fits a model across all scored observations for a comparison (`outcome ~ policy + startingSide`, per design.md's "Starting-side correction uses a fixed-effect model, not stratified win rates" decision) and returns a corrected estimate distinct from — and computed alongside — the existing raw `StartingSideCounts`. Verify: new test constructs a synthetic 100-observation set (60 started with policy A, 40 with policy B, per the worked example in design.md and in the `strategy-comparison` spec's "corrected estimate accompanies an imbalanced starting-side count" scenario) and asserts the corrected estimate differs from the naive uncorrected rate in the expected direction.
+- [x] 3.2 Handle the degenerate case where every scored observation started with the same side by returning `nil` rather than a value derived from a one-sided model fit, implementing the requirement that reported comparisons correct for starting-side imbalance without ever presenting a spurious correction. Verify: new test constructs an all-one-side synthetic observation set and asserts the correction function returns `nil`.
+
+## 4. Denominator cleanup
+
+- [x] 4.1 Remove `PresentationRecord.presentedCount(for:)` from `Sources/LTMEval/PresentationRecord.swift`, per design.md's decision that "`StrategyScore.presented` is the sole denominator; `PresentationRecord.presentedCount(for:)` is removed". Verify: `swift build` fails on any remaining reference to `presentedCount(for:)` in `Sources/` or `Tests/`; after removing/updating the calling test(s) in `Tests/LTMEvalTests/`, `swift build` and `swift test` both succeed with `StrategyScore.rate`'s existing `presented`-based denominator behavior unchanged.
+
+## 5. Documentation consistency
+
+- [x] 5.1 Confirm `docs/memory-systems/README.md` does not claim query-class coverage beyond Chinese and English, or negative-case collection, anywhere it describes the `strategy-comparison` capability — implementing the query-class label set is validated only for Chinese and English input and negative cases are not collected requirements as documented facts rather than silent gaps, per design.md's decision that "Query-class coverage and negative-case exclusion are spec text, not code". Verify: manual content review of the relevant README section; add a corrective sentence if an over-claim is found, referencing the new spec requirements by name.

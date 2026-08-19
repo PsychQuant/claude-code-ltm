@@ -94,7 +94,6 @@ func evalProjection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
 
     #expect(result.record.isNullComparison)
     #expect(result.record.attribution.allSatisfy { $0.creditedTo == nil })
-    #expect(result.record.presentedCount(for: RankingPolicyID("archival")) == 0)
 }
 
 @Test func serializedPresentationRecordsContainNoQueryText() throws {
