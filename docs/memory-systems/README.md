@@ -49,15 +49,21 @@ power-law 調過，不重推。**參數是否適用於本語料未經校準**—
 archive 會讓正回饋**把記憶永久埋掉**。因此 `human-like` 的低 strength 只回到中性
 （boost = 1.0），永遠留在候選集。
 
-> **`human-like` 缺一個機制，這裡明說。** issue 要的第三個機制是 **spreading
-> activation**（Collins & Loftus, 1975；issue 裡叫「共現擴散激發」，Clarity Surface
-> 已裁決共現實作只是它的一個變體）——**目前沒有實作**。它需要一個共現邊結構，
-> 而事件 schema 還沒帶那個東西；補上去會讓這次改動超出「定義 seam」的範圍。
-> 列為 follow-up。
+> **`human-like` 現在有三個機制了（#15，2026-08-19）。** issue 要的第三個機制
+> **spreading activation**（Collins & Loftus, 1975；issue 裡叫「共現擴散激發」，
+> Clarity Surface 已裁決共現實作只是它的一個變體）已實作：`opened`/`cited`/
+> `pinned` 這三種 reinforcement 事件會把一部分（已衰減的）強度擴散給同一次
+> 呈現裡**同框出現、但沒有被直接互動**的其他 anchor，只做一跳、不遞迴，且
+> `dismissed` 不參與擴散。共現邊來自 `LTMService.query()` 現在會替每次查詢
+> 產生的呈現識別碼（`presentation`）——這條路徑先前一律寫 `nil`，是 #15
+> diagnose 時發現的另一個缺口，一併補上。
 >
-> 這條記在這裡，是因為先前的 `proposal.md` 把 "co-retrieval association" 列進
-> 已 ship 的機制、本表也標成「已實作」——那是過度宣稱，由 #1 的 verify
-> （2026-08-11）抓出並更正。**部分實作就寫部分實作。**
+> 這一段的歷史值得留著：先前的 `proposal.md` 把 "co-retrieval association"
+> 列進已 ship 的機制、本表也標成「已實作」——那是過度宣稱，由 #1 的 verify
+> （2026-08-11）抓出並更正，改標「目前沒有實作」。**現在是真的實作了**，
+> 但擴散因子（`spreadingActivationFactor`）的預設值仍然完全未經本語料驗證
+> ——連 AI4o 都找不到對應出處（本次實作時查過，沒查到），純粹是保守估計。
+> **部分實作就寫部分實作，實作了也不等於驗證過。**
 
 ### `conservative` 一度被移除，又被改回來——這段值得記
 

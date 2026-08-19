@@ -15,6 +15,18 @@ public struct ProjectionParameters: Sendable, Equatable {
     public let citedWeight: Double
     public let pinnedWeight: Double
     public let dismissedWeight: Double
+    /// 一筆 reinforcement 事件（`opened`/`cited`/`pinned`）擴散給同框呈現、
+    /// 但未被直接互動的 anchor 的比例。0 等於關閉擴散。**不對 `dismissed`
+    /// 生效**——見 `project(_:at:resolvedBy:parameters:)` 的擴散那一段與
+    /// #15 design.md 的理由。
+    ///
+    /// **這個值找不到 AI4o 原始出處。** 動手實作前查過
+    /// `PsychQuant/ai4o` 的 `docs/memory/implementation/`，沒有找到對應的
+    /// spreading-activation 設定（該 repo 的 recall boost 機制與這裡要做的
+    /// 共現擴散不是同一件事）。所以這裡的預設值**不是**沿用 AI4o 的參數
+    /// （與其他四個參數的來源不同），是本次實作挑的一個保守估計，同樣
+    /// 完全未經本語料驗證。
+    public let spreadingActivationFactor: Double
 
     /// **這些預設值全部未經校準，方向也未知。**
     ///
@@ -28,16 +40,19 @@ public struct ProjectionParameters: Sendable, Equatable {
         openedWeight: Double = 1.0,
         citedWeight: Double = 2.0,
         pinnedWeight: Double = 3.0,
-        dismissedWeight: Double = 2.0
+        dismissedWeight: Double = 2.0,
+        spreadingActivationFactor: Double = 0.3
     ) {
         // 參數是程式／設定層的東西，錯了是程式錯誤 → trap（#1 verify R5）。
         // 先前完全不驗，於是：`decayExponent: -1` 讓「衰減」變成越舊權重越大；
         // `openedWeight: -1` 讓一個增強事件產生負 reinforcement；任何一個 NaN
-        // 都會讓強度比較恆偽、策略靜默退化成 archival。
+        // 都會讓強度比較恆偽、策略靜默退化成 archival。同一條紀律套用到
+        // `spreadingActivationFactor`（#15）——它一樣是外部可控的乘數。
         for (name, value) in [
             ("decayExponent", decayExponent), ("openedWeight", openedWeight),
             ("citedWeight", citedWeight), ("pinnedWeight", pinnedWeight),
             ("dismissedWeight", dismissedWeight),
+            ("spreadingActivationFactor", spreadingActivationFactor),
         ] {
             precondition(value.isFinite, "ProjectionParameters.\(name) 必須是有限值，實得 \(value)")
             precondition(value >= 0, "ProjectionParameters.\(name) 不得為負，實得 \(value)")
@@ -55,6 +70,7 @@ public struct ProjectionParameters: Sendable, Equatable {
         self.citedWeight = citedWeight
         self.pinnedWeight = pinnedWeight
         self.dismissedWeight = dismissedWeight
+        self.spreadingActivationFactor = spreadingActivationFactor
     }
 
     public static let `default` = ProjectionParameters()
@@ -90,6 +106,20 @@ public func project(
 
     var orphaned: Set<Anchor> = []
     var futureDated = 0
+    // 擴散激發（spreading activation，#15）的兩個輸入，跟主迴圈**同一遍**蒐集：
+    //
+    // - `presentationGroups`：哪些 anchor 曾經同框呈現過。任何帶 `presentation`
+    //   的存活事件都算數，不限事件種類——目前生產路徑只有 `.shown` 會帶這個
+    //   欄位，但邊界不寫死在「只看 shown」，未來 deliberate 事件（Stage 2 MCP，
+    //   #24）帶著同一個識別碼出現時，這個群組會自動吃到。
+    // - `deliberateContributions`：每一筆 reinforcement 來源事件（`opened`/
+    //   `cited`/`pinned`）自己的（anchor、呈現群組、已套衰減的權重貢獻）。
+    //   `dismissed` 刻意不收集——擴散只做 reinforcement，理由見 design.md。
+    //
+    // 兩者都只收「已經通過未來時間戳與 orphan 兩道檢查」的事件——跟主迴圈
+    // 共用同一份過濾，不是另開一遍重新判斷。
+    var presentationGroups: [PresentationID: Set<Anchor>] = [:]
+    var deliberateContributions: [(anchor: Anchor, group: PresentationID, contribution: Double)] = []
     for event in events {
         // 評估時點之後的事件不可能已經發生。先前的 `max(0, ...)` 把未來時間戳
         // 夾成 age 0，也就是 decay = 1.0 的**最大權重，而且永遠維持**——竄改
@@ -119,23 +149,55 @@ public func project(
             counts[event.anchor, default: [:]][event.kind, default: 0] += 1
         }
 
+        if let group = event.presentation {
+            presentationGroups[group, default: []].insert(event.anchor)
+        }
+
         switch event.kind {
         case .shown:
             // 曝光不增強。計數只為了當分母——把它算進增強會形成
             // 「出現過就更容易再出現」的迴圈，與有沒有用無關。
             impressions[event.anchor, default: 0] += 1
         case .opened:
-            reinforcement[event.anchor, default: 0] += parameters.openedWeight * decay
+            let contribution = parameters.openedWeight * decay
+            reinforcement[event.anchor, default: 0] += contribution
             lastDeliberate[event.anchor] = max(lastDeliberate[event.anchor] ?? .distantPast, event.timestamp)
+            if let group = event.presentation {
+                deliberateContributions.append((event.anchor, group, contribution))
+            }
         case .cited:
-            reinforcement[event.anchor, default: 0] += parameters.citedWeight * decay
+            let contribution = parameters.citedWeight * decay
+            reinforcement[event.anchor, default: 0] += contribution
             lastDeliberate[event.anchor] = max(lastDeliberate[event.anchor] ?? .distantPast, event.timestamp)
+            if let group = event.presentation {
+                deliberateContributions.append((event.anchor, group, contribution))
+            }
         case .pinned:
-            reinforcement[event.anchor, default: 0] += parameters.pinnedWeight * decay
+            let contribution = parameters.pinnedWeight * decay
+            reinforcement[event.anchor, default: 0] += contribution
             lastDeliberate[event.anchor] = max(lastDeliberate[event.anchor] ?? .distantPast, event.timestamp)
+            if let group = event.presentation {
+                deliberateContributions.append((event.anchor, group, contribution))
+            }
         case .dismissed:
+            // 擴散刻意不涵蓋 dismissed：見 design.md「Spreading activation is
+            // a second pass」段落——把「同框但未互動」的 anchor 也標成較差，
+            // 是遠比 reinforcement 擴散更重的宣稱，本次不做。
             suppression[event.anchor, default: 0] += parameters.dismissedWeight * decay
             lastDeliberate[event.anchor] = max(lastDeliberate[event.anchor] ?? .distantPast, event.timestamp)
+        }
+    }
+
+    // 擴散激發：每一筆 reinforcement 來源事件，把它的（已衰減）貢獻乘上
+    // `spreadingActivationFactor`，分給同框呈現裡**其他**存活的 anchor。
+    // 只做一跳——這裡讀的是 `deliberateContributions`（主迴圈蒐集的原始
+    // 事件貢獻），不是 spreading 之後的 `reinforcement`，所以一個 anchor
+    // 收到的擴散不會再被當成新的擴散來源。
+    for entry in deliberateContributions {
+        guard let members = presentationGroups[entry.group] else { continue }
+        for other in members where other != entry.anchor {
+            guard isLive(other) else { continue }
+            reinforcement[other, default: 0] += parameters.spreadingActivationFactor * entry.contribution
         }
     }
 

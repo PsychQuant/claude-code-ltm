@@ -712,3 +712,69 @@ func facadeRefusesFullRebuildFromTheQueryPath() throws {
     #expect(FileManager.default.fileExists(atPath: workspace.derived.databaseURL.path))
     #expect(FileManager.default.fileExists(atPath: workspace.derived.stateURL.path))
 }
+
+// MARK: - 呈現識別碼（Task 1.2/1.3，#15）
+
+@Test("兩次獨立查詢各自的 shown 事件共用一個呈現識別碼，兩次之間不共用")
+func twoSeparateQueriesProduceTwoSeparatePresentationGroups() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: [
+        "第一段關於記憶策略的內容", "第二段關於記憶策略的內容", "第三段關於記憶策略的內容",
+    ])
+    let service = try workspace.service(withEvents: true)
+    try service.build()
+
+    let first = try service.query(
+        text: "記憶策略", limit: 10, scope: .allProjects, recordEvents: true)
+    let second = try service.query(
+        text: "記憶策略", limit: 10, scope: .allProjects, recordEvents: true)
+
+    #expect(!first.hits.isEmpty)
+    #expect(!second.hits.isEmpty)
+
+    let firstIDs = Set(first.hits.compactMap(\.presentation))
+    let secondIDs = Set(second.hits.compactMap(\.presentation))
+
+    // 同一次查詢的所有 hit 共用同一個識別碼。
+    #expect(firstIDs.count == 1, "第一次查詢的所有 hit 應共用一個呈現識別碼")
+    #expect(secondIDs.count == 1, "第二次查詢的所有 hit 應共用一個呈現識別碼")
+    // 兩次查詢之間不共用。
+    #expect(firstIDs.isDisjoint(with: secondIDs), "兩次查詢的呈現識別碼不應重疊")
+}
+
+@Test("QueryHit 攜帶的呈現識別碼與事件檔裡實際寫入的一致")
+func queryHitExposesTheIdentifierItWasRecordedUnder() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["關於記憶策略的內容"])
+    let service = try workspace.service(withEvents: true)
+    try service.build()
+
+    let outcome = try service.query(
+        text: "記憶策略", limit: 10, scope: .allProjects, recordEvents: true)
+    #expect(!outcome.hits.isEmpty)
+
+    let store = try FileEventStore(url: workspace.eventsURL)
+    let events = try store.allEvents()
+    let shown = events.filter { $0.kind == .shown }
+    #expect(!shown.isEmpty)
+
+    for hit in outcome.hits {
+        let matching = shown.first { $0.anchor == hit.anchor }
+        #expect(matching?.presentation == hit.presentation, "hit.presentation 必須與寫入事件檔的值一致")
+    }
+}
+
+@Test("不記錄事件時，QueryHit 沒有呈現識別碼")
+func noPresentationIdentifierWhenNotRecording() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["關於記憶策略的內容"])
+    let service = try workspace.service()
+    try service.build()
+
+    let outcome = try service.query(text: "記憶策略", limit: 10, scope: .allProjects)
+    #expect(!outcome.hits.isEmpty)
+    #expect(outcome.hits.allSatisfy { $0.presentation == nil })
+}

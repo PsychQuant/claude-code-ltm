@@ -273,3 +273,105 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     #expect(edited.orphanedAnchors.contains(a))
     #expect(edited.reinforcement(for: a) == 0)
 }
+
+// MARK: - 擴散激發（spreading activation，#15）
+
+@Test func aNonFiniteSpreadingFactorIsRejected() async {
+    await #expect(processExitsWith: .failure) {
+        _ = ProjectionParameters(spreadingActivationFactor: .nan)
+    }
+}
+
+@Test func aNegativeSpreadingFactorIsRejected() async {
+    await #expect(processExitsWith: .failure) {
+        _ = ProjectionParameters(spreadingActivationFactor: -0.1)
+    }
+}
+
+@Test func coPresentedAnchorWithNoDirectInteractionGainsReinforcement() {
+    // 呈現群組 G：A 被點開，B、C 只是同框出現、從未被互動過。
+    let group = PresentationID.random()
+    let a = anchor("a", "同框呈現的第一則")
+    let b = anchor("b", "同框呈現的第二則")
+    let c = anchor("c", "同框呈現的第三則")
+    let corpusReader = corpus([turn("a", "同框呈現的第一則"), turn("b", "同框呈現的第二則"), turn("c", "同框呈現的第三則")])
+
+    let events: [Event] = [
+        .interaction(.shown, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.shown, anchor: b, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.shown, anchor: c, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.opened, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+    ]
+    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
+    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+
+    let aReinforcement = result.reinforcement(for: a)
+    #expect(aReinforcement > 0, "A 自己被開，應該有直接增強")
+    #expect(result.reinforcement(for: b) > 0, "B 同框出現，應該獲得擴散增強")
+    #expect(result.reinforcement(for: c) > 0, "C 同框出現，應該獲得擴散增強")
+    #expect(
+        abs(result.reinforcement(for: b) - aReinforcement * 0.3) < 1e-9,
+        "B 的擴散增強應恰為 A 直接增強的 spreadingActivationFactor 倍")
+    #expect(result.reinforcement(for: b) < aReinforcement, "擴散增強必須小於直接增強")
+}
+
+@Test func anAnchorFromADifferentPresentationGroupGetsNoSpread() {
+    let group = PresentationID.random()
+    let otherGroup = PresentationID.random()
+    let a = anchor("a", "群組一的第一則文字")
+    let d = anchor("d", "群組二的獨立內容")
+    let corpusReader = corpus([turn("a", "群組一的第一則文字"), turn("d", "群組二的獨立內容")])
+
+    let events: [Event] = [
+        .interaction(.shown, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.opened, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.shown, anchor: d, at: instant, generation: gen, policy: policy, presentation: otherGroup),
+    ]
+    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
+    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+
+    #expect(result.reinforcement(for: d) == 0, "不同呈現群組的 anchor 不應獲得擴散")
+}
+
+@Test func spreadingDoesNotRecursePastOneHop() {
+    // A 在群組 G1 被開，B 與 A 同框（因此獲得擴散）；B 又跟 C 同框在**不同**群組 G2
+    // （A 從未跟 C 同框）。擴散不應該從 B 再傳到 C。
+    let g1 = PresentationID.random()
+    let g2 = PresentationID.random()
+    let a = anchor("a", "第一群組的來源文字")
+    let b = anchor("b", "跨兩個群組的橋接")
+    let c = anchor("c", "第二群組的獨立內容")
+    let corpusReader = corpus([
+        turn("a", "第一群組的來源文字"), turn("b", "跨兩個群組的橋接"), turn("c", "第二群組的獨立內容"),
+    ])
+
+    let events: [Event] = [
+        .interaction(.shown, anchor: a, at: instant, generation: gen, policy: policy, presentation: g1),
+        .interaction(.shown, anchor: b, at: instant, generation: gen, policy: policy, presentation: g1),
+        .interaction(.opened, anchor: a, at: instant, generation: gen, policy: policy, presentation: g1),
+        .interaction(.shown, anchor: b, at: instant, generation: gen, policy: policy, presentation: g2),
+        .interaction(.shown, anchor: c, at: instant, generation: gen, policy: policy, presentation: g2),
+    ]
+    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
+    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+
+    #expect(result.reinforcement(for: b) > 0, "前提：B 因為跟 A 同框而獲得擴散")
+    #expect(result.reinforcement(for: c) == 0, "C 不該因為 B 收到的擴散再借到任何增強——只做一跳")
+}
+
+@Test func dismissalDoesNotSpreadSuppression() {
+    let group = PresentationID.random()
+    let a = anchor("a", "被使用者不採用的那一則")
+    let b = anchor("b", "同框但沒有被互動過的那一則")
+    let corpusReader = corpus([turn("a", "被使用者不採用的那一則"), turn("b", "同框但沒有被互動過的那一則")])
+
+    let events: [Event] = [
+        .interaction(.shown, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.shown, anchor: b, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.dismissed, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+    ]
+    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
+    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+
+    #expect((result[b]?.suppression ?? 0) == 0, "dismissed 不得把抑制擴散給同框但未互動的 anchor")
+}

@@ -114,6 +114,14 @@ public struct QueryHit: Sendable, Equatable {
     /// 的 "A candidate's relevance band is the number of retrieval channels it
     /// matched"）。暴露它讓「band 從哪來」在輸出上看得見，而不是只能讀 code 推斷。
     public let channels: [String]
+    /// 這次查詢的呈現識別碼——同一次 `query()` 呼叫的所有 hit 共用同一個值。
+    ///
+    /// 只在 `recordEvents` 為真且有 `eventStore` 時才非 nil（沒有事件檔可寫，
+    /// 就沒有指標可以指）。存在的理由是讓未來的 deliberate 事件寫入者（例如
+    /// Stage 2 MCP，見 #24）能把「使用者稍後點開了這個結果」記在跟這次呈現
+    /// 一樣的群組底下——`EventStore.append` 已經接受 `presentation` 參數，
+    /// 不需要新的記錄 API，只是先前這條路徑一律傳 nil（見 #15 的 diagnosis）。
+    public let presentation: PresentationID?
 }
 
 /// 一次查詢的完整結果。
@@ -325,6 +333,11 @@ public struct LTMService {
         let projection = try makeProjection(database: database, strategy: chosen, now: now)
         let ranked = try chosen.rerank(candidates, with: projection)
 
+        // 這次查詢的呈現識別碼：只在真的會寫事件時才產生——沒有事件檔可寫，
+        // 就沒有指標可以指（#15）。同一個值套用到這次查詢的所有 hit 與所有
+        // 為它們寫入的 `.shown` 事件，讓兩者可以事後對上。
+        let presentation: PresentationID? = (recordEvents && eventStore != nil) ? .random() : nil
+
         let byAnchor = Dictionary(scored.map { ($0.anchor, $0) }, uniquingKeysWith: { first, _ in first })
         var hits: [QueryHit] = []
         for result in ranked {
@@ -338,14 +351,15 @@ public struct LTMService {
                     historyDescription: String(describing: result.reason.history),
                     movementDescription: String(describing: result.reason.movement),
                     anchor: result.candidate.anchor,
-                    channels: source.channels.map(\.rawValue).sorted()))
+                    channels: source.channels.map(\.rawValue).sorted(),
+                    presentation: presentation))
         }
 
         var recorded = 0
         if recordEvents, let eventStore {
             recorded = try record(
                 kind: .shown, anchors: hits.map(\.anchor), policy: chosen.id, store: eventStore,
-                now: now)
+                now: now, presentation: presentation)
         }
 
         return QueryOutcome(
@@ -415,9 +429,13 @@ public struct LTMService {
     }
 
     /// 寫入一批事件。
+    ///
+    /// `presentation` 預設 nil：呼叫端沒有群組可指時（或未來其他不代表單一
+    /// 呈現的批次寫入）維持原行為。`query()` 是目前唯一會傳非 nil 值的呼叫點
+    /// ——見該處生成 `PresentationID` 的理由（#15）。
     private func record(
         kind: EventKind, anchors: [Anchor], policy: RankingPolicyID, store: any EventStore,
-        now: Date
+        now: Date, presentation: PresentationID? = nil
     ) throws -> Int {
         let generation = GenerationID("g-\(Int(now.timeIntervalSince1970))")
         var written = 0
@@ -425,7 +443,7 @@ public struct LTMService {
             try store.append(
                 Event(
                     kind: kind, anchor: anchor, timestamp: now, generation: generation,
-                    policy: policy, noteRef: nil, presentation: nil))
+                    policy: policy, noteRef: nil, presentation: presentation))
             written += 1
         }
         return written
