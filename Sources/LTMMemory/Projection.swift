@@ -236,9 +236,9 @@ public func project(
     for entry in deliberateContributions {
         guard let members = presentationGroups[entry.group] else { continue }
         // 群組大小超過防禦性上限時整體跳過擴散——不是無界放大，是視為異常
-        // （add-spreading-activation-fixes Decision 4）。**防禦性上限，非校準值**：
-        // 50 是本次自選的估計，未經本語料驗證，理由與 `spreadingActivationFactor`
-        // 的既有誠實記錄慣例相同。
+        // （add-spreading-activation-fixes Decision 4）。上限本身（`maxSpreadingGroupSize`
+        // 常數，目前 2000）的選值理由見該常數上方的文件註解，不在這裡重複——
+        // fix-round-3 verify 抓到這裡曾經留著已經過時的「50」，跟常數本身不符。
         guard members.count <= maxSpreadingGroupSize else { continue }
         for other in members where other != entry.anchor {
             guard isLive(other) else { continue }

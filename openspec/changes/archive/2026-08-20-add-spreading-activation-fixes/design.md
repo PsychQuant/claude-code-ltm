@@ -24,7 +24,9 @@
 
 ### Decision 1: Document spreading as a documented exception in `memory-events`, not a violation
 
-`memory-events` spec 的「Only deliberate interactions reinforce」Requirement 保留不動，另外新增一條擴散專屬的新 scenario，明確記錄：在同一次呈現（presentation）群組裡，只要群組內有任一 anchor 收到 `opened`/`cited`/`pinned` 事件，群組內其他存活、未被使用者明確 dismissed 的 anchor，即使自己只有 `shown` 事件（或完全沒有事件），也可能因擴散拿到非零 reinforcement——且這個非零值嚴格小於直接互動本身會產生的 reinforcement（透過 `spreadingActivationFactor < 1` 保證，見既有 `precondition`）。
+`memory-events` spec 的「Only deliberate interactions reinforce」Requirement 保留不動，另外新增一條擴散專屬的新 scenario，明確記錄：在同一次呈現（presentation）群組裡，只要群組內有任一 anchor 收到 `opened`/`cited`/`pinned` 事件，群組內其他存活、未被使用者明確 dismissed 的 anchor，即使自己只有 `shown` 事件（或完全沒有事件），也可能因擴散拿到非零 reinforcement。
+
+> **修正（2026-08-20，fix-round-3）**：上一句原本接著寫「且這個非零值嚴格小於直接互動本身會產生的 reinforcement（透過 `spreadingActivationFactor < 1` 保證，見既有 `precondition`）」——**這句話當時是假的**：那個 precondition 直到 fix-round-2（commit `0f0dfdf`）才補上，"見既有" 的措辭卻宣稱它原本就在。這是與 fix #4（AI4o 出處假宣稱）同一類缺陷，在同一份文件裡發生。且即使 precondition 已補上，它保證的只是**逐筆**貢獻嚴格小於其衍生自的那筆直接互動貢獻，不是一個 anchor 的**總**擴散量有上限——這條較弱的保證還可以被合法的 `openedWeight`/`citedWeight`/`pinnedWeight: 0` 推翻（直接貢獻本身為 0 時，`0 < 0` 不成立）。完整、誠實的措辭見 `openspec/specs/memory-events/spec.md` 的對應 Requirement（fix-round-3 已收斂）。
 
 **替代方案考慮過**：narrow 機制本身（Definition B：擴散只調整「兩者皆已有直接互動」的 anchor 之間的相對強度），讓舊 Requirement 完全不用動。**未採用**——這會推翻使用者在 #15 spectra-discuss 明確選過的 Definition A（同框呈現即使自己未被開啟也拿到擴散加分），且會讓擴散這個機制的實際效果大幅弱化（只在「多筆都被直接互動」的窄情境下才有作用，違背擴散激發本身要模擬的「聯想促發」語意，見 `ltm-analogy.md` 的類比判準）。
 
@@ -50,8 +52,8 @@
 
 `Projection.swift` 的擴散迴圈（`for entry in deliberateContributions { ... for other in members ... }`）新增兩個條件：
 
-1. **排除已被明確 dismissed 的目標**：若 `other` 這個 anchor 在同一份事件序列裡有 `.dismissed` 事件（即 `suppression[other]` 非零），擴散不對它生效——使用者的明確負面訊號不該被同框的正面訊號部分抵銷。
-2. **同框群組大小上限**：`presentationGroups[group]` 的成員數超過一個防禦性門檻（實作時定為常數，建議值 50——對齊一般查詢 `limit` 參數的合理上界數倍）時，該群組整體跳過擴散（不對組內任何 anchor 套用），視為異常大小、可能是竄改或非典型使用模式的訊號，而非無界放大。
+1. **排除已被明確 dismissed 的目標**：若 `other` 這個 anchor 在同一份事件序列裡有 `.dismissed` 事件，擴散不對它生效——使用者的明確負面訊號不該被同框的正面訊號部分抵銷。**修正（2026-08-20，fix-round-3）**：上一句原本接著寫「即 `suppression[other]` 非零」，把「事件是否存在」與「抑制量數值是否非零」宣告為等價——這個等價不成立（`dismissedWeight: 0` 是合法參數值，此時 `suppression` 恆為 0，但 dismissed 事件確實存在），fix-round-2 已把實作改成獨立追蹤事件存在性（`dismissedAnchors: Set<Anchor>`），這裡把描述一併更正。
+2. **同框群組大小上限**：`presentationGroups[group]` 的成員數超過一個防禦性門檻時，該群組整體跳過擴散（不對組內任何 anchor 套用），視為異常大小、可能是竄改或非典型使用模式的訊號，而非無界放大。**修正（2026-08-20，fix-round-3）**：門檻的值已從最初的建議值 50 調整為 2000（fix-round-2）——50 對齊的是「一般查詢 `limit` 參數的合理上界數倍」，但 `ltm query --k` 有文件支援的上限是 1000，50 比它低了 20 倍，任何用到 `--k` 中段以上的正常查詢都會在合規使用下靜默關掉整組擴散。2000 高於文件支援上限，讓這個上限只防禦超出 CLI 能產生範圍的群組。
 
 **替代方案考慮過**：對擴散總量做動態正規化（例如依組大小反比縮放 `spreadingActivationFactor`）。**未採用**——會讓「單一 anchor 收到的擴散量」不再只依賴自己的鄰居狀態，而依賴整個群組大小這個間接、難以在 `RankingReason.History` 裡誠實描述的量，違反 `MemoryStrategy.swift` 已經記錄的「provenance 不得說謊」紀律；門檻式跳過（skip）比連續縮放更容易誠實描述在 provenance 裡（不套用就是不套用，不需要解釋一個縮放係數）。
 
@@ -99,4 +101,4 @@
 - **[Risk]** Decision 3 接受的偵測力損失（見上）→ **Mitigation**：在 `strategy-comparison` 的 delta spec 與 `ComparisonReport.swift` 的程式碼註解都明確記錄這個取捨,讓未來的維護者知道這是刻意決定,不是遺漏。
 - **[Risk]** `conservative` 行為變更（不再吃到擴散）可能讓依賴舊行為（即使是非預期的）的下游比較實驗結果不可比 → **Mitigation**：這是修正一個未經 spec 授權的滲透,不是引入新行為;`docs/memory-systems/` 若有引用 conservative 排序特性的既有文字,一併檢查是否需要更新（不在本次 Impact 清單但屬於實作時的合理連帶檢查）。
 - **[Risk]** 同框群組大小上限（Decision 4）的常數是本次自選、未經校準 → **Mitigation**：比照 `spreadingActivationFactor` 既有的誠實記錄慣例,在程式碼註解裡明確標記「防禦性上限,非校準值」,不宣稱它是最佳門檻。上限本身已從最初的 50 調整為 2000（2026-08-20 補：50 比 `ltm query --k` 有文件支援的上限 1000 低了 20 倍,任何用到 `--k` 中段以上的正常查詢都會在合規使用下靜默關掉整組擴散——2000 高於文件支援上限,讓這個上限只防禦超出 CLI 能產生範圍的群組）。
-- **[Risk，2026-08-20 新增，fix-round-2 verify finding]** `appliesSpreadingActivation` 的閘門只裝在 `LTMService.makeProjection`——單策略查詢路徑。`LTMEval.Interleaving.present(query:candidates:projection:a:b:startingSide:)`（A/B 比較 harness）對兩個被比較的策略共用**同一個** `Projection` 物件（`memory-strategy` spec 既有 Requirement「兩臂共用同一個 projection」要求如此），所以這條路徑結構上繞過了 human-like 專屬閘門：若拿來比較 `human-like` 與 `conservative` 的那個共用 projection 帶了非零 `spreadingActivationFactor`，`conservative` 那一臂也會吃到擴散貢獻。→ **Mitigation（部分，非完整修復）**：這是已知限制而非新引入的缺陷——`Sources/` 目前沒有任何生產呼叫端使用 `Interleaving.present`，只有測試呼叫它，所以這條路徑目前是潛伏而非即時生效。完整修法需要重新設計比較 harness 的介面（讓兩臂能各自帶不同的 spreading 設定，或明確定義「比較擴散開/關兩種條件」的語意），這是架構層決定，超出本次修復範圍，留給 #16（評估指標基礎設施）真正啟用這條路徑時再處理——**在那之前，任何用這條路徑比較 human-like／conservative 的結果都不能假設擴散已被正確隔離**。
+- **[Risk，2026-08-20 新增，fix-round-2 verify finding]** `appliesSpreadingActivation` 的閘門只裝在 `LTMService.makeProjection`——單策略查詢路徑。`LTMEval.InterleavingHarness.present(query:candidates:projection:a:b:startingSide:)`（A/B 比較 harness）對兩個被比較的策略共用**同一個** `Projection` 物件（`memory-strategy` spec 既有 Requirement「兩臂共用同一個 projection」要求如此），所以這條路徑結構上繞過了 human-like 專屬閘門：若拿來比較 `human-like` 與 `conservative` 的那個共用 projection 帶了非零 `spreadingActivationFactor`，`conservative` 那一臂也會吃到擴散貢獻。→ **Mitigation（部分，非完整修復）**：這是已知限制而非新引入的缺陷——`Sources/` 目前沒有任何生產呼叫端使用 `InterleavingHarness.present`，只有測試呼叫它，所以這條路徑目前是潛伏而非即時生效。完整修法需要重新設計比較 harness 的介面（讓兩臂能各自帶不同的 spreading 設定，或明確定義「比較擴散開/關兩種條件」的語意），這是架構層決定，超出本次修復範圍，留給 #16（評估指標基礎設施）真正啟用這條路徑時再處理——**在那之前，任何用這條路徑比較 human-like／conservative 的結果都不能假設擴散已被正確隔離**。

@@ -6,7 +6,7 @@
 
 Spreading is a property of the `human-like` tier only. When a strategy is projected through `LTMService`'s single-strategy query path (`LTMService.makeProjection`), no other shipped strategy SHALL receive spreading-derived reinforcement, regardless of which event kinds it otherwise consumes. In particular, `conservative` consumes the same four event kinds as `human-like` (see "Strategies are distinguished by mechanism, never by magnitude") but SHALL NOT receive spreading contributions on that path — sharing a signal set does not imply sharing every mechanism gated on that signal set.
 
-**Known gap (not covered by this guarantee):** the A/B comparison harness (`LTMEval.Interleaving.present`) shares a single `Projection` object between both compared strategies (required by "MemoryStrategy is the sole seam between retrieval and memory"'s sibling requirement that both arms of a comparison receive the same projection). If that shared projection carries a nonzero `spreadingActivationFactor`, spreading contributions reach whichever strategy is compared against `human-like`, including `conservative`. As of this writing `Interleaving.present` has no production caller (only tests), so this gap is latent rather than live; it is not resolved here because doing so requires redesigning the comparison harness's projection-sharing contract, which is out of scope for this change.
+**Known gap (not covered by this guarantee):** the A/B comparison harness (`LTMEval.InterleavingHarness.present`) shares a single `Projection` object between both compared strategies (required by "MemoryStrategy is the sole seam between retrieval and memory"'s sibling requirement that both arms of a comparison receive the same projection). `ProjectionParameters.default` carries a nonzero `spreadingActivationFactor` (0.3), so any caller that builds the shared projection with the default parameters — not merely a caller that deliberately opts into a nonzero factor — has spreading contributions reach whichever strategy is compared against `human-like`, including `conservative`. As of this writing `InterleavingHarness.present` has no production caller (only tests), so this gap is latent rather than live; it is not resolved here because doing so requires redesigning the comparison harness's projection-sharing contract, which is out of scope for this change.
 
 #### Scenario: A co-presented anchor with no direct interaction of its own gains reinforcement
 
@@ -28,6 +28,6 @@ Spreading is a property of the `human-like` tier only. When a strategy is projec
 
 #### Scenario: Conservative does not receive spreading reinforcement despite sharing human-like's signal set
 
-- **GIVEN** a presentation group of two anchors projected under `conservative`, where one anchor is deliberately opened and the other has only a `shown` event and no other events
+- **GIVEN** a presentation group of two anchors, queried under `conservative` through `LTMService`'s single-strategy query path (not the A/B comparison harness — see the Known-gap note above), where one anchor is deliberately opened and the other has only a `shown` event and no other events
 - **WHEN** `conservative`'s projection is used to rank the group
 - **THEN** the anchor with only a `shown` event shows zero reinforcement, unlike the same scenario projected for `human-like`

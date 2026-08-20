@@ -473,10 +473,47 @@ private func makeOversizedGroupFixture(memberCount: Int, groupTag: String) -> (
     return (corpus(turns), events, shownOnlyAnchors)
 }
 
+// `makeOversizedGroupFixture(memberCount:)` 建的群組是 memberCount 個純曝光
+// 成員 **加上** 1 個被開啟成員，所以 `members.count`（`maxSpreadingGroupSize`
+// 比較的量）等於 `memberCount + 1`。以下三條邊界測試都直接依這個關係換算，
+// 註解裡不重複寫「等於多少」以免像 fix-round-2 那版一樣，換算數字寫錯又沒清乾淨
+// （#15 fix-round-3 verify finding）。
+
+@Test func presentationGroupExactlyAtCapSizeStillSpreads() {
+    // `members.count == maxSpreadingGroupSize`（2000）：guard 用 `<=`，上限本身
+    // 要放行。
+    let fixture = makeOversizedGroupFixture(memberCount: 1999, groupTag: "atcap")
+    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
+    let result = project(
+        fixture.events, at: instant, resolvedBy: fixture.corpus, parameters: params)
+
+    for a in fixture.shownOnlyAnchors {
+        #expect(
+            result.reinforcement(for: a) > 0,
+            "群組大小恰好等於上限時仍應正常擴散——guard 用 <=，上限本身要放行")
+    }
+}
+
+@Test func presentationGroupOneOverCapSizeDoesNotSpread() {
+    // `members.count == maxSpreadingGroupSize + 1`（2001）：真正的邊界測試——
+    // 跟上一條只差 1，能抓到 off-by-one 或比較方向寫反（`<` vs `<=`，`>` vs `>=`）。
+    let fixture = makeOversizedGroupFixture(memberCount: 2000, groupTag: "onecap")
+    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
+    let result = project(
+        fixture.events, at: instant, resolvedBy: fixture.corpus, parameters: params)
+
+    for a in fixture.shownOnlyAnchors {
+        #expect(
+            result.reinforcement(for: a) == 0,
+            "群組大小比上限多 1 時應整體跳過擴散")
+    }
+}
+
 @Test func oversizedPresentationGroupDoesNotSpread() {
-    // 群組大小超過防禦性上限（2000，見 Projection.swift 的 `maxSpreadingGroupSize`）
-    // 時，整個群組跳過擴散——不是無界放大，是視為異常。用上限 + 1 個純曝光成員
-    // 建構，確保剛好跨過門檻。
+    // 群組大小遠超過防禦性上限（`members.count == maxSpreadingGroupSize + 2`）
+    // 時，整個群組跳過擴散——不是無界放大，是視為異常。上一條
+    // `presentationGroupOneOverCapSizeDoesNotSpread` 已經釘住緊貼邊界的情形，
+    // 這條確認「遠超過」同樣成立，不只是剛好跨過那一格。
     let fixture = makeOversizedGroupFixture(memberCount: 2001, groupTag: "over")
     let params = ProjectionParameters(spreadingActivationFactor: 0.3)
     let result = project(
@@ -486,24 +523,6 @@ private func makeOversizedGroupFixture(memberCount: Int, groupTag: String) -> (
         #expect(
             result.reinforcement(for: a) == 0,
             "群組大小超過上限時應整體跳過擴散，純曝光成員 reinforcement 應為 0")
-    }
-}
-
-@Test func presentationGroupExactlyAtCapSizeStillSpreads() {
-    // 邊界測試（#15 fix-round-2 verify LOW finding：上限的邊界先前沒有任何測試
-    // 釘住，off-by-one 或比較方向反了都不會被發現）。2000 個純曝光成員 + 1 個
-    // 被開啟成員 = 群組大小恰好 2001... 不對，`maxSpreadingGroupSize` 比較的是
-    // `members.count`（含被開啟者本身），所以要讓 `members.count == 2000`，
-    // 純曝光成員要放 1999 個。
-    let fixture = makeOversizedGroupFixture(memberCount: 1999, groupTag: "atcap")
-    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
-    let result = project(
-        fixture.events, at: instant, resolvedBy: fixture.corpus, parameters: params)
-
-    for a in fixture.shownOnlyAnchors {
-        #expect(
-            result.reinforcement(for: a) > 0,
-            "群組大小恰好等於上限（2000）時仍應正常擴散——guard 用 <=，上限本身要放行")
     }
 }
 

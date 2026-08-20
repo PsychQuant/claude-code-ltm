@@ -5,6 +5,12 @@
 ## Unreleased
 
 ### Fixed
+- 第三輪修復 `add-spreading-activation-fixes`（#15）：前一輪把「假宣稱／過時數字」修在某一處、忘了同一句話的其他複本，這輪對整個 repo 做系統性 grep 掃描，一次把所有複本改掉，而不是逐一頭痛醫頭：
+  - `design.md:27` 的「透過 `spreadingActivationFactor < 1` 保證，見既有 precondition」——precondition 是上一輪才補的，這句話寫下的當時是假的，先前只改了 spec 沒改 design.md 本體；
+  - `design.md` Decision 4 本文與 `Sources/LTMMemory/Projection.swift` 迴圈上方的程式碼註解仍寫著「50」，跟已改成 2000 的常數矛盾；
+  - `design.md` Decision 4 與 `tasks.md` 2.2 仍把「`suppression` 數值非零」與「有 dismissed 事件」寫成等價——這個等價已被上一輪的修法本身證明不成立；
+  - `LTMEval.Interleaving.present` 這個符號名是錯的，正確是 `InterleavingHarness.present`，四處文件複製了同一個錯誤引用。
+  另外收斂了這輪修補動作自己新引入的兩個問題：memory-events spec 新加的「其他策略以 factor=0 投影」括號豁免範圍過寬（把整條 Requirement 都豁免掉，不只是擴散相關的三條 scenario）；收斂後的「逐筆嚴格小於」SHALL 仍可被合法的 `openedWeight`/`citedWeight`/`pinnedWeight: 0` 推翻——與這輪要修的 fix #4 同一類缺陷，在同一份文件的另一句重演，這次把前提條件（來源貢獻為正）寫進 SHALL 本身。也補上一條真正釘住 cap+1（2001）邊界的測試，並清掉舊測試裡沒整理乾淨的自我更正註解。(#15)
 - 修正上一輪 `add-spreading-activation-fixes`（#15）修復本身留下的 6 個 `/idd-verify` 缺陷（第二輪 follow-up verify 發現，修法就地補在同一個 commit 基礎上，未開新 change）：
   (1) `memory-events` spec 的「Impressions alone produce no reinforcement」scenario
   文字本身沒有排除同框有擴散的情形——先前只在 prose 加了例外說明，scenario
@@ -20,7 +26,7 @@
   (5) 補齊 archived design.md 的 AI4o 出處 errata（先前只修了 Open Questions
   段落，Decisions 段落的同一個假宣稱漏了）；
   (6) `docs/memory-systems/README.md` 補上本輪修復的行為變更說明。
-  另外把 `LTMEval.Interleaving.present`（A/B 比較 harness）繞過 human-like
+  另外把 `LTMEval.InterleavingHarness.present`（A/B 比較 harness）繞過 human-like
   專屬擴散閘門這件事記為已知限制（目前無生產呼叫端，潛伏而非即時生效，完整
   修復需要重新設計比較 harness 的 projection 共用契約，留待後續）。(#15)
 - 修正 `add-spreading-activation`（#15）擴散機制的 6 個 `/idd-verify` 缺陷：
