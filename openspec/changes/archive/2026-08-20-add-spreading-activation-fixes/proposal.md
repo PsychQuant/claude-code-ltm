@@ -49,4 +49,4 @@
     - openspec/changes/archive/2026-08-19-add-spreading-activation/proposal.md
     - CHANGELOG.md
   - New: （無）
-  - Removed: （無）
+  - Removed: `ComparisonDataError.unknownPresentationReference(PresentationID)`（enum case，改為 `SkippedEvents.presentationNotTracked` 計數）；`ComparisonReport.SkippedEvents.init` 簽章變更（新增必填參數 `presentationNotTracked`，對此 repo 外的既有呼叫端是 source-breaking，目前無已知外部消費端）——2026-08-20 修正，先前誤寫為「無」（fix-round-2 verify finding）

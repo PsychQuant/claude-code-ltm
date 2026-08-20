@@ -288,6 +288,17 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     }
 }
 
+@Test func aSpreadingFactorOfOneOrMoreIsRejected() async {
+    // #15 fix-round-2 verify finding：memory-events spec 的 SHALL 是「每筆擴散
+    // 貢獻嚴格小於它衍生自的那筆直接互動貢獻」，這件事只有 factor < 1 時才成立
+    // （factor == 1 讓擴散貢獻等於直接貢獻，不是嚴格小於）。先前完全沒有上界
+    // 驗證，design.md 卻宣稱「透過 spreadingActivationFactor < 1 保證，見既有
+    // precondition」——那個 precondition 當時不存在。
+    await #expect(processExitsWith: .failure) {
+        _ = ProjectionParameters(spreadingActivationFactor: 1.0)
+    }
+}
+
 @Test func coPresentedAnchorWithNoDirectInteractionGainsReinforcement() {
     // 呈現群組 G：A 被點開，B、C 只是同框出現、從未被互動過。
     let group = PresentationID.random()
@@ -402,12 +413,42 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
         "B 有自己的 dismissed 事件，不該從同框的 A 收到擴散增強")
 }
 
-@Test func oversizedPresentationGroupDoesNotSpread() {
-    // 群組大小超過防禦性上限時，整個群組跳過擴散——不是無界放大，是視為異常。
-    // 用 60 個成員（超過設計預設建議的 50）建構，其中一個被開啟，其餘只有 shown。
+@Test func dismissedExclusionHoldsEvenWhenDismissedWeightIsZero() {
+    // #15 fix-round-2 verify finding：排除條件先前綁在 `suppression[other] != 0`
+    // ——用「抑制量的大小」代理「有沒有 dismissed 事件」。`dismissedWeight: 0`
+    // 是合法參數值（precondition 只驗 >= 0），這種設定下 `suppression` 恆為 0，
+    // 排除條件因此靜默失效。排除必須綁在「事件是否存在」，不是「權重算出來的
+    // 數值」——跟 `MemoryStrategy.swift` 的 `RankingReason.History.none` 已經
+    // 記過的同一個混淆。
     let group = PresentationID.random()
-    let openedID = "opened-anchor"
-    let openedText = "在超大群組裡被開啟的那一則"
+    let a = anchor("a", "被明確開啟的那一則內容")
+    let b = anchor("b", "同框但被使用者明確不採用的那一則")
+    let corpusReader = corpus([turn("a", "被明確開啟的那一則內容"), turn("b", "同框但被使用者明確不採用的那一則")])
+
+    let events: [Event] = [
+        .interaction(.shown, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.shown, anchor: b, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.opened, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.dismissed, anchor: b, at: instant, generation: gen, policy: policy, presentation: group),
+    ]
+    let params = ProjectionParameters(dismissedWeight: 0, spreadingActivationFactor: 0.3)
+    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+
+    #expect(result.reinforcement(for: a) > 0, "前提：A 自己被開，應該有直接增強")
+    #expect(
+        result.reinforcement(for: b) == 0,
+        "B 有自己的 dismissed 事件（即使 dismissedWeight 是 0），仍不該從同框的 A 收到擴散增強")
+}
+
+/// 建一個含 `memberCount` 個純曝光成員 + 1 個被開啟成員的同框群組，回傳
+/// （corpus reader、events、純曝光成員的 anchor 清單）。共用給上限的邊界測試用，
+/// 避免兩條測試各寫一份幾乎相同的建構邏輯。
+private func makeOversizedGroupFixture(memberCount: Int, groupTag: String) -> (
+    corpus: FixtureCorpus, events: [Event], shownOnlyAnchors: [Anchor]
+) {
+    let group = PresentationID.random()
+    let openedID = "\(groupTag)-opened"
+    let openedText = "在\(groupTag)群組裡被開啟的那一則"
     var turns = [turn(openedID, openedText)]
     var events: [Event] = [
         .interaction(
@@ -418,9 +459,9 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
             policy: policy, presentation: group),
     ]
     var shownOnlyAnchors: [Anchor] = []
-    for i in 0..<60 {
-        let id = "member-\(i)"
-        let text = "超大群組裡的第 \(i) 個純曝光成員"
+    for i in 0..<memberCount {
+        let id = "\(groupTag)-member-\(i)"
+        let text = "\(groupTag)群組裡的第 \(i) 個純曝光成員"
         turns.append(turn(id, text))
         let a = anchor(id, text)
         shownOnlyAnchors.append(a)
@@ -429,14 +470,40 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
                 .shown, anchor: a, at: instant, generation: gen, policy: policy,
                 presentation: group))
     }
-    let corpusReader = corpus(turns)
-    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
-    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+    return (corpus(turns), events, shownOnlyAnchors)
+}
 
-    for a in shownOnlyAnchors {
+@Test func oversizedPresentationGroupDoesNotSpread() {
+    // 群組大小超過防禦性上限（2000，見 Projection.swift 的 `maxSpreadingGroupSize`）
+    // 時，整個群組跳過擴散——不是無界放大，是視為異常。用上限 + 1 個純曝光成員
+    // 建構，確保剛好跨過門檻。
+    let fixture = makeOversizedGroupFixture(memberCount: 2001, groupTag: "over")
+    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
+    let result = project(
+        fixture.events, at: instant, resolvedBy: fixture.corpus, parameters: params)
+
+    for a in fixture.shownOnlyAnchors {
         #expect(
             result.reinforcement(for: a) == 0,
             "群組大小超過上限時應整體跳過擴散，純曝光成員 reinforcement 應為 0")
+    }
+}
+
+@Test func presentationGroupExactlyAtCapSizeStillSpreads() {
+    // 邊界測試（#15 fix-round-2 verify LOW finding：上限的邊界先前沒有任何測試
+    // 釘住，off-by-one 或比較方向反了都不會被發現）。2000 個純曝光成員 + 1 個
+    // 被開啟成員 = 群組大小恰好 2001... 不對，`maxSpreadingGroupSize` 比較的是
+    // `members.count`（含被開啟者本身），所以要讓 `members.count == 2000`，
+    // 純曝光成員要放 1999 個。
+    let fixture = makeOversizedGroupFixture(memberCount: 1999, groupTag: "atcap")
+    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
+    let result = project(
+        fixture.events, at: instant, resolvedBy: fixture.corpus, parameters: params)
+
+    for a in fixture.shownOnlyAnchors {
+        #expect(
+            result.reinforcement(for: a) > 0,
+            "群組大小恰好等於上限（2000）時仍應正常擴散——guard 用 <=，上限本身要放行")
     }
 }
 

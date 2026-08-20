@@ -8,11 +8,6 @@ import LTMCore
 /// projection 的可調參數。
 ///
 /// 全部是衍生層的東西，改了不影響任何既存事件——這就是把它們留成參數的理由。
-/// 擴散生效的同框呈現群組大小上限。**防禦性上限，非校準值**——見
-/// `project(_:at:resolvedBy:parameters:)` 擴散那一段的用法與理由
-/// （add-spreading-activation-fixes Decision 4）。
-private let maxSpreadingGroupSize = 50
-
 public struct ProjectionParameters: Sendable, Equatable {
     /// 冪次衰減指數。`weight * (1 + ageDays)^(-exponent)`。
     public let decayExponent: Double
@@ -31,6 +26,15 @@ public struct ProjectionParameters: Sendable, Equatable {
     /// 共現擴散不是同一件事）。所以這裡的預設值**不是**沿用 AI4o 的參數
     /// （與其他四個參數的來源不同），是本次實作挑的一個保守估計，同樣
     /// 完全未經本語料驗證。
+    ///
+    /// **必須嚴格小於 1**（下方 `init` 的 precondition 執行這件事）。這個
+    /// 保證的範圍是**逐筆貢獻**：每一筆擴散貢獻（`factor * entry.contribution`）
+    /// 嚴格小於它衍生自的那筆直接互動貢獻（`entry.contribution`）——這件事
+    /// factor < 1 就足以保證，不需要更多。**這個保證不涵蓋一個 anchor 的
+    /// 總 reinforcement**：一個 anchor 若同框於多個群組、各自收到不同來源的
+    /// 擴散貢獻，加總起來仍可能超過任一單筆直接互動的量（#15 fix-round-2
+    /// verify devils-advocate finding：先前的宣稱沒有區分「逐筆」與「總量」，
+    /// 讀起來像是在保證後者，而 factor < 1 這件事本身修不好那個更強的宣稱）。
     public let spreadingActivationFactor: Double
 
     /// **這些預設值全部未經校準，方向也未知。**
@@ -70,6 +74,15 @@ public struct ProjectionParameters: Sendable, Equatable {
         precondition(
             decayExponent > 0,
             "ProjectionParameters.decayExponent 必須 > 0（0 等於關閉衰減），實得 \(decayExponent)")
+        // **必須嚴格小於 1**，否則「每筆擴散貢獻嚴格小於它衍生自的直接互動貢獻」
+        // 這條 memory-events spec 的 SHALL 不成立（factor == 1 讓兩者相等，不是
+        // 嚴格小於）。先前沒有這條 precondition，design.md 卻宣稱它存在
+        // （#15 fix-round-2 verify finding）——這條 precondition 補上後那句話
+        // 才是真的，但只涵蓋逐筆貢獻，見上方欄位說明。
+        precondition(
+            spreadingActivationFactor < 1,
+            "ProjectionParameters.spreadingActivationFactor 必須 < 1（否則擴散貢獻不會嚴格小於"
+                + "它衍生自的直接互動貢獻），實得 \(spreadingActivationFactor)")
         self.decayExponent = decayExponent
         self.openedWeight = openedWeight
         self.citedWeight = citedWeight
@@ -80,6 +93,18 @@ public struct ProjectionParameters: Sendable, Equatable {
 
     public static let `default` = ProjectionParameters()
 }
+
+/// 擴散生效的同框呈現群組大小上限。**防禦性上限，非校準值**——見
+/// `project(_:at:resolvedBy:parameters:)` 擴散那一段的用法與理由
+/// （add-spreading-activation-fixes Decision 4）。
+///
+/// **設在 2000，不是 50**（#15 fix-round-2 verify finding）：`ltm query --k`
+/// 有文件支援的上限是 1000（`Sources/ltm/Commands.swift` 驗證範圍 1–1000），
+/// 原本挑的 50 比這個上限低了 20 倍——任何用到 `--k` 中段以上的正常查詢，
+/// 都會在完全合規的使用下靜默關掉整組擴散，而不是只在異常情況觸發。
+/// 2000 高於文件支援的上限、留有餘裕，讓這個上限只防禦超出 CLI 能產生範圍
+/// 的群組（竄改或損壞的事件檔）。
+private let maxSpreadingGroupSize = 2000
 
 /// 把事件序列摺成 per-anchor 統計。
 ///
@@ -125,6 +150,12 @@ public func project(
     // 共用同一份過濾，不是另開一遍重新判斷。
     var presentationGroups: [PresentationID: Set<Anchor>] = [:]
     var deliberateContributions: [(anchor: Anchor, group: PresentationID, contribution: Double)] = []
+    // 排除擴散目標用**事件是否存在**判斷，不是 `suppression` 的數值大小
+    // （#15 fix-round-2 verify finding）：`dismissedWeight: 0` 是合法參數值，
+    // 這種設定下 `suppression[anchor]` 恆為 0，magnitude-based 判斷會靜默
+    // 放行。與 `MemoryStrategy.swift` 的 `RankingReason.History.none` 記過的
+    // 同一個混淆——用權重算出來的數值代理事件本身的存在。
+    var dismissedAnchors: Set<Anchor> = []
     for event in events {
         // 評估時點之後的事件不可能已經發生。先前的 `max(0, ...)` 把未來時間戳
         // 夾成 age 0，也就是 decay = 1.0 的**最大權重，而且永遠維持**——竄改
@@ -190,6 +221,10 @@ public func project(
             // 是遠比 reinforcement 擴散更重的宣稱，本次不做。
             suppression[event.anchor, default: 0] += parameters.dismissedWeight * decay
             lastDeliberate[event.anchor] = max(lastDeliberate[event.anchor] ?? .distantPast, event.timestamp)
+            // 記事件是否存在，跟 `suppression` 的數值分開——`dismissedWeight`
+            // 可以合法設成 0，那時 `suppression` 讀不出「這個 anchor 曾被
+            // dismissed」這件事，但這個集合讀得出。
+            dismissedAnchors.insert(event.anchor)
         }
     }
 
@@ -209,9 +244,10 @@ public func project(
             guard isLive(other) else { continue }
             // 已被使用者明確 dismissed 的 anchor 不再接受擴散：那是一個明確的負面
             // 訊號，不該被同框的正面訊號部分抵銷（add-spreading-activation-fixes
-            // Decision 4）。用 `suppression` 非零判斷「有自己的 dismissed 事件」——
-            // 與擴散寫入 `reinforcement` 是分開的累加器，不會互相污染判斷。
-            guard (suppression[other] ?? 0) == 0 else { continue }
+            // Decision 4）。用「dismissed 事件是否存在」判斷，不是 `suppression`
+            // 的數值——`dismissedWeight: 0` 是合法設定，數值判斷在那種情況下
+            // 會靜默放行（#15 fix-round-2 verify finding）。
+            guard !dismissedAnchors.contains(other) else { continue }
             reinforcement[other, default: 0] += parameters.spreadingActivationFactor * entry.contribution
         }
     }
