@@ -5,6 +5,12 @@
 ## Unreleased
 
 ### Fixed
+- 第五輪（最後一輪）修復 `add-spreading-activation-fixes`（#15），並在此停止迭代：
+  - **補回被上一輪誤刪的 SHALL**：round-4 把 `memory-strategy` 的條件「延後」給 `memory-events` 時，把「`dismissed` 不作為擴散**來源**」（suppression 不擴散）這條規則刪掉了，而延後清單裡寫的是另一條完全不同的規則（dismissed 作為**目標**不接收擴散）。結果是來源側那條 SHALL 在整個 spec 樹裡消失，只剩程式碼與測試守著它。現已補進 `memory-events`（唯一權威來源），並明寫兩者是不同方向的兩條規則。
+  - **把「部分重述」改成「完全不重述」**：round-4 的延後句雖然說「not restated here」，同一句話卻又列了三個條件，而那份列舉出生就漏了第四個（`spreadingActivationFactor > 0`）——第五輪了，同一個「列舉會漏」的形狀。改成純指標，一個條件都不列，並在文字裡寫明「列舉本身就是缺陷，不是漏掉哪一項的問題」。
+  - **design.md 的 Implementation Contract**（不是 Decision 1）仍是四個閘門全缺的無條件宣稱，而它以驗收條件的身分出現、比 spec prose 更強。改成同樣單向指向 `memory-events`。
+- **誠實邊界（本輪最重要的發現，非缺陷修復）**：擴散機制由 `opened`/`cited`/`pinned` 事件驅動，而 **shipped code 沒有任何路徑寫入這三種事件**——`LTMService` 唯一的事件寫入點固定寫 `shown`，`Sources/` 裡唯一的 deliberate 事件建構是 `Event.pin` 的定義本身（無呼叫端）。因此 `project()` 的擴散迴圈在生產上**一次都沒執行過**，五輪 verify 修的全是一個目前只在測試裡活著的機制的規格文字。這件事已寫進 `memory-strategy` spec 與 `docs/memory-systems/README.md`——先前 spec 對一個小得多的 `InterleavingHarness` 缺口特地標了 latent，卻對「整個機制生產不可達」隻字未提，而 README 甚至寫著「現在是真的實作了」。
+  **殘留的規格細節不一致（第五輪 verify 仍列出的 MEDIUM/LOW 項）不影響現行行為**，因為現行行為裡這條路徑跑不到；要等 Stage 2 MCP（#24）補上 deliberate 事件寫入路徑，這些 SHALL 才會第一次被生產資料考驗，屆時應重新檢視。(#15)
 - 第四輪修復 `add-spreading-activation-fixes`（#15）：前三輪都是「發現複本 → 改掉那幾份」，這輪改用逐條 SHALL／scenario 稽核，對擴散機制的每一條規範句在 `memory-events`、`memory-strategy`（各含 main spec + archived delta spec）、`docs/memory-systems/README.md` 五個位置比對是否一致：
   - `memory-events` 的「gains reinforcement」scenario 仍斷言無條件「nonzero, strictly less than」，跟上一輪才收斂到 Requirement prose 的「來源貢獻須為正」條件不一致——scenario 補上同一個條件。
   - `memory-strategy` 的 Requirement 本體（`human-like` SHALL treat anchors...）先前完全沒被三輪改過，仍是無條件宣稱，且與 `memory-events` 已有的三個例外（正貢獻、dismissed 排除、群組上限）不一致。這次不是再抄一份條件過去（那正是前三輪一直重演的複本問題），而是把這條 Requirement 改成明確指向 `memory-events` 當唯一權威來源、自己不重述條件——減少未來還能漂移的複本數量。

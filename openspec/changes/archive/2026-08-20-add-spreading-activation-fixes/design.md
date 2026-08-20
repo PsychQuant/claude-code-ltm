@@ -72,7 +72,7 @@
 ## Implementation Contract
 
 **行為**：
-- `human-like` 策略的排序結果：同框呈現群組內，若組內有任一 anchor 被 `opened`/`cited`/`pinned`，其餘存活、未被 dismissed 的組員的 `netStrength` 會反映一個非零但嚴格小於直接互動貢獻的增量。
+- `human-like` 策略的排序結果：同框呈現群組內的擴散行為**完全依 `openspec/specs/memory-events/spec.md` 的「Only deliberate interactions reinforce」Requirement 為準，本契約不重述任何條件**（2026-08-21 fix-round-4 修正：本行原本寫「若組內有任一 anchor 被 `opened`/`cited`/`pinned`，其餘存活、未被 dismissed 的組員的 `netStrength` 會反映一個非零但嚴格小於直接互動貢獻的增量」——那是無條件宣稱，缺了 `spreadingActivationFactor > 0`、來源權重須為正、群組大小上限、來源事件須帶 presentation 識別碼四個閘門，而它以「實作契約」身分出現、比 spec prose 更接近驗收條件。重述條件正是 #15 反覆漂移的根因，所以改成單向指過去）。
 - `conservative` 與 `archival` 策略的排序結果：與擴散無關，不因同框呈現而改變（`conservative` 相對於本次修復前的行為是**變更**：先前意外吃到的擴散消失）。
 - `ltm query --json` 的每個 hit 物件：`recordEvents=true` 且成功寫入事件時，物件多一個 `"presentation"` 字串欄位（UUID 字面量）；`recordEvents=false` 或事件寫入被跳過時該欄位不存在。
 - `ComparisonReport.report(events:)`：`presentation` 非 nil 但無對應 `PresentationRecord` 的事件不再拋 `ComparisonDataError.unknownPresentationReference`，改為計入合法略過的計數，其餘行為（`generationMismatch`／`anchorNotInPresentation` 仍拋錯）不變。
