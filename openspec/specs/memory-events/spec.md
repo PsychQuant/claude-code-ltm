@@ -26,6 +26,7 @@ An anchor SHALL identify a region of the read-only corpus by the tuple (source f
 - **WHEN** an anchor is dereferenced and the normalized text at the addressed location hashes to a value other than the stored hash
 - **THEN** the dereference returns an orphaned result naming the mismatch, and does not return the text found at that location
 
+---
 ### Requirement: A canonical line is exactly the canonical encoding of its value
 
 Reading a line from the canonical store SHALL decode it, re-encode the decoded value with the same encoder the writer uses, and reject the line unless the result is byte-for-byte identical to the bytes read. Rejection SHALL name the line number so the record can be located and repaired.
@@ -45,6 +46,7 @@ A line consisting of zero bytes SHALL be skipped without being treated as a reco
 - **WHEN** the store is read in salvage mode
 - **THEN** the first line is returned and the second is listed as corrupt
 
+---
 ### Requirement: Identifiers, hashes and spans have type-level shape constraints
 
 Every value that reaches a canonical record SHALL be constrained in its own type, at construction and at decoding: opaque identifiers to a fixed ASCII character set with a length ceiling; note and presentation references to a random-identifier storage type that admits no free text; content hashes to lowercase hexadecimal of fixed length, excluding the digest of the empty string; spans to a non-empty, non-negative, non-inverted pair of integers validated before the range is constructed.
@@ -67,6 +69,7 @@ This layer cannot be the criterion — it sees only what the decoder kept — bu
 - **WHEN** the anchor is dereferenced
 - **THEN** the result is an orphan, not a crash
 
+---
 ### Requirement: The event store refuses to write inside the read-only corpus
 
 Constructing a store SHALL fail when its path resolves inside the read-only corpus, where "inside" is decided by filesystem identity of the containing directories rather than by path spelling, so that an alternate absolute path to the same directory is recognised. Construction SHALL also fail when the containing directory is group- or world-writable without the sticky bit. Appending SHALL create the file owner-readable only, SHALL refuse a target that is not a regular file, and no read or write operation SHALL block indefinitely.
@@ -83,6 +86,7 @@ Constructing a store SHALL fail when its path resolves inside the read-only corp
 - **WHEN** an append is attempted, and separately when a read is attempted
 - **THEN** each fails promptly rather than blocking
 
+---
 ### Requirement: Event records carry pointers and statistics only
 
 An event SHALL consist of an event kind, an anchor, a timestamp, a generation identifier naming the index build that produced the result, a ranking policy identifier naming the strategy in force, and an optional presentation identifier naming the presentation the interaction originated in. A pin event SHALL additionally carry an opaque note reference generated as a random identifier. No event field SHALL contain corpus text, query text, or pin note text. A note reference SHALL NOT be derived from note content by hashing or by any other content-dependent function, and neither SHALL a presentation identifier.
@@ -106,6 +110,7 @@ The presentation identifier SHALL be absent for interactions that did not origin
 - **WHEN** two pin events are recorded for the same anchor with identical note text
 - **THEN** the two events carry different note references
 
+---
 ### Requirement: The event kind set is closed
 
 The event kind SHALL be one of exactly five values: `shown`, `opened`, `cited`, `pinned`, `dismissed`. Recording an event whose kind is outside this set SHALL fail rather than being stored.
@@ -115,6 +120,7 @@ The event kind SHALL be one of exactly five values: `shown`, `opened`, `cited`, 
 - **WHEN** a caller attempts to record an event whose kind is not one of the five defined values
 - **THEN** the append fails and no record is added to the store
 
+---
 ### Requirement: The event store is append-only
 
 The event store SHALL expose append and range-read operations. It SHALL NOT expose an operation that updates or deletes an individual event. An append that cannot be persisted SHALL surface the failure to the caller rather than being dropped.
@@ -129,6 +135,7 @@ The event store SHALL expose append and range-read operations. It SHALL NOT expo
 - **WHEN** five events are appended and then read back over a range covering all of them
 - **THEN** the returned sequence preserves the order in which the events were appended
 
+---
 ### Requirement: Projection derives per-anchor statistics without persisting them
 
 Per-anchor statistics SHALL be computed by a projection function from **three** inputs: the event sequence, an evaluation instant, and a corpus reader. The resulting statistics SHALL NOT be written back into the event store as canonical records. Changing the projection formula SHALL change subsequent results without requiring modification of any stored event.
@@ -151,12 +158,56 @@ The corpus reader is not optional. Orphan filtering happens inside projection, a
 - **WHEN** the event sequence contains events whose anchors dereference as orphaned
 - **THEN** projection completes without error and those anchors contribute nothing to the resulting statistics
 
+---
 ### Requirement: Only deliberate interactions reinforce
 
 Projection SHALL treat `opened`, `cited`, and `pinned` as reinforcing signals and `dismissed` as a suppressing signal. Projection SHALL NOT treat `shown` as a reinforcing signal. The `shown` kind SHALL remain recordable so that comparison can compute per-presentation rates.
+
+This requirement describes an anchor considered in isolation from its presentation group. Spreading activation (see the `human-like` tier's spec in `memory-strategy`) is an explicit, documented exception at the group level, not a violation of this requirement: an anchor's own `shown` events never produce reinforcement, but that anchor SHALL receive nonzero reinforcement derived from a *different* anchor's `opened`/`cited`/`pinned` event when both were shown together in the same presentation group, subject to the two exclusions below. The derived amount SHALL be strictly less than the direct-interaction contribution it is derived from (enforced by `spreadingActivationFactor` being constrained to a non-negative value with no upper bound requirement, but scenarios below assume a factor less than 1, which is the shipped default). An anchor that was itself the subject of a `dismissed` event SHALL NOT receive spreading reinforcement from a co-presented anchor's deliberate event. Spreading SHALL NOT apply within a presentation group whose live member count exceeds an implementation-defined cap; such groups are treated as anomalous rather than a source of unbounded amplification.
 
 #### Scenario: Impressions alone produce no reinforcement
 
 - **GIVEN** an anchor with twenty `shown` events and no other events
 - **WHEN** the sequence is projected
 - **THEN** the anchor's reinforcing statistics are equal to those of an anchor with no events at all
+
+#### Scenario: A co-presented anchor with only `shown` events of its own gains reinforcement from the group
+
+- **GIVEN** two anchors A and B shown together in the same presentation group, where A has an `opened` event and B has only a `shown` event and no other events
+- **WHEN** the sequence is projected
+- **THEN** B's reinforcement is nonzero, and B's reinforcement is strictly less than A's reinforcement
+
+##### Example: spreading factor scales the derived contribution
+
+- **GIVEN** A's `opened` event contributes reinforcement of 1.0 (decay-adjusted) and the configured `spreadingActivationFactor` is 0.3
+- **WHEN** B (co-presented with A, no direct interaction of its own) is projected
+- **THEN** B's reinforcement is 0.3
+
+#### Scenario: A dismissed anchor does not receive spreading reinforcement from a co-presented opened anchor
+
+- **GIVEN** a presentation group of two anchors, where anchor A is deliberately opened and anchor B has a `dismissed` event of its own
+- **WHEN** the sequence is projected
+- **THEN** B's reinforcement remains zero despite being co-presented with A
+
+#### Scenario: An oversized presentation group does not spread
+
+- **GIVEN** a presentation group whose live member count exceeds the implementation-defined cap, where one member has an `opened` event and another member has only a `shown` event
+- **WHEN** the sequence is projected
+- **THEN** the member with only a `shown` event shows zero reinforcement
+
+<!-- @trace
+source: add-spreading-activation-fixes
+updated: 2026-08-20
+code:
+  - Tests/LTMServiceTests/LTMServiceTests.swift
+  - Sources/ltm/Commands.swift
+  - Tests/LTMEvalTests/ComparisonReportTests.swift
+  - Sources/LTMQuery/Strategies/HumanLikeStrategy.swift
+  - Sources/LTMService/LTMService.swift
+  - Sources/LTMQuery/MemoryStrategy.swift
+  - Sources/LTMEval/ComparisonReport.swift
+  - Sources/LTMMemory/Projection.swift
+  - CHANGELOG.md
+  - Tests/LTMMemoryTests/ProjectionTests.swift
+  - Tests/LTMServiceTests/CLICommandTests.swift
+-->

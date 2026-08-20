@@ -8,6 +8,11 @@ import LTMCore
 /// projection 的可調參數。
 ///
 /// 全部是衍生層的東西，改了不影響任何既存事件——這就是把它們留成參數的理由。
+/// 擴散生效的同框呈現群組大小上限。**防禦性上限，非校準值**——見
+/// `project(_:at:resolvedBy:parameters:)` 擴散那一段的用法與理由
+/// （add-spreading-activation-fixes Decision 4）。
+private let maxSpreadingGroupSize = 50
+
 public struct ProjectionParameters: Sendable, Equatable {
     /// 冪次衰減指數。`weight * (1 + ageDays)^(-exponent)`。
     public let decayExponent: Double
@@ -195,8 +200,18 @@ public func project(
     // 收到的擴散不會再被當成新的擴散來源。
     for entry in deliberateContributions {
         guard let members = presentationGroups[entry.group] else { continue }
+        // 群組大小超過防禦性上限時整體跳過擴散——不是無界放大，是視為異常
+        // （add-spreading-activation-fixes Decision 4）。**防禦性上限，非校準值**：
+        // 50 是本次自選的估計，未經本語料驗證，理由與 `spreadingActivationFactor`
+        // 的既有誠實記錄慣例相同。
+        guard members.count <= maxSpreadingGroupSize else { continue }
         for other in members where other != entry.anchor {
             guard isLive(other) else { continue }
+            // 已被使用者明確 dismissed 的 anchor 不再接受擴散：那是一個明確的負面
+            // 訊號，不該被同框的正面訊號部分抵銷（add-spreading-activation-fixes
+            // Decision 4）。用 `suppression` 非零判斷「有自己的 dismissed 事件」——
+            // 與擴散寫入 `reinforcement` 是分開的累加器，不會互相污染判斷。
+            guard (suppression[other] ?? 0) == 0 else { continue }
             reinforcement[other, default: 0] += parameters.spreadingActivationFactor * entry.contribution
         }
     }

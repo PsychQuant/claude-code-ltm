@@ -425,7 +425,16 @@ public struct LTMService {
         }
         let events = try eventStore.events(from: .distantPast, to: now)
         let reader = try PreloadedCorpusReader.load(anchors: events.map(\.anchor), from: database)
-        return project(events, at: now, resolvedBy: reader)
+        // 擴散只授權給宣告 `appliesSpreadingActivation` 的策略（目前只有
+        // human-like）。不套用的策略拿 `spreadingActivationFactor: 0`——沿用
+        // `Projection.swift` 既有文件語意「0 等於關閉擴散」，不是另開一條路徑。
+        // 先前這裡永遠用 `.default`（非零係數），`conservative` 因此意外吃到
+        // 擴散（#15 verify HIGH finding；add-spreading-activation-fixes Decision 2）。
+        let parameters =
+            strategy.appliesSpreadingActivation
+            ? ProjectionParameters.default
+            : ProjectionParameters(spreadingActivationFactor: 0)
+        return project(events, at: now, resolvedBy: reader, parameters: parameters)
     }
 
     /// 寫入一批事件。

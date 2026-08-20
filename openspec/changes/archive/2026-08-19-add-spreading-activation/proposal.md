@@ -34,3 +34,7 @@ Closing this gap also requires fixing an upstream gap discovered during design: 
 - Affected code:
   - Modified: `Sources/LTMService/LTMService.swift` (presentation identifier generation + `QueryHit` field), `Sources/LTMMemory/Projection.swift` (`ProjectionParameters` + `project(...)`)
   - Tests: `Tests/LTMServiceTests/LTMServiceTests.swift`, `Tests/LTMMemoryTests/ProjectionTests.swift`
+
+## Errata (added by add-spreading-activation-fixes, 2026-08-19)
+
+The Non-Goals line above ("The default value is carried over from `PsychQuant/ai4o`") is false. No spreading-activation-specific configuration was found in that repo when actually checked during implementation; the shipped default (`spreadingActivationFactor: 0.3`) is a self-chosen, unvalidated estimate — see `Sources/LTMMemory/Projection.swift`'s code comment and `design.md`'s matching errata entry for the full record. This note is appended, not a rewrite — the content above is left as originally written.

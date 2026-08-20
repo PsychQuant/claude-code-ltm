@@ -113,10 +113,22 @@ public struct ComparisonReport: Sendable, Equatable {
         public let notFromAPresentation: Int
         /// 事件所屬的呈現是 null comparison，依 spec 整批不計分。
         public let fromNullComparison: Int
+        /// 事件的 presentation 非 nil，但其 ID 不在本次供給的 `records` 裡。
+        ///
+        /// add-spreading-activation-fixes Decision 3：擴散機制（#15）讓每次記錄
+        /// 查詢都配發 `PresentationID`，不限於正式比較實驗；`PresentationID`
+        /// 是隨機 UUID，與比較實驗撞號機率趨近於零，所以這個情況在實務上幾乎
+        /// 必然是「這筆本來就不屬於本次比較」，不是資料損壞。**接受的取捨**：
+        /// 這個判斷不再能區分「不屬於本次比較」與「harness 內部寫壞、record
+        /// 遺失」——兩者現在都落在這個計數裡。
+        public let presentationNotTracked: Int
 
-        public init(notFromAPresentation: Int, fromNullComparison: Int) {
+        public init(
+            notFromAPresentation: Int, fromNullComparison: Int, presentationNotTracked: Int
+        ) {
             self.notFromAPresentation = notFromAPresentation
             self.fromNullComparison = fromNullComparison
+            self.presentationNotTracked = presentationNotTracked
         }
     }
 
@@ -137,13 +149,6 @@ public enum ComparisonDataError: Error, Sendable, Equatable {
     case attributionNamesAThirdStrategy(presentation: PresentationID, policy: RankingPolicyID)
     /// 同一個 anchor 在一次呈現裡出現多次。
     case duplicateAnchorInPresentation(presentation: PresentationID, anchor: Anchor)
-    /// 事件指向一個不在 `records` 裡的呈現。
-    ///
-    /// #1 verify R4：先前這種事件與「本來就不屬於任何呈現的事件」共用同一個
-    /// `continue`，於是缺一筆紀錄的後果是**分母悄悄變小**、報告照常產出。
-    /// 要對某個子集計分是合理需求，但那要由呼叫端先篩事件，不能讓 scorer
-    /// 用「找不到就跳過」去猜。
-    case unknownPresentationReference(PresentationID)
     /// 同一份報告裡的紀錄比較了不同的策略對。
     ///
     /// 併成一張表會讓從未互相比較過的兩個策略並列，而讀者無從得知。與
@@ -220,6 +225,7 @@ public enum ComparisonScorer {
 
         var skippedNotFromAPresentation = 0
         var skippedNullComparison = 0
+        var skippedPresentationNotTracked = 0
 
         for event in events {
             // **每個事件的處置只有三種：計分、合法略過、拒絕。**
@@ -230,17 +236,26 @@ public enum ComparisonScorer {
             // devils-advocate 各自指出）。這次的寫法把「拒絕」當成**一種**處置、
             // 底下列它的原因，於是新增一個拒絕原因不會讓封閉性宣告變成謊話。
             //
-            // 合法略過恰有兩種：不屬於任何呈現、屬於 null comparison。
-            // 拒絕目前有三個原因：呈現紀錄不存在、anchor 不在該次呈現、
-            // 事件自報的 generation 與紀錄不符。另有三個**紀錄層**的拒絕原因
-            // 在迴圈之前（重複 PresentationID、歸屬指向第三方策略、同一次呈現
-            // 內 anchor 重複）。
+            // 合法略過現在恰有**三種**：不屬於任何呈現、屬於 null comparison、
+            // presentation 非 nil 但不在本次供給的 records 裡。拒絕目前有兩個
+            // 原因：anchor 不在該次呈現、事件自報的 generation 與紀錄不符。
+            // 另有三個**紀錄層**的拒絕原因在迴圈之前（重複 PresentationID、
+            // 歸屬指向第三方策略、同一次呈現內 anchor 重複）。
             guard let presentationID = event.presentation else {
                 skippedNotFromAPresentation += 1  // 合法：不屬於任何呈現
                 continue
             }
             guard let record = byID[presentationID] else {
-                throw ComparisonDataError.unknownPresentationReference(presentationID)
+                // **這裡曾經是拒絕**（#1 verify R4：先前與「不屬於任何呈現」共用
+                // 同一個 `continue`，缺一筆紀錄的後果是分母悄悄變小、報告照常
+                // 產出，R4 因此把它拆成獨立的拒絕原因）。add-spreading-activation
+                // （#15）之後這個判斷不再可靠：擴散機制讓每次記錄查詢都配發
+                // `PresentationID`，不限於正式比較實驗，於是「presentation 非
+                // nil 但查無 record」的絕大多數案例變成「這筆本來就不屬於任何
+                // 比較」的一般生產查詢，不是資料損壞。改回合法略過（Decision 3），
+                // 接受的取捨見 `SkippedEvents.presentationNotTracked` 的說明。
+                skippedPresentationNotTracked += 1
+                continue
             }
             // **generation 一致性在 null-comparison 之前驗。** 先前 null 的分支
             // 先 `continue`，於是一筆 generation 對不上的事件只要指向 null 紀錄
@@ -340,7 +355,8 @@ public enum ComparisonScorer {
             generationRows: generationRows,
             skipped: ComparisonReport.SkippedEvents(
                 notFromAPresentation: skippedNotFromAPresentation,
-                fromNullComparison: skippedNullComparison),
+                fromNullComparison: skippedNullComparison,
+                presentationNotTracked: skippedPresentationNotTracked),
             startingSides: ComparisonReport.StartingSideCounts(
                 a: records.count { $0.startingSide == .a },
                 b: records.count { $0.startingSide == .b }))

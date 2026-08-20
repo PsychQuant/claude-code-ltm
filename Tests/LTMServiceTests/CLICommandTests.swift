@@ -181,6 +181,37 @@ func jsonOutputIsMachineComplete() throws {
     }
 }
 
+@Test("--json --record 時輸出每筆帶 presentation 欄位；不 --record 時不帶")
+func jsonOutputExposesPresentationOnlyWhenRecording() throws {
+    let workspace = try CLIWorkspace.make(
+        texts: ["記憶策略可插拔", "檢索基線量測", "第三段內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let recorded = try runCLI(
+        ["query", "記憶策略", "--all-projects", "--json", "--record"],
+        environment: workspace.environment)
+    #expect(recorded.code == 0)
+    if recorded.code != 0 { Issue.record("stderr: \(recorded.err)") }
+    let recordedObjects =
+        try JSONSerialization.jsonObject(with: Data(recorded.out.utf8)) as? [[String: Any]]
+    #expect(!(recordedObjects ?? []).isEmpty)
+    for object in recordedObjects ?? [] {
+        let value = object["presentation"] as? String
+        #expect(value?.isEmpty == false, "--record 時每筆物件都應帶非空 presentation 欄位")
+    }
+
+    let notRecorded = try runCLI(
+        ["query", "記憶策略", "--all-projects", "--json"], environment: workspace.environment)
+    #expect(notRecorded.code == 0)
+    let notRecordedObjects =
+        try JSONSerialization.jsonObject(with: Data(notRecorded.out.utf8)) as? [[String: Any]]
+    #expect(!(notRecordedObjects ?? []).isEmpty)
+    for object in notRecordedObjects ?? [] {
+        #expect(object["presentation"] == nil, "不 --record 時輸出物件不該帶 presentation 欄位")
+    }
+}
+
 @Test("預設不寫事件；--record 才寫，且每筆命中一則 shown")
 func eventRecordingIsOptIn() throws {
     let workspace = try CLIWorkspace.make(

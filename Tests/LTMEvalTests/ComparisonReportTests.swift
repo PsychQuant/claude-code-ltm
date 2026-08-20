@@ -356,18 +356,23 @@ private func event(
 
 // MARK: - 略過的四種情形是封閉列舉（#1 verify R4）
 
-@Test func anEventPointingAtAnUnknownPresentationIsRejected() throws {
-    // 先前這與「事件本來就不屬於任何呈現」共用同一個 `continue`：缺一筆紀錄
-    // 的後果是分母悄悄變小，而報告照常產出、看不出少算了什麼。
+@Test func anEventPointingAtAPresentationAbsentFromTheSuppliedRecordsIsLegitimatelySkipped() throws {
+    // 先前（#1 verify R4 修法）這與「事件本來就不屬於任何呈現」共用同一個
+    // `continue`，被拆開成獨立的拒絕原因：缺一筆紀錄的後果是分母悄悄變小，
+    // 而報告照常產出、看不出少算了什麼。
+    //
+    // 這條測試的斷言方向在 add-spreading-activation-fixes 反過來了：擴散機制
+    // （#15）讓每次記錄查詢都配發 `PresentationID`，不限於正式比較實驗，所以
+    // 「presentation 非 nil 但查無對應 record」現在幾乎必然是「這筆本來就不
+    // 屬於任何比較」，而不是資料損壞。改成合法略過，不再拋錯（Decision 3）。
     let r = try presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"))
-    let orphanID = PresentationID.random()
+    let strayID = PresentationID.random()
     let stray = Event.interaction(
         .opened, anchor: evalAnchor("a"), at: evalInstant,
-        generation: evalGeneration, policy: archival, presentation: orphanID)
+        generation: evalGeneration, policy: archival, presentation: strayID)
 
-    #expect(throws: ComparisonDataError.unknownPresentationReference(orphanID)) {
-        _ = try ComparisonScorer.report(records: [r], events: [stray])
-    }
+    let report = try ComparisonScorer.report(records: [r], events: [stray])
+    #expect(report.skipped.presentationNotTracked == 1)
 }
 
 @Test func anEventWhoseAnchorWasNeverPresentedIsRejected() throws {
@@ -387,8 +392,9 @@ private func event(
 }
 
 @Test func legitimateSkipsAreCountedInTheReport() throws {
-    // 合法略過只有兩種。數出來，是為了讓「這份報告用掉了多少事件」在報告
-    // 本身讀得到，而不是只存在於讀 code 的人腦中。
+    // 合法略過現在有三種（add-spreading-activation-fixes Decision 3 新增第三種）。
+    // 數出來，是為了讓「這份報告用掉了多少事件」在報告本身讀得到，而不是只
+    // 存在於讀 code 的人腦中。
     let a = evalAnchor("a")
     let real = try presentation(.cjk2char, a: a, b: evalAnchor("b"))
     let null = try PresentationRecord(
@@ -396,6 +402,7 @@ private func event(
         strategyA: archival, strategyB: humanLike, generation: evalGeneration,
         attribution: [AnchorAttribution(anchor: a, creditedTo: nil)],
         startingSide: .b, isNullComparison: true)
+    let untrackedID = PresentationID.random()
 
     let events: [Event] = [
         event(.opened, a, real),
@@ -405,11 +412,15 @@ private func event(
         // 屬於 null comparison。
         .interaction(.opened, anchor: a, at: evalInstant, generation: evalGeneration,
                      policy: archival, presentation: null.id),
+        // presentation 非 nil，但不在本次供給的 records 裡。
+        .interaction(.opened, anchor: a, at: evalInstant, generation: evalGeneration,
+                     policy: archival, presentation: untrackedID),
     ]
 
     let report = try ComparisonScorer.report(records: [real, null], events: events)
     #expect(report.skipped.notFromAPresentation == 1)
     #expect(report.skipped.fromNullComparison == 1)
+    #expect(report.skipped.presentationNotTracked == 1)
 }
 
 

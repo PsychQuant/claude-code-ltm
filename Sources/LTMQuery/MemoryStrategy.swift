@@ -335,6 +335,24 @@ public protocol MemoryStrategy: Sendable {
     /// 註冊表），而不是讓策略自報。那是尚未做出的設計決定，記在 #16。
     var displacementBound: Int { get }
 
+    /// 這個策略要不要套用擴散激發（同框呈現群組間的間接 reinforcement）。
+    ///
+    /// 預設 `false`（透過下面的 extension）。擴散的 spec 授權只給
+    /// `human-like`（見 `memory-strategy` spec「The human-like tier spreads
+    /// reinforcement to co-presented anchors, one hop only」），但擴散的
+    /// **機制**住在共用的 `project()`（`LTMMemory/Projection.swift`）——那個
+    /// 函式一次摺完所有策略都要讀的統計，不為每個策略分別摺（同一件事兩個
+    /// 寫者的教訓見 CLAUDE.md）。這個宣告是服務層知道「該不該把非零的
+    /// `spreadingActivationFactor` 傳進 `ProjectionParameters`」的唯一依據——
+    /// `LTMService.makeProjection` 讀它決定傳 0 還是預設值，`0` 沿用
+    /// `Projection.swift` 既有文件語意「0 等於關閉擴散」。
+    ///
+    /// 先前沒有這個宣告：`makeProjection` 對任何 `consumedSignals` 非空的策略
+    /// 一律用 `.default`（含非零 `spreadingActivationFactor`）建 projection，
+    /// `conservative` 因為與 `human-like` 共用訊號集合而意外吃到擴散——
+    /// spec 從未授權這件事（#15 verify HIGH finding）。
+    var appliesSpreadingActivation: Bool { get }
+
     /// **實作點，不是呼叫點。** 呼叫端一律用 `rerank`。
     ///
     /// 參數型別是 `ValidatedCandidates` 而不是 `[Candidate]`，因為那個型別的
@@ -343,6 +361,12 @@ public protocol MemoryStrategy: Sendable {
     /// seam」被一行正常 API 呼叫繞過。
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
         -> [RankedResult]
+}
+
+extension MemoryStrategy {
+    /// 預設不套用擴散——新增這個 requirement 不需要既有 conformer 逐一表態。
+    /// 只有 `HumanLikeStrategy` 覆寫為 `true`。
+    public var appliesSpreadingActivation: Bool { false }
 }
 
 extension MemoryStrategy {

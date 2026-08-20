@@ -12,6 +12,10 @@ public struct HumanLikeStrategy: MemoryStrategy {
     public let id = RankingPolicyID("human-like")
     public let consumedSignals: Set<EventKind> = [.opened, .cited, .pinned, .dismissed]
 
+    /// 擴散激發（同框呈現群組間的間接 reinforcement）只授權給這一檔。
+    /// 見 `MemoryStrategy.appliesSpreadingActivation` 的說明。
+    public let appliesSpreadingActivation = true
+
     /// 一筆結果最多能移動幾個名次。
     ///
     /// **預設 1 是 provisional 的，而且方向未知。**

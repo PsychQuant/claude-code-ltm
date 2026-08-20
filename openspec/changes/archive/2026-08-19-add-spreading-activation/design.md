@@ -83,3 +83,12 @@ Default value carried over from `PsychQuant/ai4o`'s spreading-activation configu
 ## Open Questions
 
 - Exact default value for `spreadingActivationFactor` — decided during implementation by reading `PsychQuant/ai4o`'s spreading-activation configuration (the design defers to whatever that source's convention is, consistent with how the four existing `ProjectionParameters` defaults were sourced).
+
+## Errata (added by add-spreading-activation-fixes, 2026-08-19)
+
+Two claims above did not hold once implemented, surfaced by `/idd-verify #15`:
+
+- **The Open Questions entry's provenance claim is false.** No spreading-activation-specific configuration was found in `PsychQuant/ai4o`'s `docs/memory/implementation/` (that repo's recall-boost mechanism is not the same thing as the co-presentation spreading built here). The shipped default (`spreadingActivationFactor: 0.3`) is a self-chosen estimate, unvalidated on this corpus, not sourced from AI4o like the other four `ProjectionParameters` defaults. See the code comment on `ProjectionParameters.spreadingActivationFactor` in `Sources/LTMMemory/Projection.swift` for the honest record.
+- **The Risks section's "grep-confirmed" mitigation for line 79 is false.** `Sources/LTMEval/ComparisonReport.swift`'s `ComparisonScorer` does branch on `presentation == nil` as a load-bearing check — it is exactly the consumer this mitigation claimed did not exist. Every recording query now carries a non-nil `presentation` (this design's own change), and `ComparisonScorer` originally treated any non-nil `presentation` it could not resolve to a `PresentationRecord` as a data-inconsistency error, which production queries triggered systematically.
+
+Both defects, and three others found by the same verify pass (spreading leaking into `conservative` via the shared `project()`; the existing `memory-events` "Only deliberate interactions reinforce" Requirement needing an explicit spreading exception; a pre-existing regression test unable to exercise the new code path), are fixed in `add-spreading-activation-fixes`. This note is appended, not a rewrite — the content above is left as originally written.

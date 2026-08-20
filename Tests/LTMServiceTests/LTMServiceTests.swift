@@ -778,3 +778,38 @@ func noPresentationIdentifierWhenNotRecording() throws {
     #expect(!outcome.hits.isEmpty)
     #expect(outcome.hits.allSatisfy { $0.presentation == nil })
 }
+
+// MARK: - 擴散收斂為 human-like 專屬（Task 1.1，add-spreading-activation-fixes）
+
+@Test("conservative 策略不吃到擴散：同框呈現群組裡只有 shown 事件的 anchor，即使組內另一 anchor 被 opened，仍然沒有 reinforcement")
+func conservativeStrategyDoesNotReceiveSpreadingActivation() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: [
+        "第一段關於記憶策略的內容", "第二段關於記憶策略的內容", "第三段關於記憶策略的內容",
+    ])
+    let service = try workspace.service(withEvents: true)
+    try service.build()
+
+    let outcome = try service.query(
+        text: "記憶策略", limit: 10, scope: .allProjects, recordEvents: true)
+    #expect(outcome.hits.count >= 2, "需要至少兩筆同框 hit 才能構造擴散情境")
+    let presentation = try #require(outcome.hits.first?.presentation)
+    let openedAnchor = outcome.hits[0].anchor
+    let untouchedAnchor = outcome.hits[1].anchor
+
+    let store = try FileEventStore(url: workspace.eventsURL)
+    try store.append(
+        .interaction(
+            .opened, anchor: openedAnchor, at: Date(), generation: GenerationID("g-test"),
+            policy: RankingPolicyID("conservative"), presentation: presentation))
+
+    let reranked = try service.query(
+        text: "記憶策略", limit: 10, scope: .allProjects,
+        strategy: ConservativeStrategy())
+    let untouchedHit = try #require(reranked.hits.first { $0.anchor == untouchedAnchor })
+    #expect(
+        untouchedHit.historyDescription == "none",
+        "conservative 不該吃到擴散：untouched anchor 只有同框 shown，reason.history 應為 .none，實得 \(untouchedHit.historyDescription)"
+    )
+}

@@ -375,3 +375,87 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
 
     #expect((result[b]?.suppression ?? 0) == 0, "dismissed 不得把抑制擴散給同框但未互動的 anchor")
 }
+
+// MARK: - 擴散的邊界收斂（add-spreading-activation-fixes，#15 verify 後續）
+
+@Test func dismissedAnchorDoesNotReceiveSpreadingReinforcementFromCoPresentedOpenedAnchor() {
+    // 與 dismissalDoesNotSpreadSuppression 方向相反：那條測的是「dismissed 自己
+    // 不把抑制擴散給別人」，這條測的是「dismissed 自己也不該從別人的擴散裡拿到
+    // 正向增強」——使用者的明確負面訊號不該被同框的正面訊號部分抵銷。
+    let group = PresentationID.random()
+    let a = anchor("a", "被明確開啟的那一則內容")
+    let b = anchor("b", "同框但被使用者明確不採用的那一則")
+    let corpusReader = corpus([turn("a", "被明確開啟的那一則內容"), turn("b", "同框但被使用者明確不採用的那一則")])
+
+    let events: [Event] = [
+        .interaction(.shown, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.shown, anchor: b, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.opened, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.dismissed, anchor: b, at: instant, generation: gen, policy: policy, presentation: group),
+    ]
+    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
+    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+
+    #expect(result.reinforcement(for: a) > 0, "前提：A 自己被開，應該有直接增強")
+    #expect(
+        result.reinforcement(for: b) == 0,
+        "B 有自己的 dismissed 事件，不該從同框的 A 收到擴散增強")
+}
+
+@Test func oversizedPresentationGroupDoesNotSpread() {
+    // 群組大小超過防禦性上限時，整個群組跳過擴散——不是無界放大，是視為異常。
+    // 用 60 個成員（超過設計預設建議的 50）建構，其中一個被開啟，其餘只有 shown。
+    let group = PresentationID.random()
+    let openedID = "opened-anchor"
+    let openedText = "在超大群組裡被開啟的那一則"
+    var turns = [turn(openedID, openedText)]
+    var events: [Event] = [
+        .interaction(
+            .shown, anchor: anchor(openedID, openedText), at: instant, generation: gen,
+            policy: policy, presentation: group),
+        .interaction(
+            .opened, anchor: anchor(openedID, openedText), at: instant, generation: gen,
+            policy: policy, presentation: group),
+    ]
+    var shownOnlyAnchors: [Anchor] = []
+    for i in 0..<60 {
+        let id = "member-\(i)"
+        let text = "超大群組裡的第 \(i) 個純曝光成員"
+        turns.append(turn(id, text))
+        let a = anchor(id, text)
+        shownOnlyAnchors.append(a)
+        events.append(
+            .interaction(
+                .shown, anchor: a, at: instant, generation: gen, policy: policy,
+                presentation: group))
+    }
+    let corpusReader = corpus(turns)
+    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
+    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+
+    for a in shownOnlyAnchors {
+        #expect(
+            result.reinforcement(for: a) == 0,
+            "群組大小超過上限時應整體跳過擴散，純曝光成員 reinforcement 應為 0")
+    }
+}
+
+@Test func coPresentedShownOnlyAnchorsProduceNoReinforcementWithoutADeliberateEventInTheGroup() {
+    // 「Only deliberate interactions reinforce」的新 scenario：同框群組內若沒有
+    // 任何一個成員被 opened/cited/pinned，即使有 presentation 分組，全部成員的
+    // reinforcement 仍應為 0——擴散只轉移既有的直接互動貢獻，不會憑空生出貢獻。
+    let group = PresentationID.random()
+    let a = anchor("a", "同框但誰都沒被開啟的第一則")
+    let b = anchor("b", "同框但誰都沒被開啟的第二則")
+    let corpusReader = corpus([turn("a", "同框但誰都沒被開啟的第一則"), turn("b", "同框但誰都沒被開啟的第二則")])
+
+    let events: [Event] = [
+        .interaction(.shown, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.shown, anchor: b, at: instant, generation: gen, policy: policy, presentation: group),
+    ]
+    let params = ProjectionParameters(spreadingActivationFactor: 0.3)
+    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+
+    #expect(result.reinforcement(for: a) == 0)
+    #expect(result.reinforcement(for: b) == 0)
+}

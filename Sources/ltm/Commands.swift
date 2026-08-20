@@ -477,6 +477,12 @@ enum QueryCommand {
                 object["history"] = hit.historyDescription
                 object["movement"] = hit.movementDescription
             }
+            // 只在有記錄事件時才附加——沒有事件檔可寫就沒有指標可以指，見
+            // `QueryHit.presentation` 的說明（add-spreading-activation-fixes
+            // Decision 6，ltm-cli spec 的對應 delta）。
+            if let presentation = hit.presentation {
+                object["presentation"] = presentation.description
+            }
             return object
         }
         let data = try JSONSerialization.data(

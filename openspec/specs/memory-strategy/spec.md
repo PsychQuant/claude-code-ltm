@@ -19,6 +19,7 @@ This is a real limitation of the interface shape, not merely of the implementati
 - **WHEN** the interleaving harness compares two strategies
 - **THEN** both receive the same projection value, computed once by the shared projection function
 
+---
 ### Requirement: MemoryStrategy is the sole seam between retrieval and memory
 
 The system SHALL expose exactly one abstraction through which usage history influences result ordering. That abstraction SHALL take an ordered candidate list carrying base scores and relevance bands, together with a projection of per-anchor statistics, and SHALL return a reordered result list. Retrieval SHALL NOT read the event store directly, and no strategy SHALL read the corpus directly.
@@ -33,6 +34,7 @@ The system SHALL expose exactly one abstraction through which usage history infl
 - **WHEN** a strategy returns its result list
 - **THEN** the returned list is a permutation of the input candidates, with no candidate added and none removed
 
+---
 ### Requirement: Every result carries displacement and a reason with two independent axes
 
 Each returned result SHALL carry its position displacement relative to the input candidate order, and a reason composed of **two independent fields**:
@@ -64,6 +66,7 @@ The `archival` strategy is the exception to consulting history at all: its reaso
 - **WHEN** `human-like` reorders the band
 - **THEN** the first candidate's history reports orphaned and its movement reports a recession
 
+---
 ### Requirement: The archival strategy performs no reordering
 
 The `archival` strategy SHALL return the candidate list in its input order. Every result it returns SHALL carry a displacement of zero. It SHALL produce identical output regardless of the projection it is given.
@@ -74,6 +77,7 @@ The `archival` strategy SHALL return the candidate list in its input order. Ever
 - **WHEN** the `archival` strategy is invoked with each projection in turn
 - **THEN** both invocations return the same order, and every displacement is zero
 
+---
 ### Requirement: Reordering is confined to a relevance band
 
 A strategy that reorders SHALL move a candidate only among candidates sharing its relevance band. Attempting to move a candidate across a band boundary SHALL fail loudly rather than being silently clamped or ignored.
@@ -89,6 +93,7 @@ A strategy that reorders SHALL move a candidate only among candidates sharing it
 - **WHEN** the `human-like` strategy is invoked
 - **THEN** the candidate with citations is ordered above the other and its reason names the citation signal
 
+---
 ### Requirement: Displacement is bounded in both directions
 
 A strategy that reorders SHALL move a candidate by at most a configured number of positions, **in either direction**. The bound SHALL be supplied as configuration rather than compiled in. The default SHALL be one position, and SHALL be documented as provisional: its correct value is not derivable before an evaluation set exists. Attempting to move a candidate beyond the bound SHALL fail loudly rather than being clamped.
@@ -137,6 +142,7 @@ A candidate is promoted past peers whose strength is strictly lower, up to the b
 
 The last column is exact only for the single-promoter case shown. With several reinforced candidates competing for the same positions, each still moves at most `bound`, but which of them advances depends on their relative strengths — a symmetric bound cannot let two candidates both pass the same peer when that peer may sink only one place. That is a property of the bound, not a defect: it is the sense in which the bound limits how far memory may override retrieval order.
 
+---
 ### Requirement: The human-like tier's reinforcement decays with age
 
 `human-like` SHALL weight each deliberate event by a factor that is non-increasing in the event's age at the evaluation instant, so that the same event contributes strictly less at a later evaluation instant than at an earlier one, all else equal. The decay's form is power-law and its exponent SHALL be configuration, not a compiled-in constant.
@@ -155,6 +161,7 @@ Without this requirement an implementation that counts deliberate events linearl
 - **WHEN** `human-like` reorders the band
 - **THEN** the recently cited candidate is ordered above the other
 
+---
 ### Requirement: Orphaned anchors do not influence ranking
 
 A strategy SHALL ignore projection entries whose anchors dereference as orphaned. Such entries SHALL NOT contribute reinforcement or suppression, and SHALL NOT cause the invocation to fail.
@@ -165,6 +172,7 @@ A strategy SHALL ignore projection entries whose anchors dereference as orphaned
 - **WHEN** the `human-like` strategy is invoked
 - **THEN** that anchor receives no promotion and the invocation completes normally
 
+---
 ### Requirement: Strategies are distinguished by mechanism, never by magnitude
 
 A strategy SHALL be defined by which event kinds it consumes **and under what condition it acts**, never by the magnitude of the adjustment it applies. Supplying a different displacement bound to an existing strategy SHALL NOT constitute a new strategy.
@@ -198,6 +206,7 @@ Both strategies are subject to the displacement bound. `conservative` is not exe
 - **WHEN** `conservative` is used
 - **THEN** the returned order equals the input order and every displacement is zero
 
+---
 ### Requirement: Every recorded presentation identifies the result list it originated from
 
 When `LTMService` records events for a query's results, it SHALL generate one presentation identifier per query call and attach it to every recorded event from that call's result list. A query result exposed to a caller SHALL carry that same identifier so a later interaction with one of its results can be recorded under the same group.
@@ -214,9 +223,12 @@ When `LTMService` records events for a query's results, it SHALL generate one pr
 - **WHEN** the returned results are inspected
 - **THEN** each result's exposed presentation identifier matches the identifier attached to that result's recorded event
 
+---
 ### Requirement: The human-like tier spreads reinforcement to co-presented anchors, one hop only
 
 `human-like` SHALL treat anchors that were presented together in the same presentation group as connected: when a deliberate reinforcing event (`opened`, `cited`, or `pinned`) occurs on an anchor, every other live anchor presented in the same group SHALL receive a fraction of that event's decayed reinforcement, in addition to any reinforcement that anchor accrues from its own event history. This spreading SHALL NOT apply to `dismissed` events, and a spread contribution received by an anchor SHALL NOT itself be further spread to other anchors.
+
+Spreading is a property of the `human-like` tier only. No other shipped strategy SHALL receive spreading-derived reinforcement, regardless of which event kinds it otherwise consumes. In particular, `conservative` consumes the same four event kinds as `human-like` (see "Strategies are distinguished by mechanism, never by magnitude") but SHALL NOT receive spreading contributions — sharing a signal set does not imply sharing every mechanism gated on that signal set.
 
 #### Scenario: A co-presented anchor with no direct interaction of its own gains reinforcement
 
@@ -235,3 +247,26 @@ When `LTMService` records events for a query's results, it SHALL generate one pr
 - **GIVEN** a presentation group where one anchor is deliberately dismissed and another anchor in the same group has no direct interaction
 - **WHEN** the event sequence is projected
 - **THEN** the anchor with no direct interaction shows no suppression contributed by the dismissed anchor's event
+
+#### Scenario: Conservative does not receive spreading reinforcement despite sharing human-like's signal set
+
+- **GIVEN** a presentation group of two anchors projected under `conservative`, where one anchor is deliberately opened and the other has only a `shown` event and no other events
+- **WHEN** `conservative`'s projection is used to rank the group
+- **THEN** the anchor with only a `shown` event shows zero reinforcement, unlike the same scenario projected for `human-like`
+
+<!-- @trace
+source: add-spreading-activation-fixes
+updated: 2026-08-20
+code:
+  - Tests/LTMServiceTests/LTMServiceTests.swift
+  - Sources/ltm/Commands.swift
+  - Tests/LTMEvalTests/ComparisonReportTests.swift
+  - Sources/LTMQuery/Strategies/HumanLikeStrategy.swift
+  - Sources/LTMService/LTMService.swift
+  - Sources/LTMQuery/MemoryStrategy.swift
+  - Sources/LTMEval/ComparisonReport.swift
+  - Sources/LTMMemory/Projection.swift
+  - CHANGELOG.md
+  - Tests/LTMMemoryTests/ProjectionTests.swift
+  - Tests/LTMServiceTests/CLICommandTests.swift
+-->
