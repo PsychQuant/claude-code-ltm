@@ -67,7 +67,7 @@ archive 會讓正回饋**把記憶永久埋掉**。因此 `human-like` 的低 st
 >
 > **修正（2026-08-20，`add-spreading-activation-fixes`）**：上面這段第一版
 > 實作被 `/idd-verify #15` 抓到與既有 spec 保證衝突、滲透到不該套用的策略、
-> 污染了 `strategy-comparison` 的驗證器，兩輪修復後現況是：（1）擴散**只**
+> 污染了 `strategy-comparison` 的驗證器，多輪修復後現況是：（1）擴散**只**
 > 授權給 `human-like`——`conservative`／`archival` 走的單策略查詢路徑不會
 > 吃到（A/B 比較 harness 目前有一個已知、潛伏但尚未修的缺口，見
 > `openspec/specs/memory-strategy/spec.md` 對應 Requirement 的說明）；
@@ -77,7 +77,10 @@ archive 會讓正回饋**把記憶永久埋掉**。因此 `human-like` 的低 st
 > （4）`spreadingActivationFactor` 現在強制 `< 1`，但這只保證「每一筆擴散
 > 貢獻嚴格小於它衍生自的那筆直接互動貢獻」，**不保證一個 anchor 的總擴散量
 > 有上限**——同框於多個群組的 anchor 累加起來的擴散仍可能超過任一筆直接
-> 互動。細節見 `openspec/specs/memory-events/spec.md` 的對應 Requirement。
+> 互動；**這個保證本身也只在來源事件的權重為正（`openedWeight`／
+> `citedWeight`／`pinnedWeight` > 0）時才有意義**——合法的 0 權重讓來源
+> 貢獻本身變成 0，「非零」「嚴格小於」這兩句話在那種設定下不適用，不是被
+> 違反。細節見 `openspec/specs/memory-events/spec.md` 的對應 Requirement。
 
 ### `conservative` 一度被移除，又被改回來——這段值得記
 

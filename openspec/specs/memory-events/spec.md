@@ -173,7 +173,7 @@ This requirement describes an anchor considered in isolation from its presentati
 
 #### Scenario: A co-presented anchor with only `shown` events of its own gains reinforcement from the group
 
-- **GIVEN** two anchors A and B shown together in the same presentation group, where A has an `opened` event and B has only a `shown` event and no other events
+- **GIVEN** two anchors A and B shown together in the same presentation group, where A has an `opened` event whose (decay-adjusted) contribution is positive (i.e. `openedWeight > 0`), and B has only a `shown` event and no other events
 - **WHEN** the sequence is projected
 - **THEN** B's reinforcement is nonzero, and B's reinforcement is strictly less than A's reinforcement
 

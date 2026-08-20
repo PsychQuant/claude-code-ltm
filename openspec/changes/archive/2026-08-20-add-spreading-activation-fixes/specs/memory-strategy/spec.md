@@ -2,7 +2,7 @@
 
 ### Requirement: The human-like tier spreads reinforcement to co-presented anchors, one hop only
 
-`human-like` SHALL treat anchors that were presented together in the same presentation group as connected: when a deliberate reinforcing event (`opened`, `cited`, or `pinned`) occurs on an anchor, every other live anchor presented in the same group SHALL receive a fraction of that event's decayed reinforcement, in addition to any reinforcement that anchor accrues from its own event history. This spreading SHALL NOT apply to `dismissed` events, and a spread contribution received by an anchor SHALL NOT itself be further spread to other anchors.
+`human-like` SHALL treat anchors that were presented together in the same presentation group as connected: when a deliberate reinforcing event (`opened`, `cited`, or `pinned`) occurs on an anchor, every other live anchor presented in the same group SHALL receive a fraction of that event's decayed reinforcement, in addition to any reinforcement that anchor accrues from its own event history. **The exact conditions and exclusions are specified in `memory-events`'s "Only deliberate interactions reinforce" Requirement, not restated here**: the source event's own contribution must be positive, an anchor that was itself the subject of a `dismissed` event does not receive spreading reinforcement, and an oversized presentation group is exempt. This Requirement's scope is *which strategy* the mechanism applies to; `memory-events` owns the mechanism's exact conditions — restating them here is what produced repeated drift across fix rounds (#15), which is why this Requirement now points at the single copy instead of carrying its own. A spread contribution received by an anchor SHALL NOT itself be further spread to other anchors.
 
 Spreading is a property of the `human-like` tier only. When a strategy is projected through `LTMService`'s single-strategy query path (`LTMService.makeProjection`), no other shipped strategy SHALL receive spreading-derived reinforcement, regardless of which event kinds it otherwise consumes. In particular, `conservative` consumes the same four event kinds as `human-like` (see "Strategies are distinguished by mechanism, never by magnitude") but SHALL NOT receive spreading contributions on that path — sharing a signal set does not imply sharing every mechanism gated on that signal set.
 
@@ -10,7 +10,7 @@ Spreading is a property of the `human-like` tier only. When a strategy is projec
 
 #### Scenario: A co-presented anchor with no direct interaction of its own gains reinforcement
 
-- **GIVEN** a presentation group of three anchors, one of which is deliberately opened and the other two of which are never directly interacted with
+- **GIVEN** a presentation group of three anchors, one of which is deliberately opened (with a positive, i.e. nonzero, `openedWeight`) and the other two of which are never directly interacted with
 - **WHEN** the event sequence is projected
 - **THEN** the two anchors that were never directly interacted with each show nonzero reinforcement, scaled down from the opened anchor's own reinforcement by the configured spreading factor
 
