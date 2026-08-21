@@ -174,6 +174,68 @@ func resumeDuplicateYieldsSingleChunk() throws {
     #expect(session == "22222222-2222-2222-2222-222222222222", "pointer 應報最近觀察到的 session")
 }
 
+@Test("時間戳完全相同的兩份 resume 複製，來源集合含兩個 session——不是字典序挑一個")
+func identicalTimestampsYieldBothSources() throws {
+    // #25 的核心：resume 複製**不改訊息時間戳**，所以真實語料裡時間戳永遠平手，
+    // 勝負實際由 source_key 字典序決定。上面那條 `resumeDuplicateYieldsSingleChunk`
+    // 刻意給了不同時間戳（...000 / ...100），驗的是真實語料中不會發生的分支——
+    // 這條補上真正會發生的那個。
+    let path = makeTempDatabasePath()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    let db = try IndexDatabase(path: path)
+    try db.probeTokenizers()
+    try db.createSchema()
+
+    let uuid = "aaaaaaaa-0000-0000-0000-000000000002"
+    let text = "時間戳相同的 resume 複製內容"
+    let sameTimestamp: TimeInterval = 1_760_000_000
+    let sessionA = "11111111-1111-1111-1111-111111111111"
+    let sessionB = "22222222-2222-2222-2222-222222222222"
+
+    try db.insert(
+        chunks: [makeChunk(uuid: uuid, text: text, session: sessionA, timestamp: sameTimestamp)],
+        sourceKey: "proj-one/session-A.jsonl")
+    try db.insert(
+        chunks: [makeChunk(uuid: uuid, text: text, session: sessionB, timestamp: sameTimestamp)],
+        sourceKey: "proj-one/session-B.jsonl")
+
+    #expect(try db.chunkCount() == 1, "同一則 turn 仍是一段記憶")
+
+    var chunkID: Int64 = 0
+    try db.query("SELECT id FROM chunks") { statement in
+        chunkID = sqlite3_column_int64(statement, 0)
+    }
+
+    let sources = try db.sessionSources(chunkIDs: [chunkID])
+    let sessions = sources[chunkID] ?? []
+    #expect(
+        sessions == [sessionA, sessionB],
+        "兩個來源都要回傳（依 source_key 字典序），而不是挑一個；實得 \(sessions)")
+}
+
+@Test("只被一份檔持有的 turn，來源集合恰好一個元素")
+func singleSourceYieldsSingleEntry() throws {
+    let path = makeTempDatabasePath()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    let db = try IndexDatabase(path: path)
+    try db.probeTokenizers()
+    try db.createSchema()
+
+    let session = "33333333-3333-3333-3333-333333333333"
+    try db.insert(
+        chunks: [makeChunk(uuid: "aaaaaaaa-0000-0000-0000-000000000003",
+                           text: "只出現在一份檔案裡的內容", session: session)],
+        sourceKey: "proj-one/only.jsonl")
+
+    var chunkID: Int64 = 0
+    try db.query("SELECT id FROM chunks") { statement in
+        chunkID = sqlite3_column_int64(statement, 0)
+    }
+
+    let sources = try db.sessionSources(chunkIDs: [chunkID])
+    #expect(sources[chunkID] == [session])
+}
+
 @Test("不同 project 的相同 turn 識別碼各自成立，不互相覆蓋")
 func sameUUIDInDifferentProjectsStaysSeparate() throws {
     let path = makeTempDatabasePath()

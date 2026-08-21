@@ -8,7 +8,22 @@ import SQLite3
 /// 帶著完整的指標四元組——不變式 3 在這一層就成立，不是等 facade 補上。
 public struct ScoredChunk: Sendable, Equatable {
     public let project: String
+    /// **來源集合的代表值，不是「最近觀察到的那一份」。**
+    ///
+    /// 定義為 `sessionSources` 的第一個元素（依 `source_key` 字典序）。字典序與
+    /// 觀察順序沒有因果關係——它只是一個**確定**的選擇，讓同一組來源必然得到同一個
+    /// 代表值。真正的導航資訊是 `sessionSources`（見該欄位與 #25）。
+    ///
+    /// 保留這個純量欄位是為了不破壞既有消費端與 `--json` 的既有欄位契約；它不獨立
+    /// 計算，而是由 `sessionSources` 導出，所以不存在「同一件事兩個寫者」。
     public let sessionID: String
+    /// 持有這則 turn 的**全部**來源各自的 session 識別碼，依 `source_key` 字典序。
+    ///
+    /// 至少一個元素。session resume 把同一則 turn 複製進新檔案（全語料 8,324 檔
+    /// 12,488 筆內容 100% 相同——`docs/measurements/2026-08-18-resume-duplication.md`），
+    /// 去重之後是**一個** chunk、多個持有者；先前只回傳其中一個，而挑選規則在真實
+    /// 語料裡永遠平手、實際由檔名字典序決定（#25）。
+    public let sessionSources: [String]
     public let uuid: String
     public let timestamp: Date
     public let text: String
@@ -127,12 +142,21 @@ public struct RetrievalEngine {
             return lhs.key < rhs.key
         }.prefix(limit)
 
+        // 全部來源一次撈完，不在下面的迴圈裡逐 chunk 查（N+1）。
+        let sourcesByChunk = try database.sessionSources(chunkIDs: ordered.map(\.key))
+
         var results: [ScoredChunk] = []
         for (offset, entry) in ordered.enumerated() {
             guard let chunk = try loadChunk(rowID: entry.key) else { continue }
+            // 來源集合是導航資訊的本體，`sessionID` 只是它的代表值（#25）。撈不到
+            // 任何來源列代表 `chunk_sources` 與 `chunks` 不一致——那是資料損壞，
+            // 依 retrieval spec「不得部分回傳」跳過這一筆，與 `loadChunk` 對損壞列
+            // 的處置一致。
+            guard let sources = sourcesByChunk[entry.key], !sources.isEmpty else { continue }
             results.append(
                 ScoredChunk(
-                    project: chunk.project, sessionID: chunk.sessionID, uuid: chunk.uuid,
+                    project: chunk.project, sessionID: sources[0], sessionSources: sources,
+                    uuid: chunk.uuid,
                     timestamp: chunk.timestamp, text: chunk.text, anchor: chunk.anchor,
                     fusedScore: entry.value.score, emittedRank: offset,
                     band: ScoredChunk.band(matching: entry.value.channels),

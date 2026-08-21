@@ -105,6 +105,50 @@ private struct CLIWorkspace {
     }
 
     func cleanup() { try? FileManager.default.removeItem(at: base) }
+
+    /// 一個含 session resume 複製的語料：`shared` 那則 turn 同時存在於兩份檔案，
+    /// **uuid、內容、時間戳完全相同**（resume 複製不改這些），只有 `sessionId` 不同；
+    /// `uniqueToA` 只存在於第一份檔案。
+    ///
+    /// 時間戳刻意相同——那正是 #25 的情形：時間戳比較永遠平手，先前實際由檔名
+    /// 字典序決定回報哪一個 session。
+    static func makeWithResumeDuplicate(
+        project: String = "proj-demo", shared: String, uniqueToA: String,
+        sessionA: String, sessionB: String
+    ) throws -> CLIWorkspace {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ltm-cli-\(UUID().uuidString)")
+        let workspace = CLIWorkspace(base: base)
+        let projectDir = workspace.corpus.appendingPathComponent(project)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        func line(uuid: String, session: String, text: String) -> String {
+            let object: [String: Any] = [
+                "type": "user",
+                "uuid": uuid,
+                "sessionId": session,
+                "timestamp": "2026-08-17T06:00:00.000Z",
+                "message": ["role": "user", "content": text],
+            ]
+            return String(
+                data: try! JSONSerialization.data(withJSONObject: object), encoding: .utf8)!
+        }
+
+        let sharedUUID = "11111111-aaaa-bbbb-cccc-dddddddddddd"
+        let uniqueUUID = "22222222-aaaa-bbbb-cccc-dddddddddddd"
+
+        // 檔名刻意讓 s-A 字典序在前，好讓「代表值 = 字典序第一個」可被斷言。
+        try ([
+            line(uuid: sharedUUID, session: sessionA, text: shared),
+            line(uuid: uniqueUUID, session: sessionA, text: uniqueToA),
+        ].joined(separator: "\n") + "\n").write(
+            to: projectDir.appendingPathComponent("s-A.jsonl"), atomically: true, encoding: .utf8)
+
+        try (line(uuid: sharedUUID, session: sessionB, text: shared) + "\n").write(
+            to: projectDir.appendingPathComponent("s-B.jsonl"), atomically: true, encoding: .utf8)
+
+        return workspace
+    }
 }
 
 @Test("ltm build 建出索引並回報統計，語料保持不變")
@@ -179,6 +223,73 @@ func jsonOutputIsMachineComplete() throws {
         #expect(object["score"] is Double)
         #expect(object["band"] is Int)
     }
+}
+
+@Test("--json 的 sessions 陣列：多來源列出全部，單一來源也照樣輸出一個元素")
+func jsonCarriesSessionsArrayForBothSingleAndMultiSourceHits() throws {
+    let sessionA = "aaaaaaaa-1111-2222-3333-444444444444"
+    let sessionB = "bbbbbbbb-1111-2222-3333-444444444444"
+    let workspace = try CLIWorkspace.makeWithResumeDuplicate(
+        shared: "被 resume 複製的共用內容", uniqueToA: "只在一份檔案裡的內容",
+        sessionA: sessionA, sessionB: sessionB)
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let result = try runCLI(
+        ["query", "內容", "--all-projects", "--json"], environment: workspace.environment)
+    #expect(result.code == 0)
+    if result.code != 0 { Issue.record("stderr: \(result.err)") }
+
+    let objects =
+        try JSONSerialization.jsonObject(with: Data(result.out.utf8)) as? [[String: Any]] ?? []
+    #expect(objects.count == 2, "共用那則去重後是一筆，加上獨有的那則，共兩筆")
+
+    for object in objects {
+        let snippet = object["snippet"] as? String ?? ""
+        let sessions = object["sessions"] as? [String] ?? []
+        let sessionID = object["sessionId"] as? String ?? ""
+
+        #expect(!sessions.isEmpty, "每一筆都要有 sessions，單一來源也不例外")
+        #expect(
+            sessions.contains(sessionID),
+            "sessionId 必須是 sessions 的成員（它是代表值，不是另一個獨立的值）")
+
+        if snippet.contains("共用") {
+            #expect(
+                sessions.sorted() == [sessionA, sessionB].sorted(),
+                "被兩份檔持有的 turn 要回報兩個 session，實得 \(sessions)")
+        } else {
+            #expect(sessions == [sessionA], "只被一份檔持有的 turn 回報一個 session")
+        }
+    }
+}
+
+@Test("human 輸出：單一來源逐字不變，多來源用複數標籤列出全部 session")
+func humanOutputNamesEverySourceOnlyWhenThereIsMoreThanOne() throws {
+    let sessionA = "aaaaaaaa-1111-2222-3333-444444444444"
+    let sessionB = "bbbbbbbb-1111-2222-3333-444444444444"
+    let workspace = try CLIWorkspace.makeWithResumeDuplicate(
+        shared: "被 resume 複製的共用內容", uniqueToA: "只在一份檔案裡的內容",
+        sessionA: sessionA, sessionB: sessionB)
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let result = try runCLI(
+        ["query", "內容", "--all-projects"], environment: workspace.environment)
+    #expect(result.code == 0)
+    if result.code != 0 { Issue.record("stderr: \(result.err)") }
+
+    // 單一來源那一筆：既有的單數形式逐字不變。
+    #expect(
+        result.out.contains("↳ session \(sessionA)  turn"),
+        "只被一份檔持有的那一筆，指標行應維持既有的單數形式")
+    // 多來源那一筆：複數標籤 + 兩個 session 都在。
+    #expect(
+        result.out.contains("↳ sessions "),
+        "被兩份檔持有的那一筆，指標行應改用複數標籤")
+    #expect(
+        result.out.contains(sessionB),
+        "第二個來源的 session 必須出現在輸出裡——先前它被字典序挑選丟掉了")
 }
 
 @Test("--json --record 時輸出每筆帶 presentation 欄位；不 --record 時不帶")

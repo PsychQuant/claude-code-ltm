@@ -257,6 +257,44 @@ public final class IndexDatabase {
             """, bind: [.integer(chunkID)])
     }
 
+    /// 一批 chunk 各自的**全部**來源 session 識別碼，依 `source_key` 字典序。
+    ///
+    /// ## 為什麼要有這個（#25）
+    ///
+    /// `chunks.session_id` 是**一個**值，而 `refreshNavigation` 從多個等價來源裡挑出
+    /// 它的規則在真實語料裡從未真正生效：resume 複製不改訊息時間戳，所以時間戳比較
+    /// 永遠平手，實際決定勝負的是 `source_key` 字典序——與「最近觀察到」沒有因果關係
+    /// （量測見 `docs/measurements/2026-08-18-resume-duplication.md`）。
+    ///
+    /// 修法不是換一個更好的代理指標，而是**不要挑**：`chunk_sources` 已經記著每個
+    /// 持有者各自的 session id，導航回傳全部，讓消費端知道這則 turn 存在於哪幾份檔，
+    /// 而不是收到一個沒有依據的挑選結果。
+    ///
+    /// ## 批次而不是逐 chunk
+    ///
+    /// 收 `[Int64]` 回 `[Int64: [String]]`，一次查詢撈完整批——呼叫端（`RetrievalEngine`）
+    /// 本來就在對 k 個 rowID 迴圈，逐 chunk 再查一次會是 N+1。
+    ///
+    /// 空輸入回空字典，不下查詢。
+    public func sessionSources(chunkIDs: [Int64]) throws -> [Int64: [String]] {
+        guard !chunkIDs.isEmpty else { return [:] }
+        // rowID 是本地整數、非外來字串，但仍走 bind 而不是字串內插——SQL 組裝的
+        // 例外一旦開一次，下一個「這個也是本地值」就會跟著進來。
+        let placeholders = Array(repeating: "?", count: chunkIDs.count).joined(separator: ",")
+        var byChunk: [Int64: [String]] = [:]
+        try query(
+            """
+            SELECT chunk_id, session_id FROM chunk_sources
+            WHERE chunk_id IN (\(placeholders))
+            ORDER BY chunk_id, source_key
+            """, bind: chunkIDs.map { .integer($0) }
+        ) { statement in
+            let chunkID = sqlite3_column_int64(statement, 0)
+            byChunk[chunkID, default: []].append(columnText(statement, 1))
+        }
+        return byChunk
+    }
+
     /// 解除某來源檔對 chunk 的持有；**只有失去最後一個持有者的 chunk 才真的刪掉**。
     ///
     /// 「這個檔沒了」與「這則 turn 沒了」是兩件事。session resume 讓同一則 turn

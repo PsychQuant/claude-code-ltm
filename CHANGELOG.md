@@ -4,6 +4,15 @@
 
 ## Unreleased
 
+### Changed
+- 導航從「挑一個來源」改為**回傳全部來源**（#25）。`chunks.session_id` 的規則本來是「存最近觀察到的那一份」，但 session resume 複製 turn 時不改訊息時間戳，所以時間戳比較在真實語料裡**永遠平手**，實際決定勝負的是 `source_key` 字典序——與「最近觀察到」沒有因果關係（量測：`docs/measurements/2026-08-18-resume-duplication.md`，8,324 檔中 12,488 筆內容 100% 相同、98.9% sessionId 不同）。
+  - `ScoredChunk` 與 `QueryHit` 新增 `sessionSources: [String]`，列出持有該 turn 的**每一個**來源檔各自的 session id（依 `source_key` 字典序），資料來自 #24 已加入的 `chunk_sources` 連結表，不需 schema 變更。
+  - 純量 `sessionID` **保留**，但語意改寫為「來源集合的代表值」（集合的第一個元素），不再宣稱任何觀察順序含意，且**由集合導出而非獨立計算**——不存在兩個寫者。
+  - `timestamp` 維持純量：每個持有者帶的都是該 turn 的原始時間戳，多值化後集合只會有一個相異值。此判斷依賴上述已量測事實，若行為改變需重審（`chunk_sources` 已存各自的 timestamp，屆時不需 schema 遷移）。
+  - `ltm query --json` 每個物件新增 `sessions` 陣列，**無條件輸出**（單一來源時也有，只是一個元素）。刻意不沿用 `displacement`／`presentation` 的「只在有意義時才附加」慣例：條件式輸出會逼消費端寫一條只在單一來源時才走到、最不容易被測到的 fallback 分支。
+  - `ltm query` human 輸出：單一來源時指標行逐字不變；多來源時改用複數標籤 `↳ sessions a, b`，讓「這則 turn 存在於好幾份檔案」直接看得見。
+  - 補上 issue #25 明文指出的測試缺口：既有的 resume 測試刻意給了**不同**時間戳，驗的是真實語料中不會發生的分支；新測試用**完全相同**的時間戳，斷言回傳兩個來源而非字典序挑一個。
+
 ### Fixed
 - 第五輪（最後一輪）修復 `add-spreading-activation-fixes`（#15），並在此停止迭代：
   - **補回被上一輪誤刪的 SHALL**：round-4 把 `memory-strategy` 的條件「延後」給 `memory-events` 時，把「`dismissed` 不作為擴散**來源**」（suppression 不擴散）這條規則刪掉了，而延後清單裡寫的是另一條完全不同的規則（dismissed 作為**目標**不接收擴散）。結果是來源側那條 SHALL 在整個 spec 樹裡消失，只剩程式碼與測試守著它。現已補進 `memory-events`（唯一權威來源），並明寫兩者是不同方向的兩條規則。

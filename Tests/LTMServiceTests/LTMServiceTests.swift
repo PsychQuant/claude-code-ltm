@@ -813,3 +813,51 @@ func conservativeStrategyDoesNotReceiveSpreadingActivation() throws {
         "conservative 不該吃到擴散：untouched anchor 只有同框 shown，reason.history 應為 .none，實得 \(untouchedHit.historyDescription)"
     )
 }
+
+// MARK: - 導航來源集合（#25，`return-all-navigation-sources`）
+
+@Test("facade 每一筆命中都帶來源集合，且 sessionID 是它的成員")
+func everyHitCarriesItsSourceSet() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["關於記憶策略的第一段", "關於記憶策略的第二段"])
+    let service = try workspace.service()
+    try service.build()
+
+    let outcome = try service.query(text: "記憶策略", limit: 10, scope: .allProjects)
+    #expect(!outcome.hits.isEmpty)
+    for hit in outcome.hits {
+        #expect(!hit.sessionSources.isEmpty, "來源集合至少一個元素，單一來源也不例外")
+        #expect(
+            hit.sessionSources.contains(hit.sessionID),
+            "sessionID 是來源集合的代表值，必須是它的成員")
+    }
+}
+
+@Test("facade：被兩份檔持有的 turn 回報兩個來源，而不是字典序挑出的那一個")
+func aResumeDuplicatedTurnReportsEveryHoldingSource() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    let sessionA = "aaaaaaaa-1111-2222-3333-444444444444"
+    let sessionB = "bbbbbbbb-1111-2222-3333-444444444444"
+    let shared = "被 resume 複製到兩份檔案的同一段內容"
+
+    // 兩份檔含同一則 turn（同 index → 同 uuid、同內容、同時間戳），只有 sessionId 不同
+    // ——這正是 session resume 產生的形狀，也是 #25 裡時間戳永遠平手的成因。
+    let dir = workspace.corpus.appendingPathComponent("proj-one")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try (turnRecord(index: 0, text: shared, session: sessionA) + "\n")
+        .write(to: dir.appendingPathComponent("s-A.jsonl"), atomically: true, encoding: .utf8)
+    try (turnRecord(index: 0, text: shared, session: sessionB) + "\n")
+        .write(to: dir.appendingPathComponent("s-B.jsonl"), atomically: true, encoding: .utf8)
+
+    let service = try workspace.service()
+    try service.build()
+
+    let outcome = try service.query(text: "resume", limit: 10, scope: .allProjects)
+    let hit = try #require(outcome.hits.first { $0.snippet.contains("resume") })
+    #expect(
+        hit.sessionSources.sorted() == [sessionA, sessionB].sorted(),
+        "兩個持有者都要回報，實得 \(hit.sessionSources)")
+    #expect(hit.sessionID == sessionA, "代表值取 source_key 字典序第一個（s-A.jsonl）")
+}

@@ -95,7 +95,15 @@ public struct MemoryCorpusPolicy: CorpusContainmentPolicy {
 /// 所以 `snippet` 是原文片段而不是摘要——摘要會讓呼叫端以為它可以直接用。
 public struct QueryHit: Sendable, Equatable {
     public let project: String
+    /// **來源集合的代表值，不是「最近觀察到的那一份」**——見 `sessionSources`
+    /// 與 `ScoredChunk.sessionID` 的說明（#25）。
     public let sessionID: String
+    /// 持有這則 turn 的**全部**來源各自的 session 識別碼，依 `source_key` 字典序。
+    ///
+    /// 至少一個元素。這是導航資訊的本體：resume 複製讓同一則 turn 活在多份檔裡，
+    /// 使用者要知道的是「可以去哪幾份檔看上下文」，而不是一個由檔名字典序碰巧
+    /// 選出的單一值（#25）。
+    public let sessionSources: [String]
     public let uuid: String
     public let timestamp: Date
     public let snippet: String
@@ -344,7 +352,8 @@ public struct LTMService {
             guard let source = byAnchor[result.candidate.anchor] else { continue }
             hits.append(
                 QueryHit(
-                    project: source.project, sessionID: source.sessionID, uuid: source.uuid,
+                    project: source.project, sessionID: source.sessionID,
+                    sessionSources: source.sessionSources, uuid: source.uuid,
                     timestamp: source.timestamp, snippet: source.text,
                     score: result.candidate.baseScore, band: result.candidate.band.rank,
                     displacement: result.displacement,

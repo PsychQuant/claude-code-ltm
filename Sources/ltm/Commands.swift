@@ -418,7 +418,14 @@ enum QueryCommand {
             let clipped = snippet.count > 160 ? String(snippet.prefix(160)) + "…" : snippet
             print("\(index + 1). [\(hit.project)] \(formatter.string(from: hit.timestamp))")
             print("   \(clipped)")
-            print("   ↳ session \(hit.sessionID)  turn \(hit.uuid)")
+            // 多來源時列出全部並用**複數**標籤——「這則 turn 存在於好幾份檔案」
+            // 因此在輸出上直接看得見，不必數。單一來源維持既有的單數形式逐字不變
+            // （#25）。
+            if hit.sessionSources.count > 1 {
+                print("   ↳ sessions \(hit.sessionSources.joined(separator: ", "))  turn \(hit.uuid)")
+            } else {
+                print("   ↳ session \(hit.sessionID)  turn \(hit.uuid)")
+            }
             if hit.displacement != 0 {
                 print("   ↳ 位移 \(hit.displacement > 0 ? "+" : "")\(hit.displacement)（\(hit.historyDescription)）")
             }
@@ -470,6 +477,13 @@ enum QueryCommand {
                 "score": hit.score,
                 "band": hit.band,
                 "channels": hit.channels,
+                // **無條件輸出，即使只有一個元素**（#25）。這裡刻意不沿用下面
+                // `displacement`／`presentation` 的「只在有意義時才附加」慣例：
+                // 那個慣例適用於「這次查詢沒有這個概念」的欄位，而每一筆命中
+                // 永遠至少有一個來源。條件式輸出會逼消費端寫一條「欄位不存在時
+                // 回頭用 sessionId」的分支，而那條分支只在單一來源時才走到——
+                // 也就是最不容易被測到、最容易寫錯的那條。
+                "sessions": hit.sessionSources,
             ]
             // 位移與理由只在重排策略下才有意義；archival 一律 0，附上去只是噪音。
             if outcome.strategyID != "archival" {
