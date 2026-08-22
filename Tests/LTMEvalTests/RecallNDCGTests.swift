@@ -93,3 +93,24 @@ import Testing
     #expect(vectorNDCG == 1.0)
     #expect(fusedNDCG == 1.0)
 }
+
+@Test func anExpectedAnchorBeyondTheRecallWindowIsNotRecalled() throws {
+    // **這條是 recall 窗的回歸鎖。** 它先前不存在，於是 `prefix(recallK)` 是死碼：
+    // 實測把它整段拿掉（`retrieved.firstIndex(of:)`），60 條測試照樣全綠（#16 verify）。
+    //
+    // 原本六條測試沒有一條把 expected 放在窗外——`recallAt20ConfirmsPresenceBefore
+    // AnyRankingScore` 的 fixture 是「expected 根本不在列表裡」，驗的是「不存在」
+    // 而不是「存在但超出第 20 名」。而 recall 窗正是兩階段指標的第一階段，也是
+    // issue #16 那句「漏召回比排錯序嚴重」直接指的東西。
+    let others = (0..<25).map { evalAnchor("o\($0)") }
+    let expected = evalAnchor("needle")
+    var retrieved = others
+    retrieved[20] = expected  // 0-indexed 20 = 第 21 名，剛好落在 recallK=20 之外
+
+    #expect(scoreRecallAndRanking(retrieved: retrieved, expected: expected) == .notRecalled)
+
+    // 同一份輸入，把窗開大到剛好含得下就必須變成 recalled——證明上面那條紅不是
+    // 因為 anchor 不在列表裡，而是**因為窗**。
+    let widened = scoreRecallAndRanking(retrieved: retrieved, expected: expected, recallK: 21)
+    #expect(widened == .recalled(ndcgAt10: 0), "窗內但 nDCG 視窗外：recalled 且分數 0")
+}

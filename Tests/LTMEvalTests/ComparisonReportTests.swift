@@ -520,3 +520,52 @@ private func event(
             startingSide: .a, isNullComparison: false)
     }
 }
+
+@Test func theReportCarriesAStartingSideCorrectedEstimateAlongsideTheRawCounts() throws {
+    // `strategy-comparison` spec 的 scenario「A report corrects for a starting-side
+    // imbalance」。**它先前沒有測試，而且不可能通過**——校正函式寫好了，但沒有任何
+    // 呼叫端，報告連欄位都沒有（#16 verify，CRITICAL）。那是同一個「只完成一半」
+    // 的第四次：R3 拿掉預設值 → R4 補機制未記錄 → R5 補計數沒人讀 → #16 補函式
+    // 沒人呼叫。
+    //
+    // 分派刻意失衡（A 起手 3 次、B 起手 1 次），且兩層的偏好方向相反，讓校正後的
+    // 數字與 pooled rate **不相等**——否則這條測試分不出有沒有校正。
+    let aSide = (0..<3).map { i in
+        try! presentation(
+            .cjk2char, a: evalAnchor("pa\(i)"), b: evalAnchor("pb\(i)"), startingSide: .a)
+    }
+    let bSide = [
+        try presentation(.cjk2char, a: evalAnchor("qa"), b: evalAnchor("qb"), startingSide: .b)
+    ]
+    // A 起手的三次全部偏好 archival；B 起手的一次偏好 human-like。
+    var events: [Event] = aSide.map { event(.opened, $0.attribution[0].anchor, $0) }
+    events.append(event(.opened, bSide[0].attribution[1].anchor, bSide[0]))
+
+    let report = try ComparisonScorer.report(records: aSide + bSide, events: events)
+
+    // 原始計數仍在（scenario 要求「both」）
+    #expect(report.startingSides.a == 3)
+    #expect(report.startingSides.b == 1)
+
+    let corrected = try #require(report.startingSideCorrected)
+    // 兩層各自的 archival 偏好率：A 起手層 3/3 = 1.0、B 起手層 0/1 = 0.0，
+    // 等權重平均 = 0.5。pooled rate 會是 3/4 = 0.75——**兩者不同，這才證明校正生效**。
+    let archivalCorrected = try #require(corrected[archival])
+    #expect(abs(archivalCorrected - 0.5) < 1e-9, "等權重兩層平均，不是 pooled 的 0.75")
+    let humanLikeCorrected = try #require(corrected[humanLike])
+    #expect(abs(humanLikeCorrected - 0.5) < 1e-9)
+}
+
+@Test func aDegenerateStartingSideDistributionYieldsNoCorrection() throws {
+    // spec 的 degenerate scenario：某一層完全沒有觀測時，報告要說「算不出來」，
+    // 而不是回一個由單層推出的假校正。這條同樣先前沒有測試。
+    let allOneSide = (0..<4).map { i in
+        try! presentation(
+            .cjk2char, a: evalAnchor("za\(i)"), b: evalAnchor("zb\(i)"), startingSide: .a)
+    }
+    let events = allOneSide.map { event(.opened, $0.attribution[0].anchor, $0) }
+    let report = try ComparisonScorer.report(records: allOneSide, events: events)
+
+    #expect(report.startingSides.b == 0)
+    #expect(report.startingSideCorrected == nil, "只有一層有觀測時，校正不可計算")
+}

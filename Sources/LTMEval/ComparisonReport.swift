@@ -86,10 +86,26 @@ public struct ComparisonReport: Sendable, Equatable {
     /// 而那個事後檢查沒有任何程式碼實作它，於是「偏誤已消除」仍然是一句
     /// 從報告讀不出來的宣稱。這是 R3→R4 那個「只完成一半」的第三次。
     ///
-    /// 這裡只做**可見**：把計數放進報告，讓失衡是讀得到的事實。**按起手方
-    /// 分層計分**（真正能校正位置效應的做法）需要先決定分層之後的統計量，
-    /// 屬於評估設計，追蹤於 #16。在那之前，讀者至少看得到分派長什麼樣子。
+    /// 計數本身只做**可見**：讓失衡是讀得到的事實。真正的校正在下面的
+    /// `startingSideCorrected`——那是 #16 拍板的固定效應做法，**與這組計數
+    /// 一起產出**，不是另一個沒人讀的欄位。
     public let startingSides: StartingSideCounts
+
+    /// 起手方校正後的偏好估計，每個策略各一個。
+    ///
+    /// **這個欄位存在的理由是「只做一半」已經發生過四次。** R3 拿掉預設值、
+    /// R4 補平衡機制但沒記錄、R5 補了計數但沒人讀（於是上面那段註解一度寫著
+    /// 「記下來但沒人讀，等於沒記」）、#16 補了校正函式但**沒有任何呼叫端**
+    /// ——而同一個 commit 寫進 spec 的是「report SHALL include a
+    /// starting-side-corrected preference estimate」，兩條 scenario 都沒有測試
+    /// 也不可能通過（#16 verify）。這一版把消費端補上。
+    ///
+    /// `nil` 代表兩個起手方之一完全沒有計分觀測——此時做不出兩層平均，回傳一個
+    /// 由單層推出的「校正後」數字會是**假的校正**（見
+    /// `startingSideCorrectedPreference` 的說明與 spec 的 degenerate scenario）。
+    /// 這與 `aggregate`／`StrategyScore.rate` 用 optional 表達「這裡沒有數字」
+    /// 是同一條紀律。
+    public let startingSideCorrected: [RankingPolicyID: Double]?
 
     public struct StartingSideCounts: Sendable, Equatable {
         public let a: Int
@@ -213,6 +229,7 @@ public enum ComparisonScorer {
         var penalties: [Key: Int] = [:]
         var presented: [Key: Int] = [:]
         var observations: [QueryClass: Int] = [:]
+        var startingSideObservations: [StartingSideObservation] = []
         // **逐 (generation, class) 也要各自計數。** R6 修了 `scores` 的 pooling，
         // 卻讓巢狀 `ClassRow.observations` 繼續讀全域的 `observations`，於是每一代
         // 都回報全部世代的觀測數（#1 verify R7）。R6 自己的診斷寫「先前每一個
@@ -283,6 +300,17 @@ public enum ComparisonScorer {
                 presented[key, default: 0] += 1
             case .opened, .cited, .pinned:
                 credits[key, default: 0] += 1
+                // 起手方校正的觀測**只收 credit 事件**：這個估計問的是「被計分的
+                // 偏好有多少比例流向某個策略」，而 `dismissed` 表達的是反向偏好，
+                // 把它記成 `creditedTo` 會讓「被討厭」讀成「被偏好」。
+                //
+                // 配對就放在這裡，因為 `policy`（`record.credit(for:)` 的結果）與
+                // `record.startingSide` **只有這個迴圈同時知道**。放到外面去做，
+                // 呼叫端就得重寫一次「事件 → 是否計分 → 歸屬哪個 policy」，
+                // 那正是「同一件事有兩個寫者」（#16 verify 指出原本的簽名把這個
+                // 負擔推給了下一個呼叫端）。
+                startingSideObservations.append(
+                    StartingSideObservation(side: record.startingSide, creditedTo: policy))
                 observations[record.queryClass, default: 0] += 1
                 generationObservations[record.generation, default: 0] += 1
                 perGenerationObservations[record.generation, default: [:]][
@@ -295,6 +323,19 @@ public enum ComparisonScorer {
                     record.queryClass, default: 0] += 1
             }
         }
+
+        // 每個出現過的策略各算一個校正後估計。`nil` 由函式在 degenerate 分佈時
+        // 回傳，整個欄位在**沒有任何策略算得出來**時才是 nil。
+        let scoredPolicies = Set(credits.keys.map(\.policy)).union(penalties.keys.map(\.policy))
+        var corrected: [RankingPolicyID: Double] = [:]
+        for policy in scoredPolicies {
+            if let value = startingSideCorrectedPreference(
+                startingSideObservations, towardPolicy: policy)
+            {
+                corrected[policy] = value
+            }
+        }
+        let correctedPreferences: [RankingPolicyID: Double]? = corrected.isEmpty ? nil : corrected
 
         let allKeys = Set(credits.keys).union(penalties.keys).union(presented.keys)
 
@@ -359,7 +400,8 @@ public enum ComparisonScorer {
                 presentationNotTracked: skippedPresentationNotTracked),
             startingSides: ComparisonReport.StartingSideCounts(
                 a: records.count { $0.startingSide == .a },
-                b: records.count { $0.startingSide == .b }))
+                b: records.count { $0.startingSide == .b }),
+            startingSideCorrected: correctedPreferences)
     }
 
     private struct Key: Hashable {

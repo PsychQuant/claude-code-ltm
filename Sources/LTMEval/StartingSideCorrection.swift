@@ -3,6 +3,12 @@ import LTMCore
 
 /// 一筆已配對好的觀測：這次呈現以哪一側起手、這次互動記給了哪個策略。
 ///
+/// **呼叫端是 `ComparisonScorer.report`**（`ComparisonReport.swift` 的計分迴圈，
+/// credit 事件那一支）——它是唯一同時知道 `policy` 與 `record.startingSide` 的地方。
+/// 這句話先前寫成一般性的「呼叫端如何如何」，而**當時沒有任何呼叫端**：那讓下一個
+/// 使用者必須自己重寫一次配對邏輯，也就是下面這段說要避免的東西（#16 verify）。
+///
+/// 舊的說法保留在下面，因為它解釋了為什麼配對不放在這個型別裡：
 /// 呼叫端從既有的 `PresentationRecord.startingSide` 與已計分事件的歸屬
 /// （`ComparisonScorer` 迴圈裡已經算出來的 `policy`）配對出這個型別，
 /// 本型別本身不重做那段配對邏輯——避免與既有計分迴圈長出第二份可能漂移的實作。

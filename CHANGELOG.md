@@ -26,6 +26,41 @@
     不是指定的那個而且中途還在長大。
 
 ### Fixed
+- **#16 verify 的 2 CRITICAL + 3 HIGH**（5/5 lens 全跑完，Codex 仍停用——**沒有跨模型盲驗**）。
+  五組裁決裡有兩組只落地了一半，而 change 被歸檔成 8/8。
+  - **CRITICAL：起手方校正是「只做一半」的第四次，而 spec 用 SHALL 規定了報告要有它。**
+    `startingSideCorrectedPreference` 全 repo 唯一的呼叫點是它自己的測試；`0a35783`
+    **完全沒動** `ComparisonReport.swift`（而 proposal 的 Impact 明寫要動）。同一個 commit
+    寫進 spec 的是「the report SHALL include a starting-side-corrected preference estimate」
+    加兩條 scenario，**兩條都沒有測試也不可能通過**。前三次是 R3 拿掉預設值 → R4 補機制
+    未記錄 → R5 補計數沒人讀。已把配對放進 `ComparisonScorer` 的計分迴圈（唯一同時知道
+    `policy` 與 `record.startingSide` 的地方），報告新增 `startingSideCorrected`，並補上
+    那兩條 scenario 的測試——第一條刻意讓校正後（0.5）與 pooled（0.75）不相等，否則分不出
+    有沒有校正；驗過把計算改成恆 `nil` 會紅。
+  - **CRITICAL：spec 的兩條 Requirement 直接互斥。** :274 寫「SHALL NOT attempt to
+    **construct or score** negative cases」，而同一檔 :226 的 scenario「An empty result list
+    is scored as not recalled」逐字就是 construct 且 score 一個負例——`.notRecalled` 這個
+    case 的存在理由正是描述負例。這是 `common-spec-prose-enumeration` 的教科書失效：
+    心裡想的是一組特定案例（事件日誌收集不到的真實失敗查詢），寫成了一句總括判準，
+    字面涵蓋範圍大於那組案例，於是在**它自己的 change 內部**長出矛盾。已把禁令收斂成
+    「不得從真實使用**收集**」並明寫合成 fixture 一直都在範圍內。
+  - **HIGH：`prefix(recallK)` 是死碼。** 實測整段拿掉 → **60/60 全綠**。六條測試沒有一條
+    把 expected 放在窗外——名為 `recallAt20ConfirmsPresenceBeforeAnyRankingScore` 的那條
+    fixture 是「expected 根本不在列表裡」，驗的是「不存在」而不是「超出第 20 名」。而
+    recall 窗正是兩階段指標的第一階段。已補 fixture（25 筆、expected 在第 21 名），並驗過
+    拿掉 `prefix(recallK)` 後它會紅。
+  - **HIGH：校正函式的簽名偏離 Implementation Contract**，偏離方向剛好讓 wiring 可以被
+    略過，且它的 doc 宣稱「呼叫端從既有欄位配對，本型別不重做那段邏輯」——而當時**沒有
+    任何呼叫端**，那段配對只存在於 `ComparisonScorer` 的 private 迴圈裡。接上呼叫端即解決；
+    doc 改成具名指出呼叫端。
+  - **HIGH：spec:235 的三軌 SHALL 是條件句，而沒有任何報告型別呈現 fused outcome**
+    ——目前 vacuously 成立。已在 spec 內寫明這件事與它為什麼仍然留著，讓讀者不必從
+    `ComparisonReport` 沒有欄位這件事去推斷。
+  - **未變的誠實邊界**：ground truth 依裁決 2 仍在範圍外，CLAUDE.md「策略比較目前沒有
+    任何量測支撐——沒有評估集」**仍然成立**。本輪修的是「指標有沒有接上」，不是「有沒有
+    資料可比」。
+
+### Fixed
 - **#17 verify 的 4 條 HIGH**（`conservative` 檔次的裁決驗證；5/5 lens 全跑完，Codex 仍停用
   ——**沒有跨模型盲驗**）。四條我都自己重跑實驗確認：
   - **spec scenario 對 `conservative` 的 THEN 是錯的。** 它寫「reorders the tied

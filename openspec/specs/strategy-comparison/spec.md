@@ -234,6 +234,8 @@ A retrieval result against a known expected anchor SHALL be scored in two stages
 
 Given a query with an expected anchor, the two-stage recall-then-ranking outcome SHALL be computed separately for the lexical-only retrieved list, the vector-only retrieved list, and the fused retrieved list, using the same scoring function for all three. A report presenting a fused-channel outcome SHALL also present the lexical-only and vector-only outcomes for the same query.
 
+This second sentence is **conditional, and no shipped report type presents a fused-channel outcome yet** — `ComparisonReport` carries interleaving preference scores, not recall/ranking outcomes, because those need the `(query, expected turn)` ground-truth set that this capability explicitly does not build (see "Negative cases are not collected" and the honesty boundary in `CLAUDE.md`). So the requirement is satisfied vacuously today. It is stated here rather than deferred because the shape it constrains — three tracks scored by one function, never three pipelines — is a decision already made, and a reader who finds no per-channel field in `ComparisonReport` should be able to tell that from this specification rather than infer it (#16 verify).
+
 #### Scenario: Single-channel degradation is visible in the per-channel breakdown
 
 - **GIVEN** a query where the lexical channel fails to recall the expected anchor but the vector channel and the fused channel both recall it
@@ -271,7 +273,11 @@ The five-value closed query-class set (`cjk-2char`, `cjk-3char`, `cjk-4plus`, `l
 ---
 ### Requirement: Negative cases are not collected
 
-This capability SHALL NOT attempt to construct or score negative cases — queries for which the user expects a specific anchor to be retrieved but the system fails to retrieve it. The no-query-text policy governing presentation records makes constructing such a case impossible without retaining either the query text or a substitute carrying comparable information, and no such substitute is defined by this capability. The evaluation population is therefore known to exclude event-log-invisible retrieval failures, and this exclusion SHALL be treated as a stated, accepted limitation rather than a defect to be silently worked around.
+This capability SHALL NOT **collect** negative cases from real usage — that is, it SHALL NOT retain, from a live session, the information needed to reconstruct a query for which the user expected a specific anchor and the system failed to retrieve it. The no-query-text policy governing presentation records makes such collection impossible without retaining either the query text or a substitute carrying comparable information, and no such substitute is defined by this capability. The evaluation population is therefore known to exclude event-log-invisible retrieval failures, and this exclusion SHALL be treated as a stated, accepted limitation rather than a defect to be silently worked around.
+
+**The prohibition is on collection, not on the concept.** Scoring a retrieval outcome as *not recalled* is required elsewhere in this specification (see "Retrieval quality is scored in two stages, recall first") and is exercised by synthetic fixtures that construct an expected anchor together with a retrieved list that omits it. Those fixtures are in scope and always were.
+
+An earlier wording of this requirement said the capability "SHALL NOT attempt to **construct or score** negative cases", which the same commit's own scenario — "An empty result list is scored as not recalled" — violates verbatim, as does every `.notRecalled` fixture in the test suite. The defect was the one `common-spec-prose-enumeration` describes: a specific set of cases (real failure queries, invisible to the event log) written up as a general criterion whose literal reach is wider than the set the author had in mind, so it grew an answer at a boundary nobody checked — here, inside its own change (#16 verify).
 
 #### Scenario: A comparison report does not claim to cover negative cases
 
