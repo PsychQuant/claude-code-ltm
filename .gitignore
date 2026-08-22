@@ -43,3 +43,6 @@ openspec/.vector-search.db*
 
 # 編輯器本機設定（VSCode Swift extension 自動產生，機器相依）
 .vscode/
+
+# Python 匯入 script 當模組時產生的 bytecode 快取（純衍生物）
+__pycache__/

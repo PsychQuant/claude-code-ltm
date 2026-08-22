@@ -26,6 +26,29 @@
     不是指定的那個而且中途還在長大。
 
 ### Fixed
+- **#18 verify R2 的 findings**（該輪 5 個 lens 只跑完 3 個——devil's advocate 與另一個
+  因 ECONNRESET 失敗，**覆蓋不完整**）。全部是 R1 那批事實的殘留，形狀只有一個：
+  **我修的是被引用的句子，不是那個事實。**
+  - **撤回只寫進了描述撤回的文件。**「`cjk-4plus` 與 `mixed` 一次都沒觀測到平手」
+    仍留在 `ConservativeStrategy.swift` 與 `docs/memory-systems/README.md`，而**同一個
+    commit 落地的量測表**就寫著 `cjk-4plus` 在兩個較大規模都是 0.3%。更正寫進了
+    CHANGELOG 與量測紀錄（描述撤回的兩份），沒寫進被撤回的那兩份。
+  - **「觀測到的段長都是 2」在三處存活**（spec、doc comment、README），而量測紀錄
+    寫著 400 檔那一階出現 2 段長度 3。那句話唯一的任務是提醒「那是觀測、不是上界」
+    ——**它自己把觀測講錯了**，於是 spec 用一個假的觀測去禁止從觀測推上限。
+  - **spec 段落開頭句仍宣告 "is unmeasured"**，而同一段結尾說 "has now been measured"。
+    R1 的 H2 只點名段尾那句禁令，我就只改了那一句。
+  - **抽樣腳本的守衛是字串式路徑比對，五條旁路實測全部放行**：APFS 大小寫不敏感、
+    firmlink、以及**目的地是 `~/.claude/projects` 本身**（`rmtree` + 寫入唯讀語料，
+    違反不變式 1）。`Sources/LTMMemory/EventStore.swift` 的 `CorpusLocation` 就是正確
+    做法，其註解逐字禁止複製那段邏輯——那支腳本就是被禁止的複製品，且比原版弱三處。
+  - **修法一律改成性質而非列舉**：doc comment / README / spec 三處不再複述任何數字
+    （連「某桶是 0」都不複述），只留定性結論與指向紀錄的指標；spec 條文改成「不得從
+    **任何**被觀測到的段長分佈推導上限」。抽樣腳本**不再接受目的地參數**——用
+    `tempfile.mkdtemp()` 自己建立並印出，沒有外來路徑就沒有要判定的東西；另留一道
+    inode 身分檢查當縱深（大小寫與 firmlink 折疊到同一個 inode，五條旁路實測全擋）。
+
+### Fixed
 - **#18 verify R1 的 6 條 HIGH**（`e6494ef` 之後的修復）。核心邏輯沒問題，**壞的是
   那些數字的可信度與周邊宣稱**——四條打在量測紀錄上、一條在 spec、一條在 CHANGELOG。
   - **`JSONSerialization` 的數字解析不保真，初版用它比對分數。** 初版附了一個實驗

@@ -196,13 +196,13 @@ k=20，104 個查詢，每個規模 2,080 個候選。「相鄰平手」的分�
 ```bash
 swift build -c release
 
-# 抽樣（目的地必須在 repo 之外——腳本自己會擋）
-python3 scripts/sample-corpus-scales.py /path/outside/repo 100 400 1600
+# 抽樣。目的地**由腳本自己建立並印出**（呼叫端不提供路徑——見下方 R2 那一節）
+python3 scripts/sample-corpus-scales.py 100 400 1600
+# → 目的地（由本腳本建立）：/var/folders/.../ltm-rrf-scales-XXXX
 
-# 各規模建索引
+ROOT=<上一行印出的路徑>
 for n in 100 400 1600; do
-  LTM_CORPUS_ROOT=/path/outside/repo/n$n/corpus \
-  LTM_DERIVED_ROOT=/path/outside/repo/n$n/derived \
+  LTM_CORPUS_ROOT=$ROOT/n$n/corpus LTM_DERIVED_ROOT=$ROOT/n$n/derived \
     .build/release/ltm build --full
 done
 
@@ -245,6 +245,36 @@ LTM_CORPUS_ROOT=<語料> LTM_DERIVED_ROOT=<索引> \
 裡從未出現（`git log --all -S"平手很常見"` 只命中初版 commit 自己）。那段撤回敘事
 出自 issue #18 的 body 對一個**未落地**工作狀態的描述，被我當成 repo 事實轉述了。
 
-**留著這一節的理由**：這份紀錄的每一個數字都經過一次「看起來對、其實方法有洞」的
-迭代，而洞的形狀是可複製的——**我做了一個實驗、得到想要的答案就停手，而那個實驗
-測的不是我需要的那個性質**。下一份量測最可能重犯的就是這個。
+### R2 抓到的：撤回只寫進了描述撤回的文件
+
+R1 修完之後跑的 R2（5 個 lens 只跑完 3 個，devil's advocate 因 ECONNRESET 失敗——
+所以那一輪的覆蓋不完整）又報了 HIGH，而且是**同一批事實**的殘留：
+
+- 「`cjk-4plus` 與 `mixed` 一次都沒觀測到平手」還留在 `ConservativeStrategy.swift`
+  與 `docs/memory-systems/README.md`，而**同一個 commit 落地的上表**就寫著
+  `cjk-4plus` 在兩個較大規模都是 0.3%。撤回寫進了 CHANGELOG 與本檔（**描述**撤回
+  的兩份文件），沒寫進 doc comment 與 README（**被**撤回的兩份）。
+- 「觀測到的段長都是 2」還留在 spec、doc comment、README 三處，而本檔第 115 行
+  就寫著 400 檔那一階出現 2 段長度 3。最刺的是：那句話唯一的任務是提醒「那是觀測、
+  不是上界」，而它自己把觀測講錯了——spec 因此用一個**假的**觀測去禁止從觀測推上限。
+- spec 段落的**開頭句**仍宣告 "is unmeasured"，而同一段的結尾說 "has now been
+  measured"。R1 的 H2 只點名了段尾那句禁令，我就只改了那一句。
+- 抽樣腳本的守衛是字串式路徑比對，實測五條旁路全部放行——包含目的地是
+  `~/.claude/projects` **本身**（會 `rmtree` 並寫入唯讀語料，違反不變式 1）。
+  而 `Sources/LTMMemory/EventStore.swift` 的 `CorpusLocation` 就是這件事的正確做法，
+  它的註解逐字禁止複製那段邏輯。
+
+**修法都改成性質而非列舉**：doc comment、README、spec 三處不再複述任何數字（連
+「某桶是 0」都不複述），只留定性結論與指向本檔的指標；spec 的條文改成「不得從
+**任何**被觀測到的段長分佈推導上限」。抽樣腳本則**不再接受目的地參數**——它用
+`tempfile.mkdtemp()` 自己建立並印出來，沒有外來路徑就沒有要判定的東西（另留一道
+inode 身分的 sanity check 當縱深，五條旁路實測全擋）。
+
+**留著這兩節的理由**：這份紀錄的每一個數字都經過兩次「看起來對、其實有洞」的迭代，
+而兩次的形狀不同、都值得記：
+
+- **R1 的形狀**：我做了一個實驗、得到想要的答案就停手，而那個實驗測的不是我需要的
+  那個性質（測寫入端單射，需要的是讀取端保真）。
+- **R2 的形狀**：我修的是**被引用的句子**，不是那個事實。finding 說「doc comment
+  宣稱 X」，我就去改 doc comment 的措辭，既沒有把更正傳播到其他複本，也沒有回頭問
+  「這個弱化後的版本現在還對嗎」——而它剛好落在被新資料打掉的那一格。
