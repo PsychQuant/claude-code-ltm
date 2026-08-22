@@ -1,0 +1,10 @@
+#!/bin/sh
+# snippet 裡有一個看起來像鍵的 \"score\" : 999。抽取只認鍵位置，必須忽略它。
+# 手算答案：3 筆候選、相鄰對 2、平手 1（前兩筆）、段長 2。
+cat <<'JSON'
+[
+ { "band" : 1, "snippet" : "討論到 \"score\" : 999 這個欄位", "score" : 0.03 },
+ { "band" : 1, "snippet" : "無關", "score" : 0.03 },
+ { "band" : 2, "snippet" : "x", "score" : 0.02 }
+]
+JSON
