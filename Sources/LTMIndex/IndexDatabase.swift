@@ -249,7 +249,7 @@ public final class IndexDatabase {
     ///
     /// 這裡仍然是「對來源集合取極值」——與被移除的 `session_id` 同一個形狀。
     /// 它目前安全，因為 resume 複製不改原始時間戳，所以 `MAX` 退化成常數：
-    /// 實測 8,680 檔、23,908 個跨檔 uuid，時間戳相異率 **0.00%**
+    /// 實測 8,744 檔、**2,736 個會成為 chunk 的跨檔 turn**，時間戳相異率 **0.00%**
     /// （`docs/measurements/2026-08-18-resume-duplication.md` 的「補量」一節；
     /// 該紀錄原本明文不涵蓋時間戳，是 #25 verify 抓到引用落空後補的）。
     ///

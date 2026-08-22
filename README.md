@@ -38,8 +38,9 @@ claude-LTM 在它之上建可拋棄的索引與可插拔的記憶策略，讓 Cl
 1. **`~/.claude/projects/` 唯讀。** 我們不擁有 source of truth。任何寫入路徑都是 bug。
 2. **索引是純衍生物。** `rm -rf ~/.claude-ltm/derived && ltm build` 必須得到等價結果。
    任何只活在索引裡的東西都違規。
-3. **回傳一律附指標。** 每個命中帶 `(project, sessionId, uuid, timestamp)`，可回原 jsonl
-   讀完整上下文。**檢索只負責導航，不負責當答案。**
+3. **回傳一律附指標。** 每個命中帶 `(project, sessions, uuid, timestamp)`，可回原 jsonl
+   讀完整上下文。**檢索只負責導航，不負責當答案。** `sessions` 是**集合**——持有
+   這則 turn 的每一個來源檔各一個 session id，沒有哪一個是「代表」（#25）。
 
 第 3 條的推論：LLM 提取（若有）只能用於 **routing**，不能用於 **answering**。同樣是提取，
 用來決定「該讀哪一段」是安全的，用來產生「答案是什麼」是危險的。
@@ -138,7 +139,10 @@ ltm memory --prune --force       # 連「一筆都不剩」也照做（換代後
 - **查詢前會把語料的新內容併進索引**（前綴雜湊對得上就只讀尾巴）。這條路徑會寫入，
   所以它跟 `ltm build` 拿同一把單寫者鎖；拿不到就用既有索引回答，不等待也不失敗。
 - **同一則對話 turn 只算一段記憶**。session resume 會把舊 turn 複製進新檔案，那仍然
-  是同一段記憶——指標報最近觀察到的 session，而定址用的是不隨 resume 改變的值。
+  是同一段記憶——去重之後是一個 chunk，而**指標回傳全部持有它的 session**，不挑
+  代表；定址用的是不隨 resume 改變的值。（此處原本寫「指標報最近觀察到的 session」，
+  #25 證明那條規則從未生效：resume 不改訊息時間戳，所以「最近」永遠平手，實際由
+  檔名字典序決定，且會隨新檔出現而改變。）
 
 量測基線見 [`docs/measurements/`](docs/measurements/)，設計文件見
 [`docs/superpowers/specs/`](docs/superpowers/specs/)。**本節不含任何效能宣稱**——

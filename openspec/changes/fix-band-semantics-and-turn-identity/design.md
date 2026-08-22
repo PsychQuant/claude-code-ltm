@@ -60,7 +60,7 @@ Accepted cost: moving a project to a different path changes its fingerprint and 
 
 ### `sessionId` is demoted from identity to navigation
 
-The pointer tuple returned with every hit still contains `sessionId` — a reader needs it to open the conversation. But it is now metadata carried by the chunk, not part of what makes a turn *that* turn. When one turn appears in several session files, **every** observing file's session identifier is retained in `chunk_sources` and all of them are returned; none is designated as the chunk's session.
+The pointer tuple returned with every hit still carries session information — a reader needs it to open the conversation. But it is navigation metadata, not part of what makes a turn *that* turn. (Amended 2026-08-22 by #25: this sentence previously said the tuple contains a singular `sessionId` "carried by the chunk". It is now a set carried by `chunk_sources`, not a scalar on the chunk row.) When one turn appears in several session files, **every** observing file's session identifier is retained in `chunk_sources` and all of them are returned; none is designated as the chunk's session.
 
 (Superseded 2026-08-22 by #25. This sentence previously said the chunk stores "the most recent `sessionId` observed, because that is the session most likely still open". That rule was never operative — resume copies preserve the original message timestamp, so the recency comparison always tied and the outcome fell to file-path ordering, which is position rather than content, and which shifted whenever another copy appeared. `chunks.session_id` was removed in index layout 5.)
 
@@ -101,7 +101,7 @@ The spec records this explicitly, because the same change made after real histor
 **Interface / data shape**
 
 - `Anchor.source` is 32 lowercase hex characters (project fingerprint). `Anchor` keeps its four-component shape.
-- `chunks` is unique on `(project_fingerprint, uuid)`; `session_id` remains a column and is no longer part of any key.
+- `chunks` is unique on `(project_fingerprint, uuid)`; `session_id` is not part of any key. (Amended 2026-08-22 by #25: this line previously read "`session_id` remains a column" — it no longer is one. The column was removed in index layout 5 and session identity now lives only in `chunk_sources`, one row per holding source.)
 - `ScoredChunk.band` is derived from `channels.count`; the JSON output's `band` field reports the stratum, not the rank.
 
 **Failure modes**

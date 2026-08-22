@@ -5,6 +5,30 @@
 ## Unreleased
 
 ### Fixed
+- **#25 第三輪 verify**（`11b614a`+`b30f9c2`；這輪 5/5 lens 全跑完，補上第二輪因週配額
+  用盡而從未執行的 requirements / logic / devils-advocate）。**核心邏輯零 finding** —— 欄位
+  對位、layout 4→5 遷移、生產路徑無特權元素三項獨立複核皆通過。問題全在文件遷移與量測：
+  - **`.claude/rules/ltm-analogy.md`（自稱 source of truth）落後於它自己的摘要。** 該檔開頭
+    逐字寫著「三處不要各寫一份完整版，那是保證會漂移的結構」，而我上一輪只改了摘要
+    （CLAUDE.md），讓漂移以最糟方向發生：**摘要比 SoT 新**。性質 1 仍寫「違反兩次」、
+    性質 5 導出的不變式 3 仍是單數 `sessionId`。已補上第三次違反，並記下它為什麼偽裝
+    得最好——**存進去的不是一個 id，而是一個挑選結果**；會變的不是那個值，是產生它的
+    規則。判準因此推進一層：不只問「這個識別碼會不會變」，還要問「這個值怎麼被決定，
+    那個決定會不會隨無關的東西改變」。
+  - **README.md 兩處未遷移**，其中一處把已被證偽的規則當**現行行為**寫在「刻意的，不是
+    暫時的」清單裡——live spec 已逐字寫「That rule never held」，門面仍在宣傳它。
+  - `fix-band-semantics-and-turn-identity` 的 `design.md` 第三處（Implementation Contract 的
+    Interface/data shape：「`session_id` remains a column」）與 `tasks.md` 兩處仍記載已移除
+    的規則，其中一條 Verify 的三個指涉（spec Example、fixture、測試名）全部落空。
+  - `CorpusScanner.swift` 的型別文件仍以舊四元組敘述不變式 3、並稱 session 是 chunk 的欄位。
+  - **補量的母體錯了（DA 抓到，我在修「引用落空」的動作裡重犯同類錯）**：`MAX(chunk_sources
+    .timestamp)` 只在「一個 chunk 有 ≥2 個 source 列」時才有多於一個成員，那個母體是
+    **2,736**，而我上一輪量的是只要求 `uuid`+`timestamp` 的寬鬆母體 **23,908**——差 8.7 倍，
+    其餘是 tool_use/result 這類永不進索引的行。0 相異於超集確實蘊涵 0 於子集（我也直接
+    量了子集＝0/2,736），所以結論沒變，但「量測要涵蓋你宣稱的那件事」指的是**母體也要
+    對得上**。已改用正確母體，並在該節寫明兩個母體的差異與它們為何不可互相比較。
+
+### Fixed
 - **#25 第二輪 verify 的四條 findings**（`11b614a` 之後；該輪 5 個 lens 只跑完 2 個——
   requirements／logic／devils-advocate 都因週配額用盡失敗，覆蓋不全）：
   - **待歸檔 delta 的修法先前不夠**：上一輪只改掉 delta 裡「most recently observed」那一句，

@@ -4,8 +4,15 @@ import LTMCore
 
 /// 一則被索引的 turn。
 ///
-/// 指標四元組 `(project, sessionID, uuid, timestamp)` 是不變式 3 的載體——**每一筆
-/// 回傳都得帶著它**，所以它是 chunk 的欄位而不是可選的裝飾。
+/// 這個型別是**掃描層的一筆觀測**：某個來源檔的某一行，在那個檔裡帶著那個
+/// `sessionID`。它是逐來源的事實，不是「這則 turn 的 session」——同一則 turn 經
+/// resume 複製後會以不同 `sessionID` 出現在多個檔，每一份都是一筆各自為真的觀測。
+///
+/// 落地時這些觀測進 `chunk_sources`（每個持有者一列）；`chunks` 只留
+/// `(project, uuid, timestamp)` 三個純量。不變式 3 的指標因此是
+/// `(project, sessions, uuid, timestamp)`，其中 `sessions` 是集合——**沒有代表值**
+/// （#25，index layout 5；先前這裡寫「指標四元組…是 chunk 的欄位」，那是 session
+/// 還被壓成單值時的敘述）。
 ///
 /// `project` 刻意**不進** anchor：語料的 project 目錄名是路徑轉寫（可能很長、
 /// 可能含任意字元），而 `Anchor.source` 受 `OpaqueIdentifier` 約束（ASCII、≤64）。

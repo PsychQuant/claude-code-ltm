@@ -5,7 +5,7 @@
 ## 2. Anchor 與 turn 身分
 
 - [x] 2.1 `Anchor.source` 改為 project 指紋，實現 design decision "An anchor's source is a project fingerprint, not a session identifier" 與 requirement "Anchor addresses corpus text by content, not by index identity" 的修訂條款 "The source fingerprint SHALL be derived from a property of the corpus that does not change when the same turn is observed again through a different session file"：source 為 project 目錄名的 SHA-256 前 32 個小寫十六進位字元。Behavior：同一則 turn 經由兩個 session 檔觀察到時，anchor 相同；指紋符合 `OpaqueIdentifier`（實測 311 個 project 有 173 個名稱超過 64 字元，故不可直接存名稱）；canonical store 內不出現本機路徑。Verify：LTMCoreTests 的指紋穩定性與形狀測試。
-- [x] 2.2 chunk 身分改為 `(project 指紋, turn 識別碼)`，實現 design decisions "Turn de-duplication is by content, and the uniqueness key follows" 與 "`sessionId` is demoted from identity to navigation"，對應 requirement "Chunk granularity is one conversation turn with full pointer metadata" 的修訂條款 "A turn observed through several session files … SHALL yield one chunk"：唯一鍵改掉、upsert 不再改寫身分欄位、`session_id` 降為導航 metadata 並存最近觀察到的值。Behavior：同一 turn 出現在兩個 session 檔時索引只有一個 chunk，其 pointer 報最新的 session。Verify：LTMIndexTests 的 resume 去重測試（spec Example 的三列 fixture）。
+- [x] 2.2 chunk 身分改為 `(project 指紋, turn 識別碼)`，實現 design decisions "Turn de-duplication is by content, and the uniqueness key follows" 與 "`sessionId` is demoted from identity to navigation"，對應 requirement "Chunk granularity is one conversation turn with full pointer metadata" 的修訂條款 "A turn observed through several session files … SHALL yield one chunk"：唯一鍵改掉、upsert 不再改寫身分欄位、`session_id` 降為導航 metadata。Behavior：同一 turn 出現在兩個 session 檔時索引只有一個 chunk。Verify：`LTMIndexTests` 的 resume 去重測試。（2026-08-22 由 #25 修正：本行原本另寫「並存最近觀察到的值」「其 pointer 報最新的 session」，且 Verify 指名 spec Example 的三列 fixture 與 `navigationTieBreakFollowsTheSpecExample`。那條規則從未生效並已於 layout 5 整條移除，該 Example 已從 spec 刪除，該測試已改名為 `identicalTimestampsKeepEverySourceAfterBuild` 並換了斷言——三個指涉都已不存在。去重本身仍然成立，故保留。）
 - [x] 2.3 舊格式 anchor 的拒絕路徑，實現 design decision "Existing anchors are discarded, and this is the only moment that is free" 與 requirement "Anchors recorded under a superseded source-fingerprint form are refused, not reinterpreted" 與 ltm-cli 的 "An index built under a superseded anchor format is refused"：索引記錄 anchor 格式版本；不符時查詢非零結束並指名 `ltm build --full`，事件層對舊格式紀錄具名拒絕而非重新詮釋。Behavior：兩條路徑都拒絕、都指名補救方式，且不隱式重建。Verify：LTMServiceTests 的格式不符拒絕測試；LTMMemoryTests 的舊格式紀錄拒絕測試。
 - [x] 2.4 跨 resume 的使用歷史存活測試，實現 memory-events 的 "Anchor survives a session resume"：fixture 為同一 turn 先後出現在兩個 session 檔（不同 sessionId）。Behavior：在只有第一個檔案時記錄的事件，在第二個檔案索引後仍解析得到，且被 projection 計入。Verify：具名的 LTMServiceTests 跨 resume 測試——這是 B3 的回歸鎖。
 
@@ -87,7 +87,7 @@
   去重（task 2.2）引入的，不是 `chunk_sources`。
 - [x] 9.3 **導航欄位改由 `chunk_sources` 重算**。`session_id` / `timestamp` 是
   「還被哪些來源持有」的函數。先前由 upsert 的 CASE 決定，於是一個來源被刪掉後
-  值凍結在已不存在的檔案上。平手規則（時間戳相同時取 source key 最小者）順帶讓
+  值凍結在已不存在的檔案上。平手規則（時間戳相同時取 source key 最小者）——**此句已於 2026-08-22 由 #25 作廢**：那個方向後來被 `b5c099a` 改成 DESC、再於 layout 5 整條移除（session 不再有代表值），而「順帶解決 #25」的說法本身也已在 issue #25 上具名撤回（它只涵蓋決定性，不涵蓋正確性）——原文順帶讓
   #25 有了明確答案。layoutVersion 3 → 4。
 - [x] 9.4 **band 分層從 facade 搬進 `RetrievalEngine`**。retrieval spec 的
   「SHALL NOT reorder outside that seam」是本 change 從未修改的既有 requirement，
