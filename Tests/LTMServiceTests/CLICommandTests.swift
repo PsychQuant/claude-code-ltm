@@ -215,7 +215,8 @@ func jsonOutputIsMachineComplete() throws {
     }
     #expect(!objects.isEmpty)
     for object in objects {
-        for field in ["project", "sessionId", "uuid", "timestamp"] {
+        // `sessionId` 不在此列：指標的 session 分量是集合 `sessions`（#25）。
+        for field in ["project", "uuid", "timestamp"] {
             let value = object[field] as? String
             #expect(value?.isEmpty == false, "\(field) 缺漏——不變式 3 要求每筆都帶指標")
         }
@@ -247,12 +248,8 @@ func jsonCarriesSessionsArrayForBothSingleAndMultiSourceHits() throws {
     for object in objects {
         let snippet = object["snippet"] as? String ?? ""
         let sessions = object["sessions"] as? [String] ?? []
-        let sessionID = object["sessionId"] as? String ?? ""
 
         #expect(!sessions.isEmpty, "每一筆都要有 sessions，單一來源也不例外")
-        #expect(
-            sessions.contains(sessionID),
-            "sessionId 必須是 sessions 的成員（它是代表值，不是另一個獨立的值）")
 
         if snippet.contains("共用") {
             #expect(
@@ -454,4 +451,77 @@ func invalidKIsRefused() throws {
         ["query", "內容", "--all-projects", "--k", "abc"], environment: workspace.environment)
     #expect(nonNumeric.code == LTMCommandLine.ExitCode.usageError.rawValue)
     #expect(nonNumeric.out.isEmpty, "不得靜默改用預設然後回報成功")
+}
+
+@Test("--json 不得有把單一 session 稱作「這個」session 的欄位")
+func jsonHasNoPrivilegedSingleSessionField() throws {
+    // #25 選項 3：N 份 resume 複製是 N 個等價來源，沒有哪一個是「代表」。
+    // 一個名為 `sessionId`（單數、定指）的欄位是對來源的假宣稱——它先前的值
+    // 由 source_key 極值決定，而極值會隨新檔案出現而改變（實測見 CHANGELOG）。
+    // 真相是集合，所以輸出只留集合。
+    let workspace = try CLIWorkspace.makeWithResumeDuplicate(
+        shared: "被 resume 複製的共用內容", uniqueToA: "只在一份檔案裡的內容",
+        sessionA: "aaaaaaaa-1111-2222-3333-444444444444",
+        sessionB: "bbbbbbbb-1111-2222-3333-444444444444")
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let result = try runCLI(
+        ["query", "內容", "--all-projects", "--json"], environment: workspace.environment)
+    #expect(result.code == 0)
+    let objects =
+        try JSONSerialization.jsonObject(with: Data(result.out.utf8)) as? [[String: Any]] ?? []
+    #expect(!objects.isEmpty)
+    for object in objects {
+        #expect(
+            object["sessionId"] == nil,
+            "不得有單數 sessionId 欄位——它宣稱某一個來源是「這個」來源，而 N 份 resume 複製之間沒有這種特權")
+        #expect(object["sessions"] is [Any], "sessions 陣列才是導航資訊的本體")
+    }
+}
+
+@Test("新的 resume 複製出現時，既有記憶的來源資訊只會增加，不會改變既有的值")
+func addingAResumeCopyOnlyGrowsTheSourceSet() throws {
+    // 這是 #25 真正的病灶（實測 T0→T1→T2）：先前「挑極值」的做法讓一則**內容
+    // 從未改變**的記憶，其指標因為**另一個檔案出現**而改變——那是位置定址，
+    // 違反 ltm-analogy 的性質 1。集合只增不改，因為它不挑。
+    let sessionM = "mmmmmmmm-1111-2222-3333-444444444444"
+    let sessionS = "ssssssss-1111-2222-3333-444444444444"
+    let sessionA = "aaaaaaaa-1111-2222-3333-444444444444"
+    let shared = "被 resume 複製的共用內容"
+
+    let workspace = try CLIWorkspace.makeWithResumeDuplicate(
+        shared: shared, uniqueToA: "只在一份檔案裡的內容",
+        sessionA: sessionM, sessionB: sessionS)
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    func sessionsForShared() throws -> Set<String> {
+        let out = try runCLI(
+            ["query", "內容", "--all-projects", "--json"], environment: workspace.environment).out
+        let objects = try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [[String: Any]] ?? []
+        let hit = objects.first { ($0["snippet"] as? String ?? "").contains("共用") }
+        return Set(hit?["sessions"] as? [String] ?? [])
+    }
+
+    let before = try sessionsForShared()
+    #expect(before == [sessionM, sessionS])
+
+    // 之後才出現一份字典序排在最前面的 resume 複製——先前這會讓回傳的指標
+    // 從 m 翻成 a，即使那則記憶本身一個字都沒動。
+    let dir = workspace.corpus.appendingPathComponent("proj-demo")
+    let line = try #require(
+        String(
+            data: try JSONSerialization.data(withJSONObject: [
+                "type": "user", "uuid": "11111111-aaaa-bbbb-cccc-dddddddddddd",
+                "sessionId": sessionA, "timestamp": "2026-08-17T06:00:00.000Z",
+                "message": ["role": "user", "content": shared],
+            ]), encoding: .utf8))
+    try (line + "\n").write(
+        to: dir.appendingPathComponent("s-0.jsonl"), atomically: true, encoding: .utf8)
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let after = try sessionsForShared()
+    #expect(after == [sessionM, sessionS, sessionA], "新來源加入集合")
+    #expect(before.isSubset(of: after), "既有的來源值一個都不能消失或被取代")
 }

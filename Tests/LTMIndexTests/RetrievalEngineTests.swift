@@ -122,7 +122,10 @@ func everyHitCarriesFourFieldPointer() throws {
     #expect(!hits.isEmpty)
     for hit in hits {
         #expect(!hit.project.isEmpty)
-        #expect(!hit.sessionID.isEmpty)
+        // 指標的 session 分量是**集合**，不是單值（#25）——至少一個來源，
+        // 每個都非空。沒有「代表值」可以斷言。
+        #expect(!hit.sessionSources.isEmpty)
+        #expect(hit.sessionSources.allSatisfy { !$0.isEmpty })
         #expect(!hit.uuid.isEmpty)
         #expect(hit.timestamp.timeIntervalSince1970 > 0)
         #expect(hit.anchor.turnID == hit.uuid)

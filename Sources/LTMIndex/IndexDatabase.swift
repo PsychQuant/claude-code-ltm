@@ -29,7 +29,14 @@ public final class IndexDatabase {
     ///
     /// 版本不符時整份重建，而不是嘗試遷移：索引是純衍生物（不變式 2），重建的
     /// 代價是時間，遷移寫錯的代價是安靜的錯誤結果。
-    public static let layoutVersion = 4
+    ///
+    /// 4 → 5（#25）：`chunks.session_id` 移除。它曾經存「這則 turn 屬於哪個
+    /// session」的單一值，而那個值是從一組等價來源裡挑出來的代表——挑選規則
+    /// 由 `source_key`（檔案路徑＝位置）決定，且會隨新 resume 檔出現而改變。
+    /// 導航資訊改由 `chunk_sources` 回傳全部來源。留著這個欄位會違反不變式 2：
+    /// 停止維護後它的值變成 insertion-order 相依，增量與全量重建不再等價
+    /// （由 `IncrementalEquivalenceTests` 的性質測試抓到）。
+    public static let layoutVersion = 5
 
     public enum DatabaseError: Error, Sendable, Equatable {
         case openFailed(path: String, message: String)
@@ -110,7 +117,6 @@ public final class IndexDatabase {
                 id INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
                 project_fingerprint TEXT NOT NULL,
-                session_id TEXT NOT NULL,
                 uuid TEXT NOT NULL,
                 timestamp REAL NOT NULL,
                 role TEXT NOT NULL,
@@ -216,43 +222,38 @@ public final class IndexDatabase {
 
     // MARK: - chunk 寫入
 
-    /// 由尚存的 `chunk_sources` 連結重算一個 chunk 的導航欄位。
+    /// 由尚存的 `chunk_sources` 連結重算 chunk 的 `timestamp`。
     ///
-    /// 規則：**時間戳最新的那個來源勝出**；時間戳相同時取 `source_key` 字典序
-    /// **最大**者。
+    /// ## 為什麼只剩 timestamp（#25）
     ///
-    /// ## 第二條為什麼是 DESC 而不是 ASC
+    /// 這裡曾經同時重算 `session_id`，規則是「時間戳最新者勝，平手取 `source_key`
+    /// 字典序最大」。那條規則現在整個拿掉了，因為它做的事是**從一組等價來源裡
+    /// 挑一個當代表**，而那個代表值：
     ///
-    /// 因為 corpus-indexing spec 的 Example 逐字要求它：同一則 `t-1` 出現在
-    /// `s-A.jsonl` 與 `s-B.jsonl` 時，「`t-1`'s pointer reports session `s-B`」。
+    /// 1. 由 `source_key`（檔案路徑＝**位置**）決定，違反 `ltm-analogy` 的性質 1
+    ///    「內容定址，不是位置定址」；
+    /// 2. **會變**——實測：一則內容從未改動的 turn，其代表值會因為**另一個
+    ///    resume 檔出現**而改變（極值隨集合成長而移動）。CLAUDE.md 記載這條
+    ///    判準已被違反兩次，判準是「會不會變」而非禁用清單；這是第三次。
     ///
-    /// 這一條曾經寫成 ASC，理由是「先前勝負由插入順序偶然決定，現在結果一樣、
-    /// 只是把副作用寫成規則」。**那句話是錯的，結果剛好相反**：舊的 upsert 是
-    /// `CASE WHEN excluded.timestamp >= chunks.timestamp`，而插入順序是 source key
-    /// 升冪，所以平手時勝出的是**最後插入者（source key 最大）**。實測 base 給
-    /// `b.jsonl`、改動後給 `a.jsonl`——每一則被 resume 複製過的 turn 的導航指標
-    /// 都換了一個值，而那個新值正是 spec Example 明文說不該有的那個。
+    /// 導航資訊改由 `sessionSources(chunkIDs:)` 回傳**全部**來源，沒有代表值。
     ///
-    /// ## 誠實邊界：這仍然是任意的
+    /// `chunks.session_id` 欄位已在 layout 5 移除。要知道一則 turn 屬於哪些
+    /// session，唯一的來源是 `chunk_sources`。（中途曾考慮「留欄位但不維護」，
+    /// 但那讓它的值變成 insertion-order 相依，增量與全量重建不再等價——性質
+    /// 測試抓到了，所以改成刪除。）
     ///
-    /// 平手是**常態不是例外**（resume 複製不改時間戳，量測見
-    /// `docs/measurements/2026-08-18-resume-duplication.md`），所以絕大多數情形下
-    /// 決定導航指標的是檔名字典序，而不是「最近觀察到」。字典序與「較晚觀察到」
-    /// 沒有因果關係——它只是碰巧與 spec Example 的期望一致。
-    ///
-    /// **這不是 #25 的解答**，#25 要的是一個真的代理指標（mtime／觀察序／回傳全部
-    /// 來源）或一次明確的介面決定。本函式只保證**確定性**：同一組連結必然算出
-    /// 同一個結果，所以增量與全量重建一致。決定性與正確性是兩件事。
+    /// `timestamp` 留在這裡是因為它**不是**同一類東西：它是那段經歷發生的時間
+    /// （記憶的性質），而不是它被哪個檔記下來（紀錄的性質）。所有 resume 複製
+    /// 帶的是同一個原始時間戳，所以這個值不隨來源集合變動；它也真的有讀者
+    /// （排序與範圍查詢）。
     private func refreshNavigation(chunkID: Int64) throws {
         try execute(
             """
             UPDATE chunks SET
-                session_id = (SELECT s.session_id FROM chunk_sources s
-                              WHERE s.chunk_id = chunks.id
-                              ORDER BY s.timestamp DESC, s.source_key DESC LIMIT 1),
-                timestamp  = (SELECT s.timestamp  FROM chunk_sources s
-                              WHERE s.chunk_id = chunks.id
-                              ORDER BY s.timestamp DESC, s.source_key DESC LIMIT 1)
+                timestamp = (SELECT s.timestamp FROM chunk_sources s
+                             WHERE s.chunk_id = chunks.id
+                             ORDER BY s.timestamp DESC, s.source_key DESC LIMIT 1)
             WHERE id = ? AND EXISTS(SELECT 1 FROM chunk_sources s WHERE s.chunk_id = chunks.id)
             """, bind: [.integer(chunkID)])
     }
@@ -325,9 +326,9 @@ public final class IndexDatabase {
         }
         // 活下來的那些：先記住是誰，解除連結之後要重算導航欄位。
         //
-        // 沒有這一步，chunk 會活下來但 `session_id` / `timestamp` 凍結在剛被解除
-        // 持有的那個來源上——指標指向一個已經不在磁碟上的 session 檔，而
-        // 「檢索負責導航」正是指標存在的唯一理由。
+        // 沒有這一步，chunk 會活下來但 `timestamp` 凍結在剛被解除持有的那個
+        // 來源上。（session 已不是 chunks 的欄位——見 layout 5 的說明；它的
+        // 多來源事實住在 `chunk_sources`，解除連結時自然就更新了。）
         var survivors: [Int64] = []
         try query(
             """
@@ -389,28 +390,28 @@ public final class IndexDatabase {
             try execute(
                 """
                 INSERT INTO chunks(
-                    project, project_fingerprint, session_id, uuid, timestamp,
+                    project, project_fingerprint, uuid, timestamp,
                     role, text, anchor_hash, anchor_span_lower, anchor_span_upper)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_fingerprint, uuid) DO UPDATE SET
                     text=excluded.text,
                     role=excluded.role,
                     anchor_hash=excluded.anchor_hash,
                     anchor_span_lower=excluded.anchor_span_lower,
                     anchor_span_upper=excluded.anchor_span_upper,
-                    -- 導航欄位（session_id / timestamp）**不在這裡決定**。
+                    -- `timestamp` **不在這裡決定**：它是「這則 turn 目前還被哪些
+                    -- 來源持有」的函數，所以住在 `chunk_sources`，由
+                    -- `refreshNavigation` 從尚存的連結重算。先前它是 upsert 的
+                    -- CASE，於是一個來源被刪掉之後，勝出的那份值就**凍結**在已不
+                    -- 存在的檔案上——增量與全量重建因此不同（不變式 2）。
                     --
-                    -- 它們是「這則 turn 目前還被哪些來源持有」的函數，所以住在
-                    -- `chunk_sources`，由 `refreshNavigation` 從尚存的連結重算。
-                    -- 先前它們是 upsert 的 CASE，於是一個來源被刪掉之後，勝出的
-                    -- 那份值就**凍結**在已不存在的檔案上——增量與全量重建因此不同
-                    -- （不變式 2），而回傳的指標指向一個打不開的 session 檔。
-                    session_id=chunks.session_id,
+                    -- session 已不再是 chunks 的欄位（#25，layout 5）：它是多值的，
+                    -- 住在 `chunk_sources`。
                     timestamp=chunks.timestamp
                 """,
                 bind: [
                     .text(chunk.project), .text(chunk.projectFingerprint),
-                    .text(chunk.sessionID), .text(chunk.uuid),
+                    .text(chunk.uuid),
                     .double(chunk.timestamp.timeIntervalSince1970),
                     .text(chunk.role), .text(chunk.text),
                     .text(chunk.anchor.contentHash.hex),

@@ -225,7 +225,9 @@ func everyHitCarriesPointer() throws {
     #expect(!outcome.hits.isEmpty)
     for hit in outcome.hits {
         #expect(!hit.project.isEmpty)
-        #expect(!hit.sessionID.isEmpty)
+        // session 分量是集合（#25）：至少一個來源，每個都非空。
+        #expect(!hit.sessionSources.isEmpty)
+        #expect(hit.sessionSources.allSatisfy { !$0.isEmpty })
         #expect(!hit.uuid.isEmpty)
         #expect(hit.timestamp.timeIntervalSince1970 > 0)
     }
@@ -828,9 +830,6 @@ func everyHitCarriesItsSourceSet() throws {
     #expect(!outcome.hits.isEmpty)
     for hit in outcome.hits {
         #expect(!hit.sessionSources.isEmpty, "來源集合至少一個元素，單一來源也不例外")
-        #expect(
-            hit.sessionSources.contains(hit.sessionID),
-            "sessionID 是來源集合的代表值，必須是它的成員")
     }
 }
 
@@ -859,5 +858,6 @@ func aResumeDuplicatedTurnReportsEveryHoldingSource() throws {
     #expect(
         hit.sessionSources.sorted() == [sessionA, sessionB].sorted(),
         "兩個持有者都要回報，實得 \(hit.sessionSources)")
-    #expect(hit.sessionID == sessionA, "代表值取 source_key 字典序第一個（s-A.jsonl）")
+    // 刻意**不**斷言任何「代表值」——沒有代表值可挑就是這次改動的重點（#25）。
+    // 集合的順序只是顯示確定性，不得有消費端依賴 [0]。
 }

@@ -23,7 +23,7 @@ TBD - created by archiving change 'retrieval-engine-and-cli'. Update Purpose aft
 ---
 ### Requirement: ltm query prints pointered hits in human and JSON forms
 
-`ltm query <text>` SHALL print up to k (default 20) hits. Human-readable output SHALL show rank, project, timestamp, snippet, and the pointer. With `--json`, output SHALL be a JSON array whose objects each carry `project`, `sessionId`, `uuid`, `timestamp`, `snippet`, `score`, and `band`; when a reordering strategy is active each object SHALL additionally carry the seam's displacement and reason fields; when event recording produced a presentation identifier for that hit, the object SHALL additionally carry a `presentation` field containing that identifier.
+`ltm query <text>` SHALL print up to k (default 20) hits. Human-readable output SHALL show rank, project, timestamp, snippet, and the pointer. With `--json`, output SHALL be a JSON array whose objects each carry `project`, `sessions`, `uuid`, `timestamp`, `snippet`, `score`, and `band`; when a reordering strategy is active each object SHALL additionally carry the seam's displacement and reason fields; when event recording produced a presentation identifier for that hit, the object SHALL additionally carry a `presentation` field containing that identifier.
 
 Both forms SHALL surface the hit's full source set, as defined by the `corpus-indexing` capability's "Chunk granularity is one conversation turn with full pointer metadata" Requirement and required on every result by the `retrieval` capability. This capability specifies only the two output shapes:
 
@@ -33,7 +33,7 @@ Both forms SHALL surface the hit's full source set, as defined by the `corpus-in
 #### Scenario: JSON output is machine-complete
 
 - **WHEN** `ltm query "fixture phrase" --json` returns 3 hits
-- **THEN** the output parses as a JSON array of 3 objects and every object contains non-empty `project`, `sessionId`, `uuid`, `timestamp` fields plus `snippet`, `score`, `band`
+- **THEN** the output parses as a JSON array of 3 objects and every object contains non-empty `project`, `uuid`, `timestamp` fields, a non-empty `sessions` array, and `snippet`, `score`, `band` — and no object carries a singular `sessionId` field
 
 #### Scenario: JSON output exposes the presentation identifier when events were recorded
 
@@ -44,7 +44,7 @@ Both forms SHALL surface the hit's full source set, as defined by the `corpus-in
 
 - **GIVEN** a corpus where one turn is held by two session files and another turn is held by exactly one
 - **WHEN** `ltm query --json` retrieves both
-- **THEN** the multi-source hit's `sessions` array has two elements and the single-source hit's has one, and both hits' `sessionId` values appear in their own `sessions` array
+- **THEN** the multi-source hit's `sessions` array has two elements and the single-source hit's has one
 
 #### Scenario: Human-readable output names every source only when there is more than one
 

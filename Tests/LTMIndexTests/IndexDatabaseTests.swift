@@ -146,7 +146,7 @@ func segmentationSplitsCJKAndKeepsLatin() {
     #expect(segmented.contains("MemoryStrategy"))
 }
 
-@Test("同一則 turn 經由兩個 session 檔寫入時只留一個 chunk，pointer 報最新 session")
+@Test("同一則 turn 經由兩個 session 檔寫入時只留一個 chunk")
 func resumeDuplicateYieldsSingleChunk() throws {
     let path = makeTempDatabasePath()
     defer { try? FileManager.default.removeItem(atPath: path) }
@@ -167,11 +167,12 @@ func resumeDuplicateYieldsSingleChunk() throws {
         sourceKey: "proj-one/session-B.jsonl")
 
     #expect(try db.chunkCount() == 1, "resume 複製的同一則 turn 是一段記憶，不是兩段")
-    var session = ""
-    try db.query("SELECT session_id FROM chunks") { statement in
-        session = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? ""
-    }
-    #expect(session == "22222222-2222-2222-2222-222222222222", "pointer 應報最近觀察到的 session")
+
+    // 先前這裡還斷言 `chunks.session_id == "2222…"`（「pointer 應報最近觀察到的
+    // session」）。那個欄位與那條規則都在 #25／layout 5 移除了——「最近觀察到」
+    // 在真實語料裡永遠平手，實際由檔名字典序決定。兩個來源都保留的性質由
+    // `identicalTimestampsYieldBothSources` 鎖住（且用的是**相同**時間戳，
+    // 也就是真實語料裡真正會發生的那個分支）。
 }
 
 @Test("時間戳完全相同的兩份 resume 複製，來源集合含兩個 session——不是字典序挑一個")

@@ -421,11 +421,9 @@ enum QueryCommand {
             // 多來源時列出全部並用**複數**標籤——「這則 turn 存在於好幾份檔案」
             // 因此在輸出上直接看得見，不必數。單一來源維持既有的單數形式逐字不變
             // （#25）。
-            if hit.sessionSources.count > 1 {
-                print("   ↳ sessions \(hit.sessionSources.joined(separator: ", "))  turn \(hit.uuid)")
-            } else {
-                print("   ↳ session \(hit.sessionID)  turn \(hit.uuid)")
-            }
+            let label = hit.sessionSources.count > 1 ? "sessions" : "session"
+            print(
+                "   ↳ \(label) \(hit.sessionSources.joined(separator: ", "))  turn \(hit.uuid)")
             if hit.displacement != 0 {
                 print("   ↳ 位移 \(hit.displacement > 0 ? "+" : "")\(hit.displacement)（\(hit.historyDescription)）")
             }
@@ -470,7 +468,6 @@ enum QueryCommand {
         let objects: [[String: Any]] = outcome.hits.map { hit in
             var object: [String: Any] = [
                 "project": hit.project,
-                "sessionId": hit.sessionID,
                 "uuid": hit.uuid,
                 "timestamp": formatter.string(from: hit.timestamp),
                 "snippet": hit.snippet,

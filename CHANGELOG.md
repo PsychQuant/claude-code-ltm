@@ -5,13 +5,43 @@
 ## Unreleased
 
 ### Changed
-- 導航從「挑一個來源」改為**回傳全部來源**（#25）。`chunks.session_id` 的規則本來是「存最近觀察到的那一份」，但 session resume 複製 turn 時不改訊息時間戳，所以時間戳比較在真實語料裡**永遠平手**，實際決定勝負的是 `source_key` 字典序——與「最近觀察到」沒有因果關係（量測：`docs/measurements/2026-08-18-resume-duplication.md`，8,324 檔中 12,488 筆內容 100% 相同、98.9% sessionId 不同）。
-  - `ScoredChunk` 與 `QueryHit` 新增 `sessionSources: [String]`，列出持有該 turn 的**每一個**來源檔各自的 session id（依 `source_key` 字典序），資料來自 #24 已加入的 `chunk_sources` 連結表，不需 schema 變更。
-  - 純量 `sessionID` **保留**，但語意改寫為「來源集合的代表值」（集合的第一個元素），不再宣稱任何觀察順序含意，且**由集合導出而非獨立計算**——不存在兩個寫者。
-  - `timestamp` 維持純量：每個持有者帶的都是該 turn 的原始時間戳，多值化後集合只會有一個相異值。此判斷依賴上述已量測事實，若行為改變需重審（`chunk_sources` 已存各自的 timestamp，屆時不需 schema 遷移）。
-  - `ltm query --json` 每個物件新增 `sessions` 陣列，**無條件輸出**（單一來源時也有，只是一個元素）。刻意不沿用 `displacement`／`presentation` 的「只在有意義時才附加」慣例：條件式輸出會逼消費端寫一條只在單一來源時才走到、最不容易被測到的 fallback 分支。
-  - `ltm query` human 輸出：單一來源時指標行逐字不變；多來源時改用複數標籤 `↳ sessions a, b`，讓「這則 turn 存在於好幾份檔案」直接看得見。
-  - 補上 issue #25 明文指出的測試缺口：既有的 resume 測試刻意給了**不同**時間戳，驗的是真實語料中不會發生的分支；新測試用**完全相同**的時間戳，斷言回傳兩個來源而非字典序挑一個。
+- **導航的 session 分量改成集合，`chunks.session_id` 欄位移除（#25，index layout 4 → 5，需重建索引）。**
+  上一版（`a28d3dc`）保留了一個「代表值」純量，`/idd-verify #25` 指出它與 `refreshNavigation`
+  是兩個方向相反的寫者（儲存取 `source_key` 極大、回傳取極小），同一份 DB 對同一則 turn
+  給出兩個不同的值。往下追根因不是方向選錯，而是**「挑一個代表」這個動作本身**：
+  - 實測（三步）：一則**內容從未改動**的 turn，其代表值會因為**另一個 resume 檔出現**
+    而改變——`{M,S}` 時回報 M，加入 `s-A` 後回報 A，加入 `s-Z` 後儲存值變 Z。兩個方向
+    都不穩定，因為極值隨集合成長而移動。
+  - `source_key` 是檔案路徑＝**位置**。以它挑代表就是位置定址，違反 `ltm-analogy` 性質 1
+    「內容定址，不是位置定址」。CLAUDE.md 記載這條判準已被違反兩次、判準是「會不會變」
+    而非禁用清單——這是第三次，也是偽裝最好的一次（它看起來是個穩定純量）。
+  - 人類記憶的對應：source memory 與 content memory 本來就可分離，來源是複數或缺失
+    都不損害記憶本身；把它壓成必填單值是模型錯了，而資料層（`chunk_sources`）早就是複數。
+  修法是**拿掉特權元素**而非拿掉集合：`ScoredChunk`／`QueryHit` 的純量 `sessionID` 移除，
+  `sessionSources` 就是導航資訊；`--json` 移除 `sessionId`、保留 `sessions`；human 輸出
+  依來源數用單／複數標籤列出全部。`chunk_sources.session_id` 與 `CorpusChunk.sessionID`
+  保留不動——那些是逐來源的真實事實，不是挑出來的代表。
+  中途曾試「留欄位但不維護」的折衷，被不變式 2 的性質測試擋下：停止維護後該欄位的值
+  變成 insertion-order 相依，增量與全量重建不再等價。**那條性質測試賺到了它的位置。**
+  同時把 session 的不變式 2 覆蓋從 `ChunkRow` 搬到 `chunk_sources` 的比較裡——資料搬家，
+  覆蓋要跟著搬，否則等於靜默移除該性質的保護。
+  三份 spec（corpus-indexing 為唯一定義者）、CLAUDE.md 不變式 3、以及尚未歸檔的
+  `fix-band-semantics-and-turn-identity` delta（它原本會在 archive 時**靜默覆蓋**掉這些
+  改動）一併更正。
+
+  <details><summary>上一版（<code>a28d3dc</code>）原本的條目，保留供追溯</summary>
+
+  導航從「挑一個來源」改為回傳全部來源；`ScoredChunk`／`QueryHit` 新增
+  `sessionSources`；純量 `sessionID` 保留為「來源集合的代表值」並宣稱
+  「由集合導出而非獨立計算——不存在兩個寫者」；`timestamp` 維持純量；
+  `--json` 新增 `sessions`；human 多來源改複數標籤；補上 issue 明文要求的
+  相同時間戳測試。
+
+  **其中「不存在兩個寫者」是錯的**（`refreshNavigation` 仍在寫、且方向相反），
+  而「代表值」這個概念本身是上面那條記載的病灶。其餘各項仍然成立並保留在
+  現行實作裡。
+
+  </details>
 
 ### Fixed
 - 第五輪（最後一輪）修復 `add-spreading-activation-fixes`（#15），並在此停止迭代：

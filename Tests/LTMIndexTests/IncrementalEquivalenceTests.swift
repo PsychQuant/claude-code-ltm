@@ -56,9 +56,10 @@ import Testing
 // - **只有一個 project**。生成器所有檔案都在同一個 project 底下，所以複合唯一鍵
 //   `(project_fingerprint, uuid)` 的「跨 project 同 uuid 不得合併」這一半**完全沒被
 //   走到**——而那正是本 change 的核心改動之一。
-// - **`Snapshot` 不比對 `chunk_sources` 的 `session_id` / `timestamp`**，也不比對
-//   `state.json`。導航欄位是從連結重算的，所以連結本身錯了而重算結果碰巧相同時，
-//   這裡看不見。
+// - **`Snapshot` 不比對 `chunk_sources` 的 `timestamp`**，也不比對 `state.json`。
+//   `timestamp` 是從連結重算的，所以連結本身錯了而重算結果碰巧相同時，這裡
+//   看不見。（`session_id` 自 #25／layout 5 起**有**比對——它從 `chunks` 的
+//   欄位搬到 `chunk_sources`，覆蓋跟著搬。）
 // - **生成語料裡 0% 是會被跳過的行**（工具呼叫、結果、摘要）。真實語料裡那是 46%
 //   （`docs/measurements/2026-08-18-resume-duplication.md`：677,913 解析 / 583,924
 //   跳過），所以跳過路徑與它的計數在這裡零覆蓋。
@@ -149,7 +150,6 @@ private struct ChunkRow: Equatable, Comparable {
     let fingerprint: String
     let uuid: String
     let project: String
-    let sessionID: String
     let role: String
     let text: String
     let timestamp: Double
@@ -183,7 +183,7 @@ private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> S
     var chunks: [ChunkRow] = []
     try database.query(
         """
-        SELECT project_fingerprint, uuid, project, session_id, role, text, timestamp,
+        SELECT project_fingerprint, uuid, project, role, text, timestamp,
                anchor_hash, anchor_span_lower, anchor_span_upper, vector_row
         FROM chunks
         """
@@ -192,23 +192,30 @@ private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> S
             sqlite3_column_text(statement, i).map { String(cString: $0) } ?? ""
         }
         let row =
-            sqlite3_column_type(statement, 10) == SQLITE_NULL
-            ? nil : Int(sqlite3_column_int64(statement, 10))
+            sqlite3_column_type(statement, 9) == SQLITE_NULL
+            ? nil : Int(sqlite3_column_int64(statement, 9))
         chunks.append(
             ChunkRow(
-                fingerprint: str(0), uuid: str(1), project: str(2), sessionID: str(3),
-                role: str(4), text: str(5),
-                timestamp: sqlite3_column_double(statement, 6),
-                anchorHash: str(7),
-                spanLower: Int(sqlite3_column_int64(statement, 8)),
-                spanUpper: Int(sqlite3_column_int64(statement, 9)),
+                fingerprint: str(0), uuid: str(1), project: str(2),
+                role: str(3), text: str(4),
+                timestamp: sqlite3_column_double(statement, 5),
+                anchorHash: str(6),
+                spanLower: Int(sqlite3_column_int64(statement, 7)),
+                spanUpper: Int(sqlite3_column_int64(statement, 8)),
                 vector: row.flatMap { sidecar?.vector(at: $0) }))
     }
 
     var links: [String] = []
-    try database.query("SELECT chunk_id, source_key FROM chunk_sources") { statement in
+    // **`session_id` 在這裡比對**（#25，layout 5）。它先前是 `chunks` 的欄位、
+    // 由 `ChunkRow` 涵蓋；現在導航的 session 只住在 `chunk_sources`，所以覆蓋
+    // 必須跟著搬過來，否則刪掉 `ChunkRow.sessionID` 等於靜默移除 session 的
+    // 不變式 2 覆蓋。（本檔頂端「不比對 chunk_sources 的 session_id」那條
+    // 已知限制因此只剩 `timestamp`。）
+    try database.query("SELECT chunk_id, source_key, session_id FROM chunk_sources") { statement in
         // chunk_id 是 rowid，跨兩份索引不可比——換成該 chunk 的身分。
-        links.append("\(sqlite3_column_int64(statement, 0))|\(String(cString: sqlite3_column_text(statement, 1)))")
+        links.append(
+            "\(sqlite3_column_int64(statement, 0))|\(String(cString: sqlite3_column_text(statement, 1)))"
+                + "|\(String(cString: sqlite3_column_text(statement, 2)))")
     }
     // 把 rowid 換成 (fingerprint, uuid)。
     var identityByRowID: [Int64: String] = [:]
@@ -265,7 +272,6 @@ private func divergences(incremental a: Snapshot, fullRebuild b: Snapshot) -> [S
     } else {
         for (x, y) in zip(a.chunks, b.chunks) where x != y {
             var fields: [String] = []
-            if x.sessionID != y.sessionID { fields.append("session_id(\(x.sessionID.prefix(8)) vs \(y.sessionID.prefix(8)))") }
             if x.text != y.text { fields.append("text") }
             if x.anchorHash != y.anchorHash { fields.append("anchor_hash") }
             if x.timestamp != y.timestamp { fields.append("timestamp") }

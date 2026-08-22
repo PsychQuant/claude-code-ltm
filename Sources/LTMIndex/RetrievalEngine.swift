@@ -8,15 +8,6 @@ import SQLite3
 /// 帶著完整的指標四元組——不變式 3 在這一層就成立，不是等 facade 補上。
 public struct ScoredChunk: Sendable, Equatable {
     public let project: String
-    /// **來源集合的代表值，不是「最近觀察到的那一份」。**
-    ///
-    /// 定義為 `sessionSources` 的第一個元素（依 `source_key` 字典序）。字典序與
-    /// 觀察順序沒有因果關係——它只是一個**確定**的選擇，讓同一組來源必然得到同一個
-    /// 代表值。真正的導航資訊是 `sessionSources`（見該欄位與 #25）。
-    ///
-    /// 保留這個純量欄位是為了不破壞既有消費端與 `--json` 的既有欄位契約；它不獨立
-    /// 計算，而是由 `sessionSources` 導出，所以不存在「同一件事兩個寫者」。
-    public let sessionID: String
     /// 持有這則 turn 的**全部**來源各自的 session 識別碼，依 `source_key` 字典序。
     ///
     /// 至少一個元素。session resume 把同一則 turn 複製進新檔案（全語料 8,324 檔
@@ -148,14 +139,14 @@ public struct RetrievalEngine {
         var results: [ScoredChunk] = []
         for (offset, entry) in ordered.enumerated() {
             guard let chunk = try loadChunk(rowID: entry.key) else { continue }
-            // 來源集合是導航資訊的本體，`sessionID` 只是它的代表值（#25）。撈不到
-            // 任何來源列代表 `chunk_sources` 與 `chunks` 不一致——那是資料損壞，
-            // 依 retrieval spec「不得部分回傳」跳過這一筆，與 `loadChunk` 對損壞列
-            // 的處置一致。
+            // 來源集合**就是**導航資訊，沒有代表值可挑（#25／`ltm-analogy` 性質 1）。
+            // 撈不到任何來源列代表 `chunk_sources` 與 `chunks` 不一致——那是資料
+            // 損壞，依 retrieval spec「不得部分回傳」跳過這一筆，與 `loadChunk`
+            // 對損壞列的處置一致。
             guard let sources = sourcesByChunk[entry.key], !sources.isEmpty else { continue }
             results.append(
                 ScoredChunk(
-                    project: chunk.project, sessionID: sources[0], sessionSources: sources,
+                    project: chunk.project, sessionSources: sources,
                     uuid: chunk.uuid,
                     timestamp: chunk.timestamp, text: chunk.text, anchor: chunk.anchor,
                     fusedScore: entry.value.score, emittedRank: offset,
@@ -236,7 +227,6 @@ public struct RetrievalEngine {
 
     private struct StoredChunk {
         let project: String
-        let sessionID: String
         let uuid: String
         let timestamp: Date
         let text: String
@@ -247,18 +237,20 @@ public struct RetrievalEngine {
         var found: StoredChunk?
         try database.query(
             """
-            SELECT project, session_id, uuid, timestamp, text,
+            SELECT project, uuid, timestamp, text,
                    anchor_hash, anchor_span_lower, anchor_span_upper, project_fingerprint
             FROM chunks WHERE id = ?
             """, bind: [.integer(rowID)]
         ) { statement in
+            // 欄位索引對應上面的 SELECT 順序：
+            // 0 project, 1 uuid, 2 timestamp, 3 text, 4 anchor_hash,
+            // 5 span_lower, 6 span_upper, 7 project_fingerprint
             func text(_ column: Int32) -> String { columnText(statement, column) }
-            let sessionID = text(1)
-            let uuid = text(2)
-            let hashHex = text(5)
-            let fingerprint = text(8)
-            let lower = Int(sqlite3_column_int64(statement, 6))
-            let upper = Int(sqlite3_column_int64(statement, 7))
+            let uuid = text(1)
+            let hashHex = text(4)
+            let fingerprint = text(7)
+            let lower = Int(sqlite3_column_int64(statement, 5))
+            let upper = Int(sqlite3_column_int64(statement, 6))
             // 索引裡的值理論上都是寫入時驗過的，但它是磁碟上的外來資料——
             // 損壞的列跳過，不 trap。
             guard let hash = try? ContentHash(validating: hashHex),
@@ -267,9 +259,9 @@ public struct RetrievalEngine {
                 (try? OpaqueIdentifier.validate(uuid)) != nil
             else { return }
             found = StoredChunk(
-                project: text(0), sessionID: sessionID, uuid: uuid,
-                timestamp: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
-                text: text(4),
+                project: text(0), uuid: uuid,
+                timestamp: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
+                text: text(3),
                 // source 是 **project 指紋**，與寫入端（`CorpusScanner`）一致。
                 // 用 sessionID 重建 anchor 會讓同一則 turn 在 resume 前後得到不同的
                 // anchor，於是既有事件全部對不上——B3 的病灶就在讀寫兩端不一致。

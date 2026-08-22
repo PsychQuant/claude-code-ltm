@@ -397,17 +397,18 @@ func absentSidecarIsFineWhenNoVectorsAreDeclared() throws {
     #expect(report.totalChunks == 1, "沒有向量不影響 lexical 通道")
 }
 
-@Test("時間戳相同時，導航指標報 spec Example 指名的那個 session")
-func navigationTieBreakFollowsTheSpecExample() throws {
-    // corpus-indexing spec 的 Example 逐字：同一則 `t-1` 出現在 `s-A.jsonl` 與
-    // `s-B.jsonl` 時「`t-1`'s pointer reports session `s-B`」。
+@Test("時間戳相同時，建置後兩個來源都在——沒有被挑掉的那一個")
+func identicalTimestampsKeepEverySourceAfterBuild() throws {
+    // 這條測試取代了先前的 `navigationTieBreakFollowsTheSpecExample`。
     //
-    // 平手是**常態不是例外**（resume 複製不改時間戳），所以這條規則決定的是真實
-    // 語料裡絕大多數 resume 過的 turn 的指標，不是邊角情形。
+    // 那條鎖的是「平手時指標報 source_key 字典序**最大**者」，理由是當時的
+    // corpus-indexing spec Example 逐字要求 `s-B`。#25 把整個「挑一個」的模型
+    // 拆掉了：N 份 resume 複製是 N 個等價來源，沒有代表值——挑選規則由檔案路徑
+    // （位置）決定，且會隨新檔案出現而改變，違反 `ltm-analogy` 的性質 1。
     //
-    // 這條測試存在的直接理由：`ORDER BY … source_key ASC` 與 `DESC` 互換時，
-    // 301 個測試沒有一條會紅——那個方向曾經被翻反過，而且是在一句宣稱
-    // 「現在結果一樣」的註解底下翻的。
+    // 所以要鎖的性質換了：**建置之後兩個來源都必須在**。這是 end-to-end（走
+    // 真正的 IndexBuilder 掃描路徑），與 IndexDatabaseTests 那條直接插入的
+    // 互補。
     let workspace = try makeWorkspace()
     defer {
         try? FileManager.default.removeItem(at: workspace.corpus)
@@ -415,10 +416,9 @@ func navigationTieBreakFollowsTheSpecExample() throws {
     }
     let uuid = "0000ffff-aaaa-bbbb-cccc-dddddddddddd"
     let stamp = "2026-08-17T06:00:00.000Z"
-    for (file, session) in [
-        ("s-A.jsonl", "aaaaaaaa-1111-1111-1111-111111111111"),
-        ("s-B.jsonl", "bbbbbbbb-2222-2222-2222-222222222222"),
-    ] {
+    let sessionA = "aaaaaaaa-1111-1111-1111-111111111111"
+    let sessionB = "bbbbbbbb-2222-2222-2222-222222222222"
+    for (file, session) in [("s-A.jsonl", sessionA), ("s-B.jsonl", sessionB)] {
         _ = try writeSession(
             in: workspace.corpus, project: "proj-one", file: file,
             lines: [turnLine(uuid: uuid, session: session, role: "user",
@@ -432,12 +432,12 @@ func navigationTieBreakFollowsTheSpecExample() throws {
 
     let database = try IndexDatabase(path: workspace.derived.databaseURL.path)
     defer { database.close() }
-    var stored = "?"
-    try database.query("SELECT session_id FROM chunks WHERE uuid = ?", bind: [.text(uuid)]) {
-        statement in
-        stored = String(cString: sqlite3_column_text(statement, 0))
+    var chunkID: Int64 = 0
+    try database.query("SELECT id FROM chunks WHERE uuid = ?", bind: [.text(uuid)]) { statement in
+        chunkID = sqlite3_column_int64(statement, 0)
     }
+    let sources = try database.sessionSources(chunkIDs: [chunkID])[chunkID] ?? []
     #expect(
-        stored.hasPrefix("bbbbbbbb"),
-        "spec Example 說指標報 s-B；實際 \(stored.prefix(8))")
+        sources == [sessionA, sessionB],
+        "兩個來源都要留著（依 source_key 字典序），實得 \(sources)")
 }
