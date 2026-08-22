@@ -60,7 +60,9 @@ Accepted cost: moving a project to a different path changes its fingerprint and 
 
 ### `sessionId` is demoted from identity to navigation
 
-The pointer tuple returned with every hit still contains `sessionId` — a reader needs it to open the conversation. But it is now metadata carried by the chunk, not part of what makes a turn *that* turn. When one turn appears in several session files, the chunk stores the most recent `sessionId` observed, because that is the session most likely still open.
+The pointer tuple returned with every hit still contains `sessionId` — a reader needs it to open the conversation. But it is now metadata carried by the chunk, not part of what makes a turn *that* turn. When one turn appears in several session files, **every** observing file's session identifier is retained in `chunk_sources` and all of them are returned; none is designated as the chunk's session.
+
+(Superseded 2026-08-22 by #25. This sentence previously said the chunk stores "the most recent `sessionId` observed, because that is the session most likely still open". That rule was never operative — resume copies preserve the original message timestamp, so the recency comparison always tied and the outcome fell to file-path ordering, which is position rather than content, and which shifted whenever another copy appeared. `chunks.session_id` was removed in index layout 5.)
 
 This is the distinction the original design missed: **identity and navigation are different jobs**, and `sessionId` is only fit for the second.
 
@@ -91,7 +93,7 @@ The spec records this explicitly, because the same change made after real histor
 **Behavior**
 
 - `ltm query --strategy human-like` over a corpus with recorded history returns an order that differs from `archival`, and reports non-zero displacement for at least one hit. Today both return identical output; that difference is the acceptance signal for the band fix.
-- A turn present in several session files is retrieved once. Its pointer names the most recently observed `sessionId`.
+- A turn present in several session files is retrieved once. Its pointer carries the full set of holding sessions, with no element designated as representative (amended 2026-08-22 by #25 — see the Decision above).
 - Usage history recorded before a session is resumed still resolves after the resume: the same anchor dereferences to the same text, and the projection counts it.
 - `ltm query --strategy <name>` without `--record` applies the named strategy and writes no event.
 - Every query path that mutates the derived index holds the same single-writer lock as `ltm build`.

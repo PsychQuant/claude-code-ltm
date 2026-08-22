@@ -2,34 +2,42 @@
 
 ### Requirement: Chunk granularity is one conversation turn with full pointer metadata
 
-Indexing SHALL create exactly one chunk per conversation turn. A turn observed through several session files — as happens when a session is resumed or forked and its earlier turns are copied into a new file — SHALL yield one chunk, not one per file. Each chunk SHALL be addressable by the pointer tuple `(project, sessions, uuid, timestamp)` alongside its text and vector, and the tuple SHALL be returned with any retrieval hit derived from that chunk.
+Indexing SHALL create exactly one chunk per conversation turn. A turn observed through several session files — as happens when a session is resumed or forked and its earlier turns are copied into a new file — SHALL yield one chunk, not one per file. Each chunk SHALL be addressable by the pointer tuple `(project, sessions, uuid, timestamp)` alongside its text and vector, and the tuple SHALL be returned with any retrieval hit derived from that chunk. The `sessions` component is a set held in `chunk_sources`, one entry per source file holding the chunk; the other three are scalar columns on the chunk row.
 
-The chunk's identity SHALL be `(project fingerprint, turn identifier)`, matching the identity of the anchor that addresses it, so that one anchor corresponds to exactly one chunk. The session identifier SHALL NOT participate in chunk identity; it is navigation metadata. When a turn has been observed through several session files, **every** observing file's session identifier SHALL be retained in `chunk_sources`, and no single one SHALL be designated as the chunk's session.
-
-(Superseded 2026-08-22 by #25. This paragraph previously said the stored `sessionId` SHALL be "the most recently observed one, because that is the session a reader is most likely able to open". That rule was never operative: resume copies preserve the original message timestamp, so the recency comparison always tied and the result was decided by file-path ordering — position, not content — and it shifted whenever another resume copy appeared. The `chunks.session_id` column was removed in index layout 5. This delta is corrected here rather than left to overwrite the live spec on archive.)
+The chunk's identity SHALL be `(project fingerprint, turn identifier)`, matching the identity of the anchor that addresses it, so that one anchor corresponds to exactly one chunk. The session identifier SHALL NOT participate in chunk identity; it is navigation metadata.
 
 An earlier form of this requirement said "exactly one chunk per jsonl conversation turn", which read as one chunk per turn per file and was implemented with a global uniqueness constraint on the turn identifier alone. Measured over the whole corpus of 8,324 files (`docs/measurements/2026-08-18-resume-duplication.md`), 12,488 turn identifiers appear in more than one file, 100% of them with identical content and 98.9% under different session identifiers — so that constraint caused an upsert to overwrite the stored session identifier, which in turn orphaned every anchor recorded against the earlier value.
+
+**A chunk is routinely held by more than one source file.** Session resume copies the same turn into a new file, so one turn commonly exists in several session files; deduplication is by content, so those copies produce exactly one chunk. The chunk SHALL therefore additionally carry the set of session identifiers of every source file that holds it — one entry per holding source, each entry being that source's own session identifier. **This capability owns the definition of that set**; the `retrieval` and `ltm-cli` capabilities reference it and specify only how their own layer surfaces it.
+
+**There is no privileged single source.** A chunk SHALL NOT carry a scalar "the" session identifier, and no consumer SHALL treat any element of the source set as a representative. The set MAY be ordered by source key for display determinism, but that order carries no meaning and element zero is not special.
+
+This replaces an earlier rule that stored one chosen session identifier per chunk ("the most recently observed one"). That rule never held: resume copies preserve the original message timestamp, so the timestamp comparison it relied on always tied, and the outcome was decided by source-key ordering — that is, by file *path*, which is position rather than content. It was also unstable: measurement showed the chosen value changing for a turn whose content never changed, simply because another resume copy appeared and moved the extremum of the set. The `chunks.session_id` column was therefore removed in index layout 5; `chunk_sources` is the only place session identity lives. (Measured in `docs/measurements/2026-08-18-resume-duplication.md`: 12,488 turns across 8,324 files with identical content, 98.9% of them under differing session identifiers.)
+
+`timestamp` SHALL remain a single value. Every source holding a given turn carries that turn's original message timestamp, so the set would have exactly one distinct member — measured at 0.00% divergence across 23,908 cross-file turn identifiers in 8,680 files (`docs/measurements/2026-08-18-resume-duplication.md`, "補量" section). That measurement describes the corpus as it stands, not a guarantee from the writer of these files: were resume copies ever to rewrite the timestamp, this scalar would acquire exactly the instability that removed the session scalar, and SHALL then be revisited the same way.
 
 #### Scenario: Every chunk is pointered
 
 - **WHEN** a fixture corpus of 3 projects and 50 turns is indexed
 - **THEN** the index contains 50 chunks and each carries a non-empty `project`, `uuid` and `timestamp` plus a `sessions` set with at least one entry
 
-#### Scenario: A turn observed through two session files yields one chunk
+#### Scenario: A turn held by two sources carries both session identifiers
 
-- **GIVEN** a corpus where turn `t-1` appears in session file `s-A.jsonl` and again, with identical text, in `s-B.jsonl`
+- **GIVEN** two session files holding the same turn with identical content and identical message timestamps, as session resume produces
+- **WHEN** the corpus is indexed and that turn's chunk is examined
+- **THEN** the chunk carries a source set of two entries, one per holding file, each with that file's own session identifier
+
+##### Example: resume copy under differing session identifiers
+
+- **GIVEN** file `s-B.jsonl` holds turn `t-1` under session `s-B`, and file `s-A.jsonl` holds the identical turn `t-1` under session `s-A`, both with the same message timestamp
 - **WHEN** the corpus is indexed
-- **THEN** exactly one chunk exists for `t-1`, its source set is `{s-A, s-B}` with neither designated as the session, and a query matching that text returns it once
+- **THEN** exactly one chunk exists for `t-1` and its source set is `{s-A, s-B}` — neither is designated as the chunk's session
 
-##### Example: De-duplication across a resume
+#### Scenario: A turn held by one source carries a single-entry set
 
-| Source file | Turn id | Text | Session |
-| ----------- | ------- | ---- | ------- |
-| s-A.jsonl | t-1 | "the tokenizer decision" | s-A |
-| s-B.jsonl | t-1 | "the tokenizer decision" | s-B |
-| s-B.jsonl | t-2 | "and its measurement" | s-B |
-
-Indexing yields two chunks (`t-1`, `t-2`), not three. `t-1`'s source set is `{s-A, s-B}`; `t-2`'s is `{s-B}`.
+- **GIVEN** a turn appearing in exactly one session file
+- **WHEN** the corpus is indexed and that turn's chunk is examined
+- **THEN** the chunk's source set has exactly one entry, holding that file's session identifier
 
 ## ADDED Requirements
 

@@ -4,6 +4,31 @@
 
 ## Unreleased
 
+### Fixed
+- **#25 第二輪 verify 的四條 findings**（`11b614a` 之後；該輪 5 個 lens 只跑完 2 個——
+  requirements／logic／devils-advocate 都因週配額用盡失敗，覆蓋不全）：
+  - **待歸檔 delta 的修法先前不夠**：上一輪只改掉 delta 裡「most recently observed」那一句，
+    但 `## MODIFIED Requirements` 是**整條 Requirement 替換**——archive 一跑仍會刪掉本輪新增的
+    「There is no privileged single source」「element zero is not special」「owns the definition」
+    等全部條款，而 `retrieval` 與 `ltm-cli` 兩處**逐字指名**該 Requirement 為定義來源。已把
+    delta 的 body 同步為 live 全文，並用腳本逐條核對（3 個 Scenario + 5 個關鍵子句全數涵蓋）。
+  - `fix-band-semantics-and-turn-identity` 的 `design.md` 仍有兩處規定被移除的規則（含
+    Implementation Contract 的驗收條件），已補上 superseded 註記。
+  - live `corpus-indexing` spec 自我矛盾：同一份檔案先說 chunk row 只剩三個純量欄位，
+    Scenario 仍要求「all four pointer fields」——layout 5 之後那是結構上不可能成立的驗收條件。
+  - **誠實邊界違規（自己犯的）**：spec 與程式碼註解引用
+    `docs/measurements/2026-08-18-resume-duplication.md` 宣稱 timestamp 前提「已量測」，
+    而該紀錄第 62 行明文寫著「不涵蓋時間戳是否相同」。**補量**：唯讀掃 8,680 檔、23,908 個
+    跨檔 uuid，時間戳相異率 **0.00%**（0/23,908），寫進該紀錄的「補量」一節，並把 spec 與
+    註解改成引用這個具體數字＋明示它是語料當下的形狀而非寫入契約。
+  - 順帶移除 `refreshNavigation` 裡 `ORDER BY … source_key DESC` 這個**死 tiebreak**（只取
+    timestamp 時平手取誰都一樣），改為 `MAX(s.timestamp)`——在一份專講「source_key 排序＝
+    位置定址」的檔案裡，那條殘留會讓讀者以為 timestamp 仍有 path-derived 成分。
+  另補驗兩件 verify 因 lens 掛掉而未查的事：(1) layout 4 → 5 對既有 DB——實測手工造的
+  layout-4 庫（含 NOT NULL `session_id`）遇新 binary 乾淨觸發全量重建、舊表連欄位一併丟棄，
+  無半套狀態；(2) `loadChunk` 欄位索引整體前移一位——用各欄位值互不相同的資料端到端驗，
+  每欄都取到自己的值，無錯位。(#25)
+
 ### Changed
 - **導航的 session 分量改成集合，`chunks.session_id` 欄位移除（#25，index layout 4 → 5，需重建索引）。**
   上一版（`a28d3dc`）保留了一個「代表值」純量，`/idd-verify #25` 指出它與 `refreshNavigation`

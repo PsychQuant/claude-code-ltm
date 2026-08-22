@@ -244,16 +244,29 @@ public final class IndexDatabase {
     /// 測試抓到了，所以改成刪除。）
     ///
     /// `timestamp` 留在這裡是因為它**不是**同一類東西：它是那段經歷發生的時間
-    /// （記憶的性質），而不是它被哪個檔記下來（紀錄的性質）。所有 resume 複製
-    /// 帶的是同一個原始時間戳，所以這個值不隨來源集合變動；它也真的有讀者
+    /// （記憶的性質），而不是它被哪個檔記下來（紀錄的性質）。它也真的有讀者
     /// （排序與範圍查詢）。
+    ///
+    /// 這裡仍然是「對來源集合取極值」——與被移除的 `session_id` 同一個形狀。
+    /// 它目前安全，因為 resume 複製不改原始時間戳，所以 `MAX` 退化成常數：
+    /// 實測 8,680 檔、23,908 個跨檔 uuid，時間戳相異率 **0.00%**
+    /// （`docs/measurements/2026-08-18-resume-duplication.md` 的「補量」一節；
+    /// 該紀錄原本明文不涵蓋時間戳，是 #25 verify 抓到引用落空後補的）。
+    ///
+    /// **這是語料當下的形狀，不是寫入契約**。若 Claude Code 之後改成複製時重寫
+    /// timestamp，這個前提就失效，而本欄位會退化成與 `session_id` 相同的病灶；
+    /// 屆時的修法一樣是不挑極值。
+    ///
+    /// 先前這裡寫的是 `ORDER BY s.timestamp DESC, s.source_key DESC LIMIT 1`，
+    /// 與 `MAX()` 等價（平手時取誰都一樣，因為只取 timestamp 本身），但那個
+    /// `source_key` tiebreak 是**死的**，且在一份專門記錄「source_key 排序就是
+    /// 位置定址」的檔案裡會讓讀者以為 timestamp 仍有 path-derived 的成分。
     private func refreshNavigation(chunkID: Int64) throws {
         try execute(
             """
             UPDATE chunks SET
-                timestamp = (SELECT s.timestamp FROM chunk_sources s
-                             WHERE s.chunk_id = chunks.id
-                             ORDER BY s.timestamp DESC, s.source_key DESC LIMIT 1)
+                timestamp = (SELECT MAX(s.timestamp) FROM chunk_sources s
+                             WHERE s.chunk_id = chunks.id)
             WHERE id = ? AND EXISTS(SELECT 1 FROM chunk_sources s WHERE s.chunk_id = chunks.id)
             """, bind: [.integer(chunkID)])
     }

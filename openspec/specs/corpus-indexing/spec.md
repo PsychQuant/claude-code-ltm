@@ -66,12 +66,12 @@ Indexing SHALL create exactly one chunk per jsonl conversation turn. Each chunk 
 
 This replaces an earlier rule that stored one chosen session identifier per chunk ("the most recently observed one"). That rule never held: resume copies preserve the original message timestamp, so the timestamp comparison it relied on always tied, and the outcome was decided by source-key ordering — that is, by file *path*, which is position rather than content. It was also unstable: measurement showed the chosen value changing for a turn whose content never changed, simply because another resume copy appeared and moved the extremum of the set. The `chunks.session_id` column was therefore removed in index layout 5; `chunk_sources` is the only place session identity lives. (Measured in `docs/measurements/2026-08-18-resume-duplication.md`: 12,488 turns across 8,324 files with identical content, 98.9% of them under differing session identifiers.)
 
-`timestamp` SHALL remain a single value. Every source holding a given turn carries that turn's original message timestamp, so the set would have exactly one distinct member; this is a consequence of the measured resume behavior cited above, and is to be revisited if that behavior changes.
+`timestamp` SHALL remain a single value. Every source holding a given turn carries that turn's original message timestamp, so the set would have exactly one distinct member — measured at 0.00% divergence across 23,908 cross-file turn identifiers in 8,680 files (`docs/measurements/2026-08-18-resume-duplication.md`, "補量" section). That measurement describes the corpus as it stands, not a guarantee from the writer of these files: were resume copies ever to rewrite the timestamp, this scalar would acquire exactly the instability that removed the session scalar, and SHALL then be revisited the same way.
 
 #### Scenario: Every chunk is pointered
 
 - **WHEN** a fixture corpus of 3 projects and 50 turns is indexed
-- **THEN** the index contains 50 chunks and each chunk row carries non-empty values for all four pointer fields
+- **THEN** the index contains 50 chunks and each carries a non-empty `project`, `uuid` and `timestamp` plus a `sessions` set with at least one entry
 
 #### Scenario: A turn held by two sources carries both session identifiers
 
