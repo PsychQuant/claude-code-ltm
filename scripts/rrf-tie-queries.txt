@@ -1,0 +1,108 @@
+# #18 的查詢集。**全部為自行撰寫的通用技術詞彙**，不含任何語料片段
+# （CLAUDE.md 隱私邊界：測試/量測輸入用合成資料，不從 ~/.claude/projects/ 抄）。
+# 分桶不在本檔宣告——由 `QueryClassifier`（生產程式碼）在執行期算出，
+# 避免本檔與分類規則成為兩份會漂移的規格。
+測試
+索引
+記憶
+錯誤
+查詢
+向量
+快取
+部署
+效能
+重構
+型別
+編碼
+排序
+遷移
+授權
+併發
+佇列
+雜湊
+節點
+分頁
+壓縮
+憑證
+隔離
+冪等
+相容性
+一致性
+冪等性
+相依性
+資料庫
+中介層
+記憶體
+執行緒
+版本號
+對照表
+邊界值
+熔斷器
+觀察者
+建構子
+迭代器
+產生器
+雜湊表
+連線池
+時間戳
+正規化
+增量索引重建
+記憶策略可插拔
+向量嵌入模型
+分散式鎖的實作
+錯誤處理與重試
+相關度分層規則
+資料庫遷移腳本
+併發寫入的競態
+快取失效策略
+內容定址的指紋
+測試覆蓋率門檻
+非同步任務佇列
+憑證輪替流程
+監控告警閾值
+效能瓶頸的定位
+邊界條件的測試
+冪等性保證機制
+序列化格式相容
+記憶體洩漏排查
+灰度發布與回滾
+RRF fusion
+cosine similarity
+sqlite wal mode
+embedding revision
+incremental rebuild
+tokenizer
+bm25 ranking
+flock inode
+ftruncate
+prefix hash
+json schema
+unit test
+race condition
+idempotent
+backpressure
+sha256
+utf8
+regex
+mutex
+throughput
+索引 rebuild
+RRF 平手
+向量 cosine
+記憶 strategy
+sqlite 鎖
+增量 build
+embedding 版本
+band 分層
+chunk 去重
+session 導航
+anchor 指紋
+tokenizer 中文
+WAL 檔案
+快取 hit rate
+測試 coverage
+JSON 序列化
+併發 lock
+retry 策略
+效能 benchmark
+錯誤 handling
