@@ -110,7 +110,11 @@ public enum RankingGuard {
     /// 都不影響輸出。守衛存在的全部理由就是攔截不守規矩的實作，而那條路徑
     /// 從來沒被驗證過。
     ///
-    /// 現在幅度不再經過這個簽章，那個洞在結構上關掉了。
+    /// 幅度不再經過這個簽章——但**那不等於洞關掉了**。上限的值仍然由策略自己
+    /// 宣告，seam 只是改成從 protocol 讀而不是收策略傳來的引數；來源相同。
+    /// 完整論證與它為什麼是尚未做出的設計決定，見 `MemoryStrategy` 的
+    /// `displacementBound` 註解（那裡是 source of truth，此處不重述）。
+    /// 這一行先前寫著「那個洞在結構上關掉了」，與 SoT 相反（#17 verify）。
     public static func checkTieRunsOnly(
         original: [Candidate], reordered: [Candidate]
     ) throws -> [GuardedPlacement] {

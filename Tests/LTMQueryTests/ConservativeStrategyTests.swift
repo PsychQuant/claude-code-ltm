@@ -32,10 +32,16 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
 
     #expect(output.map(\.candidate.anchor) == [testAnchor("c"), testAnchor("b"), testAnchor("a")])
 
-    // 預設上限下仍然有 tie-breaking，只是幅度受限——強者往前一格。
+    // 預設上限下仍然有動作，但**不是**「強者往前一格」——那句話原本寫在這裡，
+    // 而它對下一行的輸入就是錯的（#17 verify）。`boundedReorderByStrength` 是
+    // 有界的相鄰交換趟數，且 `movedThisPass` 讓每個候選一趟只能動一次：
+    // `[a(0), b(2), c(5)]` 在 bound=1 下得到 `[b, a, c]`——**最強的 c 完全沒動**，
+    // 往前的是 b。所以預設上限的語意是「一趟相鄰交換」，不是「依強度排序」。
     let bounded = try ConservativeStrategy().rerank(input, with: strengths([("c", 5), ("b", 2)]))
     #expect(bounded.allSatisfy { abs($0.displacement) <= 1 })
-    #expect(bounded.map(\.candidate.anchor) != input.map(\.anchor), "預設上限下仍應有動作")
+    #expect(
+        bounded.map(\.candidate.anchor) == [testAnchor("b"), testAnchor("a"), testAnchor("c")],
+        "bound=1 是單趟相鄰交換：b 越過 a，c 因 a 已動過而被擋住")
 }
 
 @Test func conservativeNeverReordersCandidatesWithDifferentBaseScores() throws {
@@ -182,6 +188,27 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
     }
 }
 
+@Test(.timeLimit(.minutes(1)))
+func conservativeTerminatesOnNonFiniteScoresEvenWithTheSeamBypassed() throws {
+    // 上面那條測試**到不了**它宣稱要防的那個迴圈：`rerank` 在 seam 就被
+    // `requireFiniteBaseScores` 擋下，`rerankChecked` 根本沒被進入。所以 R3 那個
+    // 「`end` 從 `start + 1` 起算」的修法**沒有任何東西釘住**——實測把它改回
+    // `var end = start`，全部 67 條測試照樣全綠（#17 verify）。
+    //
+    // 而那條路徑不是假想的：`ValidatedCandidates` 是 `public`＋`Sendable`、可儲存
+    // 可轉手（`MemoryStrategy.swift` 的說明記著 #1 verify R6 的實測），所以
+    // `rerankChecked` 在 seam 被繞過的情況下是可達的。這條測試直接走那條路。
+    //
+    // 它回歸時的症狀是**掛住**而不是失敗，`.timeLimit` 把它轉成一個真的紅燈。
+    let bad = [
+        Candidate(anchor: testAnchor("x"), baseScore: .nan, band: RelevanceBand(rank: 0)),
+        Candidate(anchor: testAnchor("y"), baseScore: .nan, band: RelevanceBand(rank: 0)),
+    ]
+    // 不斷言拋不拋、拋什麼——只斷言**它會回來**。迴圈不前進時這一行永遠不返回。
+    _ = try? ConservativeStrategy().rerankChecked(
+        ValidatedCandidates(bad), with: .empty(at: instant))
+}
+
 @Test func negativeZeroAndPositiveZeroCountAsTied() throws {
     // -0.0 == 0.0 在 IEEE 754 為真，所以它們屬於同一個等分區段。這是對的
     // 行為，但值得釘住——它是「精確相等」這個判準的邊界之一。
@@ -261,6 +288,13 @@ private func strengths(_ entries: [(String, Double)]) -> Projection {
     #expect(zeroBound.map(\.candidate.anchor) == tied.map(\.anchor))
     #expect(zeroBound.allSatisfy { $0.displacement == 0 })
 
+    // **斷言完整的輸出順序，不只是「有變」。** 原本這裡只寫 `!= tied`，比 scenario
+    // 的 THEN 弱得多，而弱到剛好蓋不住它要覆蓋的那個性質（#17 verify）：`[b,a,c]`
+    // 也滿足 `!=`，但那不是「依強度排序」。scenario 的措辭已同步改成描述實際行為。
     let conservative = try ConservativeStrategy().rerank(tied, with: projection)
-    #expect(conservative.map(\.candidate.anchor) != tied.map(\.anchor))
+    #expect(
+        conservative.map(\.candidate.anchor)
+            == [testAnchor("b"), testAnchor("a"), testAnchor("c")],
+        "預設 bound=1：單趟相鄰交換，最強的 c 沒有移動")
+    #expect(conservative.allSatisfy { abs($0.displacement) <= 1 })
 }

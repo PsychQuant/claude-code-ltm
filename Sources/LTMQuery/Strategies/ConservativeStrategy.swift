@@ -137,8 +137,18 @@ public struct ConservativeStrategy: MemoryStrategy {
         // 而 R5 實測那個參數**沒有任何測試釘住**（改回 `max(count,1)` 全綠），
         // 因為所有經由策略的測試都已經被策略內部的有界重排壓住幅度了。
         //
-        // 三次都錯在同一個地方：**讓被約束者提供約束值**。現在上限由 seam 從
-        // protocol 讀，策略只提供它自己的額外條件。
+        // 三次都錯在同一個地方：**讓被約束者提供約束值**。
+        //
+        // **而那個洞還沒關掉。** 這裡先前寫著「現在上限由 seam 從 protocol 讀，
+        // 策略只提供它自己的額外條件」——那句話正是 `MemoryStrategy` 的
+        // `displacementBound` 逐字撤回過的宣稱（#1 verify R6 實測）：「從 protocol
+        // 讀」就是「從策略讀」，來源相同、只換了管線。要真的關掉，spec 得先回答
+        // 「誰有權決定上限」，那是尚未做出的設計決定（追蹤於 #16）。
+        //
+        // 這裡不重述那段論證——**它的 source of truth 是 `MemoryStrategy` 的
+        // `displacementBound` 註解**，重述一次就是第二份會漂移的規格。（本檔與
+        // `RankingGuard.checkTieRunsOnly` 都曾各自寫了一個「洞已關掉」的版本，
+        // 而它們與 SoT 相反，#17 verify 抓到。）
         let placements = try RankingGuard.checkTieRunsOnly(
             original: candidates, reordered: reordered)
 

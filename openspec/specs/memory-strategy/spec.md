@@ -203,7 +203,9 @@ Two further constraints on how that record may be cited, both learned the hard w
 
 - **GIVEN** a band whose candidates all carry equal base scores, and a projection in which they differ in strength
 - **WHEN** `human-like` is constructed with a bound of zero and when `conservative` is used
-- **THEN** the zero-bound `human-like` returns the input order unchanged while `conservative` reorders the tied candidates by strength
+- **THEN** the zero-bound `human-like` returns the input order unchanged, while `conservative` at its default bound moves at least one tied candidate
+
+> Note the asymmetry in what this scenario claims. `human-like` at bound zero does *nothing*, which is total. `conservative` at its default bound does *something*, which is not the same as ordering the run by strength: the shared reordering core performs a bounded number of adjacent-swap passes and lets each candidate move at most once per pass, so on a tied run `[a, b, c]` with strengths `0, 2, 5` the default bound yields `[b, a, c]` — the strongest candidate does not move at all. An earlier wording of this THEN said "reorders the tied candidates by strength", which is false at the shipped default and was not caught because the covering test asserted only that the order changed (#17 verify).
 
 #### Scenario: Conservative leaves differently-scored candidates alone
 

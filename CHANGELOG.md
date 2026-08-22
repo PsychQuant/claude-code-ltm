@@ -26,6 +26,33 @@
     不是指定的那個而且中途還在長大。
 
 ### Fixed
+- **#17 verify 的 4 條 HIGH**（`conservative` 檔次的裁決驗證；5/5 lens 全跑完，Codex 仍停用
+  ——**沒有跨模型盲驗**）。四條我都自己重跑實驗確認：
+  - **spec scenario 對 `conservative` 的 THEN 是錯的。** 它寫「reorders the tied
+    candidates by strength」，但共用的有界重排核心在預設 bound=1 下是**單趟相鄰交換**，
+    且 `movedThisPass` 讓每個候選一趟只能動一次：`[a(0), b(2), c(5)]` → `[b, a, c]`
+    ——**最強的 c 完全沒動**。覆蓋它的測試只斷言「順序有變」，比 scenario 的 THEN 弱得多，
+    弱到剛好蓋不住它要覆蓋的性質。scenario 改成描述實際行為並寫明那個不對稱；測試改成
+    斷言完整輸出順序。同一份測試裡「強者往前一格」那句註解對它自己的輸入就是錯的，一併修。
+  - **R3 的無限迴圈修法（`end = start + 1`）沒有任何東西釘住。** 實測改回 `var end = start`
+    → **67/67 全綠**。名義上的回歸鎖 `conservativeDoesNotHangOnNonFiniteBaseScores`
+    **到不了那個迴圈**：`rerank` 在 seam 就被 `requireFiniteBaseScores` 擋下。而那條路徑
+    不是假想的——`ValidatedCandidates` 是 public+Sendable、可儲存可轉手。已補
+    `conservativeTerminatesOnNonFiniteScoresEvenWithTheSeamBypassed`，直接建構 token 走
+    `rerankChecked`，只斷言「它會回來」。**驗過會為對的理由變紅**：退回修法後
+    `timeout 180 swift test` 回 exit 124（掛住）。
+  - **三個寫者對「被約束者提供約束值」的洞說兩套話。** `ConservativeStrategy` 與
+    `RankingGuard.checkTieRunsOnly` 各自寫著「那個洞在結構上關掉了」，而
+    `MemoryStrategy.displacementBound` 的註解**逐字撤回過那句話**（「『從 protocol 讀』
+    就是『從策略讀』，來源相同、只換了管線」，#1 verify R6 實測）。已讓前兩處指向
+    SoT 而不重述——重述一次就是第二份會漂移的規格。
+  - **tie-run 守衛在生產路徑上可整行換掉而測試全綠**（實測 67/67）——覆蓋它的測試從不
+    呼叫 `ConservativeStrategy`，只把手工排列餵給 helper。這是 `CLAUDE.md` 記過的形狀
+    （「回歸鎖全測在 helper 上而生產路徑那行可以整行刪掉」）。**補測試不夠**：策略不會
+    違反自己的約束，要讓那行 load-bearing 只能把執行點上提到 seam，而那與
+    `displacementBound` 的「誰有權決定」是同一個未解決的設計決定 → 開 #32。
+
+### Fixed
 - **#18 verify R2 的 findings**（該輪 5 個 lens 只跑完 3 個——devil's advocate 與另一個
   因 ECONNRESET 失敗，**覆蓋不完整**）。全部是 R1 那批事實的殘留，形狀只有一個：
   **我修的是被引用的句子，不是那個事實。**
