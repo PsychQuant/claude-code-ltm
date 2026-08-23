@@ -29,7 +29,7 @@ private func exampleCandidates() -> [Candidate] {
 /// #32 之前，這條路徑從來沒有被走過。
 private struct MisbehavingStrategy: MemoryStrategy {
     let id = RankingPolicyID("misbehaving")
-    /// 觸發測試授權註冊（見 `TestStrategyAuthority`）。
+    /// 觸發測試授權註冊（見 `StrategyRegistry.readyForTesting`）。
     private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
     let displacementBound: Int
@@ -224,7 +224,7 @@ private final class UnregisteredStrategy: MemoryStrategy, @unchecked Sendable {
     let id = RankingPolicyID("never-registered")
     let consumedSignals: Set<EventKind> = []
     let displacementBound = 1
-    let wasEntered = Mutex(false)
+    let wasEntered = TestRegistryBox(false)
 
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
         -> [RankedResult]
@@ -260,5 +260,99 @@ func theRegistryAndTheAuthorityTableAgreeOnWhichStrategiesExist() {
         #expect(
             StrategyRegistry.authorizedConstraints(for: id) != nil,
             "\(name) 在 known 裡卻沒有授權條目——兩份清單開始漂移了")
+    }
+}
+
+
+
+// MARK: - #34 verify：授權表真正買到的能力，以及它買不到的
+
+/// 冒用出貨識別碼的外來 conformer：宣告 `conservative` 卻不帶約束。
+///
+/// **這是授權表唯一真正買到的能力**，而先前沒有任何測試涵蓋它（#34 verify，
+/// devil's advocate）。原有的 `theShippedStrategiesMatchTheirAuthority` 是一條
+/// **等式**，所以表與策略自報一起被清空時它照樣綠——實測：同時拿掉兩邊的
+/// `.withinTieRuns`，377 條只紅一條 #32 時代的自報斷言，四條新測試全綠。
+///
+/// 等式抓得到「兩份漂移」，抓不到「兩份一起被清空」，而後者才是把授權表變成
+/// 裝飾的那個動作。這條測試下的是**行為**斷言，不是自報比對。
+private struct ImpersonatingStrategy: MemoryStrategy {
+    let id = RankingPolicyID("conservative")
+    let consumedSignals: Set<EventKind> = []
+    let displacementBound = 4
+    /// **刻意宣告空集合**——要驗的正是「表的約束減不掉」。
+    let placementConstraints: Set<PlacementConstraint> = []
+
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        // `[C, A, B]`：C 離開自己的等分區段。
+        let byID = Dictionary(
+            input.candidates.map { ($0.anchor.turnID, $0) }, uniquingKeysWith: { a, _ in a })
+        let original = Dictionary(
+            uniqueKeysWithValues: input.candidates.enumerated().map { ($0.element.anchor, $0.offset) })
+        return ["C", "A", "B"].enumerated().compactMap { position, turnID in
+            guard let candidate = byID[turnID] else { return nil }
+            let displacement = (original[candidate.anchor] ?? position) - position
+            return RankedResult(
+                candidate: candidate, displacement: displacement,
+                reason: RankingReason(
+                    history: .none,
+                    movement: displacement > 0
+                        ? .advanced(positions: displacement)
+                        : (displacement < 0 ? .receded(positions: -displacement) : .unmoved)))
+        }
+    }
+}
+
+@Test("冒用 conservative 之名卻宣告無約束的 conformer 被擋——表的內容是行為上可觀察的")
+func impersonatingAShippedIdentifierDoesNotEscapeItsConstraints() throws {
+    #expect(throws: StrategyViolation.movedAcrossTieRuns) {
+        _ = try ImpersonatingStrategy().rerank(exampleCandidates(), with: .empty(at: instant))
+    }
+}
+
+@Test("測試註冊口減不掉出貨識別碼的授權——同一條合成紀律套用在鉤子自己身上")
+func theTestHookCannotSubtractFromAShippedAuthority() throws {
+    // #34 verify 抓到的具體缺陷：初版的註冊口是無條件覆蓋，而 lookup 第一行就
+    // return——註冊 `conservative` 為空集合會把 tie-run 約束減掉，讓「只為測試」
+    // 的鉤子成為本機制要擋的那個洞的新路徑。實測確認過。
+    //
+    // 第一版修法是 `precondition`，但那**測不到**（trap 不是 Swift error），
+    // 實測拿掉它零測試變紅——一條不可能失敗的守衛。現在改成聯集：註冊值與表的
+    // 條目相加，於是「減掉」在結構上做不到，而且是可斷言的行為。
+    StrategyRegistry.registerForTesting(RankingPolicyID("conservative"), constraints: [])
+    defer { StrategyRegistry.unregisterForTesting(RankingPolicyID("conservative")) }
+
+    #expect(
+        StrategyRegistry.authorizedConstraints(for: RankingPolicyID("conservative"))
+            == [.withinTieRuns],
+        "註冊空集合不得減掉表裡的約束")
+
+    // 行為層：即使註冊了空集合，冒用者仍然被擋。
+    #expect(throws: StrategyViolation.movedAcrossTieRuns) {
+        _ = try ImpersonatingStrategy().rerank(exampleCandidates(), with: .empty(at: instant))
+    }
+}
+
+@Test("registry 的識別碼集合與授權表的鍵集合**互相**涵蓋")
+func theRegistryAndTheAuthorityTableCoverEachOther() {
+    // 先前只驗 `known ⊆ 表`（單向）。實測把 `known` 砍掉一個識別碼，377 條全綠
+    // ——而 `known` 餵的是 CLI 的「可用策略」錯誤訊息，於是一檔組得出來卻不列名
+    // 的策略不會被任何測試抓到（#34 verify）。
+    //
+    // 反向要能驗，表的鍵集合必須列舉得出來。它是 switch 而不是字典，所以這裡
+    // 用「已知的全集」對照：任何**不在** `known` 裡的名字都必須查無授權。
+    for name in StrategyRegistry.known {
+        #expect(
+            StrategyRegistry.authorizedConstraints(for: RankingPolicyID(name)) != nil,
+            "\(name) 在 known 裡卻沒有授權條目")
+        #expect(StrategyRegistry.make(RankingPolicyID(name)) != nil, "\(name) 在 known 裡卻組不出實例")
+    }
+    // 反向：一個曾經在表裡、但被移出 `known` 的識別碼會被這條抓到。
+    for name in ["archival", "human-like", "conservative"] {
+        #expect(
+            StrategyRegistry.known.contains(name),
+            "\(name) 有授權條目／組得出實例，卻不在 known 裡——CLI 的『可用策略』會漏列它")
     }
 }

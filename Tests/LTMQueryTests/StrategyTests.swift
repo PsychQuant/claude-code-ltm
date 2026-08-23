@@ -150,7 +150,7 @@ private struct RogueStrategy: MemoryStrategy {
     }
     let mode: Mode
     let id = RankingPolicyID("rogue")
-    /// 觸發測試授權註冊（見 `TestStrategyAuthority`）。
+    /// 觸發測試授權註冊（見 `StrategyRegistry.readyForTesting`）。
     private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
 

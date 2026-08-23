@@ -56,14 +56,24 @@ public enum StrategyRegistry {
     public static func authorizedConstraints(for id: RankingPolicyID)
         -> Set<PlacementConstraint>?
     {
-        // **測試註冊優先，而這一行在生產路徑上也會跑。** 誠實記下它的代價：
-        // 每次 `rerank` 多一次鎖的取放，查一個在生產中永遠是空的字典。
+        // **註冊的條目與 switch 的條目相加，不取代**（見 `registerForTesting`）。
         //
-        // 沒有量測，所以這裡不宣稱它「可忽略」——只說明為什麼接受它：替代方案是
-        // 用編譯條件把註冊口從 release build 拿掉，而那會讓**測試跑的 code 與
-        // 出貨的 code 不同**，那個代價本 repo 已經付過幾次（stale release binary、
-        // SwiftPM 增量假綠）。一條無分支的鎖，換兩者逐字相同。
-        if let extra = testAuthorities.withLock({ $0[id] }) { return extra }
+        // 這一行在生產路徑上也會跑。誠實記下它的代價：每次 `rerank` 多一次鎖的
+        // 取放，查一個在生產中永遠是空的字典。沒有量測，所以不宣稱它「可忽略」
+        // ——只說明為什麼接受它：替代方案是用編譯條件把註冊口從 release build
+        // 拿掉，而那會讓**測試跑的 code 與出貨的 code 不同**，那個代價本 repo
+        // 已經付過幾次（stale release binary、SwiftPM 增量假綠）。
+        let registered = testAuthorities.withLock { $0[id] }
+        let shipped = shippedConstraints(for: id)
+        // 兩者皆無 → 這個識別碼不存在，由 seam 具名拒絕。
+        guard registered != nil || shipped != nil else { return nil }
+        return (shipped ?? []).union(registered ?? [])
+    }
+
+    /// switch 那一半。分出來只是為了讓上面的聯集讀得出來。
+    private static func shippedConstraints(for id: RankingPolicyID)
+        -> Set<PlacementConstraint>?
+    {
         switch id.value {
         case "archival":
             // 它從不重排，所以位置約束對它是多餘的——`displacementBound = 0`
@@ -98,6 +108,21 @@ public enum StrategyRegistry {
     /// 授權——封閉性對外仍然成立。這與 `ValidatedCandidates` 的 internal `init`
     /// 是同一條邊界，而那條邊界 spec 已經記過它是什麼（capability，不是 proof）。
     /// **本條也寫進 spec**：沒有被記錄的信任邊界與疏漏無法區分。
+    /// ## 它與表**相加**，不覆蓋（#34 verify，security + DA 各自指出）
+    ///
+    /// 初版是無條件 `$0[id] = constraints`，而 lookup 的第一行就 return——於是
+    /// 註冊 `conservative` 為空集合會**減掉**表裡的 tie-run 約束。實測確認過：
+    /// 註冊後 `authorizedConstraints(for: "conservative")` 回 `[]`。那讓這個
+    /// 「只為測試」的鉤子成為本次改動要關掉的那個洞的一條新路徑。
+    ///
+    /// 修法不是加一道 `precondition`（trap 抓不進測試，那條守衛會沒有回歸鎖——
+    /// 實測拿掉它零測試變紅），而是**把同一條合成紀律套用到鉤子自己身上**：
+    /// 查詢時取「switch 的條目 ∪ 註冊的條目」。於是
+    ///
+    /// - 測試識別碼（switch 裡沒有）→ 註冊值就是它的授權，測試寫得出來；
+    /// - 出貨識別碼（switch 裡有）→ 聯集保住表的約束，**減不掉**。
+    ///
+    /// 一條規則，兩種身分，而且它的違反是可斷言的行為而不是行程中止。
     static func registerForTesting(_ id: RankingPolicyID, constraints: Set<PlacementConstraint>) {
         testAuthorities.withLock { $0[id] = constraints }
     }
@@ -141,14 +166,18 @@ public enum StrategyRegistry {
 
     /// 註冊表本體。用 `Mutex` 而不是裸 `static var`：本型別的成員從並行的
     /// 查詢路徑被讀，而 Swift 6 的並行檢查不接受可變的全域狀態。
-    private static let testAuthorities = Mutex<[RankingPolicyID: Set<PlacementConstraint>]>([:])
+    private static let testAuthorities = TestRegistryBox<[RankingPolicyID: Set<PlacementConstraint>]>([:])
 }
 
-/// 極小的互斥包裝。
+/// 極小的互斥包裝。**刻意不叫 `Mutex`**——stdlib 的 `Synchronization.Mutex` 同名，
+/// 一個 file-scope 的同名泛型會讓匯入該模組的檔案解析到意外的型別（#34 verify）。
 ///
-/// 只為 `registerForTesting` 存在，不對外暴露——生產路徑（`authorizedConstraints`
-/// 的 switch）不需要它，讀一次 `withLock` 的成本落在一個永遠是空表的查詢上。
-final class Mutex<Value>: @unchecked Sendable {
+/// 只為 `registerForTesting` 存在，不對外暴露。
+///
+/// **但生產路徑會經過它**——`authorizedConstraints` 的第一行就查這張表，所以每次
+/// `rerank` 都有一次鎖的取放（查一個在生產中永遠是空的字典）。先前這段註解寫著
+/// 「生產路徑不需要它」，與同一檔上方那段誠實的說明**直接矛盾**（#34 verify）。
+final class TestRegistryBox<Value>: @unchecked Sendable {
     private var value: Value
     private let lock = NSLock()
 
