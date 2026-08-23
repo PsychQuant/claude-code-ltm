@@ -525,3 +525,109 @@ func addingAResumeCopyOnlyGrowsTheSourceSet() throws {
     #expect(after == [sessionM, sessionS, sessionA], "新來源加入集合")
     #expect(before.isSubset(of: after), "既有的來源值一個都不能消失或被取代")
 }
+
+// MARK: - 比較模式（--compare）
+
+extension CLIWorkspace {
+    var recordsFile: URL { memory.appendingPathComponent("memory/presentations.jsonl") }
+}
+
+@Test("--compare 隱含 --record：不帶 --record 也照樣寫事件，兩個一起給行為相同")
+func compareImpliesRecord() throws {
+    let workspace = try CLIWorkspace.make(
+        texts: ["記憶策略可插拔", "檢索基線量測", "第三段內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let compared = try runCLI(
+        ["query", "內容", "--all-projects", "--compare", "--json"],
+        environment: workspace.environment)
+    #expect(compared.code == 0)
+    if compared.code != 0 { Issue.record("stderr: \(compared.err)") }
+
+    let hits =
+        (try JSONSerialization.jsonObject(with: Data(compared.out.utf8)) as? [[String: Any]]) ?? []
+    #expect(!hits.isEmpty)
+    // 先斷言檔案存在：不存在時下面的讀取會以 NSCocoaError 拋出，那讓「沒寫事件」
+    // 這個真正的失敗被包裝成一個看不出原因的錯誤。
+    #expect(
+        FileManager.default.fileExists(atPath: workspace.eventsFile.path),
+        "--compare 必須寫事件檔")
+    #expect(
+        FileManager.default.fileExists(atPath: workspace.recordsFile.path),
+        "--compare 必須寫呈現紀錄檔")
+    let events = try String(contentsOf: workspace.eventsFile, encoding: .utf8)
+        .split(separator: "\n").filter { !$0.isEmpty }
+    #expect(events.count == hits.count, "--compare 不帶 --record 也必須寫事件")
+    let records = try String(contentsOf: workspace.recordsFile, encoding: .utf8)
+        .split(separator: "\n").filter { !$0.isEmpty }
+    #expect(records.count == 1, "一次比較寫一筆呈現紀錄")
+
+    // 兩個一起給 = 只給 --compare。再跑一次應該又各多一筆。
+    let both = try runCLI(
+        ["query", "內容", "--all-projects", "--compare", "--record", "--json"],
+        environment: workspace.environment)
+    #expect(both.code == 0)
+    let recordsAfter = try String(contentsOf: workspace.recordsFile, encoding: .utf8)
+        .split(separator: "\n").filter { !$0.isEmpty }
+    #expect(recordsAfter.count == 2)
+}
+
+@Test("--compare 與 --strategy 互斥：具名失敗，且在跑任何查詢之前")
+func compareAndStrategyConflict() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略可插拔", "檢索基線量測"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let result = try runCLI(
+        ["query", "內容", "--all-projects", "--compare", "--strategy", "human-like"],
+        environment: workspace.environment)
+    #expect(result.code == LTMCommandLine.ExitCode.usageError.rawValue)
+    #expect(result.err.contains("--compare"))
+    #expect(result.err.contains("--strategy"))
+    #expect(result.out.isEmpty, "衝突在查詢之前擋下，不得印出任何結果")
+    #expect(
+        !FileManager.default.fileExists(atPath: workspace.recordsFile.path),
+        "被擋下的呼叫不得寫任何紀錄")
+}
+
+@Test("比較模式的人類可讀輸出不透露任何策略名字")
+func comparisonOutputRevealsNoAttribution() throws {
+    let workspace = try CLIWorkspace.make(
+        texts: ["記憶策略可插拔", "檢索基線量測", "第三段內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let result = try runCLI(
+        ["query", "內容", "--all-projects", "--compare"], environment: workspace.environment)
+    #expect(result.code == 0)
+    if result.code != 0 { Issue.record("stderr: \(result.err)") }
+    #expect(!result.out.isEmpty)
+    // 逐位置的歸屬是給計分讀的。看結果的人知道了就會影響他接下來點哪一筆，
+    // 而那個點擊正是要拿來計分的東西。
+    for name in StrategyRegistry.known {
+        #expect(!result.out.contains(name), "輸出不得出現策略名字：\(name)")
+    }
+    // 紀錄裡當然有——歸屬存在，只是不呈現。
+    let records = try String(contentsOf: workspace.recordsFile, encoding: .utf8)
+    #expect(records.contains("archival") && records.contains("human-like"))
+}
+
+@Test("不帶 --compare 的查詢不寫呈現紀錄，輸出與改動前逐字相同")
+func defaultQueryPathIsUnchangedByComparisonMode() throws {
+    let workspace = try CLIWorkspace.make(
+        texts: ["記憶策略可插拔", "檢索基線量測", "第三段內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let plain = try runCLI(["query", "內容", "--all-projects"], environment: workspace.environment)
+    #expect(plain.code == 0)
+    #expect(
+        !FileManager.default.fileExists(atPath: workspace.recordsFile.path),
+        "預設路徑不得寫呈現紀錄")
+    #expect(
+        !FileManager.default.fileExists(atPath: workspace.eventsFile.path),
+        "預設路徑不得寫事件——這是既有契約，比較模式不得改動它")
+    // 既有的 footer 形狀（含策略名）在預設路徑上原封不動。
+    #expect(plain.out.contains("— 策略 archival"))
+}

@@ -5,6 +5,35 @@
 ## Unreleased
 
 ### Added
+- **#33：兩條評估路徑的機具接上了**（change `wire-evaluation-machinery`）。issue 原本只
+  說「ground truth 資料集沒人在追」，而 discuss 期間查證出**第三塊、也是真正的瓶頸**：
+  `grep -rn "InterleavingHarness" Sources/LTMService/ Sources/ltm/` 零命中、
+  `PresentationRecord(` 只出現在 `Interleaving.swift` 自己——**live 的交錯路徑不存在**，
+  所以 `ltm query --record` 寫的 `shown` 事件到 `ComparisonScorer` 全部落進
+  `skippedPresentationNotTracked`，報告照樣產出而且不報錯。
+  - **`ltm query --compare`**：一次檢索、兩個策略各排一次、交錯後呈現，落地
+    `PresentationRecord` 與對應的 `shown` 事件。隱含 `--record`，與 `--strategy` 互斥。
+    人類可讀輸出**一個策略名字都不出現**——逐位置的歸屬是給計分讀的，讓看結果的人
+    知道會影響他接下來點哪一筆，而那個點擊正是要拿來計分的東西。
+  - **比較模式住服務層**（`LTMService.compare`），CLI 只轉述旗標。服務層收的是策略
+    **識別碼**不是實例，實例由新的 `StrategyRegistry` 產生——那張對照表先前只活在 CLI，
+    第二個呼叫端出現時就會變成兩份。
+  - **`KnownItemHarness`**（LTMEval）：從語料抽段、由段內文字導出查詢、把該段當 gold，
+    對 lexical-only／vector-only／fused 三軌各跑一次既有的兩階段評分。回傳型別**只有
+    計數與比率**，查詢與 gold 指標用完即丟（測試對序列化後的 bytes 下斷言）。
+    導不出可用查詢的樣本被**跳過並計數**——靜默跳過會讓有效樣本數與要求的不同。
+  - **新增 public API**：`LTMEval` 的 `PresentationRecordStore` / `FilePresentationRecordStore`、
+    `KnownItemCorpus` / `KnownItemHarness` / `KnownItemReport` / `ChannelRankings` /
+    `ChannelAggregate(s)` / `SplitMix64`；`LTMMemory` 的 `CanonicalStore`；`LTMService` 的
+    `StrategyRegistry` 與 `LTMService.compare`；`RetrievalEngine.search(query:limit:scope:channels:)`。
+  - **新增 `ServiceError`**：`comparisonRequiresStores`（不能記錄的比較不執行）、
+    `incompatibleComparisonPair`（兩個都消費歷史卻對擴散要求不同的策略無法共用一份
+    projection——交錯器只收一份）、`unknownStrategy`（不退回預設值）。
+  - **誠實邊界**：這次改動讓**機制**存在，**沒有**讓策略比較獲得量測支撐。bootstrap 期
+    每一次比較都是 null comparison（零歷史 → 淨強度全 0 → 嚴格大於恆為假 → 兩邊順序
+    相同），計分整批略過。CLAUDE.md 的那句「策略比較目前沒有任何量測支撐」原封不動，
+    只補上「變的是機具、沒變的是資料」這個區分。
+
 - **#18：RRF 平手發生率已在語料子集上量到**（`docs/measurements/2026-08-22-rrf-tie-rate.md`；
   探針 `scripts/measure-rrf-ties.swift`、查詢集 `scripts/rrf-tie-queries.txt`、抽樣
   `scripts/sample-corpus-scales.py`、機制表 `scripts/rrf-tie-mechanism.sh`、自驗

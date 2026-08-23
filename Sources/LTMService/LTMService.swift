@@ -11,6 +11,7 @@ func columnText(_ statement: OpaquePointer, _ column: Int32) -> String {
     let count = Int(sqlite3_column_bytes(statement, column))
     return String(decoding: UnsafeBufferPointer(start: raw, count: count), as: UTF8.self)
 }
+import LTMEval
 import LTMIndex
 import LTMMemory
 import LTMQuery
@@ -202,18 +203,48 @@ public struct LTMService {
         case vectorSidecarMismatch(declared: Int, found: Int)
         /// 某個要寫入的根落在語料裡。
         case rootInsideCorpus(path: String)
+        /// 指名了一個不存在的策略識別碼。
+        ///
+        /// **不退回預設值**：靜默改用 archival 會讓一個打錯的名字看起來像成功
+        /// 執行了使用者要的策略。
+        case unknownStrategy(name: String)
+        /// 要求比較模式，但沒有地方可以記錄它。
+        ///
+        /// **不能記錄的比較不執行。** 交錯呈現的價值全部來自事後計分，而計分要
+        /// 的是「這次呈現的哪一個位置由誰貢獻」——紀錄掉了，使用者看到的一份
+        /// 交錯結果與一份記錄成功的交錯結果完全無法分辨。照做而不記錄等於安靜
+        /// 地把這次呈現的證據值歸零。
+        case comparisonRequiresStores
+        /// 這一對策略無法共用同一份 projection。
+        ///
+        /// 交錯器收**一份** projection，而 projection 的形狀由
+        /// `appliesSpreadingActivation` 決定（擴散激發的 spec 授權只給
+        /// `human-like`，#15 verify）。兩個都會消費歷史、卻對擴散有不同要求的
+        /// 策略，任何一份共用的 projection 都會讓其中一邊拿到 spec 沒授權它看的
+        /// 統計——而那正是 #15 verify 抓到的那個缺陷。
+        ///
+        /// **不消費任何訊號的策略（`archival`）不構成要求**：它的契約逐字是
+        /// 「不論給它什麼 projection 都產出相同輸出」，所以 `archival` 可以跟
+        /// 任何一邊配對。判準沿用 `rerank` 已經在用的那條——一個策略只受它能
+        /// 消費的資料的約束。
+        case incompatibleComparisonPair(a: String, b: String)
     }
+
+    /// 呈現紀錄的存放。比較模式以外的路徑不碰它。
+    private let recordStore: (any PresentationRecordStore)?
 
     public init(
         location: DerivedLocation,
         corpusRoot: URL = CorpusLocation.readOnlyRoot,
         embedder: any EmbeddingProvider,
-        eventStore: (any EventStore)? = nil
+        eventStore: (any EventStore)? = nil,
+        recordStore: (any PresentationRecordStore)? = nil
     ) {
         self.location = location
         self.corpusRoot = corpusRoot
         self.embedder = embedder
         self.eventStore = eventStore
+        self.recordStore = recordStore
     }
 
     /// 由 roots 參數化組出 facade。**CLI 與測試共用這一條路徑。**
@@ -226,6 +257,7 @@ public struct LTMService {
         derivedRoot: URL,
         embedder: any EmbeddingProvider,
         eventStore: (any EventStore)? = nil,
+        recordStore: (any PresentationRecordStore)? = nil,
         memoryRoot: URL? = nil
     ) throws -> LTMService {
         let policy = MemoryCorpusPolicy(corpusRoots: [corpusRoot])
@@ -236,7 +268,8 @@ public struct LTMService {
         }
         return LTMService(
             location: try DerivedLocation(root: derivedRoot, policy: policy),
-            corpusRoot: corpusRoot, embedder: embedder, eventStore: eventStore)
+            corpusRoot: corpusRoot, embedder: embedder, eventStore: eventStore,
+            recordStore: recordStore)
     }
 
     // MARK: - 建置
@@ -265,6 +298,192 @@ public struct LTMService {
         recordEvents: Bool = false,
         now: Date = Date()
     ) throws -> QueryOutcome {
+        try withRetrieval(text: text, limit: limit, scope: scope) { database, scored, refreshed in
+            let chosen = strategy ?? ArchivalStrategy()
+
+            // 檢索**已經**以 band-major 順序回傳（`RetrievalEngine.search`），所以
+            // 這裡逐筆映射、不重排。
+            //
+            // 「不重排」是字面的：retrieval spec 的 requirement 寫
+            // 「SHALL NOT reorder outside that seam」，而它的 scenario 要求
+            // 「the emitted order equals the fused retrieval order」。分層曾經在這裡做
+            // ——那就是 seam 之外的重排，即使排序規則本身是對的。
+            //
+            // 分帶與排帶屬於檢索而不是策略，理由不是美學：`MemoryStrategy` 的前置條件
+            // `requireBandsInOrder` 要求候選**到達時**已經分好帶。一個 seam 要求它的
+            // 輸入具備某個性質，那個性質就是輸入方的職責。
+            let candidates = Self.candidates(from: scored)
+            let projection = try makeProjection(database: database, strategy: chosen, now: now)
+            let ranked = try chosen.rerank(candidates, with: projection)
+
+            // 這次查詢的呈現識別碼：只在真的會寫事件時才產生——沒有事件檔可寫，
+            // 就沒有指標可以指（#15）。同一個值套用到這次查詢的所有 hit 與所有
+            // 為它們寫入的 `.shown` 事件，讓兩者可以事後對上。
+            let presentation: PresentationID? =
+                (recordEvents && eventStore != nil) ? .random() : nil
+
+            let byAnchor = Self.index(scored)
+            var hits: [QueryHit] = []
+            for result in ranked {
+                guard let source = byAnchor[result.candidate.anchor] else { continue }
+                hits.append(
+                    Self.hit(
+                        from: source, candidate: result.candidate,
+                        displacement: result.displacement,
+                        history: String(describing: result.reason.history),
+                        movement: String(describing: result.reason.movement),
+                        presentation: presentation))
+            }
+
+            var recorded = 0
+            if recordEvents, let eventStore {
+                recorded = try record(
+                    kind: .shown, anchors: hits.map(\.anchor), policy: chosen.id, store: eventStore,
+                    now: now, presentation: presentation)
+            }
+
+            return QueryOutcome(
+                hits: hits, strategyID: chosen.id.value, refresh: refreshed,
+                eventsRecorded: recorded)
+        }
+    }
+
+    // MARK: - 比較
+
+    /// 一次交錯比較的結果。
+    ///
+    /// **沒有 `strategyID`**：交錯呈現沒有「用了哪個策略」這回事，兩個都用了。
+    /// 誰貢獻了哪個位置寫在 `record.attribution` 裡，而那份資料是給計分用的，
+    /// 不是給看結果的人用的——interleaved evaluation 存在的理由就是不讓看的人
+    /// 知道。
+    public struct ComparisonOutcome: Sendable {
+        public let hits: [QueryHit]
+        /// 已落地的呈現紀錄。
+        public let record: PresentationRecord
+        public let refresh: RefreshReport
+        /// 寫了幾筆 `shown` 事件。
+        public let eventsRecorded: Int
+
+        public var presentation: PresentationID { record.id }
+    }
+
+    /// 用兩個策略排同一份候選，交錯呈現，並把紀錄與事件落地。
+    ///
+    /// ## 一次檢索，兩份排序
+    ///
+    /// 候選只取一次，兩個策略排的是**同一份清單**。分兩次檢索會讓兩邊因為與
+    /// 策略無關的理由而不同（索引在兩次之間被續讀、向量通道的浮點順序），
+    /// 於是報告量到的是檢索變異、卻宣稱量的是策略偏好。
+    ///
+    /// ## 為什麼記錄不是選項
+    ///
+    /// `persist` 存在只是為了讓測試能檢查「不落地時什麼都不寫」這件事本身；
+    /// 生產路徑一律傳 `true`。沒有事件存放或紀錄存放時直接拒絕（見
+    /// `ServiceError.comparisonRequiresStores`），不退化成「照做但不記」。
+    ///
+    /// ## bootstrap 期會是 null comparison，那不是錯誤
+    ///
+    /// 沒有任何使用歷史時每個 anchor 的淨強度都是 0，`boundedReorderByStrength`
+    /// 的交換條件（嚴格大於）恆為假，兩邊產出逐字相同的順序——交錯器把它標成
+    /// null comparison，計分整批略過。這是既有的、被表達出來的狀態，呼叫端不得
+    /// 把它當成失敗。
+    public func compare(
+        text: String,
+        limit: Int = 20,
+        scope: RetrievalEngine.Scope,
+        a aID: RankingPolicyID,
+        b bID: RankingPolicyID,
+        persist: Bool = true,
+        now: Date = Date()
+    ) throws -> ComparisonOutcome {
+        guard let eventStore, let recordStore else {
+            throw ServiceError.comparisonRequiresStores
+        }
+        // **收識別碼、在這裡組實例。** 呼叫端（CLI、未來的 MCP）只轉述使用者
+        // 打的字；策略由誰組出來只有一個答案。
+        guard let a = StrategyRegistry.make(aID) else {
+            throw ServiceError.unknownStrategy(name: aID.value)
+        }
+        guard let b = StrategyRegistry.make(bID) else {
+            throw ServiceError.unknownStrategy(name: bID.value)
+        }
+        // 兩個都消費歷史、卻對擴散有不同要求 → 共用 projection 必然餵錯一邊。
+        // 不消費訊號的策略不構成要求（見 `incompatibleComparisonPair`）。
+        let demands = [a, b].filter { !$0.consumedSignals.isEmpty }
+        guard Set(demands.map(\.appliesSpreadingActivation)).count <= 1 else {
+            throw ServiceError.incompatibleComparisonPair(a: a.id.value, b: b.id.value)
+        }
+
+        return try withRetrieval(text: text, limit: limit, scope: scope) {
+            database, scored, refreshed in
+            let candidates = Self.candidates(from: scored)
+            // projection 的參數由「有要求的那些策略」決定；都沒有要求時就是空的。
+            // guard 已保證有要求的策略彼此一致，所以取第一個即代表全體。
+            let projection = try makeProjection(
+                database: database, readsHistory: !demands.isEmpty,
+                spreading: demands.first?.appliesSpreadingActivation ?? false, now: now)
+
+            let generation = Self.generation(at: now)
+            let interleaving = try InterleavingHarness(generation: generation).present(
+                query: text, candidates: candidates, projection: projection,
+                a: a, b: b,
+                // 起手方由查詢字串決定，而**只有那一位元被留下**：`balanced` 算完
+                // 之後字串沒有任何持有者，紀錄裡存的是 `.a`／`.b`。
+                startingSide: InterleavingHarness.Side.balanced(seed: text))
+
+            let byAnchor = Self.index(scored)
+            var hits: [QueryHit] = []
+            for candidate in interleaving.presented {
+                guard let source = byAnchor[candidate.anchor] else { continue }
+                hits.append(
+                    Self.hit(
+                        from: source, candidate: candidate,
+                        // 交錯之後「位移」沒有定義：一筆結果在交錯清單裡的位置是
+                        // 兩份排序輪流取用的產物，不是任何一個策略把它移到那裡。
+                        // 回報 0 而不是編一個數字。
+                        displacement: 0,
+                        history: "interleaved", movement: "interleaved",
+                        presentation: interleaving.record.id))
+            }
+
+            var recorded = 0
+            if persist {
+                // **紀錄先落地，事件後落地。** 反過來的話，崩在兩者之間會留下一批
+                // 指向不存在紀錄的事件——計分端會把它們算成
+                // `presentationNotTracked` 而報告照常產出，也就是本次改動要修的
+                // 那個症狀的另一種來源。
+                try recordStore.append(interleaving.record)
+                recorded = try record(
+                    kind: .shown, anchors: hits.map(\.anchor),
+                    // 交錯呈現的 `shown` 事件**不歸屬任何一邊**——歸屬寫在紀錄的
+                    // `attribution` 裡，逐位置各不相同，而事件的 `policy` 是單一值。
+                    // 用交錯器自己的識別碼標記它們的來源。
+                    policy: RankingPolicyID("interleaved"),
+                    store: eventStore, now: now, presentation: interleaving.record.id)
+            }
+
+            return ComparisonOutcome(
+                hits: hits, record: interleaving.record, refresh: refreshed,
+                eventsRecorded: recorded)
+        }
+    }
+
+    /// 世代識別碼。**由 `now` 導出，一次查詢裡只算一次**——紀錄與事件必須帶
+    /// 同一個值，否則計分端會以 `generationMismatch` 拒絕整批。
+    private static func generation(at now: Date) -> GenerationID {
+        GenerationID("g-\(Int(now.timeIntervalSince1970))")
+    }
+
+    /// 開索引、驗版本、增量續讀、檢索——**`query` 與 `compare` 共用的前置段**。
+    ///
+    /// 抽成一個閉包收束的函式，而不是讓兩條路徑各寫一份：這一段裡的每一個
+    /// 拒答條件（layout 版本、embedding revision、anchor 定址規則、側車筆數）
+    /// 都是某次 verify 抓出來的，而複製一份的漂移方向永遠是「新的那份少了
+    /// 其中一條」。`defer { database.close() }` 也因此只有一個地方寫。
+    private func withRetrieval<R>(
+        text: String, limit: Int, scope: RetrievalEngine.Scope,
+        body: (IndexDatabase, [ScoredChunk], RefreshReport) throws -> R
+    ) throws -> R {
         guard FileManager.default.fileExists(atPath: location.databaseURL.path) else {
             throw ServiceError.indexMissing(path: location.databaseURL.path)
         }
@@ -317,60 +536,38 @@ public struct LTMService {
         let engine = RetrievalEngine(database: database, vectors: vectors, embedder: embedder)
         let scored = try engine.search(query: text, limit: limit, scope: scope)
 
-        let chosen = strategy ?? ArchivalStrategy()
+        return try body(database, scored, refreshed)
+    }
 
-        // 檢索**已經**以 band-major 順序回傳（`RetrievalEngine.search`），所以
-        // 這裡逐筆映射、不重排。
-        //
-        // 「不重排」是字面的：retrieval spec 的 requirement 寫
-        // 「SHALL NOT reorder outside that seam」，而它的 scenario 要求
-        // 「the emitted order equals the fused retrieval order」。分層曾經在這裡做
-        // ——那就是 seam 之外的重排，即使排序規則本身是對的。
-        //
-        // 分帶與排帶屬於檢索而不是策略，理由不是美學：`MemoryStrategy` 的前置條件
-        // `requireBandsInOrder` 要求候選**到達時**已經分好帶。一個 seam 要求它的
-        // 輸入具備某個性質，那個性質就是輸入方的職責。
-        let candidates = scored.map {
+    /// 檢索結果 → seam 的候選。**`query` 與 `compare` 共用**。
+    private static func candidates(from scored: [ScoredChunk]) -> [Candidate] {
+        scored.map {
             Candidate(
                 anchor: $0.anchor, baseScore: $0.fusedScore,
                 band: RelevanceBand(rank: $0.band))
         }
-        let projection = try makeProjection(database: database, strategy: chosen, now: now)
-        let ranked = try chosen.rerank(candidates, with: projection)
+    }
 
-        // 這次查詢的呈現識別碼：只在真的會寫事件時才產生——沒有事件檔可寫，
-        // 就沒有指標可以指（#15）。同一個值套用到這次查詢的所有 hit 與所有
-        // 為它們寫入的 `.shown` 事件，讓兩者可以事後對上。
-        let presentation: PresentationID? = (recordEvents && eventStore != nil) ? .random() : nil
+    private static func index(_ scored: [ScoredChunk]) -> [Anchor: ScoredChunk] {
+        Dictionary(scored.map { ($0.anchor, $0) }, uniquingKeysWith: { first, _ in first })
+    }
 
-        let byAnchor = Dictionary(scored.map { ($0.anchor, $0) }, uniquingKeysWith: { first, _ in first })
-        var hits: [QueryHit] = []
-        for result in ranked {
-            guard let source = byAnchor[result.candidate.anchor] else { continue }
-            hits.append(
-                QueryHit(
-                    project: source.project,
-                    sessionSources: source.sessionSources, uuid: source.uuid,
-                    timestamp: source.timestamp, snippet: source.text,
-                    score: result.candidate.baseScore, band: result.candidate.band.rank,
-                    displacement: result.displacement,
-                    historyDescription: String(describing: result.reason.history),
-                    movementDescription: String(describing: result.reason.movement),
-                    anchor: result.candidate.anchor,
-                    channels: source.channels.map(\.rawValue).sorted(),
-                    presentation: presentation))
-        }
-
-        var recorded = 0
-        if recordEvents, let eventStore {
-            recorded = try record(
-                kind: .shown, anchors: hits.map(\.anchor), policy: chosen.id, store: eventStore,
-                now: now, presentation: presentation)
-        }
-
-        return QueryOutcome(
-            hits: hits, strategyID: chosen.id.value, refresh: refreshed,
-            eventsRecorded: recorded)
+    /// 檢索結果 + 排序結果 → 回傳給呼叫端的一筆命中。**兩條路徑共用**。
+    private static func hit(
+        from source: ScoredChunk, candidate: Candidate, displacement: Int,
+        history: String, movement: String, presentation: PresentationID?
+    ) -> QueryHit {
+        QueryHit(
+            project: source.project,
+            sessionSources: source.sessionSources, uuid: source.uuid,
+            timestamp: source.timestamp, snippet: source.text,
+            score: candidate.baseScore, band: candidate.band.rank,
+            displacement: displacement,
+            historyDescription: history,
+            movementDescription: movement,
+            anchor: candidate.anchor,
+            channels: source.channels.map(\.rawValue).sorted(),
+            presentation: presentation)
     }
 
     /// 把語料的新增內容併進索引（查詢路徑上的增量續讀）。
@@ -424,7 +621,18 @@ public struct LTMService {
     private func makeProjection(
         database: IndexDatabase, strategy: any MemoryStrategy, now: Date
     ) throws -> Projection {
-        guard !strategy.consumedSignals.isEmpty, let eventStore else {
+        try makeProjection(
+            database: database, readsHistory: !strategy.consumedSignals.isEmpty,
+            spreading: strategy.appliesSpreadingActivation, now: now)
+    }
+
+    /// 上面那個的實作。參數是**兩個布林**而不是一個策略，因為比較模式要的
+    /// projection 是由一對策略共同決定的，而不是任何單一策略的屬性——先前只有
+    /// 單策略版本，比較模式若自己再算一次就是同一件事的第二個寫者。
+    private func makeProjection(
+        database: IndexDatabase, readsHistory: Bool, spreading: Bool, now: Date
+    ) throws -> Projection {
+        guard readsHistory, let eventStore else {
             // 不消費任何事件的策略（archival）連讀都不讀——省下的不只是時間，
             // 更是「它真的沒看使用歷史」這件事在程式碼上看得見。
             return project([], at: now, resolvedBy: PreloadedCorpusReader(turns: [:]))
@@ -437,7 +645,7 @@ public struct LTMService {
         // 先前這裡永遠用 `.default`（非零係數），`conservative` 因此意外吃到
         // 擴散（#15 verify HIGH finding；add-spreading-activation-fixes Decision 2）。
         let parameters =
-            strategy.appliesSpreadingActivation
+            spreading
             ? ProjectionParameters.default
             : ProjectionParameters(spreadingActivationFactor: 0)
         return project(events, at: now, resolvedBy: reader, parameters: parameters)
@@ -452,7 +660,7 @@ public struct LTMService {
         kind: EventKind, anchors: [Anchor], policy: RankingPolicyID, store: any EventStore,
         now: Date, presentation: PresentationID? = nil
     ) throws -> Int {
-        let generation = GenerationID("g-\(Int(now.timeIntervalSince1970))")
+        let generation = Self.generation(at: now)
         var written = 0
         for anchor in anchors {
             try store.append(

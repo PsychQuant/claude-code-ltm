@@ -88,21 +88,53 @@ public struct RetrievalEngine {
         case allProjects
     }
 
-    /// 執行查詢。
+    /// 執行查詢（**三條通道全開**——生產路徑）。
     ///
     /// - Parameter limit: 最多回幾筆（融合後）。
     public func search(query: String, limit: Int, scope: Scope) throws -> [ScoredChunk] {
+        try search(
+            query: query, limit: limit, scope: scope,
+            channels: Set(ScoredChunk.Channel.allCases))
+    }
+
+    /// 只用指定的通道執行查詢。
+    ///
+    /// ## 為什麼存在
+    ///
+    /// known-item 評估要的是**同一個查詢在三軌上各自的名次**（lexical-only、
+    /// vector-only、fused），而三軌報告是一種報告形狀、不是三套獨立的檢索。
+    /// 讓通道集合成為參數，融合仍然只有一個寫者；在評估側自己重算一份 RRF
+    /// 會量到那份重算的行為，不是生產路徑的。
+    ///
+    /// ## band 的意義**不隨通道集合縮小而重新定義**
+    ///
+    /// `band` 一律是「全部通道數 − 命中的通道數」。所以限定通道跑出來的結果，
+    /// band 會整體偏大（只跑 lexical 兩路時最好也只有 band 1）。這是事實陳述
+    /// 而不是缺陷：那些候選確實只命中了這些通道。**評估路徑只讀名次不讀 band**，
+    /// 而把 band 改成相對於子集合會讓同一個數字在兩條路徑上意思不同。
+    public func search(
+        query: String, limit: Int, scope: Scope, channels: Set<ScoredChunk.Channel>
+    ) throws -> [ScoredChunk] {
         // 每條通道各取比 limit 深一些的候選：融合會重排，只取 limit 深度的話
         // 「在單一通道排名較後、但三條都出現」的候選會被截掉，而那正是融合要
         // 撈出來的東西。
         let channelDepth = max(limit * 5, 50)
 
-        let trigramHits = try lexicalHits(
-            table: "chunks_trigram", matchText: query, depth: channelDepth, scope: scope)
-        let segmentHits = try lexicalHits(
-            table: "chunks_segment", matchText: Segmentation.segment(query), depth: channelDepth,
-            scope: scope)
-        let vectorHits = try vectorRanking(query: query, depth: channelDepth, scope: scope)
+        let trigramHits =
+            channels.contains(.trigram)
+            ? try lexicalHits(
+                table: "chunks_trigram", matchText: query, depth: channelDepth, scope: scope)
+            : []
+        let segmentHits =
+            channels.contains(.segment)
+            ? try lexicalHits(
+                table: "chunks_segment", matchText: Segmentation.segment(query),
+                depth: channelDepth, scope: scope)
+            : []
+        let vectorHits =
+            channels.contains(.vector)
+            ? try vectorRanking(query: query, depth: channelDepth, scope: scope)
+            : []
 
         var fused: [Int64: (score: Double, channels: Set<ScoredChunk.Channel>)] = [:]
         for (channel, ranking) in [

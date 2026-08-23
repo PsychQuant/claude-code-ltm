@@ -59,16 +59,39 @@ let package = Package(
         // Facade：唯一同時看得到索引、策略與事件儲存的地方。CLI 與（Stage 2 的）
         // MCP 都只是它的薄 adapter——邏輯寫進 adapter 就是缺陷，因為那會讓兩個
         // 介面的行為漂移，而不變式測試只蓋得到其中一邊。
-        .target(name: "LTMService", dependencies: ["LTMCore", "LTMIndex", "LTMQuery", "LTMMemory"]),
+        // LTMEval 在這條清單裡，是因為**比較模式住在服務層**（見
+        // `wire-evaluation-machinery` 的 Decision「Comparison mode lives in the
+        // service layer, not the CLI」）：交錯器與呈現紀錄都在 LTMEval，而把它們
+        // 搬進 CLI 會讓第二個呼叫端（Stage 2 的 MCP）必須重寫一遍。方向仍然
+        // 單向：LTMEval 只依賴 LTMCore／LTMMemory／LTMQuery，沒有循環。
+        .target(
+            name: "LTMService",
+            dependencies: ["LTMCore", "LTMIndex", "LTMQuery", "LTMMemory", "LTMEval"]),
         // CLI。**不引入 swift-argument-parser**：零第三方依賴是隱私邊界的一部分
         // （每一個依賴都是一條需要自己審的供應鏈），手寫解析的成本遠低於那個代價。
-        .executableTarget(name: "ltm", dependencies: ["LTMService", "LTMCore"]),
+        .executableTarget(name: "ltm", dependencies: ["LTMService", "LTMCore", "LTMEval"]),
+        // 量測腳本。**是一個 target 而不是 `swiftc` 單檔**：它要用索引層與評估層
+        // 的型別，而單檔編譯只能把 source 檔複製進來——那就是同一件事的第二個
+        // 寫者。`path`/`sources` 指名單一檔案，`scripts/` 下的其他探針不受影響
+        // （它們刻意保持可獨立 `swiftc`，因為那些只 shell out 到 `ltm`）。
+        .executableTarget(
+            name: "measure-retrieval",
+            dependencies: ["LTMCore", "LTMEval", "LTMIndex", "LTMService"],
+            path: "scripts",
+            exclude: [
+                "measure-resume-duplication.py", "measure-rrf-ties.swift", "probe-tokenizer.swift",
+                "rrf-tie-fixtures", "rrf-tie-mechanism.sh", "rrf-tie-queries.txt",
+                "sample-corpus-scales.py",
+            ],
+            sources: ["measure-retrieval-quality.swift"]),
         .testTarget(name: "LTMMemoryTests", dependencies: ["LTMCore", "LTMMemory"]),
         .testTarget(name: "LTMQueryTests", dependencies: ["LTMCore", "LTMQuery"]),
         .testTarget(name: "LTMEvalTests", dependencies: ["LTMCore", "LTMMemory", "LTMQuery", "LTMEval"]),
         .testTarget(name: "LTMIndexTests", dependencies: ["LTMCore", "LTMIndex"]),
         .testTarget(
             name: "LTMServiceTests",
-            dependencies: ["LTMCore", "LTMIndex", "LTMService", "LTMQuery", "LTMMemory", "ltm"]),
+            dependencies: [
+                "LTMCore", "LTMIndex", "LTMService", "LTMQuery", "LTMMemory", "LTMEval", "ltm",
+            ]),
     ]
 )
