@@ -631,3 +631,24 @@ func defaultQueryPathIsUnchangedByComparisonMode() throws {
     // 既有的 footer 形狀（含策略名）在預設路徑上原封不動。
     #expect(plain.out.contains("— 策略 archival"))
 }
+
+@Test("--strategy 帶任意字串是 usage error，不是 crash")
+func unknownStrategyNeverTrapsTheProcess() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略可插拔", "檢索基線量測"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    // #33 verify（security lens）：先前這些值會走到 `RankingPolicyID(_:)` 的
+    // `preconditionFailure` → SIGTRAP，使用者拿到 exit 133 與 stack trace。
+    // 只有「剛好落在 OpaqueIdentifier 字元集內」的錯字（`foo`）才走得到具名錯誤。
+    for value in ["中文策略", "human like", "arch/ival", String(repeating: "a", count: 100), "foo"] {
+        let result = try runCLI(
+            ["query", "內容", "--all-projects", "--strategy", value],
+            environment: workspace.environment)
+        #expect(
+            result.code == LTMCommandLine.ExitCode.usageError.rawValue,
+            "--strategy '\(value)' 應該是 usage error（得到 exit \(result.code)）")
+        #expect(result.err.contains("未知策略"), "錯誤訊息要指名這是未知策略")
+        #expect(!result.err.contains("Fatal error"), "外來輸入不得讓行程 trap")
+    }
+}

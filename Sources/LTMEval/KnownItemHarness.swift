@@ -254,7 +254,19 @@ public struct KnownItemHarness: Sendable {
             !character.unicodeScalars.allSatisfy(isASCIIAlphanumeric)
         }).map(String.init).filter { $0.count >= 4 }
         if !words.isEmpty {
-            return words[Int(rng.next() % UInt64(words.count))]
+            let word = words[Int(rng.next() % UInt64(words.count))]
+            // **這一段是整段時就放棄**（#33 verify，logic lens 實測）。
+            //
+            // 先前只有中文那條路徑檢查「子字串必須是內部的」，ASCII 這條沒有：
+            // 一段內容就是一個詞時（`"tokenizer"`），導出的查詢**逐字等於整段
+            // 語料**，gold 幾乎必然排第一——量到的是「完全比對能不能命中」而不是
+            // 檢索品質，正是本函式的 doc 宣稱擋掉的那個退化情形。
+            //
+            // 退化樣本回 nil 交給呼叫端計進 `skipped`，不硬造一個沒有意義的查詢。
+            guard word != text.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                return nil
+            }
+            return word
         }
         return nil
     }

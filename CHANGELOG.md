@@ -29,10 +29,40 @@
   - **新增 `ServiceError`**：`comparisonRequiresStores`（不能記錄的比較不執行）、
     `incompatibleComparisonPair`（兩個都消費歷史卻對擴散要求不同的策略無法共用一份
     projection——交錯器只收一份）、`unknownStrategy`（不退回預設值）。
-  - **誠實邊界**：這次改動讓**機制**存在，**沒有**讓策略比較獲得量測支撐。bootstrap 期
-    每一次比較都是 null comparison（零歷史 → 淨強度全 0 → 嚴格大於恆為假 → 兩邊順序
-    相同），計分整批略過。CLAUDE.md 的那句「策略比較目前沒有任何量測支撐」原封不動，
-    只補上「變的是機具、沒變的是資料」這個區分。
+  - **第一份紀錄**：`docs/measurements/2026-08-23-known-item-retrieval.md`
+    （1,600 檔抽樣語料建成的獨立索引 18,470 chunk、兩個 seed 各約 490 對）。
+    三軌分報第一次讓「`cjk-2char` 的向量軌掛零」變成表上讀得出來的事實。
+  - **誠實邊界**：這次改動讓**機制**存在，**沒有**讓策略比較獲得量測支撐。
+
+### Fixed（#33 verify）
+
+5-lens ensemble（pai-ensemble 2.20.0，**codex leg 停用 → 無跨模型盲驗**）回報 53 條，
+以下 5 條判為 blocking 並已修，每條都以變異測試確認回歸鎖會為對的理由變紅：
+
+- **`--strategy <任意字串>` 讓行程 abort（exit 133）**。本次改動引入的回歸：把對照表
+  搬進 `StrategyRegistry` 時，順手把使用者字串包成 `RankingPolicyID(_:)`，而那個
+  initializer 對非法值是 `preconditionFailure`。改用 `init(validating:)`。CLAUDE.md
+  的「外來資料解析路徑一律不得 trap」逐字適用於 CLI 參數。
+- **`generation` 是 wall-clock 秒數，而 spec 定義是「索引建置的世代」**。後果是致命的：
+  `ComparisonScorer` 對 generation 不符是 `throw`（且排在 null 檢查之前），所以任何
+  **事後**寫入的互動事件——交錯比較存在的全部理由——會讓整份報告產不出任何數字。
+  改成由索引三個戳記雜湊而來。
+- **applied `ltm-cli` spec 自相矛盾**：既有 requirement 寫「沒有 `--record` 就不得寫
+  任何事件」，而 `--compare` 會寫。delta 只有 `## ADDED` 沒有修既有句子。已更正。
+- **「機制就緒、只差資料累積」是假的**。淨強度只由 deliberate 事件推動，而**全 repo
+  沒有任何寫入端**（只有 `.shown`，且它被明確排除在 reinforcement 之外）。原本寫進
+  spec 與 CLAUDE.md 的「需要時間」讀起來像等得到的 bootstrap 期——已改成事實陳述，
+  缺的那一端開為 **#35**。
+- **`compare` 讀歷史的那一行零覆蓋**：把它改成「永遠不讀、永遠不擴散」，367 條測試
+  全綠。所有 compare 測試都跑在空事件檔上。已補種真實歷史的非 null 比較測試。
+
+另修 1 條 MEDIUM：`KnownItemHarness.deriveQuery` 的 ASCII 路徑會回傳**整段文字**
+（`"tokenizer"` → `"tokenizer"`），正是它自己的 doc 宣稱擋掉的退化情形；而唯一那條
+回歸測試只餵中文，走不到那條路徑。量測紀錄的數字是修正後重跑的。
+
+量測紀錄本身也改寫過一次（三處過度宣稱／揭露不足，見該檔末節）：做了同一段自己說
+「分辨不了」的歸因、在整體數字上下結論而赤字其實集中在 `cjk-2char`、nDCG 從不印
+分母（`n=12` 的 0.465 與 `n=243` 的 0.652 並列）。
 
 - **#18：RRF 平手發生率已在語料子集上量到**（`docs/measurements/2026-08-22-rrf-tie-rate.md`；
   探針 `scripts/measure-rrf-ties.swift`、查詢集 `scripts/rrf-tie-queries.txt`、抽樣

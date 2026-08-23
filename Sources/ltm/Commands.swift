@@ -138,10 +138,27 @@ enum CommandSupport {
 
     /// 由使用者打的字組出策略。**對照表在 `StrategyRegistry`，不在這裡**——
     /// 比較模式也要組策略，而那條路徑住在服務層；兩份表會漂移。
+    ///
+    /// ## `validating:` 不是可有可無的（#33 verify，security lens）
+    ///
+    /// `name` 是使用者在命令列上打的**任意字串**。`RankingPolicyID(_:)` 對非法值是
+    /// `preconditionFailure` → SIGTRAP：`--strategy 中文策略` 會讓行程 abort（實測
+    /// exit 133），使用者拿到的是 stack trace 而不是說明。只有「剛好落在
+    /// `OpaqueIdentifier` 字元集內」的錯字才走得到下面那個具名錯誤。
+    ///
+    /// 這是本次改動**引入的回歸**：先前這裡是對 `String` 直接 switch，從不建構
+    /// 識別碼型別，所以任何值都給乾淨的 usage error。把「對照表搬到
+    /// `StrategyRegistry`」這件對的事，跟「順手把使用者字串包成 `RankingPolicyID`」
+    /// 這件不對的事綁在一起了。
+    ///
+    /// CLAUDE.md 的判準逐字適用：「語料是外來資料，解析路徑一律不得 trap……
+    /// 所以 ingest 端必須先 `validate` 再建構」。**CLI 參數與語料一樣是外來資料。**
     static func strategy(named name: String?) throws -> (any MemoryStrategy)? {
         // nil 或 archival 都回 nil：facade 的預設就是 archival，讓它自己決定。
         guard let name, name != "archival" else { return nil }
-        guard let strategy = StrategyRegistry.make(RankingPolicyID(name)) else {
+        guard let id = try? RankingPolicyID(validating: name),
+            let strategy = StrategyRegistry.make(id)
+        else {
             throw LTMService.ServiceError.unknownStrategy(name: name)
         }
         return strategy

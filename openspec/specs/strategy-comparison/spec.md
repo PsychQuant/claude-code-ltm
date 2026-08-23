@@ -301,7 +301,11 @@ Comparison mode SHALL be opt-in and SHALL NOT alter the default query path. Requ
 
 When no event store is available, a request for comparison mode SHALL fail rather than proceed without persisting. Proceeding would present interleaved results whose record is lost, which is indistinguishable to the user from a comparison that was recorded.
 
-**Bootstrap behaviour is expected, not a defect.** With no recorded history every anchor's net strength is zero, no strategy reorders, and both sides produce the same ordering — a null comparison, which this capability already excludes from scoring. Comparison mode therefore yields nothing to score until interaction events accumulate. Implementations SHALL NOT treat that as an error, and artifacts SHALL NOT predict when the first scorable comparison will occur, because it depends on usage.
+**Identical orderings are expected, not a defect.** With no recorded reinforcement or suppression every anchor's net strength is zero, no strategy reorders, and both sides produce the same ordering — a null comparison, which this capability already excludes from scoring. Implementations SHALL NOT treat that as an error.
+
+**And it is not a phase that ends on its own.** An earlier version of this paragraph said comparison mode "yields nothing to score until interaction events accumulate", which reads as a bootstrap period that time resolves. That is false, and it was written into this spec while it was false: net strength is moved only by the deliberate event kinds (`opened`, `cited`, `pinned`, `dismissed`), and **no interface in this system writes any of them**. `shown` is written by the query path and is explicitly excluded from reinforcement — it counts impressions only. So every comparison is a null comparison, and will remain so for any number of invocations, until something that records deliberate interaction exists.
+
+Artifacts describing this capability SHALL state that absence as the reason no comparison is scorable, rather than attributing it to elapsed time or usage volume. Predicting when the first scorable comparison will occur remains forbidden — but the reason is that the producer does not exist, not that usage is still accumulating. The missing producer is tracked as issue #35.
 
 #### Scenario: A recorded comparison reaches the scorer
 

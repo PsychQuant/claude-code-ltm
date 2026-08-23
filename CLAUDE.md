@@ -269,10 +269,19 @@ verify 的結論要以「同一家族的五個視角都沒看到」來理解，�
   **#33 之後這句話仍然成立，而且要說清楚它變了什麼、沒變什麼**：變的是**機具**
   ——`ltm query --compare` 會走交錯器、落地 `PresentationRecord`，所以
   `ComparisonScorer` 從此有輸入可讀（在此之前它的事件全部落進
-  `presentationNotTracked`）。**沒變的是資料**：交錯比較要的是真實使用累積出來的
-  互動事件，而那需要時間；在事件累積之前每一次比較都是 null comparison，報告
-  一個數字都產不出來。**機制存在 ≠ 有量測支撐。** 要寫策略比較的結論，仍然得先
-  有一份涵蓋那個比較的 `docs/measurements/` 紀錄，而它還不存在。
+  `presentationNotTracked`）。
+
+  **沒變的是資料，而且它不會自己變。** #33 的 verify 抓到我在這裡寫過一句假話：
+  原文說「交錯比較要的是真實使用累積出來的互動事件，**而那需要時間**」——那讀起來
+  像一個等得到的 bootstrap 期。事實是：淨強度只由 deliberate 事件（`opened`／
+  `cited`／`pinned`／`dismissed`）推動，而**這個系統裡沒有任何介面寫得出它們**
+  （全 repo 只有 `.shown` 一個寫入端，而 `shown` 被 `Projection` 明確排除在
+  reinforcement 之外、只計 impressions）。所以每一次比較都是 null comparison，
+  跑一萬次也一樣。缺的不是時間，是一個**把互動記成 deliberate 事件的產生端**，
+  追蹤於 **#35**。
+
+  **機制存在 ≠ 有量測支撐。** 要寫策略比較的結論，仍然得先有一份涵蓋那個比較的
+  `docs/measurements/` 紀錄，而它還不存在。
 - **檢索基線的量測有支撐**（`docs/measurements/2026-08-08-baseline.md`，issue #2），
   所以引用它的數字是可以的——**但必須指名出處**，讓讀者能查證那份量測涵蓋什麼、
   不涵蓋什麼。不指名出處的數字，讀者無法分辨它屬於哪一側。

@@ -243,3 +243,161 @@ func recordStoreRefusesAPathInsideTheCorpus() throws {
     }
     #expect(!FileManager.default.fileExists(atPath: inside.path))
 }
+
+// MARK: - #33 verify HIGH：非 null 的比較，以及「compare 真的讀了歷史」
+
+/// 種一段真的使用歷史，讓 `human-like` 與 `archival` 產出**不同**的順序。
+///
+/// ## 這條測試補的是什麼洞
+///
+/// #33 的 verify（devil's advocate lens）實測：把 `compare` 裡讀歷史的那一行
+/// 改成「永遠不讀、永遠不擴散」，**367 條測試全綠**。原因是先前所有 compare
+/// 測試都跑在空事件檔上——零歷史時三個策略逐字相同，走不走讀歷史的分支輸出
+/// 一樣。於是這個 change 的功能核心（讓使用歷史影響其中一邊的順序）零覆蓋。
+///
+/// 同時它也是 design 驗收準則 1 的正面半邊：「a persisted presentation record
+/// **whose attribution names both strategies**」。null comparison 的
+/// `creditedTo` 全是 nil，所以那句話只有在非 null 的呈現上才驗得到。
+///
+/// 種歷史的作法沿用 `LTMServiceTests` 既有的那條（deliberate `.cited` 事件，
+/// 不是 `shown`——shown 只計 impressions、不進 netStrength）。
+@Test("有使用歷史時比較是非 null 的：逐位置歸屬具名兩個策略，且兩邊都貢獻了位置")
+func aComparisonWithRealHistoryIsAttributedToBothStrategies() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: [
+        "記憶策略可插拔", "檢索基線量測", "第三段內容", "第四段內容", "第五段內容",
+    ])
+    let service = try workspace.comparisonService()
+    try service.build()
+
+    // 先取候選，給**最後一名**寫強歷史——它應該被 human-like 往上帶。
+    let baseline = try service.query(text: "內容", limit: 10, scope: .allProjects)
+    #expect(baseline.hits.count >= 3, "前提：同帶內要有多個候選才有得重排")
+    let promoted = baseline.hits[baseline.hits.count - 1].anchor
+    let store = try FileEventStore(url: workspace.eventsURL)
+    for _ in 0..<3 {
+        try store.append(
+            Event(
+                kind: .cited, anchor: promoted,
+                timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                generation: GenerationID("g-test"), policy: RankingPolicyID("human-like"),
+                noteRef: nil, presentation: nil))
+    }
+
+    let outcome = try service.compare(
+        text: "內容", limit: 10, scope: .allProjects, a: comparisonPair.a, b: comparisonPair.b)
+
+    // 1. 兩邊順序不同 → 非 null comparison。
+    #expect(
+        !outcome.record.isNullComparison,
+        "種了歷史之後 human-like 應該重排；若這裡是 null，代表 compare 沒把歷史接進 projection")
+
+    // 2. 驗收準則 1 的正面半邊：每一個位置都具名記在某一邊。
+    #expect(outcome.record.attribution.allSatisfy { $0.creditedTo != nil })
+    let credited = Set(outcome.record.attribution.compactMap(\.creditedTo))
+    #expect(
+        credited == [comparisonPair.a, comparisonPair.b],
+        "team-draft 應該讓兩邊都貢獻位置；只有一邊代表輪替沒發生")
+
+    // 3. 落地之後餵給計分端，事件被歸屬而不是被當成 null 整批略過。
+    let records = try FilePresentationRecordStore(url: workspace.recordsURL).allRecords()
+    let events = try FileEventStore(url: workspace.eventsURL).allEvents()
+    let report = try ComparisonScorer.report(records: records, events: events)
+    #expect(report.skipped.presentationNotTracked == 0)
+    #expect(report.skipped.fromNullComparison == 0, "非 null 的呈現不得被當成 null 略過")
+}
+
+/// 呈現之後才發生的互動，必須能被計分——而不是讓 scorer 以 generation 不符拋錯。
+///
+/// #33 verify：generation 先前是 `g-<當下秒數>`，於是任何**事後**寫入的事件必然
+/// 帶不同的值，而 `ComparisonScorer` 對此是 `throw`（且那道 guard 排在
+/// null-comparison 檢查之前）。也就是說：交錯比較存在的全部理由——事後的互動
+/// ——會讓整份報告一個數字都產不出來。當時測不到，是因為所有測試的事件與紀錄
+/// 都在同一次 `compare` 呼叫裡用同一個 `now` 寫成。
+@Test("呈現之後才寫入的互動事件仍能計分——generation 綁索引而不是綁當下時間")
+func aLaterInteractionOnAPresentationStillScores() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: [
+        "記憶策略可插拔", "檢索基線量測", "第三段內容", "第四段內容", "第五段內容",
+    ])
+    let service = try workspace.comparisonService()
+    try service.build()
+
+    let store = try FileEventStore(url: workspace.eventsURL)
+    let baseline = try service.query(text: "內容", limit: 10, scope: .allProjects)
+    let promoted = baseline.hits[baseline.hits.count - 1].anchor
+    for _ in 0..<3 {
+        try store.append(
+            Event(
+                kind: .cited, anchor: promoted,
+                timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+                generation: GenerationID("g-test"), policy: RankingPolicyID("human-like"),
+                noteRef: nil, presentation: nil))
+    }
+
+    let presentedAt = Date(timeIntervalSince1970: 1_800_000_000)
+    let outcome = try service.compare(
+        text: "內容", limit: 10, scope: .allProjects,
+        a: comparisonPair.a, b: comparisonPair.b, now: presentedAt)
+    #expect(!outcome.record.isNullComparison, "前提：要有非 null 的呈現才有得計分")
+
+    // 使用者在**一小時後**點開其中一筆。generation 必須仍然對得上。
+    let opened = outcome.hits[0].anchor
+    try store.append(
+        Event(
+            kind: .opened, anchor: opened, timestamp: presentedAt.addingTimeInterval(3600),
+            generation: outcome.record.generation, policy: RankingPolicyID("interleaved"),
+            noteRef: nil, presentation: outcome.record.id))
+
+    let records = try FilePresentationRecordStore(url: workspace.recordsURL).allRecords()
+    let events = try FileEventStore(url: workspace.eventsURL).allEvents()
+    // 先前這一行會 throw generationMismatch。
+    let report = try ComparisonScorer.report(records: records, events: events)
+    #expect(report.skipped.presentationNotTracked == 0)
+    let creditTotal = report.classRows.flatMap(\.scores.values).reduce(0) { $0 + $1.credits }
+    #expect(creditTotal == 1, "事後的那一次 opened 必須被記到某一邊頭上")
+}
+
+/// generation 綁的是**索引這一代**，不是呼叫的時刻。
+///
+/// ## 這條測試存在，是因為上面那條鎖不住它
+///
+/// `aLaterInteractionOnAPresentation` 拿 `outcome.record.generation` 去寫事後的
+/// 事件——不論 generation 怎麼導出，兩邊都必然相等，所以它**永遠不會紅**。實測：
+/// 把導出方式改回 `g-<當下秒數>`，369 條測試全綠。那正是 CLAUDE.md 記著的
+/// 「不可能失敗的測試比沒有測試更糟」。
+///
+/// 真正的性質要下在**兩次不同時刻的呈現**上：同一份索引 → 同一代。這一條在
+/// 秒數版本下必紅（兩次呼叫相隔一秒就換代），也順帶鎖住 spec 那條
+/// 「跨 generation 要分開報」不會退化成每格 n=1。
+@Test("同一份索引上、不同時刻的兩次比較，帶的是同一個 generation")
+func generationIsBoundToTheIndexNotTheClock() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["記憶策略可插拔", "檢索基線量測", "第三段內容"])
+    let service = try workspace.comparisonService()
+    try service.build()
+
+    // 相隔一整天的兩次呈現。
+    let first = try service.compare(
+        text: "內容", limit: 10, scope: .allProjects,
+        a: comparisonPair.a, b: comparisonPair.b,
+        now: Date(timeIntervalSince1970: 1_800_000_000))
+    let second = try service.compare(
+        text: "內容", limit: 10, scope: .allProjects,
+        a: comparisonPair.a, b: comparisonPair.b,
+        now: Date(timeIntervalSince1970: 1_800_086_400))
+
+    #expect(
+        first.record.generation == second.record.generation,
+        "同一份索引上的呈現必須同代；逐次換代會讓報告永遠宣稱 spans generations、每格 n=1")
+
+    // 兩筆紀錄一起餵給計分端時不得被判成跨 generation。
+    let records = try FilePresentationRecordStore(url: workspace.recordsURL).allRecords()
+    #expect(records.count == 2)
+    let report = try ComparisonScorer.report(
+        records: records, events: try FileEventStore(url: workspace.eventsURL).allEvents())
+    #expect(!report.spansGenerations)
+}

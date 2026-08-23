@@ -90,7 +90,9 @@ Every non-zero exit of `ltm query` caused by index state SHALL name the command 
 ---
 ### Requirement: Event recording is opt-in and off by default
 
-`ltm query` SHALL NOT append any event to the memory event store unless `--record` is given. With `--record`, it SHALL append one `shown` event per emitted hit through the facade's event sink.
+`ltm query` SHALL NOT append any event to the memory event store unless `--record` or `--compare` is given. With either, it SHALL append one `shown` event per emitted hit through the facade's event sink.
+
+`--compare` is named here rather than only in the comparison requirement below because this sentence is where a reader checks the "events are off by default" property. Stated as a bare `--record` universal, it was false against shipped behaviour the moment comparison mode landed, and a reader auditing the privacy-relevant default would have gotten two answers from the same document.
 
 #### Scenario: Default query leaves the event log untouched
 

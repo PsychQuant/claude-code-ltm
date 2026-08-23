@@ -203,15 +203,23 @@ print("")
 print("評到 \(report.scored) 對　跳過 \(report.skipped) 段（導不出可用查詢）")
 print("Recall@\(recallK) / nDCG@10（nDCG 只在 recall 到的那些對上平均）")
 print("")
-print("| 桶 | 對數 | lexical recall | lexical nDCG | vector recall | vector nDCG | fused recall | fused nDCG |")
+// **每個 nDCG 都印出它自己的分母**（#33 verify，devil's advocate lens）。
+//
+// 先前只印一欄「對數」（fused 的 scored），而三軌的 nDCG 各自只在**被 recall 到的
+// 那些對**上平均——分母天差地遠。實例：vector 的 0.465 是十幾個觀測的平均，卻與
+// 兩百多個觀測的 0.652 以同樣三位小數並列。讀者無從分辨。
+func cellText(_ a: ChannelAggregate) -> String {
+    "| \(percentage(a.recallRate)) | \(mean(a.meanNDCGAmongRecalled)) (n=\(a.recalled)) "
+}
+print(
+    "| 桶 | 評到 | lexical recall | lexical nDCG (n) | vector recall | vector nDCG (n) "
+        + "| fused recall | fused nDCG (n) |")
 print("|---|---:|---:|---:|---:|---:|---:|---:|")
 for label in QueryClass.allCases {
     guard let cell = report.byQueryClass[label] else { continue }
     print(
         "| \(label.rawValue) | \(cell.fused.scored) "
-            + "| \(percentage(cell.lexical.recallRate)) | \(mean(cell.lexical.meanNDCGAmongRecalled)) "
-            + "| \(percentage(cell.vector.recallRate)) | \(mean(cell.vector.meanNDCGAmongRecalled)) "
-            + "| \(percentage(cell.fused.recallRate)) | \(mean(cell.fused.meanNDCGAmongRecalled)) |")
+            + cellText(cell.lexical) + cellText(cell.vector) + cellText(cell.fused) + "|")
 }
 
 // 全部合併的一列。**分桶在上、合併在下**，而不是只印合併：#2 實測向量融合的
@@ -229,8 +237,6 @@ let allVector = combined(\.vector)
 let allFused = combined(\.fused)
 print(
     "| **全部** | \(allFused.scored) "
-        + "| \(percentage(allLexical.recallRate)) | \(mean(allLexical.meanNDCGAmongRecalled)) "
-        + "| \(percentage(allVector.recallRate)) | \(mean(allVector.meanNDCGAmongRecalled)) "
-        + "| \(percentage(allFused.recallRate)) | \(mean(allFused.meanNDCGAmongRecalled)) |")
+        + cellText(allLexical) + cellText(allVector) + cellText(allFused) + "|")
     }
 }

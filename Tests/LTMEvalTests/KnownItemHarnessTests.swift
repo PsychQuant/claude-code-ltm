@@ -149,10 +149,16 @@ func emptyCellsHaveNoRateRatherThanZero() {
     #expect(missed.meanNDCGAmongRecalled == nil)
 }
 
-@Test("導出的查詢是內部子字串，不是整段語料")
-func derivedQueriesAreProperSubstrings() {
+/// 導出的查詢必須是**內部**子字串，兩條路徑都要驗。
+///
+/// #33 verify（logic lens）：先前這條只餵一段中文，而中文永遠走漢字那條路徑
+/// ——ASCII 那條完全沒被執行過，於是 `deriveQuery("tokenizer")` 回傳
+/// `"tokenizer"`（整段）這件事，被一條名字宣稱在驗它的測試放過去了。
+@Test(
+    "導出的查詢是內部子字串，不是整段語料",
+    arguments: ["記憶策略可插拔而檢索基線量測", "the tokenizer floor is three characters"])
+func derivedQueriesAreProperSubstrings(text: String) {
     var rng = SplitMix64(seed: 99)
-    let text = "記憶策略可插拔而檢索基線量測"
     for _ in 0..<50 {
         guard let query = KnownItemHarness.deriveQuery(from: text, using: &rng) else {
             Issue.record("這段文字必然導得出查詢")
@@ -163,3 +169,14 @@ func derivedQueriesAreProperSubstrings() {
         #expect(text.contains(query))
     }
 }
+
+@Test("整段就是單一個詞時導不出查詢——不硬造一個等於整段的查詢")
+func aSingleWordChunkYieldsNoQuery() {
+    var rng = SplitMix64(seed: 11)
+    for text in ["tokenizer", "  embeddings  "] {
+        #expect(
+            KnownItemHarness.deriveQuery(from: text, using: &rng) == nil,
+            "退化樣本應該回 nil 交給呼叫端計進 skipped：\(text)")
+    }
+}
+

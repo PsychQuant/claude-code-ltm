@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import LTMCore
 import SQLite3
@@ -339,7 +340,8 @@ public struct LTMService {
             if recordEvents, let eventStore {
                 recorded = try record(
                     kind: .shown, anchors: hits.map(\.anchor), policy: chosen.id, store: eventStore,
-                    now: now, presentation: presentation)
+                    now: now, generation: Self.generation(forIndexStamps: try database.stamps()),
+                    presentation: presentation)
             }
 
             return QueryOutcome(
@@ -423,7 +425,7 @@ public struct LTMService {
                 database: database, readsHistory: !demands.isEmpty,
                 spreading: demands.first?.appliesSpreadingActivation ?? false, now: now)
 
-            let generation = Self.generation(at: now)
+            let generation = Self.generation(forIndexStamps: try database.stamps())
             let interleaving = try InterleavingHarness(generation: generation).present(
                 query: text, candidates: candidates, projection: projection,
                 a: a, b: b,
@@ -459,7 +461,8 @@ public struct LTMService {
                     // `attribution` 裡，逐位置各不相同，而事件的 `policy` 是單一值。
                     // 用交錯器自己的識別碼標記它們的來源。
                     policy: RankingPolicyID("interleaved"),
-                    store: eventStore, now: now, presentation: interleaving.record.id)
+                    store: eventStore, now: now, generation: generation,
+                    presentation: interleaving.record.id)
             }
 
             return ComparisonOutcome(
@@ -468,10 +471,43 @@ public struct LTMService {
         }
     }
 
-    /// 世代識別碼。**由 `now` 導出，一次查詢裡只算一次**——紀錄與事件必須帶
-    /// 同一個值，否則計分端會以 `generationMismatch` 拒絕整批。
-    private static func generation(at now: Date) -> GenerationID {
-        GenerationID("g-\(Int(now.timeIntervalSince1970))")
+    /// 世代識別碼：**索引這一代的身分**，不是當下的時間。
+    ///
+    /// ## 為什麼不是時間（#33 verify，requirements + devil's advocate 各自抓到）
+    ///
+    /// 先前是 `g-<當下秒數>`。那有兩個後果，第二個是致命的：
+    ///
+    /// 1. 它與 spec 的定義不符。`strategy-comparison` spec 逐字寫「the generation
+    ///    identifier of **the index build**」，而秒數與索引建置無關。
+    /// 2. **它讓這整套機制的目的自我否定。** `ComparisonScorer` 對「事件自報的
+    ///    generation ≠ 紀錄的 generation」是 `throw`，而且那道 guard 排在
+    ///    null-comparison 檢查**之前**。所以任何在呈現之後才寫入的互動事件——
+    ///    也就是交錯比較存在的全部理由——必然帶不同的秒數，整份報告一個數字都
+    ///    產不出來。當時測不到，是因為所有測試的事件與紀錄都在同一次 `compare`
+    ///    呼叫裡用同一個 `now` 寫成。
+    ///
+    /// 另外它讓 spec 的「跨 generation 要分開報」退化成廢話：每次查詢自成一代，
+    /// 報告永遠宣稱 spans generations、每格 n=1。
+    ///
+    /// ## 現在的定義
+    ///
+    /// 由索引的三個戳記（layout 版本、embedding revision、anchor 定址規則）雜湊
+    /// 而來。這三者**恰好就是「結果可不可比」的判準**——本 facade 在查詢前置段
+    /// 對它們三個各有一道拒答守衛，理由都是「不同代的東西放在一起比沒有意義」。
+    /// 所以同一份索引上的所有呈現共用一代；索引換代（換模型、改 layout、改定址
+    /// 規則）就換一代，而那正是 spec 要求分開報的那條線。
+    ///
+    /// 用雜湊而不是把三個值串起來：`embedding_revision` 含 `#`，而
+    /// `OpaqueIdentifier` 只收 ASCII 英數與 `._-`。
+    private static func generation(forIndexStamps stamps: IndexDatabase.Stamps) -> GenerationID {
+        let material = [
+            stamps.layoutVersion.map(String.init) ?? "-",
+            stamps.embeddingRevision ?? "-",
+            stamps.anchorSourceRule ?? "-",
+        ].joined(separator: "\u{0}")
+        let digest = SHA256.hash(data: Data(material.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return GenerationID("g-" + hex.prefix(16))
     }
 
     /// 開索引、驗版本、增量續讀、檢索——**`query` 與 `compare` 共用的前置段**。
@@ -656,11 +692,12 @@ public struct LTMService {
     /// `presentation` 預設 nil：呼叫端沒有群組可指時（或未來其他不代表單一
     /// 呈現的批次寫入）維持原行為。`query()` 是目前唯一會傳非 nil 值的呼叫點
     /// ——見該處生成 `PresentationID` 的理由（#15）。
+    /// `generation` 由呼叫端傳入（索引戳記導出）——**不在這裡自己算**：紀錄與
+    /// 事件必須帶同一個值，而只有呼叫端同時握著兩者。
     private func record(
         kind: EventKind, anchors: [Anchor], policy: RankingPolicyID, store: any EventStore,
-        now: Date, presentation: PresentationID? = nil
+        now: Date, generation: GenerationID, presentation: PresentationID? = nil
     ) throws -> Int {
-        let generation = Self.generation(at: now)
         var written = 0
         for anchor in anchors {
             try store.append(
