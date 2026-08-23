@@ -29,6 +29,8 @@ private func exampleCandidates() -> [Candidate] {
 /// #32 之前，這條路徑從來沒有被走過。
 private struct MisbehavingStrategy: MemoryStrategy {
     let id = RankingPolicyID("misbehaving")
+    /// 觸發測試授權註冊（見 `TestStrategyAuthority`）。
+    private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
     let displacementBound: Int
     let placementConstraints: Set<PlacementConstraint>
@@ -115,4 +117,148 @@ private struct MisbehavingStrategy: MemoryStrategy {
     #expect(ArchivalStrategy().placementConstraints.isEmpty)
     #expect(HumanLikeStrategy().placementConstraints.isEmpty)
     #expect(ConservativeStrategy().placementConstraints == [.withinTieRuns])
+}
+
+// MARK: - #34：授權表是權威，策略的自報只能加碼
+
+/// 宣告會**在呼叫之間變動**的 conformer。
+///
+/// `MisbehavingStrategy` 用的是 stored property，所以它結構上表現不出跨呼叫
+/// 變異——#32 的 verify 正是用一個像這樣的探針證偽了「策略只能選、不能弱化」
+/// 那句宣稱。它必須是 class：value type 的 getter 改不了自己的狀態。
+private final class AlternatingConstraintStrategy: MemoryStrategy, @unchecked Sendable {
+    /// **專屬識別碼，刻意不在 bootstrap 名單裡。**
+    ///
+    /// 這條測試需要一個授權**非空**的識別碼（要驗的正是「表的約束減不掉」），
+    /// 而 bootstrap 把名單裡的每一個都註冊成空集合。若共用 `misbehaving`，
+    /// 測試先註冊 `[.withinTieRuns]`、隨後建構 conformer 時 bootstrap 才首次
+    /// 初始化並把它蓋回 `[]`——實測過，`static let` 的初始化時機決定了成敗。
+    /// 那是「靠順序」的形狀，換一個不重疊的名字就沒有順序可言。
+    let id = RankingPolicyID("alternating-probe")
+    let consumedSignals: Set<EventKind> = []
+    let displacementBound = 4
+    let order: [String]
+
+    private let lock = NSLock()
+    private var callCount = 0
+
+    /// **偶數次回宣告、奇數次回空集合。** 這正是 #32 那個探針的形狀。
+    var placementConstraints: Set<PlacementConstraint> {
+        lock.lock()
+        defer { lock.unlock() }
+        callCount += 1
+        return callCount.isMultiple(of: 2) ? [] : [.withinTieRuns]
+    }
+
+    init(order: [String]) { self.order = order }
+
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        let byID = Dictionary(
+            input.candidates.map { ($0.anchor.turnID, $0) }, uniquingKeysWith: { a, _ in a })
+        let originalIndex = Dictionary(
+            uniqueKeysWithValues: input.candidates.enumerated().map { ($0.element.anchor, $0.offset) })
+        return order.enumerated().compactMap { position, turnID in
+            guard let candidate = byID[turnID] else { return nil }
+            let displacement = (originalIndex[candidate.anchor] ?? position) - position
+            return RankedResult(
+                candidate: candidate, displacement: displacement,
+                reason: RankingReason(
+                    history: .none,
+                    movement: displacement > 0
+                        ? .advanced(positions: displacement)
+                        : (displacement < 0 ? .receded(positions: -displacement) : .unmoved)))
+        }
+    }
+}
+
+@Test("宣告在呼叫之間變動時，授權表的約束每一次都套用")
+func anAlternatingDeclarationIsComposedAway() throws {
+    // 授權必須**非空**——這條要驗的是「表的約束減不掉」。專屬識別碼，用完撤銷。
+    StrategyRegistry.registerForTesting(
+        RankingPolicyID("alternating-probe"), constraints: [.withinTieRuns])
+    defer { StrategyRegistry.unregisterForTesting(RankingPolicyID("alternating-probe")) }
+
+    // `[A: 0.5, B: 0.5, C: 0.3]` → 兩個等分區段 `{A, B}` 與 `{C}`。
+    let candidates = exampleCandidates()
+    let strategy = AlternatingConstraintStrategy(order: ["C", "A", "B"])  // C 離開自己的區段
+    let projection = Projection.empty(at: instant)
+
+    // **每一次**都要拋。先前（讀實例的宣告）第二次會過——#32 的探針實測。
+    for call in 1...4 {
+        #expect(throws: StrategyViolation.movedAcrossTieRuns) {
+            _ = try strategy.rerank(candidates, with: projection)
+        }
+        _ = call
+    }
+}
+
+@Test("策略可以給自己加約束，授權表沒要求也算數")
+func aStrategyMayHoldItselfToMoreThanItsAuthority() throws {
+    // `misbehaving` 的測試授權是空集合（無約束），而實例宣告 tie-run。
+    let candidates = exampleCandidates()
+    let strategy = MisbehavingStrategy(
+        displacementBound: 4, placementConstraints: [.withinTieRuns], order: ["C", "A", "B"])
+
+    #expect(throws: StrategyViolation.movedAcrossTieRuns) {
+        _ = try strategy.rerank(candidates, with: .empty(at: instant))
+    }
+}
+
+@Test("授權表裡沒有的識別碼被具名拒絕，且策略的 rerankChecked 從未被進入")
+func anUnknownIdentifierIsRefusedBeforeReranking() throws {
+    let candidates = exampleCandidates()
+    let strategy = UnregisteredStrategy()
+
+    #expect(throws: StrategyViolation.unauthorizedStrategy(RankingPolicyID("never-registered"))) {
+        _ = try strategy.rerank(candidates, with: .empty(at: instant))
+    }
+    // **斷言下在「有沒有被進入」上，不只是「有沒有拋」**：拒絕必須發生在重排
+    // 之前，否則一個未授權的策略仍然跑過了它的邏輯。
+    #expect(!strategy.wasEntered.withLock { $0 }, "拒絕必須在 rerankChecked 之前發生")
+}
+
+/// 刻意不註冊授權的 conformer。
+private final class UnregisteredStrategy: MemoryStrategy, @unchecked Sendable {
+    let id = RankingPolicyID("never-registered")
+    let consumedSignals: Set<EventKind> = []
+    let displacementBound = 1
+    let wasEntered = Mutex(false)
+
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        wasEntered.withLock { $0 = true }
+        return input.candidates.map {
+            RankedResult(
+                candidate: $0, displacement: 0,
+                reason: RankingReason(history: .none, movement: .unmoved))
+        }
+    }
+}
+
+@Test("三檔出貨策略宣告的約束與它們的授權條目相同——合成對它們是恆等運算")
+func theShippedStrategiesMatchTheirAuthority() {
+    let shipped: [any MemoryStrategy] = [
+        ArchivalStrategy(), HumanLikeStrategy(), ConservativeStrategy(),
+    ]
+    for strategy in shipped {
+        let authorized = StrategyRegistry.authorizedConstraints(for: strategy.id)
+        #expect(authorized != nil, "出貨策略 \(strategy.id.value) 必須在授權表裡")
+        #expect(
+            authorized == strategy.placementConstraints,
+            "授權條目與策略自己的宣告不同，合成就不再是恆等運算——見 \(strategy.id.value)")
+    }
+}
+
+@Test("registry 的識別碼集合與授權表的鍵集合相同")
+func theRegistryAndTheAuthorityTableAgreeOnWhichStrategiesExist() {
+    for name in StrategyRegistry.known {
+        let id = RankingPolicyID(name)
+        #expect(StrategyRegistry.make(id) != nil, "\(name) 在 known 裡卻組不出實例")
+        #expect(
+            StrategyRegistry.authorizedConstraints(for: id) != nil,
+            "\(name) 在 known 裡卻沒有授權條目——兩份清單開始漂移了")
+    }
 }

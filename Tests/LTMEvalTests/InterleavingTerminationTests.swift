@@ -16,6 +16,8 @@ import Testing
 /// `rerank` 是 extension 上的非 customization point，它連出 seam 都出不去。
 private struct TruncatingStrategy: MemoryStrategy {
     let id = RankingPolicyID("truncating")
+    /// 觸發測試授權註冊（見 `StrategyRegistry.readyForTesting`）。
+    private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
     let displacementBound = 99
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws -> [RankedResult] {

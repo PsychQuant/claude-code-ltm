@@ -5,6 +5,33 @@
 ## Unreleased
 
 ### Added
+- **#34：策略的位置約束改由授權表決定**（change `authorize-strategy-declarations`）。
+  `#32` 把 tie-run 約束的**執行點**上提到 seam（對的），但留下「策略仍能決定自己
+  受不受檢」——而那句「策略只能選、不能弱化」寫在六處 artifacts 裡，被一個 getter
+  交替回值的探針可執行地證偽（同 instance、同候選，第一次拋、第二次過）。
+  - **`StrategyAuthority.swift`（新，`LTMQuery`）**：`id → 授權約束` 的封閉表，與
+    `StrategyRegistry` 住同一個檔案。seam 取 **`表 ∪ 實例`**——策略可以給自己**加**
+    約束，永遠**減**不掉表裡的。
+  - **交替回值的 getter 因此拿不到任何東西**，所以不需要跨呼叫的一致性驗證：保證來自
+    **合成的方向**，不是記住上次讀到什麼。**seam 維持純函式**（無狀態、無同步、無快照）。
+  - **`StrategyRegistry` 從 `LTMService` 下移到 `LTMQuery`**（服務層 `typealias`
+    re-export，呼叫端零改動）。授權表必須被 seam 讀得到，而 seam 所在模組的依賴刻意
+    只有 `LTMCore`；另立第二張表則會讓「有哪些策略」有兩份會漂移的定義。
+  - **新增 `StrategyViolation.unauthorizedStrategy`**：表裡沒有的識別碼**具名拒絕**，
+    不退回自報——退回等於留一個「宣告新名字就不受檢」的後門。拒絕發生在 `rerankChecked`
+    之前（測試斷言 `wasEntered` 為假，不只是「有拋錯」）。
+  - **套件內的測試註冊口**（`internal`）：seam 的每道檢查都靠刻意違規的 conformer 鎖住，
+    而那些 conformer 必須有自己的假 id。封閉性對模組外仍成立，且**寫進 spec**——沒被
+    記錄的信任邊界與疏漏無法區分。
+  - **`displacementBound` 不在授權表裡，而「為什麼不能在」是這次的實質收穫**：表以
+    識別碼為鍵，而 spec 要求 bound 可在建構時組態——`human-like(bound: 3)` 與
+    `human-like(bound: 1)` 是同一個識別碼的兩個實例。issue 說「兩者是同一個問題的兩個
+    實例」對了一半：都是無人驗證的自報，但**只有一個能用身分鍵的權威回答**。
+    **bound 的權威問題仍未決。**
+  - 四個變異各殺掉一條不同的測試（聯集的兩個方向、未知 id 的拒絕、出貨策略對齊）。
+    實作期間另抓到兩次「靠順序才綠」：bootstrap 放錯 target（整批綠、單跑紅）、
+    探針借用了 bootstrap 名單裡的識別碼（`static let` 初始化時機決定成敗）。
+
 - **#33：兩條評估路徑的機具接上了**（change `wire-evaluation-machinery`）。issue 原本只
   說「ground truth 資料集沒人在追」，而 discuss 期間查證出**第三塊、也是真正的瓶頸**：
   `grep -rn "InterleavingHarness" Sources/LTMService/ Sources/ltm/` 零命中、

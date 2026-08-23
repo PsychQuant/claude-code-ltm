@@ -47,6 +47,8 @@ func projection(_ entries: [(Anchor, [EventKind: Int])]) -> Projection {
 /// 有自己的測試）。
 private struct IdentityProbe: MemoryStrategy {
     let id = RankingPolicyID("identity-probe")
+    /// 觸發測試授權註冊（見 `TestStrategyAuthority`）。
+    private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
     let displacementBound = 99
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws -> [RankedResult] {
@@ -88,6 +90,8 @@ private struct IdentityProbe: MemoryStrategy {
 /// 三條測的都不是這個型別的自律，是 seam 的強制。
 private struct LyingStrategy: MemoryStrategy {
     let id = RankingPolicyID("lying")
+    /// 觸發測試授權註冊（見 `TestStrategyAuthority`）。
+    private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
     let displacementBound = 99
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
@@ -105,6 +109,8 @@ private struct LyingStrategy: MemoryStrategy {
 /// `misreportedDisplacement`——把帶檢查整個拿掉，測試照樣（因為別的理由）變綠。
 private struct BandCrossingStrategy: MemoryStrategy {
     let id = RankingPolicyID("band-crossing")
+    /// 觸發測試授權註冊（見 `TestStrategyAuthority`）。
+    private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
     let displacementBound = 99
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
@@ -126,6 +132,8 @@ private struct BandCrossingStrategy: MemoryStrategy {
 /// 丟掉一筆候選、重複另一筆。**不呼叫任何守衛**，走 seam 的正常入口。
 private struct SetChangingStrategy: MemoryStrategy {
     let id = RankingPolicyID("set-changing")
+    /// 觸發測試授權註冊（見 `TestStrategyAuthority`）。
+    private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
     let displacementBound = 99
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
@@ -192,6 +200,8 @@ private struct SetChangingStrategy: MemoryStrategy {
 /// 通過——因為上限當時還留給各策略自願呼叫守衛。
 private struct FarJumpingStrategy: MemoryStrategy {
     let id = RankingPolicyID("far-jumping")
+    /// 觸發測試授權註冊（見 `TestStrategyAuthority`）。
+    private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
     let displacementBound = 1
 
@@ -350,6 +360,8 @@ private func statsProjection(_ entries: [(String, AnchorStatistics)]) -> Project
 /// 順序不動、displacement 誠實，卻在 `reason.movement` 上說謊。
 private struct MovementLiar: MemoryStrategy {
     let id = RankingPolicyID("movement-liar")
+    /// 觸發測試授權註冊（見 `TestStrategyAuthority`）。
+    private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
     let displacementBound = 0
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
@@ -377,6 +389,8 @@ private struct MovementLiar: MemoryStrategy {
 
 private struct NegativeBoundStrategy: MemoryStrategy {
     let id = RankingPolicyID("negative-bound")
+    /// 觸發測試授權註冊（見 `TestStrategyAuthority`）。
+    private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
     let displacementBound = -1
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws

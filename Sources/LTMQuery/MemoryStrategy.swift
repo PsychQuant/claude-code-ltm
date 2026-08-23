@@ -181,6 +181,12 @@ public enum StrategyViolation: Error, Sendable, Equatable {
     /// 被驗證過。與其把圍籬檢查改成 O(n²) 的兩兩比較，不如在入口要求輸入有序
     /// ——檢索本來就是照相關性排出來的，非遞減是它真實的形狀。
     case bandsOutOfOrder(at: Int)
+    /// 這個策略識別碼在授權表裡沒有條目。
+    ///
+    /// **具名拒絕，不退回策略的自報。** 退回等於留一個「宣告一個新名字就不
+    /// 受檢」的後門，而那是最容易不小心做到的事——授權表是封閉集合，新增一檔
+    /// 策略本來就要動 spec。
+    case unauthorizedStrategy(RankingPolicyID)
 }
 
 /// 進到 `rerankChecked` 的入場券。
@@ -371,11 +377,17 @@ public protocol MemoryStrategy: Sendable {
     /// 導出等分區段，兩者在任何策略被呼叫之前就在 seam 手上。所以策略無法**定義**
     /// 一條約束的意思。
     ///
-    /// **但它能控制這一次呼叫受不受檢，而且沒有一致性保證**——這個成員是 `{ get }`，
-    /// computed property 可以每次回不同的值，seam 重讀而不記錄。初版宣稱「無法弱化
-    /// 一條已宣告的約束」，#32 verify 用一個 getter 交替回值的 conformer 推翻了它
-    /// （同 instance、同輸出，第一次拋、第二次過）。完整敘述見 `PlacementConstraint`
-    /// 的說明；殘留缺口追蹤於 #34。
+    /// **這個成員宣告的是「我額外把自己約束到什麼」，不是「什麼約束適用於我」**
+    /// （#34）。適用的是 `StrategyRegistry.authorizedConstraints(for:)` 那張以
+    /// 識別碼為鍵的授權表，而 seam 取兩者的**聯集**。
+    ///
+    /// 這個成員仍然是 `{ get }`，computed property 仍然可以每次回不同的值——
+    /// #32 的 verify 就是用一個交替回值的 conformer 推翻了初版那句「無法弱化
+    /// 一條已宣告的約束」（同 instance、同輸出，第一次拋、第二次過）。**現在那個
+    /// getter 拿不到任何東西**：聯集裡已經有表的約束，空集合減不掉它。
+    ///
+    /// 所以成立的陳述是「策略無法被檢查得比它的識別碼所要求的更鬆」，而它成立的
+    /// 理由是**合成的方向**，不是策略被信任會守規矩。
     ///
     /// 預設是空集合（見下方 extension）。方向是刻意的：預設成「受約束」會讓
     /// `human-like` 正確的輸出被自己的 seam 擋掉，而那個失敗看起來像策略的 bug；
@@ -398,7 +410,20 @@ public protocol MemoryStrategy: Sendable {
     /// `[4,-1,-1,-1,-1]`）現在仍然通過——策略宣告 `displacementBound = 4` 即可。
     ///
     /// 要真的關掉，spec 得先回答「**誰有權決定上限**」（設定檔／呼叫端／
-    /// 註冊表），而不是讓策略自報。那是尚未做出的設計決定，記在 #16。
+    /// 註冊表），而不是讓策略自報。那是尚未做出的設計決定。
+    ///
+    /// ## #34 沒有關掉它，但確立了「識別碼鍵的表不是它的答案」
+    ///
+    /// #34 為 `placementConstraints` 建了一張以**識別碼**為鍵的授權表。同一招對
+    /// 這裡行不通，理由不是偷懶：本 protocol 的 `consumedSignals` doc 寫著策略軸
+    /// **永遠不是「調整幅度」**，而 spec 把那句話落實成「bound 必須可在建構時
+    /// 組態」——`human-like(displacementBound: 3)` 與 `human-like(displacementBound: 1)`
+    /// 是**同一個識別碼**的兩個實例，帶著不同的 bound。那正是「幅度不屬於身分」
+    /// 的意思，也正是識別碼鍵的表對它無話可說的原因。
+    ///
+    /// 給每個識別碼一個上限只會二選一：牴觸那條 requirement，或讓建構參數變成
+    /// 裝飾。所以**這個問題仍然未決**，只是現在知道它需要另一種形狀的權威
+    /// （設定檔／呼叫端／以「已組態的實例」為鍵的註冊表）。
     var displacementBound: Int { get }
 
     /// 這個策略要不要套用擴散激發（同框呈現群組間的間接 reinforcement）。
@@ -460,12 +485,45 @@ extension MemoryStrategy {
     public func rerank(_ candidates: [Candidate], with projection: Projection) throws
         -> [RankedResult]
     {
+        // **權威在表，不在策略。** 兩者由下面的單向合成決定實際生效的值——
+        // 表沒有這個識別碼就拒絕，不退回自報（#34）。
+        guard let authorizedConstraints = StrategyRegistry.authorizedConstraints(for: id) else {
+            throw StrategyViolation.unauthorizedStrategy(id)
+        }
+
         // 負的上限是**外來策略給的值**，不是程式錯誤——所以 throw 而不是 trap。
         // `RankingGuard.check` 裡的 `precondition(bound >= 0)` 會讓一個宣告
         // `displacementBound = -1` 的合規 conformer 中止行程（#1 verify R6）。
+        //
+        // **在合成之前擋**：負值與任何上限取最小值仍是負值，所以合成救不了它，
+        // 而先擋能給出指名那個值的錯誤。
         guard displacementBound >= 0 else {
             throw StrategyViolation.negativeDisplacementBound(displacementBound)
         }
+
+        // ## 聯集合成：策略只能給自己加約束，永遠不能減（#34）
+        //
+        // `placementConstraints` 是 `{ get }`，conformer 可以實作成 computed
+        // property 而每次回不同的值——#32 的 verify 實測過：同一個 instance、
+        // 同一組候選，第一次拋、第二次過。取聯集之後那個 getter 拿不到任何
+        // 東西：表的約束已經在裡面了，**空集合減不掉它**。
+        //
+        // 所以保證是「每次呼叫各自成立」，由合成的**形狀**給的，不必參照別次
+        // 呼叫。seam 因此維持純函式——沒有跨呼叫的表、沒有同步、沒有快照。
+        //
+        // ## 為什麼 `displacementBound` 不在這裡合成
+        //
+        // 授權表以**識別碼**為鍵，所以它只能承載識別碼決定得了的東西。protocol
+        // 的 doc 說策略軸是「消費哪些訊號」加上「在什麼條件下作用」、**永遠不是
+        // 「調整幅度」**，而 spec 把那句話落實成「bound 必須可在建構時組態」
+        // ——`human-like(displacementBound: 3)` 與 `human-like(displacementBound: 1)`
+        // 是同一個識別碼的兩個實例，帶著不同的 bound。那正是「幅度不屬於身分」
+        // 的意思，也正是識別碼鍵的表對它無話可說的原因。
+        //
+        // 給每個識別碼一個上限，只會二選一：要嘛牴觸那條 requirement，要嘛讓
+        // 建構參數變成裝飾。**所以 bound 的權威問題仍然未決**（見該成員的 doc），
+        // 本次只確立了「識別碼鍵的表不是它的答案」。
+        let effectiveConstraints = authorizedConstraints.union(placementConstraints)
         try MemoryStrategySupport.requireFiniteBaseScores(candidates)
         try MemoryStrategySupport.requireBandsInOrder(candidates)
         // **只有會消費歷史的策略才受 projection 形狀約束。**
@@ -495,7 +553,7 @@ extension MemoryStrategy {
         //
         // 這裡不重算等分區段——切法由 `RankingGuard` 的 `tieRunIdentifiers` 擁有，
         // 本處只呼叫。同一件事兩個寫者就是兩份會漂移的規格。
-        for constraint in placementConstraints {
+        for constraint in effectiveConstraints {
             switch constraint {
             case .withinTieRuns:
                 _ = try RankingGuard.checkTieRunsOnly(

@@ -150,6 +150,8 @@ private struct RogueStrategy: MemoryStrategy {
     }
     let mode: Mode
     let id = RankingPolicyID("rogue")
+    /// 觸發測試授權註冊（見 `TestStrategyAuthority`）。
+    private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
 
     let displacementBound = 99
