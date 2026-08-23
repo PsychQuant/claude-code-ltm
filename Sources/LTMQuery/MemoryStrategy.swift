@@ -292,17 +292,6 @@ public enum MemoryStrategySupport {
     }
 }
 
-/// 使用歷史能影響排序的**唯一**入口。
-///
-/// 簽章上收得到的只有候選與 projection：沒有 CorpusReader（策略讀不到語料）、
-/// 也沒有 `FileEventStore`（本模組不依賴 LTMMemory）。
-///
-/// **兩者的強度不同，不可混為一談**（#1 verify R1 實測推翻原宣稱、R2 指出這裡
-/// 漏改）：簽章不收 CorpusReader 是型別層事實，但 `CorpusReader` 與
-/// `Anchor.dereference` 都是 LTMCore 的 public API，策略側自建 reader 仍可還原
-/// 原文；依賴宣告擋掉的只是 `FileEventStore` 這個便利型別，`Event: Codable`
-/// 在 LTMCore，用 Foundation 直接讀檔即可繞過。兩條 SHALL NOT 目前**沒有
-/// 執行點**，追蹤於 #14。
 /// 一個策略可以宣告、但**不能定義**的放置約束。
 ///
 /// ## 為什麼是封閉 enum 而不是策略提供的述詞
@@ -313,8 +302,24 @@ public enum MemoryStrategySupport {
 /// 可以提供——`RankingGuard` 自己從候選的 `band` 與 `baseScore` 導出等分區段，
 /// 兩者在任何策略被呼叫之前就已經在 seam 手上。
 ///
-/// 策略可以**不宣告**某條約束（那是一個寫在介面上、審 spec 時看得到的選擇），
-/// 但不能弱化一條它已經宣告的約束。
+/// ## 它與 `displacementBound` 的差別比初版宣稱的窄（#32 verify 證偽）
+///
+/// 初版寫著「策略不能弱化一條它已經宣告的約束」。**那是錯的，而且可執行地錯。**
+/// 這是 `{ get }` 需求，conformer 可以實作成 computed property；seam 每次呼叫都
+/// **重讀**它、不記錄也不驗證。實測：一個 getter 第一次回 `[.withinTieRuns]`、
+/// 之後回 `[]` 的 conformer，用**同一個 instance**送出**同一個**跨區段排序兩次，
+/// 第一次拋 `movedAcrossTieRuns`、第二次被接受。
+///
+/// 對照之下，緊接在約束檢查之後的那個迴圈**確實**驗了 `displacement` 與
+/// `movement`（拿實際位置變化對照自報值）。約束的自報沒有被驗。
+///
+/// **實際成立的較窄陳述**：策略不能**定義** `.withinTieRuns` 的意思——區段的切法
+/// 由 `RankingGuard.tieRunIdentifiers` 擁有，策略傳不進任何影響判定的值。它能控制
+/// 的只有「這一次呼叫要不要受檢」，而那沒有跨呼叫的一致性保證。
+///
+/// 所以與 `displacementBound` 的差別是**表面大小**而不是**種類**：上限是策略在一條
+/// 連續值域上挑一個數字（宣告 4 就能移 4 位）；約束是從 seam 擁有的封閉詞彙裡挑
+/// 子集，語意動不了。兩者都是未經驗證的 per-call 自報。這個殘留缺口追蹤於 #34。
 ///
 /// ## 這個列舉為什麼不違反「列舉會漏，性質不會」
 ///
@@ -330,6 +335,17 @@ public enum PlacementConstraint: Sendable, Hashable, CaseIterable {
     case withinTieRuns
 }
 
+/// 使用歷史能影響排序的**唯一**入口。
+///
+/// 簽章上收得到的只有候選與 projection：沒有 CorpusReader（策略讀不到語料）、
+/// 也沒有 `FileEventStore`（本模組不依賴 LTMMemory）。
+///
+/// **兩者的強度不同，不可混為一談**（#1 verify R1 實測推翻原宣稱、R2 指出這裡
+/// 漏改）：簽章不收 CorpusReader 是型別層事實，但 `CorpusReader` 與
+/// `Anchor.dereference` 都是 LTMCore 的 public API，策略側自建 reader 仍可還原
+/// 原文；依賴宣告擋掉的只是 `FileEventStore` 這個便利型別，`Event: Codable`
+/// 在 LTMCore，用 Foundation 直接讀檔即可繞過。兩條 SHALL NOT 目前**沒有
+/// 執行點**，追蹤於 #14。
 public protocol MemoryStrategy: Sendable {
     /// 策略識別碼。由「消費哪些訊號」定義，不由調整幅度定義——所以同一個策略
     /// 配不同位移上限仍是同一個 id。
@@ -352,10 +368,14 @@ public protocol MemoryStrategy: Sendable {
     /// ——被約束者執行自己的約束（#32）。
     ///
     /// **宣告不帶任何資料。** `RankingGuard` 從候選的 `band` 與 `baseScore` 自己
-    /// 導出等分區段，兩者在任何策略被呼叫之前就在 seam 手上。所以策略只是在
-    /// **選**哪些檢查適用於它，無法弱化一條已宣告的約束。這是它與
-    /// `displacementBound` 的分野：那個由策略提供**值**，所以那個洞還開著
-    /// （見該成員的說明，那裡是 source of truth）。
+    /// 導出等分區段，兩者在任何策略被呼叫之前就在 seam 手上。所以策略無法**定義**
+    /// 一條約束的意思。
+    ///
+    /// **但它能控制這一次呼叫受不受檢，而且沒有一致性保證**——這個成員是 `{ get }`，
+    /// computed property 可以每次回不同的值，seam 重讀而不記錄。初版宣稱「無法弱化
+    /// 一條已宣告的約束」，#32 verify 用一個 getter 交替回值的 conformer 推翻了它
+    /// （同 instance、同輸出，第一次拋、第二次過）。完整敘述見 `PlacementConstraint`
+    /// 的說明；殘留缺口追蹤於 #34。
     ///
     /// 預設是空集合（見下方 extension）。方向是刻意的：預設成「受約束」會讓
     /// `human-like` 正確的輸出被自己的 seam 擋掉，而那個失敗看起來像策略的 bug；

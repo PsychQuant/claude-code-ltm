@@ -34,10 +34,14 @@
     宣告點**。於是 `conservative` 的等分區段條件只活在自己的 `rerankChecked` 裡，唯一能
     執行它的就是策略自己——**被約束者執行自己的約束**。實測把那一行換成只驗排列的版本，
     `LTMQuery` 67 條測試全綠：唯一覆蓋該約束的測試從不建構策略，只把手工排列餵給 helper。
-  - **為什麼這次能真的關掉**：`RankingGuard` 自己從 `band` 與 `baseScore` 導出區段，
-    **策略對這個檢查貢獻零資料**。所以宣告只能「選」不能「定義」——這是它與
-    `displacementBound` 的分野（那個由策略提供**值**，策略宣告一個大數字就能放寬自己的
-    上限，所以那個洞仍然開著，其註解是 SoT 且未被改動）。
+  - **關掉了哪一半**：`RankingGuard` 自己從 `band` 與 `baseScore` 導出區段，
+    **策略對這個檢查貢獻零資料**，所以策略無法**定義**一條約束的意思。
+  - **沒關掉、而且初版宣稱錯了的那一半**（#32 verify 證偽，見下方 Fixed 段）：
+    初版寫「宣告只能選不能定義，所以無法弱化一條已宣告的約束」。後半是錯的——
+    `{ get }` 允許 computed property，seam 每次重讀而不記錄，實測同一個 instance
+    可以第一次被擋、第二次被放行。與 `displacementBound` 的差別是**表面大小**
+    （連續值域 vs seam 擁有的封閉詞彙子集），不是**種類**——兩者都是未經驗證的
+    per-call 自報。殘留缺口追蹤於 #34。
   - **封閉 enum 為什麼不違反「列舉會漏」**：它住在 seam 裡不住在散文裡——每個 case 都有
     `RankingGuard` 側的實作，新增 case 是**帶著執行它的程式碼一起出貨**的 spec 變更。
     同一條窄例外也涵蓋 `QueryClass` 的封閉五值。
@@ -49,6 +53,30 @@
   - `memory-strategy` spec 新增一條 Requirement（4 scenarios + 三列 example table，26 → 30
     scenarios）。用 ADDED 而非 MODIFIED——`## MODIFIED` 是整條 Requirement 替換，#25 就是
     那樣把新增條款刪掉的。
+
+### Fixed
+- **#32 verify 的 4 條 HIGH**（5/5 lens；Codex 仍停用——無跨模型盲驗）。三條打在
+  「我宣稱量過的東西」上，形狀與 #18 R1 同源：**跑了實驗、得到想要的答案就停手**。
+  - **核心宣稱被可執行地證偽**：「策略無法弱化一條已宣告的約束」。`placementConstraints`
+    是 `{ get }`，conformer 可用 computed property；seam 每次呼叫**重讀**它、不記錄也不
+    驗證——而緊接著那個迴圈**確實**驗了 `displacement` 與 `movement`。DA 建了一個 getter
+    第一次回 `[.withinTieRuns]`、之後回 `[]` 的 conformer，我重跑確認：同一個 instance、
+    同一個跨區段排序，**第一次拋 `movedAcrossTieRuns`、第二次被接受**。已在五處撤回並
+    改成實際成立的較窄陳述（無法**定義**約束的意思；能控制單次呼叫受不受檢）。與
+    `displacementBound` 的差別是表面大小不是種類。殘留缺口 → **#34**。
+  - **`enum` 插在 protocol 之前卻沒空行，偷走了 protocol 的 doc comment。** Swift 把連續
+    `///` 綁到後面的宣告，於是 `MemoryStrategy` **完全沒有文件**，而 #14 逃生口那條註記
+    掛到了 `PlacementConstraint` 上——一個與它無關的型別。已把 enum 整塊移到 protocol
+    的 doc 之前。
+  - **task 5.3 的 Verify 條款是假的**：它寫「把預設翻成受約束時這條會紅」，但
+    `MisbehavingStrategy` 自帶 stored `placementConstraints`，**extension 預設從不被諮詢**
+    ——實測翻預設後那條測試照樣過。真正持有該性質的是
+    `theShippedStrategiesDeclareTheConstraintsTheSpecSays`。測試檔內的同一句註解一併修。
+  - **第二個變異的記錄少算一半且性質描述錯誤**：我寫「另外四條，全是同一形狀」，實測是
+    **19 個 issue / 16 個 test function**。而且**不是同一形狀**——其中兩條正是本次新增的
+    `theShippedStrategiesDeclareTheConstraintsTheSpecSays`，它們**逐字指名被翻掉的預設值**。
+    所以我從那次觀察推出的「失敗會隱藏自己的成因、看起來像策略 bug」，被這次改動自己
+    加的測試推翻了。記錄已更正。
 
 ### Fixed
 - **#16 verify 的 2 CRITICAL + 3 HIGH**（5/5 lens 全跑完，Codex 仍停用——**沒有跨模型盲驗**）。

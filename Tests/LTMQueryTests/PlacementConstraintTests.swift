@@ -97,7 +97,11 @@ private struct MisbehavingStrategy: MemoryStrategy {
     //
     // 這一列是整組測試的關鍵：**同一個輸出**在第一條測試裡被拒、在這裡被接受，
     // 差別只有宣告。它證明宣告真的在 gate，而不是一條對所有策略都成立的規則。
-    // 若把 protocol extension 的預設從空集合翻成 `[.withinTieRuns]`，這條會紅。
+    // **注意這條鎖的是什麼、不是什麼**：它鎖「宣告在 gate」，**不**鎖 extension 的預設
+    // 方向。`MisbehavingStrategy` 自帶 stored `placementConstraints`，所以 protocol
+    // extension 的預設**從不被諮詢**——把預設翻成 `[.withinTieRuns]` 之後這條照樣過
+    // （#32 verify 實測；初版註解在這裡宣稱它會紅，那是錯的）。真正持有預設方向那個
+    // 性質的是下面的 `theShippedStrategiesDeclareTheConstraintsTheSpecSays`。
     let strategy = MisbehavingStrategy(
         displacementBound: 2, placementConstraints: [], order: ["C", "A", "B"])
 

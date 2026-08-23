@@ -44,3 +44,24 @@ The declaration carries no data. `RankingGuard` derives tie runs itself from eac
   - Modified: `Sources/LTMQuery/MemoryStrategy.swift`, `Sources/LTMQuery/Strategies/ConservativeStrategy.swift`, `Sources/LTMQuery/RankingGuard.swift`, `Tests/LTMQueryTests/ConservativeStrategyTests.swift`
   - New: (none)
   - Removed: (none)
+
+
+---
+
+## Post-verify correction (2026-08-23, #32 verify)
+
+The central claim in this document — that a strategy "can only *select* a constraint, never
+define **or weaken** one" — was **falsified by execution** during verify. `placementConstraints`
+is a `{ get }` requirement, so a conformer may implement it as a computed property; the seam
+re-reads it on every call and neither records nor validates it. A conformer whose getter
+returns the tie-run constraint on the first read and the empty set thereafter had the *same*
+run-crossing ordering rejected on its first invocation and accepted on its second, from the
+same instance.
+
+What survives: a strategy cannot **define** what a constraint means — the seam owns the tie-run
+derivation and no strategy-supplied value enters it. What does not survive: the claim that a
+*declared* constraint cannot be weakened, and with it the claim that this differs **in kind**
+from `displacementBound`. Both are unvalidated per-call self-reports; they differ in surface
+(a value on a continuum versus a subset of a seam-owned closed vocabulary), not in kind.
+
+The live specification carries the corrected wording. The residual gap is tracked in #34.
