@@ -87,6 +87,13 @@ public struct ConservativeStrategy: MemoryStrategy {
     public let id = RankingPolicyID("conservative")
     public let consumedSignals: Set<EventKind> = [.opened, .cited, .pinned, .dismissed]
 
+    /// 這一檔的**定義性條件**：只在等分區段內重排。
+    ///
+    /// 宣告在這裡、**執行在 seam**（`MemoryStrategy.rerank` 的後置條件）。先前這個
+    /// 條件只活在下面的 `rerankChecked` 裡，於是唯一執行它的就是本型別自己——
+    /// 而實測把那一行換掉，67 條測試全綠（#32）。
+    public let placementConstraints: Set<PlacementConstraint> = [.withinTieRuns]
+
     /// 與 `human-like` 同一個上限，預設同樣是 1 且同樣是 provisional。
     ///
     /// R4：先前這一檔**沒有**上限參數，而守衛收到的是 `max(count, 1)`——一個
@@ -137,19 +144,24 @@ public struct ConservativeStrategy: MemoryStrategy {
         // 而 R5 實測那個參數**沒有任何測試釘住**（改回 `max(count,1)` 全綠），
         // 因為所有經由策略的測試都已經被策略內部的有界重排壓住幅度了。
         //
-        // 三次都錯在同一個地方：**讓被約束者提供約束值**。
+        // 三次都錯在同一個地方：**讓被約束者提供約束值**。而第四次是同一個形狀的
+        // 另一面：**讓被約束者執行自己的檢查**——本檔先前就在這裡呼叫 tie-run 守衛，
+        // 實測把它換成只驗排列的版本，67 條測試全綠（#32）。
         //
-        // **而那個洞還沒關掉。** 這裡先前寫著「現在上限由 seam 從 protocol 讀，
-        // 策略只提供它自己的額外條件」——那句話正是 `MemoryStrategy` 的
-        // `displacementBound` 逐字撤回過的宣稱（#1 verify R6 實測）：「從 protocol
-        // 讀」就是「從策略讀」，來源相同、只換了管線。要真的關掉，spec 得先回答
-        // 「誰有權決定上限」，那是尚未做出的設計決定（追蹤於 #16）。
+        // tie-run 這一面已經關掉：條件現在宣告在 `placementConstraints`，由 seam
+        // 的後置條件執行。**位移上限那一面還開著**——上限的**值**仍由策略提供，
+        // 而那需要 spec 先回答「誰有權決定上限」。兩者不是同一個問題：值可以被
+        // 策略放寬（宣告一個大數字即可），而 tie-run 沒有值可以提供，seam 自己從
+        // `band` 與 `baseScore` 導出區段。
         //
-        // 這裡不重述那段論證——**它的 source of truth 是 `MemoryStrategy` 的
-        // `displacementBound` 註解**，重述一次就是第二份會漂移的規格。（本檔與
+        // 位移上限那一面的完整論證**不在這裡重述**——source of truth 是
+        // `MemoryStrategy` 的 `displacementBound` 註解。（本檔與
         // `RankingGuard.checkTieRunsOnly` 都曾各自寫了一個「洞已關掉」的版本，
         // 而它們與 SoT 相反，#17 verify 抓到。）
-        let placements = try RankingGuard.checkTieRunsOnly(
+        //
+        // 下面只取 placements（算出每一筆移動了幾位），**不執行任何放置約束**：
+        // 算出移動到哪裡與判斷那個移動准不准，是兩件事。
+        let placements = try RankingGuard.verifyPermutation(
             original: candidates, reordered: reordered)
 
         return placements.map { placement in

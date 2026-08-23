@@ -98,6 +98,13 @@ public enum RankingGuard {
 
     /// tie-only 策略的**額外**條件：每一筆只能在自己原本的等分區段內移動。
     ///
+    /// **呼叫端是 seam**（`MemoryStrategy.rerank` 的後置條件），依策略宣告的
+    /// `placementConstraints` 決定要不要跑——**不是**由策略自己呼叫。先前是後者，
+    /// 而那讓執行點落在被約束者手上：實測把 `ConservativeStrategy` 那一行換成只驗
+    /// 排列的版本，`LTMQuery` 67 條測試全綠，因為唯一覆蓋該約束的測試從不建構
+    /// 策略、只把手工排列直接餵進本函式（#32）。本函式的邏輯一直有測試覆蓋；
+    /// 沒被覆蓋的是它**在生產路徑上被呼叫**這件事。
+    ///
     /// **它不收 bound，也不檢查幅度**——位移上限是 seam 對所有策略無條件執行的
     /// （`MemoryStrategy.displacementBound`）。這一條只加它自己那個維度。
     ///

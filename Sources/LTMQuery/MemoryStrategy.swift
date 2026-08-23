@@ -303,6 +303,33 @@ public enum MemoryStrategySupport {
 /// 原文；依賴宣告擋掉的只是 `FileEventStore` 這個便利型別，`Event: Codable`
 /// 在 LTMCore，用 Foundation 直接讀檔即可繞過。兩條 SHALL NOT 目前**沒有
 /// 執行點**，追蹤於 #14。
+/// 一個策略可以宣告、但**不能定義**的放置約束。
+///
+/// ## 為什麼是封閉 enum 而不是策略提供的述詞
+///
+/// 這個型別的每一個 case 都由 seam 自己實作，策略只能**選**、不能**定義**。
+/// 那正是它與 `MemoryStrategy.displacementBound` 的根本差別：上限的**值**由策略
+/// 提供，所以策略可以宣告一個大數字來放寬自己的限制而守衛看不出來；這裡沒有值
+/// 可以提供——`RankingGuard` 自己從候選的 `band` 與 `baseScore` 導出等分區段，
+/// 兩者在任何策略被呼叫之前就已經在 seam 手上。
+///
+/// 策略可以**不宣告**某條約束（那是一個寫在介面上、審 spec 時看得到的選擇），
+/// 但不能弱化一條它已經宣告的約束。
+///
+/// ## 這個列舉為什麼不違反「列舉會漏，性質不會」
+///
+/// 因為它住在 seam 裡，不住在散文裡。每個 case 都有 `RankingGuard` 側的實作，
+/// 值域是封閉的，新增一個 case 是**帶著執行它的程式碼一起出貨**的 spec 變更
+/// ——而會漏的那種列舉是文件裡的一份清單，沒有任何東西逼它保持完整。同一條窄
+/// 例外也涵蓋 `QueryClass` 的封閉五值：值域由系統擁有，呼叫端只能選。
+public enum PlacementConstraint: Sendable, Hashable, CaseIterable {
+    /// 只能在**等分區段**內重排：區段是「同帶且 base score 完全相等」的極大連續段。
+    ///
+    /// 由 `RankingGuard.checkTieRunsOnly` 執行，區段的切法由該處的
+    /// `tieRunIdentifiers` 決定——本模組不另寫第二份。
+    case withinTieRuns
+}
+
 public protocol MemoryStrategy: Sendable {
     /// 策略識別碼。由「消費哪些訊號」定義，不由調整幅度定義——所以同一個策略
     /// 配不同位移上限仍是同一個 id。
@@ -316,6 +343,25 @@ public protocol MemoryStrategy: Sendable {
     /// 幅度仍然不算——把 human-like 的上限調到 0 得到的是「什麼都不做」，
     /// 不是 tie-breaking，兩者不是同一個機制的兩種強度。
     var consumedSignals: Set<EventKind> { get }
+
+    /// 這個策略在**什麼條件下**才可以移動候選——策略軸的另外一半。
+    ///
+    /// 上面那條 doc 說策略軸是「消費哪些訊號」加上「在什麼條件下作用」，而在
+    /// 這個成員出現之前，**只有前半有宣告點**。於是 `conservative` 的等分區段
+    /// 條件只活在它自己的 `rerankChecked` 內部，唯一能執行它的地方就是策略自己
+    /// ——被約束者執行自己的約束（#32）。
+    ///
+    /// **宣告不帶任何資料。** `RankingGuard` 從候選的 `band` 與 `baseScore` 自己
+    /// 導出等分區段，兩者在任何策略被呼叫之前就在 seam 手上。所以策略只是在
+    /// **選**哪些檢查適用於它，無法弱化一條已宣告的約束。這是它與
+    /// `displacementBound` 的分野：那個由策略提供**值**，所以那個洞還開著
+    /// （見該成員的說明，那裡是 source of truth）。
+    ///
+    /// 預設是空集合（見下方 extension）。方向是刻意的：預設成「受約束」會讓
+    /// `human-like` 正確的輸出被自己的 seam 擋掉，而那個失敗看起來像策略的 bug；
+    /// 預設成「不受約束」時，忘記宣告的新策略是**檢查不足**——那在對照 spec
+    /// 審查時看得見，而不是在執行期以錯誤的拒絕出現。
+    var placementConstraints: Set<PlacementConstraint> { get }
 
     /// 這個策略最多能把一筆結果移動幾個名次（雙向）。
     ///
@@ -367,6 +413,10 @@ extension MemoryStrategy {
     /// 預設不套用擴散——新增這個 requirement 不需要既有 conformer 逐一表態。
     /// 只有 `HumanLikeStrategy` 覆寫為 `true`。
     public var appliesSpreadingActivation: Bool { false }
+
+    /// 預設**不宣告任何額外條件**——既有 conformer 不需逐一表態，且方向刻意如此
+    /// （理由見 protocol 上該成員的說明）。`ConservativeStrategy` 覆寫它。
+    public var placementConstraints: Set<PlacementConstraint> { [] }
 }
 
 extension MemoryStrategy {
@@ -415,6 +465,23 @@ extension MemoryStrategy {
         let placements = try RankingGuard.check(
             original: candidates, reordered: results.map(\.candidate),
             bound: displacementBound)
+
+        // 策略**宣告**的額外條件，由 seam 執行——不是由策略自己執行（#32）。
+        //
+        // 先前 `conservative` 在自己的 `rerankChecked` 裡呼叫 tie-run 守衛。實測
+        // 把那一行換成只驗排列的版本，`LTMQuery` 67 條測試全綠：唯一覆蓋該約束的
+        // 測試從不建構策略，它把手工排列直接餵給守衛。**被約束者執行的約束不是
+        // 約束**，而測不到生產路徑的回歸鎖不鎖任何東西。
+        //
+        // 這裡不重算等分區段——切法由 `RankingGuard` 的 `tieRunIdentifiers` 擁有，
+        // 本處只呼叫。同一件事兩個寫者就是兩份會漂移的規格。
+        for constraint in placementConstraints {
+            switch constraint {
+            case .withinTieRuns:
+                _ = try RankingGuard.checkTieRunsOnly(
+                    original: candidates, reordered: results.map(\.candidate))
+            }
+        }
         for (result, placement) in zip(results, placements) {
             guard result.displacement == placement.displacement else {
                 throw StrategyViolation.misreportedDisplacement(

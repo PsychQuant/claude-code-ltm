@@ -25,6 +25,31 @@
     每次查詢都對真實語料做增量續讀（單一查詢燒掉三分鐘 CPU 仍未返回），量到的索引
     不是指定的那個而且中途還在長大。
 
+### Changed
+- **#32：策略的額外條件改由 seam 執行**（`da2283d`，change `enforce-strategy-conditions-at-seam`）。
+  - **新增 public API**：`PlacementConstraint`（封閉 enum，單一 case `.withinTieRuns`）與
+    `MemoryStrategy.placementConstraints`（protocol requirement，extension 預設空集合）。
+    既有 conformer 零改動。
+  - **根因**：策略軸的定義是「消費哪些訊號」+「在什麼條件下作用」，而**後半一直沒有
+    宣告點**。於是 `conservative` 的等分區段條件只活在自己的 `rerankChecked` 裡，唯一能
+    執行它的就是策略自己——**被約束者執行自己的約束**。實測把那一行換成只驗排列的版本，
+    `LTMQuery` 67 條測試全綠：唯一覆蓋該約束的測試從不建構策略，只把手工排列餵給 helper。
+  - **為什麼這次能真的關掉**：`RankingGuard` 自己從 `band` 與 `baseScore` 導出區段，
+    **策略對這個檢查貢獻零資料**。所以宣告只能「選」不能「定義」——這是它與
+    `displacementBound` 的分野（那個由策略提供**值**，策略宣告一個大數字就能放寬自己的
+    上限，所以那個洞仍然開著，其註解是 SoT 且未被改動）。
+  - **封閉 enum 為什麼不違反「列舉會漏」**：它住在 seam 裡不住在散文裡——每個 case 都有
+    `RankingGuard` 側的實作，新增 case 是**帶著執行它的程式碼一起出貨**的 spec 變更。
+    同一條窄例外也涵蓋 `QueryClass` 的封閉五值。
+  - **兩個變異都實際跑過，不是宣稱**：(a) 拿掉 seam 執行 → 新鎖以「預期的違規沒被拋出」
+    變紅，**且僅此一條**（精準、非偶然耦合）；(b) 把 extension 預設翻成受約束 →
+    `human-like` 的正確輸出被自己的 seam 拒絕，而錯誤名稱指向 tie-run 檢查、不指向造成它的
+    預設值——**正是 design 預測的「看起來像策略 bug」失敗模式**。兩份觀察記在 archived
+    change 的 `tasks.md` Completion notes。
+  - `memory-strategy` spec 新增一條 Requirement（4 scenarios + 三列 example table，26 → 30
+    scenarios）。用 ADDED 而非 MODIFIED——`## MODIFIED` 是整條 Requirement 替換，#25 就是
+    那樣把新增條款刪掉的。
+
 ### Fixed
 - **#16 verify 的 2 CRITICAL + 3 HIGH**（5/5 lens 全跑完，Codex 仍停用——**沒有跨模型盲驗**）。
   五組裁決裡有兩組只落地了一半，而 change 被歸檔成 8/8。
