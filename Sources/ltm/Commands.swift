@@ -364,16 +364,18 @@ enum QueryCommand {
                     needsEventStore: true, needsRecordStore: true)
                 let scope = try CommandSupport.resolveScope(
                     arguments: arguments, corpusRoot: service.corpusRoot)
-                // **`--compare` 隱含 `--record`**，而它的執行點就是這裡的
-                // `persist: true`——不是在上面把 `record` 或起來。那樣寫會是死碼：
-                // 這條分支根本不讀 `record`，於是一個看起來在做事的 `|| compare`
-                // 實際上什麼都沒做，而讀的人會以為隱含關係由它保證。
+                // **`--compare` 隱含 `--record`**，而它的執行點是 `compare` 自己
+                // ——不是在上面把 `record` 或起來。那樣寫會是死碼：這條分支根本
+                // 不讀 `record`，於是一個看起來在做事的 `|| compare` 實際上什麼
+                // 都沒做，而讀的人會以為隱含關係由它保證。
                 //
                 // 不記錄的比較什麼都產不出來，只是改變使用者看到的東西，所以
                 // 這裡沒有「不記錄」這個選項；`--record` 一起給也是同一個結果。
+                // （曾經有一個 `persist:` 參數表達這件事，#36 D1 刪掉了它——
+                // 它唯一的理由是一條不存在的測試。）
                 let outcome = try service.compare(
                     text: queryText, limit: limit, scope: scope,
-                    a: ComparisonPair.a, b: ComparisonPair.b, persist: true)
+                    a: ComparisonPair.a, b: ComparisonPair.b)
                 if arguments.has("json") {
                     try printComparisonJSON(outcome)
                 } else {

@@ -401,3 +401,46 @@ func generationIsBoundToTheIndexNotTheClock() throws {
         records: records, events: try FileEventStore(url: workspace.eventsURL).allEvents())
     #expect(!report.spansGenerations)
 }
+
+// MARK: - #36 階段 1：(E) 契約補登
+
+@Test("interleaved 是保留值，不是策略——它不得出現在 StrategyRegistry.known")
+func theInterleavedPolicyIsReservedAndNotAStrategy() {
+    // `memory-events` spec 把 `policy` 描述成「naming the strategy in force」，而
+    // 交錯比較裡**沒有**單一 in-force strategy。寫 `"interleaved"` 這個選擇本身是
+    // 誠實的（它沒謊稱來自 archival），但它必須是**保留值**而不是策略識別碼。
+    //
+    // 這條測試釘住那個區分：值域一旦被寫進 spec，下一個人可能拿它去 `make()`，
+    // 而那會靜默回 `nil`。
+    #expect(
+        !StrategyRegistry.known.contains(LTMService.interleavedPolicy.value),
+        "interleaved 進了 known 會讓它看起來像一檔可選的策略")
+    #expect(
+        StrategyRegistry.make(LTMService.interleavedPolicy) == nil,
+        "它組不出實例——因為它不是策略")
+    #expect(
+        StrategyRegistry.authorizedConstraints(for: LTMService.interleavedPolicy) == nil,
+        "它也沒有授權條目——seam 會具名拒絕任何自稱是它的 conformer")
+}
+
+@Test("零命中的比較不留呈現紀錄——沒有位置 0 就沒有 starting side")
+func aComparisonWithNoCandidatesRecordsNothing() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    // **空索引**，不是「查一個不相干的字串」。寫這條測試時先試了後者，它失敗了
+    // ——而失敗本身有資訊：向量通道對**任何**查詢都回 top-k（餘弦沒有門檻），
+    // 所以只要索引裡有東西，候選就不會是空的。零命中實際只在索引為空、或 scope
+    // 把所有東西濾掉時可達。斷言要下在真的能發生的情境上。
+    let service = try workspace.comparisonService()
+    try service.build()
+
+    let outcome = try service.compare(
+        text: "記憶策略", limit: 20, scope: .allProjects,
+        a: comparisonPair.a, b: comparisonPair.b)
+
+    #expect(outcome.hits.isEmpty)
+    #expect(outcome.eventsRecorded == 0)
+    #expect(
+        !FileManager.default.fileExists(atPath: workspace.recordsURL.path),
+        "沒有東西被呈現，就不該有呈現紀錄——那種列會用『沒有起始邊』稀釋 startingSides 的分母")
+}

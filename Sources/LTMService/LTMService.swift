@@ -379,9 +379,15 @@ public struct LTMService {
     ///
     /// ## 為什麼記錄不是選項
     ///
-    /// `persist` 存在只是為了讓測試能檢查「不落地時什麼都不寫」這件事本身；
-    /// 生產路徑一律傳 `true`。沒有事件存放或紀錄存放時直接拒絕（見
-    /// `ServiceError.comparisonRequiresStores`），不退化成「照做但不記」。
+    /// 沒有事件存放或紀錄存放時直接拒絕（見 `ServiceError.comparisonRequiresStores`），
+    /// 不退化成「照做但不記」——一次沒有落地的比較，它的結果無法被任何東西核對。
+    ///
+    /// 這裡曾經有一個 `persist: Bool = true` 參數（#36 D1 刪除）。它的 doc 寫著
+    /// 「存在只是為了讓測試能檢查『不落地時什麼都不寫』這件事本身」，而
+    /// `grep -rn "persist: false"` 全 repo **零命中**——那條測試從來不存在。
+    /// 它不是一條沒被記到的測試縫，是一個**以不存在的測試為理由**存在的參數，
+    /// 而它提供的正是 spec 明說不提供的組合（「比較必然被記錄」）。
+    /// 把它寫進 spec 等於把一句假話升格成契約，所以刪掉。
     ///
     /// ## bootstrap 期會是 null comparison，那不是錯誤
     ///
@@ -389,13 +395,21 @@ public struct LTMService {
     /// 的交換條件（嚴格大於）恆為假，兩邊產出逐字相同的順序——交錯器把它標成
     /// null comparison，計分整批略過。這是既有的、被表達出來的狀態，呼叫端不得
     /// 把它當成失敗。
+    /// 交錯呈現寫進事件的 `policy` 值。
+    ///
+    /// **刻意不是 `StrategyRegistry.known` 的成員**：它不命名一個策略，它命名
+    /// 「這次呈現沒有單一策略」這件事。spec 把它記成保留值
+    /// （`memory-events`，#36 D3），而
+    /// `theInterleavedPolicyIsReservedAndNotAStrategy` 釘住它不在 `known` 內
+    /// ——否則下一個人會拿它去 `StrategyRegistry.make()` 而靜默得到 `nil`。
+    public static let interleavedPolicy = RankingPolicyID("interleaved")
+
     public func compare(
         text: String,
         limit: Int = 20,
         scope: RetrievalEngine.Scope,
         a aID: RankingPolicyID,
         b bID: RankingPolicyID,
-        persist: Bool = true,
         now: Date = Date()
     ) throws -> ComparisonOutcome {
         guard let eventStore, let recordStore else {
@@ -448,11 +462,15 @@ public struct LTMService {
                         presentation: interleaving.record.id))
             }
 
+            // **零候選不留紀錄**（#36 階段 3）。沒有候選就沒有位置 0，也就沒有
+            // starting side——把這種列計進 `startingSides` 的分母，等於用沒有起始邊
+            // 的列去稀釋交錯平衡的統計。這不是拒絕（比較本身沒有失敗），是
+            // 「沒有東西被呈現，所以沒有呈現紀錄」。
             var recorded = 0
-            if persist {
+            if !hits.isEmpty {
                 // **紀錄先落地，事件後落地。** 反過來的話，崩在兩者之間會留下一批
                 // 指向不存在紀錄的事件——計分端會把它們算成
-                // `presentationNotTracked` 而報告照常產出，也就是本次改動要修的
+                // `presentationNotTracked` 而報告照常產出，也就是 #33 要修的
                 // 那個症狀的另一種來源。
                 try recordStore.append(interleaving.record)
                 recorded = try record(
@@ -460,7 +478,12 @@ public struct LTMService {
                     // 交錯呈現的 `shown` 事件**不歸屬任何一邊**——歸屬寫在紀錄的
                     // `attribution` 裡，逐位置各不相同，而事件的 `policy` 是單一值。
                     // 用交錯器自己的識別碼標記它們的來源。
-                    policy: RankingPolicyID("interleaved"),
+                    //
+                    // `"interleaved"` **刻意不是** `StrategyRegistry.known` 的成員：
+                    // 它不命名一個策略，它命名「沒有單一策略」這件事。spec 把它
+                    // 記成保留值（`memory-events`，#36 D3），而一條測試釘住它不在
+                    // `known` 內——否則下一個人會拿它去 `make()` 而得到 `nil`。
+                    policy: Self.interleavedPolicy,
                     store: eventStore, now: now, generation: generation,
                     presentation: interleaving.record.id)
             }

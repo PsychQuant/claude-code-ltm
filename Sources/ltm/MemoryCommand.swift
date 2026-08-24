@@ -147,6 +147,31 @@ enum MemoryCommand {
 
     /// `EventStoreError` 的使用者可讀說明。**每一類都指名補救方式。**
     static func describe(_ error: EventStoreError) -> String {
+        // **補救建議必須看檔案，不能一律說 `ltm memory --prune`**（#36 D2）。
+        //
+        // `EventStoreError` 是**兩個** canonical 存放共用的錯誤型別（見
+        // `CanonicalStore` 的說明），而 `ltm memory --prune` 只處理 `events.jsonl`。
+        // 對 `presentations.jsonl` 給那條建議，是叫使用者跑一個根本不看這個檔的
+        // 命令——他跑完會看到「沒有東西要清」然後以為問題不存在。
+        //
+        // 呈現紀錄**刻意沒有** prune（理由見 `FilePresentationRecordStore`：
+        // `--prune` 在它主要的觸發情境裡等於清空整份歷史）。它的補救是修復讀取
+        // ＋ 使用者自己處置那幾行。
+        func remedy(for path: String, plural: Bool) -> String {
+            let it = plural ? "它們" : "它"
+            guard (path as NSString).lastPathComponent == "presentations.jsonl" else {
+                return "跑 `ltm memory` 看完整清單，或 `ltm memory --prune` 丟掉\(it)（會先備份）。"
+            }
+            return """
+                這是**呈現紀錄**檔，`ltm memory --prune` 不處理它（那個命令只看 \
+                `events.jsonl`）。
+                呈現紀錄刻意沒有 prune——在定址規則換代這個主要情境裡，「丟掉讀不回來的」
+                等於清空整份歷史。
+                讀得回來的部分可以先救出來：`allRecords(skippingUnusable: true)` 會回傳
+                其餘紀錄並列出跳過的行號；那幾行要不要刪、怎麼刪，由你決定。
+                """
+        }
+
         switch error {
         case .supersededAnchorRule(let path, let lineNumbers):
             return """
@@ -156,12 +181,12 @@ enum MemoryCommand {
                 \(lineNumbers.count > 20 ? "…" : "")
                 anchor 的 source 已從 sessionId 換成 project 指紋，舊值無法對現行規則
                 解析——重新詮釋會指到錯的 turn 或誤報成 orphan，兩者與正確行為分不出來。
-                跑 `ltm memory` 看完整清單，或 `ltm memory --prune` 丟掉它們（會先備份）。
+                \(remedy(for: path, plural: true))
                 """
         case .corruptRecord(let path, let lineNumber):
             return """
                 記憶層第 \(lineNumber) 行解不開：\(path)
-                跑 `ltm memory` 看完整清單，或 `ltm memory --prune` 丟掉它（會先備份）。
+                \(remedy(for: path, plural: false))
                 """
         case .readFailed(let path, let underlying):
             return """
