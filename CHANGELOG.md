@@ -5,6 +5,54 @@
 ## Unreleased
 
 ### Added
+- **#36 階段 1–3：兩輪 verify 的非阻擋 findings 收攏（前三階段）**。`#36` 收的是
+  `#33`（21 條）與 `#34`（25 條）判為非阻擋的 findings，共 46 條。診斷把它分成五群
+  並指出本 issue 自己的風險：**46 項的桶子太大而不會一次做完**，於是每次做掉最上面
+  幾條而 issue 看起來一直有人在追。plan 因此先把四個決策拍死，再讓修法照著決策走。
+  - **`FilePresentationRecordStore.allRecords(skippingUnusable:)`（新）**：鏡像
+    `FileEventStore.allEvents(skippingUnusable:)`——fail-loud 預設、兩類不可用分開
+    回報（損壞 vs 舊定址規則）、行號用真實檔案行。先前只有事件檔有這個逃生口，而
+    兩者走同一個 `CanonicalStore.appendLine`、同一種中斷風險：**一次半截 append 會讓
+    整份呈現歷史永久讀不回來**。
+  - **呈現紀錄補上舊定址規則守衛**。一筆紀錄帶多個 anchor，**任何一個**是舊規則就
+    整筆不可用——這筆紀錄的用途是把事件歸屬到位置，而部分歸屬的分母是錯的。
+  - **刻意沒有 `presentations.jsonl` 的 `--prune`**（決策 D2）。`--prune` 在它主要的
+    觸發情境（定址規則換代）裡做的是「清空整份歷史」，再開一個同形狀的破壞性表面是
+    複製已知危險。**可復原性不需要用刪除達成。**
+  - **`KnownItemHarness` 的三個具名錯誤**：`skipped` 拆成 `skippedNoSample` 與
+    `skippedNoQuery`（前者是語料實作的 bug，後者是正常損耗，合併之後兩者看起來一樣）；
+    負的 `sampleSize` 不再 trap；檢索回傳不足時具名拒絕，不安靜低估 recall。
+    深度門檻是 `min(recallK, corpus.count)`——初版寫死 `recallK`，對小語料是誤報。
+  - **`LTMService.interleavedPolicy`（新具名常數）**：`"interleaved"` **刻意不是**
+    `StrategyRegistry.known` 的成員——它不命名一個策略，它命名「這次呈現沒有單一
+    策略」。測試釘住它不在 `known` 內、`make()` 回 `nil`。
+
+### Changed
+- **#36：`compare(persist:)` 刪除**（決策 D1）。它的 doc 寫著「存在只是為了讓測試能
+  檢查『不落地時什麼都不寫』」，而 `grep -rn "persist: false"` 全 repo **零命中**
+  ——那條測試從來不存在。它不是一條沒被記到的測試縫，是一個**以不存在的測試為理由**
+  存在的參數，提供的正是 spec 明說不提供的組合。記進 spec 等於把假話升格成契約。
+- **#36：零候選的比較不再留呈現紀錄**。沒有候選就沒有位置 0，也就沒有 starting side，
+  把這種列計進 `startingSides` 的分母等於用沒有起始邊的列稀釋交錯平衡統計。
+- **#36：`EventStoreError` 的補救建議改成 path-aware**。它是**兩個** canonical 存放
+  共用的錯誤型別，而 `ltm memory --prune` 只處理 `events.jsonl`；對
+  `presentations.jsonl` 給那條建議是叫使用者跑一個根本不看這個檔的命令。
+- **#36：seam 的 `id` 在整個 `rerank` 裡只讀一次**。先前讀兩次（查表、組錯誤），
+  交替回值的 getter 因此能讓 `unauthorizedStrategy` 指名一個**從未被用來查表**的
+  識別碼。**這不解決 #37**（`id` 仍是 per-call 自報，跨呼叫仍能換身分），只保證
+  單次呼叫內部一致。
+- **#36：位置約束依 `allCases` 迭代，不依 `Set`**（後者隨 hash seed 變動）。
+  **誠實邊界：這條沒有回歸鎖。** `PlacementConstraint` 只有一個 case，一種約束不可能
+  有兩個同時違反，所以該性質無法被任何測試驅動——缺口寫進 code 註解，加第二個 case
+  的人要同時補測試。寫一條驗不到的測試比沒有測試更糟。
+- **#36：量測腳本移到 `scripts/measure-retrieval/main.swift`**，`Package.swift` 的
+  逐檔 `exclude` 清單整份刪除。`sources:` 已指名單檔但 SwiftPM 仍對 target 目錄下
+  任何未處理的檔案發 warning（實測拿掉 exclude → `found 11 file(s) which are
+  unhandled`），於是每新增一個探針檔都要回頭改清單。目錄化把負擔拿掉。
+- **#36：「全部」列依 `QueryClass.allCases` 累加**。Double 加法不可結合，而
+  `Dictionary.values` 的迭代順序隨 hash seed 變動——「同一 seed 逐字相同」先前不是
+  結構性保證，只是桶數少所以沒撞到。
+
 - **#34：策略的位置約束改由授權表決定**（change `authorize-strategy-declarations`）。
   `#32` 把 tie-run 約束的**執行點**上提到 seam（對的），但留下「策略仍能決定自己
   受不受檢」——而那句「策略只能選、不能弱化」寫在六處 artifacts 裡，被一個 getter
