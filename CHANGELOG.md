@@ -27,6 +27,34 @@
     `StrategyRegistry.known` 的成員——它不命名一個策略，它命名「這次呈現沒有單一
     策略」。測試釘住它不在 `known` 內、`make()` 回 `nil`。
 
+### Fixed
+- **#36 verify：一條 CRITICAL 與兩條 HIGH，三條都指向作者自己的宣稱**。
+  - **階段 5 有三項承諾完全沒有落地，而收尾核對沒抓到**（CRITICAL）。
+    `strategy-comparison/spec.md` 在那四個 commit 裡的唯一改動是腳本路徑改名——
+    plan 承諾的 `incompatibleComparisonPair`、CLI 比較對的決定與後果、D4 的紀律邊界
+    **一項都沒寫**（`git log --all -S"incompatibleComparisonPair" -- openspec/` 零命中，
+    從來沒進過任何 spec）。`RankingGuard.swift` 與 `ConservativeStrategy.swift`
+    **完全沒被碰**。而收尾 comment 寫「(A) 對齊｜四份 spec…」暗示階段 5 完成。
+    **這正是 plan 自己點名的頭號風險（分流變成排序），在本該攔住它的那一步重演**
+    ——因為我是照「打算做什麼」而不是照 diff 寫的核對。三項現已實際寫入。
+  - **「兩天」是錯的**（HIGH）。git 時間戳：指標被刪 `cfa8841` 03:04、補回
+    `97a827c` 10:50，**間隔 7 小時 46 分，同一天**（取 `#16` 的 close 當起點也只有
+    約 25.5 小時）。那句話寫在四處，含**一條 live spec requirement**。
+    **這正是 #39 要抓的形狀——一句斷言了可查證之事而沒有人查證的散文，出現在一個
+    逐字引用 #39 的 diff 裡。** 四處已全部更正，並留下更正紀錄而非只換數字。
+  - **淺檢索守衛是未揭露的行為回歸**（HIGH）。它 `throw`，而那個 throw 從 per-sample
+    迴圈傳出去、**中止整個 run**；量測腳本對 `harness.run` 只寫 `try`、沒有 `do/catch`。
+    更根本的是**稀有詞查詢合法地就會回少於 `recallK` 筆**（FTS5 回真的匹配到幾筆、
+    不補滿），所以它會在完全正常的資料上把整份量測炸掉。
+    改成**第三種跳過計數**（`skippedShallowRetrieval`），與同一 commit 已建立的紀律
+    一致。並在 `docs/measurements/2026-08-23-known-item-retrieval.md` 揭露：該紀錄的
+    數字產生於這個計數之前，**recall 應讀成下界而非點估計**，且它的可重現性宣稱
+    沒有在新版 harness 上重驗。
+  - 順帶：`memory-strategy` spec 的兩份 `@trace` 清單補回那兩個 Swift 檔（現在補是
+    真的了——它們這次確實被改了）；「出貨策略輸出不變」的保證恢復全稱量詞與
+    displacements/reasons，**並寫明支撐它的是 `union(X, X) == X` 這個合成恆等式而不是
+    窮舉測試**——讀者因此知道哪一種未來改動會打破它。
+
 ### Changed
 - **#36 階段 4–5：測試品質與 artifact 對齊**。
   - **未知策略的結束碼有回歸鎖了**。`#33` 的 blocking 修正把它從 trap 改成具名錯誤
@@ -41,7 +69,7 @@
     本身，讀者才不會去找一條不可能存在的 CLI 測試。
   - **`memory-strategy` spec 新增「識別碼每次呼叫只讀一次」**，並把 `displacementBound`
     的開放問題指向 **#38**（原指標指向已 close 的 `#16`，而 `#34` 的 diff 刪掉那行
-    沒補替代——**一個寫進 spec 的已知缺口有兩天完全沒有落點**）。
+    沒補替代——**一個寫進 spec 的已知缺口有約 8 小時完全沒有落點**）。
   - **`unregisterForTesting` 的 doc 收窄**。「測試之間不互相污染」對 bootstrap 名單
     不成立：`readyForTesting` 是 `static let`，撤銷名單內的識別碼是**不可逆的**。
     目前沒有測試這樣做，所以是潛伏的——但那句無限定的宣稱正是下一個人會依賴的東西。

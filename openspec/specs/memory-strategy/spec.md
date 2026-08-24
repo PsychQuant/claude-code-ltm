@@ -346,6 +346,8 @@ code:
   - Tests/LTMQueryTests/StrategyTests.swift
   - Tests/LTMEvalTests/InterleavingTerminationTests.swift
   - Sources/LTMQuery/StrategyAuthority.swift
+  - Sources/LTMQuery/RankingGuard.swift
+  - Sources/LTMQuery/Strategies/ConservativeStrategy.swift
 -->
 
 ---
@@ -361,7 +363,7 @@ An earlier draft of this paragraph also required the seam to remain a pure funct
 
 **The guarantee is bounded by the identifier, and the identifier is itself an unverified per-call self-report.** The authority is selected by the strategy's `id`, which is a `{ get }` requirement read afresh on every call, never recorded and never cross-checked — structurally identical to the declaration this Requirement constrains. A conformer whose `id` alternates between two authorised identifiers therefore obtains one authority on one call and another on the next; this was reproduced by execution, yielding the same accept/reject alternation that motivated this Requirement. So the guarantee SHALL be stated as: a strategy cannot be checked less strictly than the authority for **the identifier it reports on that call**. What this Requirement buys is that a conformer claiming a shipped identifier cannot escape that identifier's constraints. What it does not buy is that a conformer is pinned to one identity. Artifacts describing this mechanism SHALL NOT state or imply the latter. The identifier's own self-report is tracked as issue #37.
 
-**The table governs the constraints and SHALL NOT govern the displacement bound.** The table is keyed by identifier, so it can only carry what the identifier determines. This specification distinguishes strategies by which signals they consume and under what conditions they act, and never by magnitude — and it requires the bound to be configurable at construction, so two instances sharing an identifier may hold different bounds. A per-identifier ceiling would either contradict that requirement or make the construction parameter inert. Who decides the bound therefore remains open, and this Requirement MUST NOT be read as closing it; what is now established is that an identity-keyed authority is the wrong shape to close it with. That open question is tracked as issue #38 — an earlier pointer named an issue that has since been closed, and for two days the gap had no tracker at all, which is the failure mode this repository's own issues describe (#36).
+**The table governs the constraints and SHALL NOT govern the displacement bound.** The table is keyed by identifier, so it can only carry what the identifier determines. This specification distinguishes strategies by which signals they consume and under what conditions they act, and never by magnitude — and it requires the bound to be configurable at construction, so two instances sharing an identifier may hold different bounds. A per-identifier ceiling would either contradict that requirement or make the construction parameter inert. Who decides the bound therefore remains open, and this Requirement MUST NOT be read as closing it; what is now established is that an identity-keyed authority is the wrong shape to close it with. That open question is tracked as issue #38 — an earlier pointer named an issue that has since been closed, and the substitute was not written until roughly eight hours later, which is the failure mode this repository's own issues describe (#36). (An earlier revision of this sentence said "two days"; the git timestamps say otherwise, and the correction is recorded because a figure asserted without checking is precisely what issue #39 names.)
 
 **The identifier a strategy reports SHALL be read once per invocation and used for both the authority lookup and any failure it produces.** Reading it more than once lets a conformer whose identifier varies between reads be refused under one name and reported under another, so the message names something that was never consulted — and that message is the only evidence the caller receives. This is narrower than pinning a strategy to an identity, which remains open (#37): it establishes internal consistency within a single call, nothing across calls.
 
@@ -391,8 +393,13 @@ The table SHALL be the single declaration of which strategies exist. An implemen
 
 #### Scenario: The shipped strategies are unaffected
 
+- **GIVEN** any candidate list and any projection
 - **WHEN** any of the three shipped strategies is invoked through the seam
-- **THEN** it returns the ordering it returned before the authority table existed, because each already declares what its authority entry says
+- **THEN** it returns the same result it returned before the authority table existed — the same ordering, the same displacement on every result, and the same reason on every result
+
+**What backs the universal quantifiers is the composition identity, not an exhaustive test, and the difference matters.** Each shipped strategy's declaration is equal to its authority entry, and the seam composes them as a union; `union(X, X)` is `X`, so the set of constraints checked is byte-identical to what the declaration alone produced before, for every input. No behaviour downstream of that set changes, so no field of the result can differ.
+
+An earlier revision of this scenario claimed only that the *ordering* was unchanged, and quantified over strategies but not over inputs. That was weaker than what the composition actually gives, and the weakening was silent — it was caught by the review of the change that introduced it (#34) and restored here (#36). Recording the mechanism rather than only the conclusion is the point: a reader who knows the guarantee rests on `union(X, X) == X` also knows exactly which future change would break it — making a shipped strategy's declaration differ from its table entry.
 
 #### Scenario: The displacement bound still governs movement exactly as before
 
@@ -425,4 +432,6 @@ code:
   - Tests/LTMQueryTests/StrategyTests.swift
   - Tests/LTMEvalTests/InterleavingTerminationTests.swift
   - Sources/LTMQuery/StrategyAuthority.swift
+  - Sources/LTMQuery/RankingGuard.swift
+  - Sources/LTMQuery/Strategies/ConservativeStrategy.swift
 -->

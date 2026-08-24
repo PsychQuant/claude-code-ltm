@@ -143,19 +143,30 @@ public struct KnownItemReport: Sendable, Equatable, Codable {
     /// **兩者都必須出現在輸出上**：靜默跳過會讓有效樣本數與要求的樣本數不同，
     /// 而讀者不會知道。
     public let skippedNoQuery: Int
+    /// 抽到、也導得出查詢，但**某一軌回傳的名次少於判定視窗**而跳過的段數。
+    ///
+    /// 這一種與另外兩種都不同：它不是語料的問題，也不是樣本的問題，是**檢索深度
+    /// 不足以支撐這一對的判定**。稀有詞查詢合法地就會回少於 `recallK` 筆
+    /// （FTS5 回的是真的匹配到幾筆，不補滿），所以這**不必然是缺陷**——但那一對
+    /// 的 recall 判定會被低估，所以不能計進去。
+    ///
+    /// **這個數字大到某個程度就代表量測的涵蓋範圍有問題**，而那是讀報告的人要
+    /// 判斷的事——所以它必須出現在輸出上，不能被合併掉。
+    public let skippedShallowRetrieval: Int
 
     /// 跳過的總數。**衍生值**，只為了讓「scored + skipped == 要求的樣本數」這個
-    /// 核對讀得出來——不要拿它當診斷用，診斷要看兩個分項。
-    public var skipped: Int { skippedNoSample + skippedNoQuery }
+    /// 核對讀得出來——不要拿它當診斷用，診斷要看三個分項。
+    public var skipped: Int { skippedNoSample + skippedNoQuery + skippedShallowRetrieval }
 
     public init(
         byQueryClass: [QueryClass: ChannelAggregates], scored: Int,
-        skippedNoSample: Int, skippedNoQuery: Int
+        skippedNoSample: Int, skippedNoQuery: Int, skippedShallowRetrieval: Int = 0
     ) {
         self.byQueryClass = byQueryClass
         self.scored = scored
         self.skippedNoSample = skippedNoSample
         self.skippedNoQuery = skippedNoQuery
+        self.skippedShallowRetrieval = skippedShallowRetrieval
     }
 }
 
@@ -175,9 +186,9 @@ public struct KnownItemHarness: Sendable {
     public enum HarnessError: Error, Sendable, Equatable {
         /// 樣本數為負。`Array.prefix` 對負數是 `preconditionFailure`。
         case negativeSampleSize(Int)
-        /// 某一軌回傳的名次少於 `recallK`，於是「清單太短」與「真的沒命中」
-        /// 分不出來，recall 被安靜低估。
-        case retrievalTooShallow(channel: String, returned: Int, required: Int)
+        // `retrievalTooShallow` 曾經在這裡（#36 階段 3），已移除：它 `throw` 而
+        // 那個 throw 會中止整個 run，而稀有詞查詢合法地就會回少於 recallK 筆。
+        // 現在記成 `KnownItemReport.skippedShallowRetrieval`（#36 verify）。
     }
 
     /// recall 判定的視窗（Recall@20）。
@@ -223,6 +234,7 @@ public struct KnownItemHarness: Sendable {
         var scored = 0
         var skippedNoSample = 0
         var skippedNoQuery = 0
+        var skippedShallowRetrieval = 0
 
         for index in order.prefix(sampleSize) {
             guard let sample = corpus.sample(at: index) else {
@@ -237,27 +249,38 @@ public struct KnownItemHarness: Sendable {
                 continue
             }
             let rankings = try retrieve(query)
-            // **檢索回傳不足 `recallK` 筆時具名拒絕，不安靜低估**（#36 階段 3）。
+            // **檢索回傳不足時把這個樣本記成不可用，不安靜低估，也不中止整個 run**
+            //（#36 階段 3 引入，#36 verify 修正處置）。
             //
-            // `scoreRecallAndRanking` 用 `retrieved.prefix(recallK).firstIndex(of:)`
-            // 找 gold，所以「清單只有 5 筆而 gold 不在裡面」與「清單有 20 筆而
-            // gold 真的沒命中」**產生同一個 `.notRecalled`**——recall 被低估，而
-            // 報告照常產出一個看起來有信心的數字。
+            // 問題是真的：`scoreRecallAndRanking` 用
+            // `retrieved.prefix(recallK).firstIndex(of:)` 找 gold，所以「清單只有
+            // 5 筆而 gold 不在裡面」與「清單有 20 筆而 gold 真的沒命中」**產生同一個
+            // `.notRecalled`**——recall 被低估，而報告照常產出一個看起來有信心的數字。
             //
-            // 缺數字比錯數字好：這裡拋出來，讓呼叫端去修它的檢索深度。
+            // **但初版的處置錯了兩次**，兩次都由 #36 的 verify 抓到：
             //
-            // **門檻是 `min(recallK, corpus.count)` 而不是 `recallK`。** 初版寫死
-            // `recallK`，而那對**語料本身少於 recallK 段**的情形是誤報——那不是
-            // 淺檢索，是小語料，沒有任何通道回得出 20 筆。實測時兩條既有測試
-            // （三段語料）立刻撞上它。
+            // 1. 門檻寫死 `recallK`，對**語料本身少於 recallK 段**是誤報。已改成
+            //    `min(recallK, corpus.count)`——判準是「檢索**能**回幾筆」不是
+            //    「我想要幾筆」。
+            // 2. **它 `throw`，而這個 `throw` 從 per-sample 迴圈傳出去、中止整個
+            //    run。** 量測腳本對 `harness.run` 只寫 `try`、沒有 `do/catch`，所以
+            //    一個樣本的淺檢索會讓整份量測崩掉。而**稀有詞的查詢合法地就會回少於
+            //    20 筆**——FTS5 回的是真的匹配到幾筆，不會補滿。於是這個守衛會在
+            //    完全正常的資料上 fire。
             //
-            // 判準因此是「檢索**能**回幾筆」而不是「我想要幾筆」。
+            // 現在的處置與同一個 commit 已經建立的紀律一致：**記成第三種跳過原因**。
+            // 它與另外兩種分開計數，理由相同——三者的意義不同，合併之後看起來一樣。
+            var shallowChannel: String?
             for (name, list) in [
                 ("lexical", rankings.lexical), ("vector", rankings.vector),
                 ("fused", rankings.fused),
             ] where list.count < requiredDepth {
-                throw HarnessError.retrievalTooShallow(
-                    channel: name, returned: list.count, required: requiredDepth)
+                shallowChannel = name
+                break
+            }
+            if shallowChannel != nil {
+                skippedShallowRetrieval += 1
+                continue
             }
             let breakdown = ChannelBreakdown(
                 lexical: scoreRecallAndRanking(
@@ -277,7 +300,8 @@ public struct KnownItemHarness: Sendable {
 
         return KnownItemReport(
             byQueryClass: byClass, scored: scored,
-            skippedNoSample: skippedNoSample, skippedNoQuery: skippedNoQuery)
+            skippedNoSample: skippedNoSample, skippedNoQuery: skippedNoQuery,
+            skippedShallowRetrieval: skippedShallowRetrieval)
     }
 
     /// 從一段文字導出一個查詢。導不出來時回 `nil`（呼叫端負責計數）。

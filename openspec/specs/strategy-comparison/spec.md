@@ -142,6 +142,38 @@ The report SHALL carry the count of each legitimate skip so that the size of the
 - **WHEN** the harness is asked to interleave them
 - **THEN** the invocation fails, because attribution is recorded per identifier and would credit neither side distinguishably
 
+#### Scenario: A pair whose members disagree about spreading activation is refused
+
+- **GIVEN** two strategies where exactly one applies spreading activation — for example `conservative` and `human-like`
+- **WHEN** a comparison of that pair is requested
+- **THEN** the request fails with a named refusal identifying both strategies, and nothing is presented and nothing is recorded
+
+The interleaving harness hands **one** projection object to both arms, because a comparison whose two sides saw different statistics measures the statistics rather than the strategies. When the two members disagree about spreading activation, that single object cannot satisfy both: whichever way it is built, one side sees a signal this specification does not authorise it to see. There is no correct value to choose, so the pair is refused rather than silently resolved in one side's favour. This refusal is reachable from the shipped command line and was implemented before it was written down here (#36).
+
+### Requirement: The command line compares one fixed pair, and the consequence is recorded
+
+The shipped command line SHALL compare `archival` against `human-like` and SHALL NOT accept a caller-supplied pair. This is a deliberate narrowing, and the cost of it belongs in this specification rather than in a source comment: **`conservative` cannot be compared from the command line at all.**
+
+#### Scenario: The comparison pair is not selectable
+
+- **GIVEN** a user who wants to compare `conservative` against another strategy
+- **WHEN** they look for a way to express that on the command line
+- **THEN** there is none, and this is intended rather than missing
+
+Making the pair selectable is not merely adding a flag. Of the three shipped strategies, `conservative` × `human-like` is refused by the preceding requirement, so a selectable pair would expose users to a refusal they have no way to predict — the compatibility rule would have to be surfaced first. That is a separate interface question. What this requirement fixes is that the narrowing is **recorded with its consequence**, so a reader does not mistake the missing flag for an oversight.
+
+### Requirement: Unblinding is prevented by discipline, not by mechanism, and this is stated
+
+The command line prints a presentation identifier alongside comparison results, and the per-position attribution for that identifier is stored in a file under the same home directory. A reader who wants to know which side produced which position can therefore find out with one grep. This specification SHALL NOT claim that the comparison is blind.
+
+#### Scenario: The attribution is reachable from what the interface prints
+
+- **GIVEN** a comparison result printed by the shipped command line
+- **WHEN** the reader takes the presentation identifier and searches the presentation-record file for it
+- **THEN** the per-position attribution is found, and nothing prevented this
+
+Removing the printed identifier would blind the comparison, and it is deliberately **not** removed: the identifier is the only handle by which a later interaction can be attached to the presentation it came from, which is what the planned interaction-recording command needs in order to address anything at all. Tightening this side would disable the other. The two are one design question and SHALL be decided together; until then, what stands is a stated boundary rather than an enforced one (#36).
+
 #### Scenario: Legitimate skips are counted
 
 - **GIVEN** one event with no presentation, one event belonging to a null comparison, and one event naming a presentation absent from the supplied records

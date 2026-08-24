@@ -89,9 +89,19 @@ public struct ConservativeStrategy: MemoryStrategy {
 
     /// 這一檔的**定義性條件**：只在等分區段內重排。
     ///
-    /// 宣告在這裡、**執行在 seam**（`MemoryStrategy.rerank` 的後置條件）。先前這個
-    /// 條件只活在下面的 `rerankChecked` 裡，於是唯一執行它的就是本型別自己——
-    /// 而實測把那一行換掉，67 條測試全綠（#32）。
+    /// 執行在 seam（`MemoryStrategy.rerank` 的後置條件）。先前這個條件只活在下面的
+    /// `rerankChecked` 裡，於是唯一執行它的就是本型別自己——而實測把那一行換掉，
+    /// 67 條測試全綠（#32）。
+    ///
+    /// ## #34 之後這行**不是**權威，只是一份多餘的自報
+    ///
+    /// 授權由 `StrategyRegistry.authorizedConstraints(for:)` 那張以識別碼為鍵的表
+    /// 決定，seam 取「**表 ∪ 實例**」。所以把這一行改成 `[]` **不會**讓本策略不受
+    /// tie-run 檢查——表裡那一筆減不掉。
+    ///
+    /// 留著它是為了讓讀這個型別的人看得出它的定義性條件，不是為了讓它生效。
+    /// 那個區別在 #34 之前不存在（當時這一行就是唯一的來源），而這段註解在
+    /// #34 當時沒有跟上——由 #36 的 verify 抓到。
     public let placementConstraints: Set<PlacementConstraint> = [.withinTieRuns]
 
     /// 與 `human-like` 同一個上限，預設同樣是 1 且同樣是 provisional。

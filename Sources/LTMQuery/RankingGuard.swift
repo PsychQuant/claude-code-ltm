@@ -19,6 +19,20 @@ public enum RankingGuard {
     /// 與「只在帶內移動」沒有例外），而位移上限是 per-strategy 的設定
     /// （`archival` 根本沒有上限可言）。拆開之後 seam 就能無條件強制前者，
     /// 不必等策略自己想起來要呼叫（#1 verify R4：先前兩者都是自願的）。
+    ///
+    /// ## 「自願」這件事後來又搬了一次，這裡要說清楚
+    ///
+    /// 上面說的是**排列性與帶**——那兩者從 R4 起就由 seam 無條件強制。
+    ///
+    /// **位置約束（`checkTieRunsOnly`）走了另一條路，而且花了兩次改動**：#32 把它的
+    /// **執行點**上提到 seam；但**權威來源**還在策略手上，直到 #34 才移進
+    /// `StrategyRegistry` 的授權表（seam 取「表 ∪ 實例」，策略只能加不能減）。
+    ///
+    /// 那個區別值得記：**執行點與權威來源是兩件事，而 #32 只搬了前者**——當時六處
+    /// artifact 都宣稱洞已經關了，是一個交替回值的探針把它可執行地證偽的。
+    ///
+    /// 仍然開著的是 `displacementBound`：上限的**值**由策略提供，而識別碼鍵的表
+    /// 承載不了它（同一識別碼的兩個實例可以帶不同的 bound）。追蹤於 #38。
     public static func verifyPermutation(
         original: [Candidate],
         reordered: [Candidate]

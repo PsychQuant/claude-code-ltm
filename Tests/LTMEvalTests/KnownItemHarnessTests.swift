@@ -246,8 +246,8 @@ func aNegativeSampleSizeIsNamedNotTrapped() {
     }
 }
 
-@Test("檢索回傳不足時具名拒絕，不安靜低估 recall")
-func aShallowRetrievalIsRefusedRatherThanUnderestimated() {
+@Test("檢索回傳不足的樣本被記成第三種跳過，不安靜低估也不中止整個 run")
+func aShallowRetrievalIsCountedNotUnderestimatedAndNotFatal() throws {
     // 語料 25 段（> recallK），所以門檻是 recallK 本身。
     let texts = (0..<25).map { "記憶策略可插拔而檢索基線量測第 \($0) 段" }
     let source = corpus(texts)
@@ -255,14 +255,20 @@ func aShallowRetrievalIsRefusedRatherThanUnderestimated() {
     // 「回了 20 筆而真的沒命中」**產生同一個結果**——recall 被低估而報告照常產出。
     let shallow = (0..<5).map { anchor(9000 + $0) }
 
-    #expect(
-        throws: KnownItemHarness.HarnessError.retrievalTooShallow(
-            channel: "lexical", returned: 5, required: 20)
-    ) {
-        _ = try KnownItemHarness().run(corpus: source, sampleSize: 1, seed: 1) { _ in
-            ChannelRankings(lexical: shallow, vector: shallow, fused: shallow)
-        }
+    // **初版對這個情形 `throw`，而那是錯的**（#36 verify）：那個 throw 從 per-sample
+    // 迴圈傳出去、中止整個 run，而量測腳本對 `harness.run` 沒有 `do/catch`。更根本的
+    // 是**稀有詞查詢合法地就會回少於 recallK 筆**（FTS5 回真的匹配到幾筆、不補滿），
+    // 所以那個守衛會在完全正常的資料上把整份量測炸掉。
+    //
+    // 現在它記成第三種跳過原因——與另外兩種分開，因為三者意義不同。
+    let report = try KnownItemHarness().run(corpus: source, sampleSize: 3, seed: 1) { _ in
+        ChannelRankings(lexical: shallow, vector: shallow, fused: shallow)
     }
+    #expect(report.skippedShallowRetrieval == 3, "每一個都因檢索太淺而不可判定")
+    #expect(report.scored == 0, "不可判定的樣本不得計進 scored——那正是低估的來源")
+    #expect(report.skippedNoSample == 0)
+    #expect(report.skippedNoQuery == 0)
+    #expect(report.scored + report.skipped == 3, "總數仍要核對得起來")
 }
 
 @Test("語料小於 recallK 時不算淺檢索——門檻是「能回幾筆」不是「想要幾筆」")
