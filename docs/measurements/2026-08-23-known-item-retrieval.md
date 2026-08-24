@@ -4,7 +4,7 @@ Refs #33（change `wire-evaluation-machinery`）。這是 `RecallNDCG` 與 `Chan
 這兩個評分基元的**第一個呼叫端**產出的第一份紀錄——它們先前實作完成、測試齊全、
 沒有任何東西呼叫它們。
 
-- 量測器：[`scripts/measure-retrieval-quality.swift`](../../scripts/measure-retrieval-quality.swift)（`swift run measure-retrieval`）
+- 量測器：[`scripts/measure-retrieval/main.swift`](../../scripts/measure-retrieval/main.swift)（`swift run measure-retrieval`）
 - 產生器：[`Sources/LTMEval/KnownItemHarness.swift`](../../Sources/LTMEval/KnownItemHarness.swift)
 - 語料抽樣：[`scripts/sample-corpus-scales.py`](../../scripts/sample-corpus-scales.py)
 

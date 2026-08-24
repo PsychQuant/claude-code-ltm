@@ -129,16 +129,33 @@ public struct KnownItemReport: Sendable, Equatable, Codable {
     public let byQueryClass: [QueryClass: ChannelAggregates]
     /// 實際評到的對數。
     public let scored: Int
-    /// 抽到但導不出可用查詢、因而跳過的段數。
+    /// 抽到但**取不到樣本**（`corpus.sample(at:)` 回 `nil`）而跳過的段數。
     ///
-    /// **必須出現在輸出上**：靜默跳過會讓有效樣本數與要求的樣本數不同，而讀者
-    /// 不會知道。
-    public let skipped: Int
+    /// 與 `skippedNoQuery` 分開計數（#36 階段 3）。先前兩者合併成一個 `skipped`，
+    /// 而它們的意義完全不同：這一個代表**語料的 count 與實際可取樣的不一致**
+    /// ——那是語料實作的 bug，不是取樣的正常損耗。合併之後，一個語料把一半的
+    /// 索引回 `nil` 看起來會跟「一半的段落太短」一模一樣。
+    public let skippedNoSample: Int
+    /// 抽到但**導不出可用查詢**（太短、沒有可用的字元類別）而跳過的段數。
+    ///
+    /// 這一個是**正常損耗**：語料裡本來就有很短的段落。
+    ///
+    /// **兩者都必須出現在輸出上**：靜默跳過會讓有效樣本數與要求的樣本數不同，
+    /// 而讀者不會知道。
+    public let skippedNoQuery: Int
 
-    public init(byQueryClass: [QueryClass: ChannelAggregates], scored: Int, skipped: Int) {
+    /// 跳過的總數。**衍生值**，只為了讓「scored + skipped == 要求的樣本數」這個
+    /// 核對讀得出來——不要拿它當診斷用，診斷要看兩個分項。
+    public var skipped: Int { skippedNoSample + skippedNoQuery }
+
+    public init(
+        byQueryClass: [QueryClass: ChannelAggregates], scored: Int,
+        skippedNoSample: Int, skippedNoQuery: Int
+    ) {
         self.byQueryClass = byQueryClass
         self.scored = scored
-        self.skipped = skipped
+        self.skippedNoSample = skippedNoSample
+        self.skippedNoQuery = skippedNoQuery
     }
 }
 
@@ -151,6 +168,18 @@ public struct KnownItemReport: Sendable, Equatable, Codable {
 /// 沒有歧義（就是那一段），代價是**這些查詢不代表真實查詢**——使用者不會把
 /// 一段內文原封不動貼進搜尋框。這個限制必須寫進任何由它產生的紀錄。
 public struct KnownItemHarness: Sendable {
+    /// harness 自己能產生的失敗。
+    ///
+    /// 兩者都是**具名錯誤而不是 trap 或安靜降級**：一個量測工具最糟的失敗方式是
+    /// 產出一個看起來有信心的錯數字。
+    public enum HarnessError: Error, Sendable, Equatable {
+        /// 樣本數為負。`Array.prefix` 對負數是 `preconditionFailure`。
+        case negativeSampleSize(Int)
+        /// 某一軌回傳的名次少於 `recallK`，於是「清單太短」與「真的沒命中」
+        /// 分不出來，recall 被安靜低估。
+        case retrievalTooShallow(channel: String, returned: Int, required: Int)
+    }
+
     /// recall 判定的視窗（Recall@20）。
     public let recallK: Int
     /// nDCG 判定的視窗（nDCG@10）。
@@ -177,6 +206,14 @@ public struct KnownItemHarness: Sendable {
         seed: UInt64,
         retrieve: (String) throws -> ChannelRankings
     ) throws -> KnownItemReport {
+        // **負的樣本數具名拒絕，不 trap**（#36 階段 3）。`Array.prefix` 對負數是
+        // `preconditionFailure`——那是給呼叫端錯誤用的，而樣本數常常來自命令列
+        // 參數或組態，也就是外來資料。解析路徑一律不得 trap（`CLAUDE.md`）。
+        guard sampleSize >= 0 else {
+            throw HarnessError.negativeSampleSize(sampleSize)
+        }
+        // 見下方 `retrievalTooShallow` 的說明：門檻取語料大小與 `recallK` 的較小者。
+        let requiredDepth = min(recallK, corpus.count)
         var rng = SplitMix64(seed: seed)
         // 先取全部索引再 seeded shuffle：可重現，而且不會抽到重複的段。
         var order = Array(0..<corpus.count)
@@ -184,19 +221,44 @@ public struct KnownItemHarness: Sendable {
 
         var byClass: [QueryClass: ChannelAggregates] = [:]
         var scored = 0
-        var skipped = 0
+        var skippedNoSample = 0
+        var skippedNoQuery = 0
 
         for index in order.prefix(sampleSize) {
             guard let sample = corpus.sample(at: index) else {
-                skipped += 1
+                // 語料宣稱 `count` 裡有這個索引卻取不到——那是語料實作的問題，
+                // 不是取樣的正常損耗。分開計數（#36 階段 3）。
+                skippedNoSample += 1
                 continue
             }
             guard let query = Self.deriveQuery(from: sample.text, using: &rng) else {
                 // 導不出可用查詢（太短、沒有可用的字元類別）。**數出來**。
-                skipped += 1
+                skippedNoQuery += 1
                 continue
             }
             let rankings = try retrieve(query)
+            // **檢索回傳不足 `recallK` 筆時具名拒絕，不安靜低估**（#36 階段 3）。
+            //
+            // `scoreRecallAndRanking` 用 `retrieved.prefix(recallK).firstIndex(of:)`
+            // 找 gold，所以「清單只有 5 筆而 gold 不在裡面」與「清單有 20 筆而
+            // gold 真的沒命中」**產生同一個 `.notRecalled`**——recall 被低估，而
+            // 報告照常產出一個看起來有信心的數字。
+            //
+            // 缺數字比錯數字好：這裡拋出來，讓呼叫端去修它的檢索深度。
+            //
+            // **門檻是 `min(recallK, corpus.count)` 而不是 `recallK`。** 初版寫死
+            // `recallK`，而那對**語料本身少於 recallK 段**的情形是誤報——那不是
+            // 淺檢索，是小語料，沒有任何通道回得出 20 筆。實測時兩條既有測試
+            // （三段語料）立刻撞上它。
+            //
+            // 判準因此是「檢索**能**回幾筆」而不是「我想要幾筆」。
+            for (name, list) in [
+                ("lexical", rankings.lexical), ("vector", rankings.vector),
+                ("fused", rankings.fused),
+            ] where list.count < requiredDepth {
+                throw HarnessError.retrievalTooShallow(
+                    channel: name, returned: list.count, required: requiredDepth)
+            }
             let breakdown = ChannelBreakdown(
                 lexical: scoreRecallAndRanking(
                     retrieved: rankings.lexical, expected: sample.anchor,
@@ -213,7 +275,9 @@ public struct KnownItemHarness: Sendable {
             // query 到此為止：它算完 label、送過檢索，沒有任何持有者。
         }
 
-        return KnownItemReport(byQueryClass: byClass, scored: scored, skipped: skipped)
+        return KnownItemReport(
+            byQueryClass: byClass, scored: scored,
+            skippedNoSample: skippedNoSample, skippedNoQuery: skippedNoQuery)
     }
 
     /// 從一段文字導出一個查詢。導不出來時回 `nil`（呼叫端負責計數）。

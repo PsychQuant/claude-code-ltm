@@ -225,7 +225,13 @@ for label in QueryClass.allCases {
 // 全部合併的一列。**分桶在上、合併在下**，而不是只印合併：#2 實測向量融合的
 // 整體增益全部集中在中文雙字桶，只看整體會判成「沒有差異」。
 func combined(_ pick: (ChannelAggregates) -> ChannelAggregate) -> ChannelAggregate {
-    report.byQueryClass.values.reduce(ChannelAggregate(scored: 0, recalled: 0, ndcgSum: 0)) {
+    // **依 query class 的宣告順序累加，不是依字典迭代順序**（#36 階段 3）。
+    //
+    // Double 加法不可結合，而 `Dictionary.values` 的迭代順序在 Swift 隨 hash seed
+    // 變動——於是「同一 seed 跑兩次逐字相同」這個宣稱先前不是結構性保證，只是
+    // 桶數少所以實務上沒撞到。量測紀錄的可重現性不該建立在巧合上。
+    QueryClass.allCases.compactMap { report.byQueryClass[$0] }
+        .reduce(ChannelAggregate(scored: 0, recalled: 0, ndcgSum: 0)) {
         let cell = pick($1)
         return ChannelAggregate(
             scored: $0.scored + cell.scored, recalled: $0.recalled + cell.recalled,

@@ -356,3 +356,53 @@ func theRegistryAndTheAuthorityTableCoverEachOther() {
             "\(name) 有授權條目／組得出實例，卻不在 known 裡——CLI 的『可用策略』會漏列它")
     }
 }
+
+/// `id` 每次讀都換一個**未授權**的名字——用來驗錯誤指名的是被查表的那一個。
+private final class ShiftingUnauthorizedIdentity: MemoryStrategy, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    var id: RankingPolicyID {
+        lock.lock(); defer { lock.unlock() }
+        calls += 1
+        return RankingPolicyID("ghost-\(calls)")
+    }
+    let consumedSignals: Set<EventKind> = []
+    let displacementBound = 0
+    let placementConstraints: Set<PlacementConstraint> = []
+
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        input.candidates.map {
+            RankedResult(
+                candidate: $0, displacement: 0,
+                reason: RankingReason(history: .none, movement: .unmoved))
+        }
+    }
+}
+
+@Test("拒絕訊息指名的是被拿去查表的那一個識別碼")
+func theRefusalNamesTheIdentifierThatWasActuallyLookedUp() throws {
+    // #36 階段 3：先前 seam 讀兩次 `id`——一次查表、一次組錯誤。交替回值的 getter
+    // 因此能讓錯誤說「ghost-1 被拒」而實際被查的是 ghost-2。
+    //
+    // 這條**不是** #37 的修法：`id` 仍是未經驗證的 per-call 自報，跨呼叫仍能換
+    // 身分。它鎖住的只有「單次呼叫內部一致」。
+    var thrown: StrategyViolation?
+    do {
+        _ = try ShiftingUnauthorizedIdentity().rerank(exampleCandidates(), with: .empty(at: instant))
+    } catch let error as StrategyViolation {
+        thrown = error
+    } catch {
+        Issue.record("預期 StrategyViolation，實得 \(error)")
+        return
+    }
+    guard case .unauthorizedStrategy(let named) = thrown else {
+        Issue.record("預期 unauthorizedStrategy，實得 \(String(describing: thrown))")
+        return
+    }
+    // 第一次讀到的是 `ghost-1`，而查表用的就是它。讀兩次的話錯誤會指名 `ghost-2`。
+    #expect(
+        named.value == "ghost-1",
+        "錯誤指名了一個從未被用來查表的識別碼——使用者拿到的線索是錯的")
+}

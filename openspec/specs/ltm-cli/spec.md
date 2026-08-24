@@ -144,7 +144,7 @@ code:
   - docs/measurements/2026-08-23-known-item-retrieval.md
   - Sources/LTMIndex/RetrievalEngine.swift
   - Tests/LTMServiceTests/CLICommandTests.swift
-  - scripts/measure-retrieval-quality.swift
+  - scripts/measure-retrieval/main.swift
   - Sources/LTMEval/PresentationRecordStore.swift
   - CLAUDE.md
   - Sources/LTMEval/KnownItemHarness.swift

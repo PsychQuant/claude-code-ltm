@@ -73,9 +73,14 @@ func theReportCarriesNoCorpusDerivedText() throws {
 
     // 把實際導出的查詢記下來——斷言要能指名它不在輸出裡，而不是泛泛地說「沒有原文」。
     var observed: [String] = []
+    // 回傳與語料等長的名次（三段）。**不是空陣列**——harness 現在會對
+    // 「回傳筆數少於 min(recallK, corpus.count)」具名拒絕（#36 階段 3），
+    // 因為空陣列讓「清單太短」與「真的沒命中」分不出來。本測試驗的是隱私，
+    // 不是檢索深度，所以給一份形狀合理的名次即可。
+    let all = source.samples.map(\.anchor)
     let report = try harness.run(corpus: source, sampleSize: 3, seed: 7) { query in
         observed.append(query)
-        return ChannelRankings(lexical: [], vector: [], fused: [])
+        return ChannelRankings(lexical: all, vector: all, fused: all)
     }
     #expect(!observed.isEmpty)
 
@@ -99,12 +104,17 @@ func undeliverableSamplesAreCountedNotHidden() throws {
     // 四字元以上的 ASCII 詞。
     let source = corpus(["記憶策略可插拔而檢索基線量測", "。。。", "ab cd"])
     let harness = KnownItemHarness()
+    let all = source.samples.map(\.anchor)
     let report = try harness.run(corpus: source, sampleSize: 3, seed: 1) { _ in
-        ChannelRankings(lexical: [], vector: [], fused: [])
+        ChannelRankings(lexical: all, vector: all, fused: all)
     }
     #expect(report.skipped == 2, "跳過數必須算出來——不然有效樣本數會與要求的不同而讀者不知道")
     #expect(report.scored == 1)
     #expect(report.scored + report.skipped == 3)
+    // **兩種跳過原因分開**（#36 階段 3）：這兩段是導不出查詢，不是取不到樣本。
+    // 合併之後，一個把一半索引回 nil 的語料看起來會跟「一半的段落太短」一模一樣。
+    #expect(report.skippedNoQuery == 2)
+    #expect(report.skippedNoSample == 0)
 }
 
 // MARK: - 任務 4.4：三軌各自計分，且會分岔
@@ -180,3 +190,88 @@ func aSingleWordChunkYieldsNoQuery() {
     }
 }
 
+
+// MARK: - #36 階段 3：量測工具最糟的失敗方式是產出看起來有信心的錯數字
+
+/// 一個宣稱 `count` 比實際可取樣多的語料——用來驗兩種跳過原因真的分得開。
+private struct LyingCountCorpus: KnownItemCorpus {
+    let samples: [KnownItemSample]
+    let count: Int
+    func sample(at index: Int) -> KnownItemSample? {
+        samples.indices.contains(index) ? samples[index] : nil
+    }
+}
+
+@Test("取不到樣本與導不出查詢分開計數——合併會讓語料的 bug 看起來像正常損耗")
+func theTwoSkipReasonsAreCountedSeparately() throws {
+    // 語料宣稱有 6 段，實際只給得出 3 段。
+    let real = ["記憶策略可插拔而檢索基線量測", "交錯呈現的紀錄與計分", "。。。"]
+    let source = LyingCountCorpus(
+        samples: real.enumerated().map {
+            KnownItemSample(anchor: anchor($0.offset), text: $0.element)
+        },
+        count: 6)
+    // 回 6 筆而不是 3 筆：深度門檻取的是 `corpus.count`（語料**自己宣稱**的），
+    // 而這個語料宣稱 6。門檻用得上的資訊就只有這個，說謊的語料會讓門檻偏高
+    // ——那是可接受的：淺檢索守衛防的是檢索端，不是語料端說謊。
+    let all = source.samples.map(\.anchor) + (0..<3).map { anchor(8000 + $0) }
+    let report = try KnownItemHarness().run(corpus: source, sampleSize: 6, seed: 3) { _ in
+        ChannelRankings(lexical: all, vector: all, fused: all)
+    }
+
+    #expect(report.skippedNoSample == 3, "宣稱 6 段而只給得出 3 段——那是語料實作的 bug")
+    #expect(report.skippedNoQuery == 1, "「。。。」導不出查詢——那是正常損耗")
+    #expect(report.scored == 2)
+    #expect(report.scored + report.skipped == 6, "衍生的 skipped 仍要讓總數核對得起來")
+}
+
+@Test("負的樣本數具名拒絕，不 trap")
+func aNegativeSampleSizeIsNamedNotTrapped() {
+    let source = corpus(["記憶策略可插拔而檢索基線量測"])
+    // `Array.prefix` 對負數是 preconditionFailure，而樣本數常常來自命令列參數
+    // ——那是外來資料，解析路徑一律不得 trap（CLAUDE.md）。
+    //
+    // **這條回歸鎖的訊號形式是「崩」不是「紅」，誠實記下來。** 實測拿掉守衛：
+    //
+    //     Swift/Collection.swift:1329: Fatal error:
+    //     Can't take a prefix of negative length from a collection
+    //
+    // 行程直接死，所以 `Test run with N tests` 那一行不會出現、`recorded an issue`
+    // 是 0。CI 仍然會失敗（而且訊息剛好指名那個 stdlib assertion），但**用
+    // 「紅了幾條」當變異判準的人會把它讀成「殺不掉」**——這一段就是給那個人看的。
+    #expect(throws: KnownItemHarness.HarnessError.negativeSampleSize(-1)) {
+        _ = try KnownItemHarness().run(corpus: source, sampleSize: -1, seed: 1) { _ in
+            ChannelRankings(lexical: [], vector: [], fused: [])
+        }
+    }
+}
+
+@Test("檢索回傳不足時具名拒絕，不安靜低估 recall")
+func aShallowRetrievalIsRefusedRatherThanUnderestimated() {
+    // 語料 25 段（> recallK），所以門檻是 recallK 本身。
+    let texts = (0..<25).map { "記憶策略可插拔而檢索基線量測第 \($0) 段" }
+    let source = corpus(texts)
+    // 只回 5 筆：gold 不在裡面時 `scoreRecallAndRanking` 給 `.notRecalled`，與
+    // 「回了 20 筆而真的沒命中」**產生同一個結果**——recall 被低估而報告照常產出。
+    let shallow = (0..<5).map { anchor(9000 + $0) }
+
+    #expect(
+        throws: KnownItemHarness.HarnessError.retrievalTooShallow(
+            channel: "lexical", returned: 5, required: 20)
+    ) {
+        _ = try KnownItemHarness().run(corpus: source, sampleSize: 1, seed: 1) { _ in
+            ChannelRankings(lexical: shallow, vector: shallow, fused: shallow)
+        }
+    }
+}
+
+@Test("語料小於 recallK 時不算淺檢索——門檻是「能回幾筆」不是「想要幾筆」")
+func aSmallCorpusIsNotAShallowRetrieval() throws {
+    // 三段語料回三筆，門檻 min(20, 3) = 3。初版寫死 recallK，這個情形會誤報。
+    let source = corpus(["記憶策略可插拔而檢索基線量測", "交錯呈現的紀錄與計分", "向量通道與斷詞通道"])
+    let all = source.samples.map(\.anchor)
+    let report = try KnownItemHarness().run(corpus: source, sampleSize: 3, seed: 1) { _ in
+        ChannelRankings(lexical: all, vector: all, fused: all)
+    }
+    #expect(report.scored == 3)
+}

@@ -521,8 +521,20 @@ extension MemoryStrategy {
     {
         // **權威在表，不在策略。** 兩者由下面的單向合成決定實際生效的值——
         // 表沒有這個識別碼就拒絕，不退回自報（#34）。
-        guard let authorizedConstraints = StrategyRegistry.authorizedConstraints(for: id) else {
-            throw StrategyViolation.unauthorizedStrategy(id)
+        // **`id` 在整個呼叫裡只讀一次**（#36 階段 3）。
+        //
+        // 先前這裡讀兩次：一次查表、一次組錯誤。一個交替回值的 getter 因此能讓
+        // `unauthorizedStrategy` 指名一個**從未被用來查表**的識別碼——錯誤訊息
+        // 說 A 被拒，實際被拒的是 B。
+        //
+        // 這**不解決** #37（`id` 本身仍是未經驗證的 per-call 自報，交替回值仍能
+        // 在兩次 `rerank` 之間換身分）。它只保證**單次呼叫內部一致**：這一次
+        // 用哪個識別碼查表，錯誤就指名哪一個。
+        let declaredID = id
+        guard
+            let authorizedConstraints = StrategyRegistry.authorizedConstraints(for: declaredID)
+        else {
+            throw StrategyViolation.unauthorizedStrategy(declaredID)
         }
 
         // 負的上限是**外來策略給的值**，不是程式錯誤——所以 throw 而不是 trap。
@@ -595,7 +607,17 @@ extension MemoryStrategy {
         //
         // 這裡不重算等分區段——切法由 `RankingGuard` 的 `tieRunIdentifiers` 擁有，
         // 本處只呼叫。同一件事兩個寫者就是兩份會漂移的規格。
-        for constraint in effectiveConstraints {
+        // **依 `allCases` 的宣告順序迭代，不是依 `Set` 的迭代順序**（#36 階段 3）。
+        //
+        // `Set` 的迭代順序在 Swift 隨 hash seed 變動，所以「同時違反兩條約束時
+        // 回報哪一條」會隨 process 不同——而使用者拿到的錯誤是他唯一的線索。
+        //
+        // **誠實邊界：這條沒有回歸鎖，因為現在寫不出來。** `PlacementConstraint`
+        // 目前只有一個 case，一種約束不可能有兩個同時違反，所以這條性質無法被
+        // 任何測試驅動。加第二個 case 的人**要同時補那條測試**——寫一條驗不到的
+        // 測試比沒有測試更糟（`CLAUDE.md`），所以這裡留的是具名的缺口而不是
+        // 一個假裝有守衛的綠燈。
+        for constraint in PlacementConstraint.allCases where effectiveConstraints.contains(constraint) {
             switch constraint {
             case .withinTieRuns:
                 _ = try RankingGuard.checkTieRunsOnly(

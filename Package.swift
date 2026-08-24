@@ -77,13 +77,17 @@ let package = Package(
         .executableTarget(
             name: "measure-retrieval",
             dependencies: ["LTMCore", "LTMEval", "LTMIndex", "LTMService"],
-            path: "scripts",
-            exclude: [
-                "measure-resume-duplication.py", "measure-rrf-ties.swift", "probe-tokenizer.swift",
-                "rrf-tie-fixtures", "rrf-tie-mechanism.sh", "rrf-tie-queries.txt",
-                "sample-corpus-scales.py",
-            ],
-            sources: ["measure-retrieval-quality.swift"]),
+            // **自己的目錄，所以不需要 `exclude` 清單**（#36 階段 3）。
+            //
+            // 先前 `path: "scripts"` + 一份逐檔列舉的 `exclude`：`sources:` 已經
+            // 指名單檔，但 SwiftPM 仍會對 target 目錄下**任何**未被處理的檔案
+            // 發 warning（實測：拿掉 exclude → 「found 11 file(s) which are
+            // unhandled」）。於是每新增一個探針檔都要回頭改這份清單，而忘記的
+            // 症狀是一則沒人會去讀的 warning。
+            //
+            // 目錄化把那個維護負擔整個拿掉：這個目錄下只有這一個檔，永遠不會有
+            // 第二個東西掉進來。
+            path: "scripts/measure-retrieval"),
         .testTarget(name: "LTMMemoryTests", dependencies: ["LTMCore", "LTMMemory"]),
         .testTarget(name: "LTMQueryTests", dependencies: ["LTMCore", "LTMQuery"]),
         .testTarget(name: "LTMEvalTests", dependencies: ["LTMCore", "LTMMemory", "LTMQuery", "LTMEval"]),
