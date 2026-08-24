@@ -28,6 +28,28 @@
     策略」。測試釘住它不在 `known` 內、`make()` 回 `nil`。
 
 ### Changed
+- **#36 階段 4–5：測試品質與 artifact 對齊**。
+  - **未知策略的結束碼有回歸鎖了**。`#33` 的 blocking 修正把它從 trap 改成具名錯誤
+    （4 → 2），而那個 change 的 AC3 寫著「不帶旗標時 byte-identical」——字面上與該
+    改動衝突，且**沒有任何東西釘住新值**。新測試斷言的是**跑出來的結束碼**，不是
+    `ExitCode.usageError.rawValue == 2`（後者只驗一個常數的字面值）。
+  - **`memory-events` spec 補上 `interleaved` 保留值條款**。原文寫 policy 是
+    「naming the strategy in force」，而交錯比較裡沒有單一 in-force strategy
+    ——spec 的措辭涵蓋不到已出貨的值。修 spec，不修 code。
+  - **`ltm-cli` spec 明說那個拒絕情境從 CLI 不可達**。`--compare` 分支無條件建兩個
+    store，所以「沒有事件存放時失敗」只在 service 邊界可測。把不可達寫進 requirement
+    本身，讀者才不會去找一條不可能存在的 CLI 測試。
+  - **`memory-strategy` spec 新增「識別碼每次呼叫只讀一次」**，並把 `displacementBound`
+    的開放問題指向 **#38**（原指標指向已 close 的 `#16`，而 `#34` 的 diff 刪掉那行
+    沒補替代——**一個寫進 spec 的已知缺口有兩天完全沒有落點**）。
+  - **`unregisterForTesting` 的 doc 收窄**。「測試之間不互相污染」對 bootstrap 名單
+    不成立：`readyForTesting` 是 `static let`，撤銷名單內的識別碼是**不可逆的**。
+    目前沒有測試這樣做，所以是潛伏的——但那句無限定的宣稱正是下一個人會依賴的東西。
+  - **archived proposal 的 Impact 清單刻意不改**。它們是歷史紀錄，而「哪個 change
+    動了哪個檔」的權威答案是 git。該 finding 的實質是流程缺口（Impact 在 propose 時
+    寫、archive 時無人對帳），屬 **#39** 家族。
+
+### Changed
 - **#36：`compare(persist:)` 刪除**（決策 D1）。它的 doc 寫著「存在只是為了讓測試能
   檢查『不落地時什麼都不寫』」，而 `grep -rn "persist: false"` 全 repo **零命中**
   ——那條測試從來不存在。它不是一條沒被記到的測試縫，是一個**以不存在的測試為理由**

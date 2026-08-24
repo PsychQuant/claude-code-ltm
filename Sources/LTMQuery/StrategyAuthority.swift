@@ -127,7 +127,22 @@ public enum StrategyRegistry {
         testAuthorities.withLock { $0[id] = constraints }
     }
 
-    /// 撤銷一筆測試註冊。測試之間不互相污染。
+    /// 撤銷一筆測試註冊。
+    ///
+    /// ## 「測試之間不互相污染」這句話對 bootstrap 名單不成立（#36 階段 5）
+    ///
+    /// 先前這裡只寫那一句，而它有一個未寫明的例外：`readyForTesting` 是
+    /// `static let`，**在一個 process 裡只跑一次**。所以撤銷 `testIdentifiers`
+    /// 裡的任何一個之後，它**不會**被重新註冊——後續測試看到的是「那個識別碼
+    /// 沒有授權條目」，而它們預期的是空集合。
+    ///
+    /// 目前沒有測試這樣做，所以這是**潛伏的**而非現行的。但那句無限定的宣稱
+    /// 正是下一個人會依賴的東西：他會以為 `defer { unregisterForTesting(...) }`
+    /// 對任何識別碼都安全。
+    ///
+    /// **成立的較窄陳述**：對測試**自己註冊**的識別碼，撤銷即回到未註冊狀態；
+    /// 對 `testIdentifiers` 名單裡的，撤銷是**不可逆的**——那些請直接用，不要
+    /// 撤銷。
     static func unregisterForTesting(_ id: RankingPolicyID) {
         testAuthorities.withLock { _ = $0.removeValue(forKey: id) }
     }

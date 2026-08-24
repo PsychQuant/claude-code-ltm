@@ -115,6 +115,8 @@ Every non-zero exit of `ltm query` caused by index state SHALL name the command 
 
 When no event store is available, `--compare` SHALL fail with the existing message for that condition and SHALL NOT print results. Printing an interleaved ordering whose record was lost is indistinguishable, to the reader of the output, from one that was recorded.
 
+**This condition is not reachable through the CLI as shipped, and saying so is part of the requirement.** The `--compare` branch provisions both an event store and a presentation-record store unconditionally, so the refusal is enforced at the service boundary and exercised there, not from a command line. A reader who takes the paragraph above as describing a CLI-level test would be looking for something that cannot exist: there is no argument combination that reaches `--compare` without both stores. The requirement is retained here because it constrains what the CLI must do **if** that provisioning ever becomes conditional — and the day it does, this paragraph is what says the refusal must survive the change (#36).
+
 The human-readable output in comparison mode SHALL have the same shape as an ordinary query — one line per hit with its pointer — and SHALL NOT label which strategy contributed each position. Which side supplied a position is attribution data for the scorer; showing it to the user during the comparison is what interleaved evaluation exists to avoid.
 
 #### Scenario: Comparison mode records a presentation

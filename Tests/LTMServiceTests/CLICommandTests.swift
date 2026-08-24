@@ -652,3 +652,29 @@ func unknownStrategyNeverTrapsTheProcess() throws {
         #expect(!result.err.contains("Fatal error"), "外來輸入不得讓行程 trap")
     }
 }
+
+// MARK: - #36 階段 4：測試品質
+
+@Test("未知策略以 usageError（2）結束——釘住實際結束碼，不是斷言一個常數")
+func anUnknownStrategyExitsWithUsageError() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    // #33 的 blocking 修正把這個情境的結束碼從 4（SIGTRAP 的 133 之後改成的
+    // 一般錯誤）改成 2，而該 change 的 AC3 寫著「不帶旗標時 byte-identical」
+    // ——字面上與這個改動衝突。改動本身是對的（trap → 具名錯誤），但**沒有任何
+    // 東西釘住新值**，於是下一次誰動了錯誤分類就會再改一次而沒人發現。
+    //
+    // 斷言下在**跑出來的結束碼**上，不是 `ExitCode.usageError.rawValue == 2`
+    // ——後者只驗了一個常數的字面值，連「這個錯誤走不走那條分支」都沒碰到。
+    let result = try runCLI(
+        ["query", "內容", "--all-projects", "--strategy", "no-such-strategy"],
+        environment: workspace.environment)
+
+    #expect(result.code == 2, "未知策略是使用錯誤（2），不是內部錯誤")
+    #expect(result.err.contains("no-such-strategy"), "訊息要指名打錯的那個字")
+    #expect(
+        result.err.contains("archival") && result.err.contains("conservative"),
+        "要列出可用策略，否則使用者不知道正確拼法")
+}
