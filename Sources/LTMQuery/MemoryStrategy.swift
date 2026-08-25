@@ -187,6 +187,7 @@ public enum StrategyViolation: Error, Sendable, Equatable {
     /// 受檢」的後門，而那是最容易不小心做到的事——授權表是封閉集合，新增一檔
     /// 策略本來就要動 spec。
     case unauthorizedStrategy(RankingPolicyID)
+    case misreportedHistory(Anchor, reported: RankingReason.History, actual: RankingReason.History)
 }
 
 /// 進到 `rerankChecked` 的入場券。
@@ -665,6 +666,39 @@ extension MemoryStrategy {
                 throw StrategyViolation.misreportedMovement(
                     result.candidate.anchor,
                     reported: result.reason.movement, actual: expected)
+            }
+            // **`history` 是 provenance 的另一半，先前完全沒被驗**（#21 item 1）。
+            // 存在的理由與 `misreportedDisplacement` 逐字相同：**provenance 若可以
+            // 說謊，比較實驗讀到的就不是實際發生的事**。那條理由當初只被套用在
+            // 兩個欄位裡的一個半。
+            //
+            // ## 性質是「可以少報，不可以編造」，不是嚴格相等
+            //
+            // 第一版寫的是嚴格相等（history 是 `(anchor, projection)` 的函式，
+            // `describing` 的參數就只有這兩個）。**實測推翻**：`archival` 報
+            // `.none` 而 projection 說 `.counted`——16 條測試同時變紅，而它們是
+            // 對的。`archival` 的契約逐字是「不論給它什麼 projection 都產出相同
+            // 輸出」，所以**不消費歷史就報 `.none`** 正是它該做的事。
+            //
+            // 能驗的是不對稱的那一半：
+            //
+            // - `.none` 一律放行——策略有權不消費歷史。
+            // - `.counted` 必須與 projection 算出來的逐字相符（signals 與
+            //   netStrength 兩者）。宣稱有訊號促成，就得指得出那些訊號。
+            // - `.orphaned` 必須與 projection 的 orphan 判定相符。
+            //
+            // 只在**報了非 `.none`** 時才去算 expected：一個宣告不消費訊號的策略
+            // 不該因為一份它從不讀取的 projection 而付出代價（那正是 #1 verify R6
+            // 對 `requireWellFormedStatistics` 的裁決）。
+            if result.reason.history != .none {
+                let expectedHistory = RankingReason.describing(
+                    result.candidate.anchor, displacement: placement.displacement, in: projection
+                ).history
+                guard result.reason.history == expectedHistory else {
+                    throw StrategyViolation.misreportedHistory(
+                        result.candidate.anchor,
+                        reported: result.reason.history, actual: expectedHistory)
+                }
             }
         }
         return results

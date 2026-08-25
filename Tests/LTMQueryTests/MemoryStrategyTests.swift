@@ -487,3 +487,44 @@ private struct NegativeBoundStrategy: MemoryStrategy {
         }
     }
 }
+
+// MARK: - provenance 的另一半：history（#21 item 1）
+
+/// 宣稱有訊號促成，而 projection 裡什麼都沒有。
+private struct HistoryFabricator: MemoryStrategy {
+    let id = RankingPolicyID("history-fabricator")
+    private let authorized = StrategyRegistry.readyForTesting
+    let consumedSignals: Set<EventKind> = [.cited]
+    let displacementBound = 0
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        input.candidates.map {
+            RankedResult(
+                candidate: $0, displacement: 0,
+                reason: RankingReason(
+                    history: .counted(signals: [.cited: 99], netStrength: 42),
+                    movement: .unmoved))
+        }
+    }
+}
+
+@Test func aFabricatedHistoryIsRejectedEvenWhenTheOrderIsUntouched() throws {
+    // seam 先前只驗 displacement 與 movement。一個策略可以完全不動順序——於是
+    // 前兩者都誠實——卻附上一份憑空編出來的 provenance，而報告會照讀。
+    //
+    // `misreportedDisplacement` 的存在理由逐字是「provenance 若可以說謊，比較
+    // 實驗讀到的就不是實際發生的事」，而那條理由對 history 一樣適用。
+    #expect(throws: StrategyViolation.self) {
+        _ = try HistoryFabricator().rerank(candidates(["a", "b"]), with: .empty(at: instant))
+    }
+}
+
+@Test func reportingNoHistoryIsAlwaysAllowed() throws {
+    // 不對稱是刻意的：**可以少報，不可以編造**。`archival` 的契約逐字是「不論
+    // 給它什麼 projection 都產出相同輸出」，所以它報 `.none` 正是它該做的事。
+    //
+    // 第一版寫成嚴格相等，16 條測試同時變紅——而它們是對的。
+    let output = try IdentityProbe().rerank(candidates(["a", "b"]), with: .empty(at: instant))
+    #expect(output.allSatisfy { $0.reason.history == .none })
+}
