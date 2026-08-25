@@ -678,3 +678,68 @@ func anUnknownStrategyExitsWithUsageError() throws {
         result.err.contains("archival") && result.err.contains("conservative"),
         "要列出可用策略，否則使用者不知道正確拼法")
 }
+
+// MARK: - #30：ltm memory 的兩條沒被守住的性質
+
+/// 在事件檔裡塞一行壞資料，內容含一個**可辨識的哨兵字串**。
+///
+/// 哨兵是這兩條測試的核心：斷言不是「輸出看起來沒問題」，而是**那個字串一個字元都
+/// 不得出現在輸出裡**。前者是印象，後者是可證偽的。
+private func corruptEventsFile(_ workspace: CLIWorkspace, sentinel: String) throws {
+    let dir = workspace.eventsFile.deletingLastPathComponent()
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let existing = (try? Data(contentsOf: workspace.eventsFile)) ?? Data()
+    var bytes = existing
+    bytes.append(Data("{\"kind\":\"shown\",\"secret\":\"\(sentinel)\",\"trunc\n".utf8))
+    try bytes.write(to: workspace.eventsFile)
+}
+
+@Test("ltm memory 只印行號與計數，不印任何紀錄內容")
+func memoryCommandPrintsLineNumbersNeverContent() throws {
+    // 記憶層的硬約束是「不存原文」，而**那擋不住「印出原文」**——`ltm memory` 是
+    // 唯一會逐行報出壞紀錄的介面，所以它是那條約束在 CLI 端的延伸。#30 指出它
+    // 零覆蓋。
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    _ = try runCLI(["query", "內容", "--all-projects", "--record"], environment: workspace.environment)
+
+    let sentinel = "SENTINEL-DO-NOT-PRINT-c7f3a91e"
+    try corruptEventsFile(workspace, sentinel: sentinel)
+
+    let result = try runCLI(["memory"], environment: workspace.environment)
+
+    #expect(result.out.contains("行號"), "壞行必須被報出來——不報等於這個命令沒作用")
+    #expect(
+        !result.out.contains(sentinel) && !result.err.contains(sentinel),
+        "紀錄內容外洩到輸出：『不存原文』擋不住『印出原文』")
+}
+
+@Test("整份歷史都讀不回來時，--prune 拒絕並要求 --force")
+func pruningEverythingRequiresForce() throws {
+    // 這條閘的理由很窄：anchor 定址規則換代之後，換代前寫的每一筆都是舊規則，所以
+    // 「全部讀不回來」是**換代情境的預設情況**而不是邊角。使用者是照著一個說「丟掉
+    // 讀不回來的那些」的錯誤訊息走到這裡的，而在這個情境下那句話**恰好等於**
+    // 「清空整份歷史」。少了這道閘，照著指示走一次就沒了。
+    let workspace = try CLIWorkspace.make(texts: ["內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    // 事件檔**只有**壞行 —— 沒有任何可用紀錄。
+    let dir = workspace.eventsFile.deletingLastPathComponent()
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try Data("{\"kind\":\"shown\",\"trunc\n".utf8).write(to: workspace.eventsFile)
+    let before = try Data(contentsOf: workspace.eventsFile)
+
+    let refused = try runCLI(["memory", "--prune"], environment: workspace.environment)
+    #expect(refused.code != 0, "一筆都不保留的修剪必須拒絕，不能靜默照做")
+    #expect(refused.err.contains("--force"), "拒絕訊息要指名補救命令")
+    #expect(
+        try Data(contentsOf: workspace.eventsFile) == before,
+        "被拒絕的路徑不得動到檔案")
+
+    // 帶 --force 才放行。
+    let allowed = try runCLI(["memory", "--prune", "--force"], environment: workspace.environment)
+    #expect(allowed.code == 0)
+    if allowed.code != 0 { Issue.record("stderr: \(allowed.err)") }
+}
