@@ -173,7 +173,46 @@ final class DB {
             die("sqlite3_exec 失敗: \(m)\n   SQL: \(sql)")
         }
     }
-    func insert(_ table: String, _ rowid: Int, _ text: String) {
+    /// 白名單化的 table 名稱（#11）。
+    ///
+    /// SQLite 的 table 名稱**不能 bind**——它是識別碼不是值，只能內插。所以「不要
+    /// 內插」不是可行的修法；可行的是**讓能被內插的東西是一個封閉集合**。
+    ///
+    /// ## 目前不可利用，立案理由是別的
+    ///
+    /// 所有呼叫點的名稱都是原始碼裡的字面值，沒有任何外部輸入路徑碰得到這個內插點
+    /// ——verify 的 devil's advocate 已據此把它從 security 降級。改它是為了**防止
+    /// 日後有人把名稱參數化成使用者可控**，而那時未必有人記得這裡是內插的。
+    ///
+    /// 型別層的保證正是「未來的人不必記得」的意思：要新增一個表名，得先在這裡加
+    /// 一個 case，而那個動作本身就是複查點。
+    enum Table: String, CaseIterable {
+        case unicode61 = "u61"
+        case trigram = "tri"
+        case segment = "seg"
+        /// smoke test 用的暫時表，名稱由 tokenizer 名衍生。
+        case smokeUnicode61 = "__smoke_unicode61"
+        case smokeTrigram = "__smoke_trigram"
+
+        /// 建表用的 tokenizer 名。與表名分開，因為兩者只是碰巧相關。
+        var tokenizer: String {
+            switch self {
+            case .unicode61, .smokeUnicode61: return "unicode61"
+            case .trigram, .smokeTrigram: return "trigram"
+            case .segment: return "unicode61"
+            }
+        }
+    }
+
+    func insert(_ table: Table, _ rowid: Int, _ text: String) {
+        insert(table.rawValue, rowid, text)
+    }
+
+    func search(_ table: Table, _ match: String, k: Int) -> [Int] {
+        search(table.rawValue, match, k: k)
+    }
+
+    private func insert(_ table: String, _ rowid: Int, _ text: String) {
         var st: OpaquePointer?
         guard sqlite3_prepare_v2(h, "INSERT INTO \(table)(rowid,x) VALUES(?1,?2)", -1, &st, nil) == SQLITE_OK
         else { die("prepare insert \(table) 失敗: \(String(cString: sqlite3_errmsg(h)))") }
@@ -184,7 +223,7 @@ final class DB {
         else { die("insert \(table) rowid=\(rowid) 失敗: \(String(cString: sqlite3_errmsg(h)))") }
     }
     /// BM25 排序的 top-k rowid。查詢語法錯誤（非「查無結果」）會中止。
-    func search(_ table: String, _ match: String, k: Int) -> [Int] {
+    private func search(_ table: String, _ match: String, k: Int) -> [Int] {
         var st: OpaquePointer?
         let sql = "SELECT rowid FROM \(table) WHERE \(table) MATCH ?1 ORDER BY bm25(\(table)) LIMIT \(k)"
         guard sqlite3_prepare_v2(h, sql, -1, &st, nil) == SQLITE_OK
@@ -202,10 +241,13 @@ final class DB {
     }
     /// smoke test：確認該 tokenizer 真的可用（而非建表成功但比對永遠落空）
     func smoke(_ table: String, _ probe: String, _ query: String) {
-        exec("CREATE VIRTUAL TABLE __smoke_\(table) USING fts5(x, tokenize='\(table)');")
-        insert("__smoke_\(table)", 1, probe)
-        let hit = search("__smoke_\(table)", ftsPhrase(query), k: 1)
-        exec("DROP TABLE __smoke_\(table);")
+        // smoke 表也在白名單裡——臨時表同樣是內插進 SQL 的識別碼。
+        let smoke: Table = table == "unicode61" ? .smokeUnicode61 : .smokeTrigram
+        exec(
+            "CREATE VIRTUAL TABLE \(smoke.rawValue) USING fts5(x, tokenize='\(smoke.tokenizer)');")
+        insert(smoke, 1, probe)
+        let hit = search(smoke, ftsPhrase(query), k: 1)
+        exec("DROP TABLE \(smoke.rawValue);")
         if hit.isEmpty { die("tokenizer '\(table)' smoke test 失敗：索引 [\(probe)] 後查 [\(query)] 無命中") }
     }
 }
@@ -328,10 +370,16 @@ print("\n== 建索引 ==")
 let db = DB()
 db.smoke("unicode61", "alpha bravo", "bravo")
 db.smoke("trigram", "alphabravo", "phabr")
-db.exec("CREATE VIRTUAL TABLE u61 USING fts5(x, tokenize='unicode61');")
-db.exec("CREATE VIRTUAL TABLE tri USING fts5(x, tokenize='trigram');")
-db.exec("CREATE VIRTUAL TABLE seg USING fts5(x, tokenize='unicode61');")
-for (i, d) in docs.enumerated() { db.insert("u61", i, d); db.insert("tri", i, d); db.insert("seg", i, segByScript(d).joined(separator: " ")) }
+// 建表也走白名單（#11）：表名與 tokenizer 名都從 enum 來，不再各自寫一次字面值。
+for table in [DB.Table.unicode61, .trigram, .segment] {
+    db.exec(
+        "CREATE VIRTUAL TABLE \(table.rawValue) USING fts5(x, tokenize='\(table.tokenizer)');")
+}
+for (i, d) in docs.enumerated() {
+    db.insert(.unicode61, i, d)
+    db.insert(.trigram, i, d)
+    db.insert(.segment, i, segByScript(d).joined(separator: " "))
+}
 print("  smoke test 通過；u61 / tri / seg 就緒")
 
 print("\n== 建向量 ==")
@@ -423,8 +471,17 @@ let aliases: [(String, String)] = [
 /// 看起來正常而意義是空的，比不一致更糟。
 ///
 /// **殘留**：`dfCap` 這個名字本身承諾了它做不到的事。更誠實的形狀是讓型別表達
-/// 「只對有 provenance 的桶有意義」，但這個腳本已凍結在 `2026-08-10` 那份紀錄上
-/// （`CLAUDE.md`：研究進行中的儀器不要「保持最新」），所以這裡選揭露而非重構。
+/// 「只對有 provenance 的桶有意義」，而這裡選了揭露而非重構——因為型別重構要改的是
+/// 桶的產生邏輯，那會改變輸出，需要重跑並更新 `2026-08-10` 那份紀錄。
+///
+/// **更正（#11）**：這段話原本寫「這個腳本已凍結在那份紀錄上（`CLAUDE.md`：研究
+/// 進行中的儀器不要保持最新）」——**那是假的**。沒有任何東西 pin 住這個腳本：
+/// 沒有 pre-registration、沒有 deviation note 要求，`CLAUDE.md` 與量測紀錄都沒提。
+/// 那句話是寫它的人（#10）自己推論出來的，然後被寫成既成事實。
+///
+/// **真正的約束比它窄**：那份紀錄指名這個腳本為產生數字的儀器，所以**會改變輸出的
+/// 改動**需要重跑並更新紀錄；**不改變輸出的重構不需要**。這正是 #39 要抓的形狀，
+/// 而它是同一個 session 裡的第二次。
 // R3 finding 3/4/6：原本 seed 帶 dfCap（`argSeed &+ dfCap`），使 df≤1 與 df≤5 用了
 // **不同的抽樣序列**——那是兩個獨立樣本的比較，不是敏感度分析，無法把差異歸因於 cap 本身。
 // 修法：seed 固定，抽樣序列完全相同，**唯一的差別是接受條件**（配對設計）。
@@ -511,9 +568,9 @@ func runMeasurement(dfCap: Int, track: String?) {
     }
     for q in queries {
         let phrase = ftsPhrase(q.text)
-        let ru = db.search("u61", phrase, k: K)
-        let rt = db.search("tri", phrase, k: K)
-        let rs = db.search("seg", ftsPhrase(segByScript(q.text).joined(separator: " ")), k: K)
+        let ru = db.search(.unicode61, phrase, k: K)
+        let rt = db.search(.trigram, phrase, k: K)
+        let rs = db.search(.segment, ftsPhrase(segByScript(q.text).joined(separator: " ")), k: K)
         let lexOR  = orMerge(rt, rs, k: K)
         let lexRRF = rrf([rt, rs], k: K)
         rec("unicode61", q.bucket, ru.contains(q.gold))
