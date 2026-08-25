@@ -262,6 +262,11 @@ public struct CorpusScanner: Sendable {
             let priorState = previous.files[key]
             // 續讀的三個條件缺一不可：有舊狀態、檔案沒有變短、且已處理段落的
             // 雜湊對得上。檔案變短代表它被改寫過，即使前綴雜湊碰巧相符。
+            //
+            // **雜湊涵蓋整段已處理前綴，不是固定開頭**——所以檔案中段被改而
+            // size 未變時會被偵測到（#5 兩難的第一角）。代價是每次都要重讀那一
+            // 段；成本量在 `docs/measurements/2026-08-26-resume-prefix-hash-cost.md`
+            // （當下語料的上界約 4 秒），該紀錄同時寫了改用分塊 Merkle 的重議觸發。
             var startOffset = 0
             if let prior = priorState, prior.processedBytes <= size,
                 let prefix = try? readBytes(handle, from: 0, count: prior.processedBytes),

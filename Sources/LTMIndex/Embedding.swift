@@ -55,9 +55,28 @@ public final class ContextualEmbeddingProvider: EmbeddingProvider, @unchecked Se
         self.embedding = embedding
         // revision 進索引，所以它要是穩定可比的字串。把模型識別一起寫進去：
         // 只記數字的話，換了 script 模型但 revision 編號碰巧相同就分不出來。
-        self.revision = "\(embedding.modelIdentifier)#\(embedding.revision)"
+        //
+        // **池化版本也要進去**（#5）。決定一個向量長什麼樣的不只是模型：
+        // `vector(for:)` 對 token 向量做平均再正規化，而那段程式碼改了——換成
+        // max-pooling、拿掉正規化、改 token 範圍——產出的向量與舊的**不在同一個
+        // 空間**，可是模型識別與 revision 一個字都不會變。
+        //
+        // 於是舊向量與新向量混在同一個 `vectors.bin` 裡比距離，結果無意義**而且
+        // 不報錯**——`CLAUDE.md` 記的那個坑，只是換了觸發原因（不是 macOS 更新，
+        // 是我們自己改了程式碼）。改 `vector(for:)` 的人必須同時把這個常數 +1，
+        // 而下面那則註解就在它旁邊。
+        self.revision = "\(embedding.modelIdentifier)#\(embedding.revision)#pool\(Self.poolingVersion)"
         self.dimension = embedding.dimension
     }
+
+    /// `vector(for:)` 的池化與正規化方式的版本。
+    ///
+    /// **改 `vector(for:)` 的語意就要 +1。** 它進 `revision`，而 `revision` 不符
+    /// 會強制整份重建——那正是換代時該發生的事。不 +1 的後果不是錯誤訊息，是
+    /// 兩代向量安靜地混在同一個空間裡。
+    ///
+    /// 1 = 對 token 向量取算術平均，再正規化成單位長度。
+    static let poolingVersion = 1
 
     public func vector(for text: String) throws -> [Float]? {
         let result = try embedding.embeddingResult(for: text, language: nil)
