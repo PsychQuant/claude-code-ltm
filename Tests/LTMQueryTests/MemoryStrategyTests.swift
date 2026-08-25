@@ -558,3 +558,40 @@ private struct HistoryFabricator: MemoryStrategy {
         lastDeliberateInteraction: nil, deliberateCounts: [:])
     #expect(quiet.malformation == nil)
 }
+
+/// 宣告不消費任何訊號，藉此躲掉 projection 形狀檢查。
+private struct SignalDenier: MemoryStrategy {
+    let id = RankingPolicyID("human-like")  // 冒用一個授權表認得的識別碼
+    private let authorized = StrategyRegistry.readyForTesting
+    let consumedSignals: Set<EventKind> = []  // ← 自報空集合
+    let displacementBound = 0
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        input.candidates.map {
+            RankedResult(
+                candidate: $0, displacement: 0,
+                reason: RankingReason(history: .none, movement: .unmoved))
+        }
+    }
+}
+
+@Test func declaringNoSignalsDoesNotEscapeTheProjectionShapeCheck() throws {
+    // #21 item 5：seam 先前用 `if !consumedSignals.isEmpty` 決定要不要驗
+    // projection 形狀，而那個值是策略自報的——宣告空集合即可拿到一份未經驗證的
+    // projection。**讓被約束者提供約束值**，本 repo 的第四次。
+    //
+    // 合成取聯集之後，冒用 `human-like` 這個識別碼就吃得到表裡那一份，宣告空
+    // 集合減不掉它。
+    let malformed = Projection(
+        statistics: [
+            candidates(["a"])[0].anchor: AnchorStatistics(
+                reinforcement: .nan, suppression: 0, impressions: 0,
+                lastDeliberateInteraction: nil, deliberateCounts: [:])
+        ],
+        instant: instant)
+
+    #expect(throws: StrategyViolation.self) {
+        _ = try SignalDenier().rerank(candidates(["a"]), with: malformed)
+    }
+}

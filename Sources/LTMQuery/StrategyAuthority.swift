@@ -70,6 +70,32 @@ public enum StrategyRegistry {
         return (shipped ?? []).union(registered ?? [])
     }
 
+    /// 這個識別碼**至少**會消費哪些訊號。
+    ///
+    /// `consumedSignals` 先前是純自報，而 seam 拿它當**檢查開關**：
+    /// `if !consumedSignals.isEmpty` 才驗 projection 形狀。於是外部策略宣告
+    /// 空集合即可拿到一份未經驗證的 projection——**讓被約束者提供約束值**
+    /// （#21 item 5）。
+    ///
+    /// 合成方向與 `placementConstraints` 相同、理由也相同：**取聯集，策略只能
+    /// 往上加，不能減**。一個宣告空集合的 conformer 仍然吃到表裡的那一份，
+    /// 而那個保證來自合成的形狀，不是靠記住它上次宣告過什麼。
+    ///
+    /// 未登錄的識別碼回空集合而不是 `nil`：識別碼本身的授權由
+    /// `authorizedConstraints` 判定並具名拒絕，這裡不重複那個判斷。
+    static func authorizedSignals(for id: RankingPolicyID) -> Set<EventKind> {
+        switch id.value {
+        case "archival":
+            // 它的契約逐字是「不論給它什麼 projection 都產出相同輸出」，所以它
+            // **不該**因為一份它從不讀取的 projection 而失敗（#1 verify R6）。
+            return []
+        case "human-like", "conservative":
+            return [.opened, .cited, .pinned, .dismissed]
+        default:
+            return []
+        }
+    }
+
     /// switch 那一半。分出來只是為了讓上面的聯集讀得出來。
     private static func shippedConstraints(for id: RankingPolicyID)
         -> Set<PlacementConstraint>?

@@ -608,7 +608,15 @@ extension MemoryStrategy {
         // 失敗——而它的契約逐字是「不論給它什麼 projection 都產出相同輸出」，
         // 它存在的理由就是當記憶層本身可疑時仍然可用的對照組（#1 verify R6）。
         // 判準：**一個策略只受它能消費的資料的約束**。
-        if !consumedSignals.isEmpty {
+        // **開關取聯集，不是純自報**（#21 item 5）。先前是
+        // `if !consumedSignals.isEmpty`，於是外部策略宣告空集合即可拿到一份未經
+        // 驗證的 projection——被約束者提供約束值，本 repo 的第四次。
+        //
+        // 方向與 `placementConstraints` 相同：策略只能往上加。宣告空集合的
+        // conformer 仍然吃到授權表裡的那一份。
+        let effectiveSignals = StrategyRegistry.authorizedSignals(for: declaredID)
+            .union(consumedSignals)
+        if !effectiveSignals.isEmpty {
             try MemoryStrategySupport.requireWellFormedStatistics(projection)
         }
         let results = try rerankChecked(ValidatedCandidates(candidates), with: projection)
