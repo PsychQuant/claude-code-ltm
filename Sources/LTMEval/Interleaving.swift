@@ -32,16 +32,27 @@ public enum InterleavingViolation: Error, Sendable, Equatable {
 ///
 /// ## 這裡的排列檢查被刪過一次，現在裝回來了
 ///
-/// R4 刪掉它，理由是「`rerank` 是 extension 上的非 customization point，所有
-/// 經由 protocol 的呼叫都必然通過 `RankingGuard.verifyPermutation`，所以交錯器
-/// 再驗一次是驗不到東西的死碼」。**那句話是假的**（#1 verify R6 實測）：
-/// `rerankChecked` 是 public requirement，而它收的 `ValidatedCandidates` 是可
-/// 儲存、可轉手的 token，所以模組外可以完全繞過 `rerank`。
+/// R4 刪掉它，理由是「所有經由 protocol 的呼叫都必然通過
+/// `RankingGuard.verifyPermutation`」。R6 把它裝回來，理由是「`rerankChecked`
+/// 是 public requirement，token 可儲存可轉手，所以模組外可以繞過 `rerank`」。
 ///
-/// 一般化的教訓，值得記在這裡而不是只記在被推翻的那一段旁邊：
-/// **不要因為「上游保證過了」而刪掉自己的檢查**，除非那個保證是型別層的
-/// 不可達——而「不可達」這種宣稱本身要能被實測。這次刪掉防線的成本是：
-/// 假宣稱失效的同時，它掩護的那道檢查也一起不見了。
+/// **R6 那個理由也不對，而這一輪才查出來**（#22 item 12）。繞過 seam 的呼叫端
+/// 是直接呼叫 `rerankChecked`——它**不會走進這個函式**。下面第 49 行呼叫的正是
+/// `rerank`，也就是 seam 本身，所以到了第 50 行，排列性已經被驗過了。這個檢查
+/// 在這條路徑上**結構性不可達**。
+///
+/// 那它為什麼還在？因為它防的是**這個函式日後被改**——例如有人把第 49 行改成
+/// 直接呼叫 `rerankChecked`（那正是繞過 seam 的樣子），或在中間插一段重排。
+/// 那是防禦縱深，成本是一次 O(n) 比對，而它保護的是本 repo 唯一會被交錯器
+/// 消費的不變式。
+///
+/// **具名的缺口**：因此沒有辦法為它寫一條會變紅的測試——沒有任何輸入能讓它在
+/// 現行控制流下拋。寫一條驗不到的測試比沒有測試更糟（`CLAUDE.md`），所以這裡
+/// 留的是這段說明。改第 49 行的人要自己補上那條測試。
+///
+/// 一般化的教訓仍然成立，只是理由換了一個：
+/// **不要因為「上游保證過了」而刪掉自己的檢查**——但也不要為了留住它而編一個
+/// 它其實擋不到的威脅。兩者都是把一句沒查證的話寫進防線旁邊。
 private func ranking(
     from strategy: some MemoryStrategy, over candidates: [Candidate], with projection: Projection
 ) throws -> [Candidate] {
