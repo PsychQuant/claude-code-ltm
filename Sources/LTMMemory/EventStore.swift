@@ -141,8 +141,15 @@ public enum CorpusLocation {
     /// **目前只有兩條測試用合成根**（#1 verify R6 更正了這裡先前寫的「行為測試
     /// 全部在合成樹上跑」）。其餘九條仍以真實 `~/.claude/projects` 為標的——
     /// 它們只做路徑判斷與 symlink 佈局，不寫入語料，但確實碰真實路徑。
-    /// 要全部搬到合成樹，`FileEventStore.init` 也得能收語料根（目前它直接用
-    /// `CorpusLocation.readOnlyRoot`），那是介面改動，**追蹤於 #27**。
+    /// **擋住這件事的介面改動已經做了**（#27，已 close）：`FileEventStore.init`
+    /// 收 `CorpusContainmentPolicy`，而 `readOnlyRoot` 也認得 `CLAUDE_CONFIG_DIR`
+    /// （#20 item 5）——所以兩條路都通了，一條是注入圍籬、一條是把預設根本身
+    /// 指到合成樹。
+    ///
+    /// **但那九條測試還沒搬**，而現在沒有 issue 在要求搬它們。留這句話是為了
+    /// 不讓下一個讀者以為「介面通了」等於「測試已經不碰真實語料了」——兩者
+    /// 差一次沒人排程的工作。第二條路另有一個要注意的地方：`CLAUDE_CONFIG_DIR`
+    /// 是 process 全域的，而測試預設平行跑，所以那樣改要配 `.serialized`。
     ///
     /// （這裡先前寫「追蹤於 #14」，而 #14 不涵蓋語料根注入。指標指錯了 issue。）
     /// 公開可見（原為 internal）：`LTMService.MemoryCorpusPolicy` 需要對**當下實際
