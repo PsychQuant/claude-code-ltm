@@ -169,6 +169,29 @@ public struct QueryOutcome: Sendable {
     public let refresh: RefreshReport
     /// 寫了幾筆 `shown` 事件（未開啟記錄時為 0）。
     public let eventsRecorded: Int
+    /// 排序回傳了、但**無法歸屬到指標**因而被丟棄的筆數（#13）。
+    ///
+    /// 不變式 3 要求每個命中帶 `(project, sessions, uuid, timestamp)`，所以一個
+    /// 歸屬不到來源的結果**不能被回傳**——那會是一個沒有導航資訊的命中，而
+    /// 「檢索負責導航」正是它唯一的職責。丟棄是對的。
+    ///
+    /// **但沉默地丟棄不對。** 這個計數非零代表策略回傳了不在候選集合裡的 anchor，
+    /// 而 seam 的排列性檢查應該早就擋掉那件事——所以它非零本身就是一個訊號：
+    /// 要嘛 seam 有洞，要嘛 `scored` 與 `ranked` 之間有第三個寫者。
+    ///
+    /// 這與 `KnownItemReport` 的三個跳過計數是同一條紀律：**沉默的跳過等於少了
+    /// 東西而沒人會發現**（`CLAUDE.md`）。
+    ///
+    /// ## 誠實邊界：這個計數目前沒有回歸鎖，而且不可能有
+    ///
+    /// 那個分支**結構上到不了**：`byAnchor` 由 `scored` 建，`ranked` 來自策略，而
+    /// seam 的排列性檢查要求 `ranked` 是輸入候選的排列——所以策略無法經由 `rerank`
+    /// 交出一個不在候選集合裡的 anchor。把這個計數器改成永遠不增加，測試全綠。
+    ///
+    /// **那為什麼留著？** 因為那個 `guard ... else { continue }` 本來就在，而它先前
+    /// 是靜默的。這個改動買到的不是「測得到」，是「**如果哪天真的發生，它會被看見**」。
+    /// 要驅動它得先有一條繞過 seam 的注入路徑，而那條路徑不存在**正是**設計要的。
+    public let unattributableResults: Int
 }
 
 /// 唯一同時看得到索引、策略與事件儲存的地方。
@@ -325,8 +348,15 @@ public struct LTMService {
 
             let byAnchor = Self.index(scored)
             var hits: [QueryHit] = []
+            var unattributable = 0
             for result in ranked {
-                guard let source = byAnchor[result.candidate.anchor] else { continue }
+                guard let source = byAnchor[result.candidate.anchor] else {
+                    // **數出來，不要靜默 `continue`**（#13）。丟棄是對的——不變式 3
+                    // 不允許回傳沒有指標的命中——但沉默的丟棄讓「排序多出了東西」
+                    // 這件事沒有任何人會發現。
+                    unattributable += 1
+                    continue
+                }
                 hits.append(
                     Self.hit(
                         from: source, candidate: result.candidate,
@@ -346,7 +376,7 @@ public struct LTMService {
 
             return QueryOutcome(
                 hits: hits, strategyID: chosen.id.value, refresh: refreshed,
-                eventsRecorded: recorded)
+                eventsRecorded: recorded, unattributableResults: unattributable)
         }
     }
 

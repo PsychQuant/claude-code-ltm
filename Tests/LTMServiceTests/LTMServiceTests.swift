@@ -861,3 +861,34 @@ func aResumeDuplicatedTurnReportsEveryHoldingSource() throws {
     // 刻意**不**斷言任何「代表值」——沒有代表值可挑就是這次改動的重點（#25）。
     // 集合的順序只是顯示確定性，不得有消費端依賴 [0]。
 }
+
+// MARK: - #13：無法歸屬指標的結果被丟棄，而且**數出來**
+
+@Test("正常查詢的無法歸屬計數是零")
+func aNormalQueryAttributesEveryResult() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["記憶策略可插拔", "檢索基線量測", "第三段內容"])
+    let service = try workspace.service()
+    try service.build()
+
+    let outcome = try service.query(text: "內容", limit: 10, scope: .allProjects)
+    #expect(!outcome.hits.isEmpty)
+    #expect(outcome.unattributableResults == 0)
+}
+
+// **這條測試的效力要說清楚，因為它比看起來弱。**
+//
+// `unattributableResults` 非零的分支**結構上到不了**：`byAnchor` 由 `scored` 建，
+// `ranked` 來自策略，而 seam 的排列性檢查要求 `ranked` 是輸入候選的排列——所以
+// 策略**無法**經由 `rerank` 交出一個不在候選集合裡的 anchor。
+//
+// 也就是說：把計數器改成永遠不增加，這條測試**照樣綠**。它鎖不住那個計數器。
+//
+// 那為什麼還留著計數器？因為 `guard ... else { continue }` **本來就在那裡**，而它
+// 先前是靜默的。改動買到的不是「現在測得到」，是「**如果哪天真的發生，它會被看見**」
+// ——那要嘛代表 seam 的排列性檢查破了，要嘛代表 `scored` 與 `ranked` 之間長出了
+// 第三個寫者。兩者都是這個 repo 反覆記錄的形狀。
+//
+// **缺口具名，不假裝有守衛**（同 `PlacementConstraint` 的確定性迭代）：要驅動它，
+// 得先有一條繞過 seam 的注入路徑，而那條路徑不存在**正是**設計要的。
