@@ -92,7 +92,18 @@ func appendRejectsANonRegularFileOnTheWriteSide() throws {
     //
     // 兩條都在 `S_IFREG` 檢查之前。**但那條分支不是不可達，只是 FIFO 選錯了
     // 探針**：字元裝置的 `open` 與 `flock` 都成功，而 `S_IFREG` 為 false。
-    #expect(throws: EventStoreError.self) {
+    // **斷言訊息，不是「任何 EventStoreError」**。第一版寫後者，而變異測試當場
+    // 證明它為錯的理由通過：拿掉 `S_IFREG` 之後，`fchmod` 對 root 擁有的
+    // `/dev/null` 會失敗，照樣拋 `appendFailed`。
+    //
+    // 這是本 session 第三次踩同一個形狀（#22 item 9、#21 item 1、這裡）。
+    do {
         try CanonicalStore.appendLine(Data("x\n".utf8), to: URL(fileURLWithPath: "/dev/null"))
+        Issue.record("非一般檔案應該被擋下來")
+    } catch let error as EventStoreError {
+        guard case .appendFailed(_, let detail) = error, detail.contains("不是一般檔案") else {
+            Issue.record("擋下來了，但不是因為它不是一般檔案：\(error)")
+            return
+        }
     }
 }
