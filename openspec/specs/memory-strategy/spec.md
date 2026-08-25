@@ -26,23 +26,28 @@ The system SHALL expose exactly one abstraction through which usage history infl
 
 **Those two prohibitions bind implementations, not the compiler, and this specification SHALL NOT be read as claiming otherwise.** A dependency graph controls which types a module can name; it does not control what a module can do. Any module that can open a file can read the event file or the corpus using the standard library alone, against a JSON Lines format whose field names this specification publishes. Two directions have been proposed for making the prohibitions type-level facts — moving the event type's coded representation out of the shared core module, and making the corpus-reading protocol and the anchor dereference method internal — and neither achieves it: the executable counter-examples that refuted the original claim used neither of those types, so removing them would not make those counter-examples fail. The prohibitions are stated because the design intends them, and the paragraphs below name what is enforced instead.
 
-**Ordering correctness is enforced at the seam, by seven checks performed on every invocation.** They are enumerated here rather than summarised, because a summarising criterion acquires cases the enumeration never agreed to:
+**Ordering correctness is enforced at the seam, by ten checks.** Nine of them run on every invocation; item 5 runs only for a strategy that declares it consumes history, because a strategy whose contract is to produce the same output for any projection must not fail on a statistic it never reads. They are enumerated here rather than summarised, because a summarising criterion acquires cases the enumeration never agreed to. They are listed in the order the entry point performs them:
 
 1. The strategy's reported identifier has an entry in the authority table; a strategy whose identifier has none is refused before any reordering occurs. Violation: `unauthorizedStrategy`.
 2. The reported displacement bound is non-negative. Violation: `negativeDisplacementBound`.
-3. Each position's relevance band equals the band at that position in the input order. Violation: `crossedRelevanceBand`.
-4. The returned list is a permutation of the input candidates, compared as a multiset so that a duplicate cannot mask an omission. Violation: `candidateSetChanged`.
-5. No candidate moves further than the displacement bound permits. Violation: `displacementBoundExceeded`.
-6. Every placement constraint in the union of the authority table's entry and the strategy's own declaration holds. Violation: `movedAcrossTieRuns` for the tie-run constraint.
-7. Each result's reported displacement, and separately its reported movement, equal the position change that actually occurred. Violations: `misreportedDisplacement` and `misreportedMovement` — two checks, because a strategy can report an honest displacement beside a fabricated movement.
+3. Every candidate's base score is finite. Violation: `nonFiniteBaseScore`. This is a precondition rather than a formatting preference: a non-finite score makes equality comparison false against itself, and both the equal-segment split and the guard's permutation comparison are built on equality — an earlier revision hung in an infinite loop instead of failing.
+4. Relevance bands are non-decreasing across the input order. Violation: `bandsOutOfOrder`. This is what makes the band fence meaningful: the guard verifies bands positionally, and positional comparison is equivalent to "no cross-band movement" only when each band occupies a single contiguous run of the input.
+5. Every statistic in the projection is finite and non-negative. Violation: `malformedStatistics`. This is the one conditional check — it runs only when the strategy declares a non-empty set of consumed signals. It validates the whole projection rather than only the anchors in play, so that a malformed statistic surfaces here rather than at an unrelated query later.
+6. The returned list is a permutation of the input candidates, compared as a multiset so that a duplicate cannot mask an omission. Violation: `candidateSetChanged`.
+7. Each position's relevance band equals the band at that position in the input order. Violation: `crossedRelevanceBand`.
+8. No candidate moves further than the displacement bound permits. Violation: `displacementBoundExceeded`.
+9. Every placement constraint in the union of the authority table's entry and the strategy's own declaration holds. Violation: `movedAcrossTieRuns` for the tie-run constraint.
+10. Each result's reported displacement, and separately its reported movement, equal the position change that actually occurred. Violations: `misreportedDisplacement` and `misreportedMovement` — two checks, because a strategy can report an honest displacement beside a fabricated movement.
 
-Each violation named above is raised by a `throw` reachable from the seam's public entry point, and every such `throw` appears in this list. That correspondence is the reason the list is worth stating: an enumeration nobody can check against the implementation is a summary wearing a list's clothes.
+Each violation named above is raised by a `throw` reachable from the seam's public entry point, and every such `throw` appears in this list. The correspondence is mechanically checkable and the check is stated so a reader need not reconstruct it: the eleven names above SHALL match, one for one, both the cases of the `StrategyViolation` enumeration and the distinct violations thrown at the `throw StrategyViolation.` sites reachable from the public entry point.
 
-A strategy that reads the corpus still cannot return an ordering these seven checks accept unless that ordering was already a legal reordering — at which point what it read did not change the legality of what it returned.
+**This list was wrong when it was first written, and the way it was wrong is the reason the check is now stated rather than asserted.** It named eight violations and claimed every reachable `throw` appeared in it. Three did not: the precondition checks now listed as items 3 through 5 run inside the public entry point, before the checked method is reached, and were verified only from the checked method inward. An enumeration nobody can check against the implementation is a summary wearing a list's clothes — but an enumeration that asserts its own completeness without stating how to test it is worse, because the assertion is indistinguishable from a completed check.
+
+A strategy that reads the corpus still cannot return an ordering these checks accept unless that ordering was already a legal reordering — at which point what it read did not change the legality of what it returned.
 
 **The privacy boundary is enforced at the bytes that land, not at the seam.** The memory layer's canonical stores compare each line's decoded-then-re-encoded form against the original bytes, so a value that is not exactly what the schema produces is rejected. That check is indifferent to what any component read: reading corpus text is not the hazard the privacy boundary addresses; corpus text reaching the memory layer's files is, and that is where it is caught.
 
-**The seam's entry point is unbypassable from outside the defining package, and the mechanism is a deliberate trust boundary rather than an omission.** The checked method takes a validated-candidates value whose initialiser is package-internal, so no caller outside the package can construct one and therefore none can reach the checked method directly; the only public entry runs the seven checks unconditionally. Inside the package that value can be constructed, which is what makes the seam's own violation tests writable. Whether a strategy's reported identifier and displacement bound require an authority of their own is a separate open question, tracked outside this requirement.
+**The seam's entry point is unbypassable from outside the defining package, and the mechanism is a deliberate trust boundary rather than an omission.** The checked method takes a validated-candidates value whose initialiser is package-internal, so no caller outside the package can construct one and therefore none can reach the checked method directly; the only public entry performs the checks above, on every invocation, without the strategy being able to skip or weaken them. Inside the package that value can be constructed, which is what makes the seam's own violation tests writable. Whether a strategy's reported identifier and displacement bound require an authority of their own is a separate open question, tracked outside this requirement.
 
 #### Scenario: Retrieval is unchanged when the strategy is swapped
 
@@ -57,7 +62,7 @@ A strategy that reads the corpus still cannot return an ordering these seven che
 #### Scenario: A strategy that reads the corpus gains nothing the seam will accept
 
 - **GIVEN** a strategy that reconstructs candidate text by reading the corpus itself
-- **WHEN** it returns an ordering that violates any of the seven checks
+- **WHEN** it returns an ordering that violates any of the checks enumerated above
 - **THEN** the invocation fails with the named violation for that check, exactly as it would for a strategy that read nothing
 
 #### Scenario: The prohibitions are not compile-time facts

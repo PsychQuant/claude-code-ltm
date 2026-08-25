@@ -64,14 +64,20 @@
   `Data(contentsOf:)` 與 `JSONSerialization`，不是被提議移走的那些便利型別——當初推翻
   該宣稱的兩個反例正是這樣做的，**移走型別不會讓它們失敗**。所以那個代價（動依賴圖
   底層、波及所有模組）換不到承諾的東西。
-  - **改寫成它實際保護的兩件事，各自指名執行點**：排序正確性由 seam 自己的七項檢查
-    執行，每項列出它拋的違規名（`unauthorizedStrategy` / `negativeDisplacementBound` /
-    `crossedRelevanceBand` / `candidateSetChanged` / `displacementBoundExceeded` /
-    `movedAcrossTieRuns` / `misreportedDisplacement` + `misreportedMovement`）；隱私
-    邊界的執行點在 canonical store **落地 bytes** 的 round-trip 檢查。
-  - **列舉本身寫成可查證的**：spec 明寫「seam 公開入口可達的 `throw` 恰為列出的這些」，
-    兩個方向都對過（八個 `throw` ↔ 七個列舉項）。**無人能對照實作查證的列舉，是一份
-    穿著清單外衣的摘要。**
+  - **改寫成它實際保護的兩件事，各自指名執行點**：排序正確性由 seam 的**十項檢查**
+    執行（依入口實際執行順序列出），每項列出它拋的違規名，共 11 個名字；隱私邊界的
+    執行點在 canonical store **落地 bytes** 的 round-trip 檢查。第 5 項（
+    `malformedStatistics`）是唯一有條件的一項——只對宣告會消費歷史的策略執行，因為
+    `archival` 的契約逐字是「不論給它什麼 projection 都產出相同輸出」。
+  - **列舉本身寫成可查證的，而且把查法寫在旁邊**：spec 明寫這 11 個名字必須與
+    `StrategyViolation` 的 case、以及公開入口可達的 `throw` 站點**三者逐一對應**。
+    實測 11 = 11 = 11、三個集合互減皆為空。
+  - **這份列舉的第一版是錯的，而錯法就是它現在改寫查法的理由**（verify #14 抓到）。
+    初版列 8 個違規名並宣稱「每個可達的 `throw` 都在清單裡」，**漏了三個**：
+    `nonFiniteBaseScore` / `bandsOutOfOrder` / `malformedStatistics` 是 `rerank` 在進
+    `rerankChecked` **之前**跑的前置檢查，而我只從 `rerankChecked` 往內數。
+    **一份宣稱自己完整、卻不寫出怎麼驗的列舉，比不宣稱更糟——那句宣稱和一次真的
+    查證在字面上分不出來。**
   - `ValidatedCandidates` 的 `internal` init 記為**刻意的信任邊界**（doc 指向 spec），
     不是遺漏。四處過期註解一併修掉；**第四處由獨立掃描步驟找到、不在 proposal 的
     Impact 內**——與 `#34` 那次同形狀，但這次在宣稱完成**之前**被抓到，因為那一步是
