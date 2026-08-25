@@ -406,6 +406,25 @@ let aliases: [(String, String)] = [
 
 /// gold 一律是**抽出查詢的那份文件**（不是「第一個含它的文件」）。
 /// dfCap > 1 時其他文件也含該子字串，檢索因此變難——這正是要量的敏感度。
+///
+/// ## `dfCap` 套用五個桶，**同義桶除外**（#10）
+///
+/// 同義桶硬性要求 `hits.count == 1`，所以它在**兩輪都是 `df≤1`**，不管呼叫端傳什麼。
+/// 這是刻意的，理由**不是**「gold 不唯一」——其他桶在 `df>1` 時 gold 也不唯一，
+/// 它們卻沒事。真正的差別是 gold **怎麼被決定的**：
+///
+/// - **子字串／英數／混雜**：gold 由 **provenance** 決定——「這個子字串是從第 `i` 篇
+///   抽出來的」。`df>1` 時 gold 仍然明確，只是檢索變難，而那正是要量的東西。
+/// - **同義**：**沒有 provenance**。alias pair 是一份固定清單，gold 是「含另一側的
+///   那篇」。多篇都符合時，**每一篇都是同樣合理的答案**，沒有有依據的 gold。
+///
+/// 也就是說 `dfCap` 對前五桶調的是**難度**，對同義桶調的會是**「gold 是不是可定義」**
+/// ——兩件不同的事，同一個參數不該同時做。讓同義桶遵守 `dfCap` 會讓它量到的數字
+/// 看起來正常而意義是空的，比不一致更糟。
+///
+/// **殘留**：`dfCap` 這個名字本身承諾了它做不到的事。更誠實的形狀是讓型別表達
+/// 「只對有 provenance 的桶有意義」，但這個腳本已凍結在 `2026-08-10` 那份紀錄上
+/// （`CLAUDE.md`：研究進行中的儀器不要「保持最新」），所以這裡選揭露而非重構。
 // R3 finding 3/4/6：原本 seed 帶 dfCap（`argSeed &+ dfCap`），使 df≤1 與 df≤5 用了
 // **不同的抽樣序列**——那是兩個獨立樣本的比較，不是敏感度分析，無法把差異歸因於 cap 本身。
 // 修法：seed 固定，抽樣序列完全相同，**唯一的差別是接受條件**（配對設計）。
@@ -466,6 +485,8 @@ func buildQueries(perBucket: Int, dfCap: Int) -> [Query] {
         for (side, other) in [(en, zh), (zh, en)] {
             guard (n[.synonym] ?? 0) < perBucket else { break }
             let hits = docs.indices.filter { docs[$0].localizedCaseInsensitiveContains(side) && !docs[$0].contains(other) }
+            // **恆為 df≤1，不遵守 dfCap** —— 見 buildQueries 簽章上的說明（#10）。
+            // 同義桶沒有 provenance，df>1 時沒有有依據的 gold 可挑。
             guard hits.count == 1 else { continue }
             qs.append(Query(bucket: .synonym, text: other, gold: hits[0])); n[.synonym, default: 0] += 1
         }
