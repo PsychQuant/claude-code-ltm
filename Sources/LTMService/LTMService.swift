@@ -395,6 +395,13 @@ public struct LTMService {
         public let refresh: RefreshReport
         /// 寫了幾筆 `shown` 事件。
         public let eventsRecorded: Int
+        /// 交錯清單裡有幾筆對不回指標而被丟棄。
+        ///
+        /// 與 `QueryOutcome.unattributableResults` 同一個理由與同一個誠實邊界：
+        /// 丟棄是對的（不變式 3 不允許回傳沒有指標的命中），**沉默的丟棄不是**。
+        /// 這條路徑目前一樣受排列守衛保護，所以預期恆為 0——`compare()` 先前只有
+        /// 一個裸的 `continue`，於是「這裡也可能丟東西」在型別上不存在（#13 verify）。
+        public let unattributableResults: Int
 
         public var presentation: PresentationID { record.id }
     }
@@ -479,8 +486,13 @@ public struct LTMService {
 
             let byAnchor = Self.index(scored)
             var hits: [QueryHit] = []
+            var unattributable = 0
             for candidate in interleaving.presented {
-                guard let source = byAnchor[candidate.anchor] else { continue }
+                guard let source = byAnchor[candidate.anchor] else {
+                    // 與 `query()` 同形（#13）：數出來，不要靜默 `continue`。
+                    unattributable += 1
+                    continue
+                }
                 hits.append(
                     Self.hit(
                         from: source, candidate: candidate,
@@ -520,7 +532,7 @@ public struct LTMService {
 
             return ComparisonOutcome(
                 hits: hits, record: interleaving.record, refresh: refreshed,
-                eventsRecorded: recorded)
+                eventsRecorded: recorded, unattributableResults: unattributable)
         }
     }
 

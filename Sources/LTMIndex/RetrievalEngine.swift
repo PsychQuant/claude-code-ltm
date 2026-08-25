@@ -123,12 +123,12 @@ public struct RetrievalEngine {
         let trigramHits =
             channels.contains(.trigram)
             ? try lexicalHits(
-                table: "chunks_trigram", matchText: query, depth: channelDepth, scope: scope)
+                table: .trigram, matchText: query, depth: channelDepth, scope: scope)
             : []
         let segmentHits =
             channels.contains(.segment)
             ? try lexicalHits(
-                table: "chunks_segment", matchText: Segmentation.segment(query),
+                table: .segment, matchText: Segmentation.segment(query),
                 depth: channelDepth, scope: scope)
             : []
         let vectorHits =
@@ -190,8 +190,25 @@ public struct RetrievalEngine {
 
     // MARK: - 通道
 
+    /// 一條 lexical 通道對應的 FTS5 表名。
+    ///
+    /// **SQL 識別碼不能參數化**（`?` 只綁值），所以表名必然是字串內插。既然內插無法
+    /// 避免，就讓被內插的東西只能來自一個封閉集合：要新增一條通道，得先在這裡加一個
+    /// case，而那個動作本身就是複查點。
+    ///
+    /// 這裡目前餵進來的都是字面值，所以**現在不可利用**。立案理由是防止日後有人把
+    /// 通道名參數化成外部可控——#11 verify 抓到這個檔案與 `IndexDatabase` 仍有同型
+    /// 內插，而 #11 的診斷曾宣稱「正式索引層無此模式」，那句話是假的。
+    enum LexicalTable: String {
+        case trigram = "chunks_trigram"
+        case segment = "chunks_segment"
+    }
+
     /// 一條 FTS5 通道的排名（rowid 序列，最相關在前）。
-    func lexicalHits(table: String, matchText: String, depth: Int, scope: Scope) throws -> [Int64] {
+    func lexicalHits(table: LexicalTable, matchText: String, depth: Int, scope: Scope) throws
+        -> [Int64]
+    {
+        let table = table.rawValue
         let pattern = Self.ftsPhrase(matchText)
         guard !pattern.isEmpty else { return [] }
         var rowIDs: [Int64] = []

@@ -378,8 +378,10 @@ enum QueryCommand {
                     a: ComparisonPair.a, b: ComparisonPair.b)
                 if arguments.has("json") {
                     try printComparisonJSON(outcome)
+                    printUnattributableDiagnostics(outcome.unattributableResults)
                 } else {
                     printComparisonHuman(outcome)
+                    printUnattributableDiagnostics(outcome.unattributableResults)
                 }
                 return LTMCommandLine.ExitCode.success.rawValue
             }
@@ -396,8 +398,10 @@ enum QueryCommand {
 
             if arguments.has("json") {
                 try printJSON(outcome)
+                printUnattributableDiagnostics(outcome.unattributableResults)
             } else {
                 printHuman(outcome)
+                printUnattributableDiagnostics(outcome.unattributableResults)
             }
             return LTMCommandLine.ExitCode.success.rawValue
         } catch let error as InterleavingViolation {
@@ -634,6 +638,21 @@ enum QueryCommand {
     /// 抽成具名函式是因為先前它 inline 在有命中那條路徑的尾巴，於是另外兩條
     /// 一個字都不說——而零命中正是最需要它的那一刻，`--json` 則是 #24 Stage 2 的
     /// MCP server 要走的那條。
+    /// 對不回指標而被丟棄的筆數。
+    ///
+    /// 與上面的來源診斷同一條理由：丟棄是對的（不變式 3 不允許回傳沒有指標的
+    /// 命中），**沉默的丟棄不是**。走 stderr 而不是加進 JSON payload，因為
+    /// `--json` 目前是一個純粹的命中陣列、沒有信封，而這是診斷不是結果——
+    /// 與 `sourcesUnreadable`／`skipped` 走同一條路。
+    ///
+    /// 兩條路徑都受排列守衛保護，所以預期恆為 0。#13 verify 抓到的是：這個數字
+    /// 被算出來了，卻**沒有任何輸出路徑會印它**——那讓「如果哪天真的發生，它會被
+    /// 看見」這句話在當時並不成立。
+    static func printUnattributableDiagnostics(_ count: Int) {
+        guard count > 0 else { return }
+        Output.error("  ⚠ \(count) 筆結果對不回指標，已丟棄（排序多出了候選集合以外的東西）")
+    }
+
     static func printRefreshDiagnostics(_ refresh: RefreshReport) {
         // 讀不到的來源**不會被作廢**（讀不到 ≠ 消失），但不作廢就必須說出來——
         // 否則索引少了這些檔的新內容，而使用者看到的是一次成功的查詢。

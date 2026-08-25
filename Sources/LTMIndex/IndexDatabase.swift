@@ -85,8 +85,16 @@ public final class IndexDatabase {
     /// 之間的相對 recall**，在該檔自己指名的 known-item 條件下。先前這裡把其中一個
     /// 數字說成「沒有 trigram 的中文 recall」——那是把配置比較的結果講成一個獨立
     /// 命題，超出該紀錄涵蓋的範圍。要引用具體數字請直接讀那份紀錄。）
+    /// 探測用的 tokenizer 名。與 `RetrievalEngine.LexicalTable` 同一個理由：SQL
+    /// 識別碼無法參數化，所以讓被內插的東西只能來自封閉集合。
+    public enum ProbeTokenizer: String, CaseIterable {
+        case trigram
+        case unicode61
+    }
+
     public func probeTokenizers() throws {
-        for tokenizer in ["trigram", "unicode61"] {
+        for probe in ProbeTokenizer.allCases {
+            let tokenizer = probe.rawValue
             let sql = """
                 CREATE VIRTUAL TABLE temp.probe_\(tokenizer) USING fts5(x, tokenize='\(tokenizer)')
                 """
