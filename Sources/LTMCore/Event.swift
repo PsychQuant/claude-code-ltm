@@ -23,6 +23,13 @@ public struct GenerationID: Sendable, Hashable, Codable, CustomStringConvertible
 
 /// 當下生效的排序策略識別碼。
 public struct RankingPolicyID: Sendable, Hashable, Codable, CustomStringConvertible {
+    /// 交錯比較的保留值：**它不命名一個策略，它命名「這次呈現沒有單一策略」**。
+    ///
+    /// 住在這裡而不是 facade（#21 item 2）：計分端也必須認得它，而計分端看不到
+    /// facade。定義兩份就是同一件事有兩個寫者，而漂移的方向是「其中一份不認得
+    /// 這個值」——那會讓每一筆比較事件都被判成資料不一致。
+    public static let interleaved = RankingPolicyID("interleaved")
+
     public let value: String
     public init(_ value: String) { self.value = OpaqueIdentifier.require(value, "RankingPolicyID") }
     public init(validating value: String) throws {

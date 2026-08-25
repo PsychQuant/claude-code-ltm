@@ -157,6 +157,12 @@ public enum ComparisonDataError: Error, Sendable, Equatable {
     case duplicatePresentationID(PresentationID)
     /// 事件宣稱的 generation 與它所屬呈現紀錄的不一致。
     case generationMismatch(presentation: PresentationID)
+    /// 事件自報的 policy 指名了一個策略，而紀錄把那個位置歸給了另一個。
+    ///
+    /// **保留值 `interleaved` 不算不一致**：它宣告的正是「沒有單一策略」，
+    /// 與任何逐位置歸屬都相容。只有指名了具體策略的事件才要對得上（#21 item 2）。
+    case policyMismatch(
+        presentation: PresentationID, reported: RankingPolicyID, attributed: RankingPolicyID)
     /// 呈現紀錄的 attribution 把位置記給了不屬於這次比較的策略。
     ///
     /// #1 verify R3：先前 scorer 直接信任 `credit(for:)` 回來的任何 policy id，
@@ -287,6 +293,19 @@ public enum ComparisonScorer {
             guard let policy = record.credit(for: event.anchor) else {
                 throw ComparisonDataError.anchorNotInPresentation(
                     presentation: presentationID, anchor: event.anchor)
+            }
+
+            // **事件自報的 policy 也要看**（#21 item 2）。先前它完全被忽略，於是
+            // 事件說 A、紀錄說 B 時 scorer 靜默採信紀錄——與上面 `generation`
+            // 那條防的是同一個缺陷類別，而那條會拋。
+            //
+            // 不對稱，理由與 `misreportedHistory` 同構：保留值 `interleaved`
+            // 宣告的正是「這次呈現沒有單一策略」，與任何逐位置歸屬都相容，所以
+            // 放行。指名了具體策略的事件才要對得上——那時兩份說法互斥，而靜默
+            // 採信其中一份等於讓讀者看不到資料已經不一致。
+            if event.policy != .interleaved && event.policy != policy {
+                throw ComparisonDataError.policyMismatch(
+                    presentation: record.id, reported: event.policy, attributed: policy)
             }
 
             // 歸屬用**紀錄**的 generation，不是事件自報的。兩者不一致代表資料

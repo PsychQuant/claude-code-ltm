@@ -433,7 +433,7 @@ public struct LTMService {
     /// （`memory-events`，#36 D3），而
     /// `theInterleavedPolicyIsReservedAndNotAStrategy` 釘住它不在 `known` 內
     /// ——否則下一個人會拿它去 `StrategyRegistry.make()` 而靜默得到 `nil`。
-    public static let interleavedPolicy = RankingPolicyID("interleaved")
+    public static let interleavedPolicy = RankingPolicyID.interleaved
 
     public func compare(
         text: String,
