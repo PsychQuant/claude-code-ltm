@@ -153,6 +153,13 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
   觸發見 `docs/measurements/2026-08-08-baseline.md`。
 - **jsonl 不假設 append-only，但利用它**。`state.json` 記 `prefixHash`，對得上就從
   `processedBytes` 續讀，對不上就整份重解。
+- **`FileManager` 的失敗常常不是回 `nil`，是安靜地回「空的」**。實測（#26）：對一個
+  權限不足的目錄，`enumerator(at:includingPropertiesForKeys:options:)` **不回 `nil`**
+  ——它回一個產出零個項目的 enumerator。所以 `guard let walker = … else { continue }`
+  這種寫法**那條 else 根本不會 fire**，而失敗被當成「這個目錄是空的」。
+  要被告知就得用帶 `errorHandler` 的多載。同理 `(try? contentsOfDirectory(…)) ?? []`
+  把權限錯誤變成「零個項目」。**判準：問「這個 API 失敗時我怎麼知道」，而不是假設
+  它會回 `nil` 或拋錯。**
 - **`FileManager` 的路徑形式不一致，別用字串前綴算相對路徑**。實測（2026-08-17）：
   `temporaryDirectory` 與 `resolvingSymlinksInPath()` 都給 `/var/folders/…`，而
   `contentsOfDirectory` 對同一棵樹給 `/private/var/folders/…`。前綴比對因此落空，

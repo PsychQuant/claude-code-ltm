@@ -369,3 +369,68 @@ func incompleteTrailingRecordIsRereadNextScan() throws {
     #expect(second.chunks.contains { $0.uuid == "aaaaaaaa-0000-0000-0000-000000000002" },
             "半行補完後必須被索引 —— 先前它會永久消失且無錯誤訊息")
 }
+
+// MARK: - #26：目錄層失敗不得被轉成「沒有東西」
+
+@Test("語料根列不出來時拋錯，不是回報零個 project")
+func anUnlistableCorpusRootThrows() throws {
+    let base = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-scan-\(UUID().uuidString)")
+    let corpus = base.appendingPathComponent("corpus")
+    try FileManager.default.createDirectory(at: corpus, withIntermediateDirectories: true)
+    defer {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: corpus.path)
+        try? FileManager.default.removeItem(at: base)
+    }
+    // 先放一個 project，讓「零個」與「讀不到」在結果上有差別。
+    let proj = corpus.appendingPathComponent("proj-one")
+    try FileManager.default.createDirectory(at: proj, withIntermediateDirectories: true)
+    try Data("{}\n".utf8).write(to: proj.appendingPathComponent("s.jsonl"))
+
+    // 拿掉讀取權限 → contentsOfDirectory 失敗。
+    try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: corpus.path)
+
+    let scanner = CorpusScanner(corpusRoot: corpus)
+    // 先前這裡是 `(try? …) ?? []`——失敗變成「零個 project」，而零個 project 會讓
+    // `scan` 把**整份索引**作廢並回報成功。
+    #expect(throws: CorpusScanner.ScanError.corpusRootUnreadable(path: corpus.path)) {
+        _ = try scanner.scan(previous: ScanState())
+    }
+}
+
+@Test("列不出內容的 project，其既有來源被當成讀不到而非消失")
+func anUnlistableProjectProtectsItsPriorSources() throws {
+    let base = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-scan-\(UUID().uuidString)")
+    let corpus = base.appendingPathComponent("corpus")
+    let proj = corpus.appendingPathComponent("proj-one")
+    try FileManager.default.createDirectory(at: proj, withIntermediateDirectories: true)
+    defer {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: proj.path)
+        try? FileManager.default.removeItem(at: base)
+    }
+    let line = #"{"uuid":"00000000-aaaa-bbbb-cccc-dddddddddddd","sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-08-17T06:00:00Z","type":"user","message":{"role":"user","content":"記憶策略的內容夠長可以切"}}"#
+    try Data((line + "\n").utf8).write(to: proj.appendingPathComponent("s.jsonl"))
+
+    let scanner = CorpusScanner(corpusRoot: corpus)
+    let first = try scanner.scan(previous: ScanState())
+    #expect(!first.chunks.isEmpty, "前提：第一輪要真的讀到東西")
+    let knownKeys = Set(first.state.files.keys)
+    #expect(!knownKeys.isEmpty)
+
+    // 拿掉 project 的讀取權限 → enumerator 回 nil。
+    try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: proj.path)
+
+    let second = try scanner.scan(previous: first.state)
+
+    // **核心**：先前是 `else { continue }`——那個 project 一個檔都沒被看到，於是
+    // 下一段的「上一輪有、這一輪沒看到 → 消失」把它全部作廢，而命令回報成功。
+    #expect(
+        second.invalidatedSources.isEmpty,
+        "列不出目錄被當成消失——一次權限錯誤會清空該 project 的索引，而且看起來是成功的")
+    #expect(
+        knownKeys.isSubset(of: second.unreadableSources),
+        "讀不到的來源必須被說出來，不能只是不作廢就算了")
+    // 狀態要保留，否則下一輪它們仍會被當成新檔案整份重解。
+    #expect(knownKeys.isSubset(of: Set(second.state.files.keys)))
+}

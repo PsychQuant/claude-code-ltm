@@ -145,6 +145,18 @@ public struct CorpusScanner: Sendable {
         case corpusRootUnreadable(path: String)
     }
 
+    /// 一次目錄遍歷的結果：找到的檔案，加上**列不出來的 project**。
+    ///
+    /// 後者先前不存在——`contentsOfDirectory` 與 `enumerator` 的失敗都被
+    /// `(try? …) ?? []` 與 `else { continue }` 吞成「這裡沒有東西」（#26）。
+    /// 而「沒有東西」與「上一輪有、這一輪沒看到」在 `scan` 裡是同一件事，於是
+    /// **一次權限錯誤會讓那個 project 的全部 chunk 被作廢，而命令回報成功**。
+    struct DirectoryWalk {
+        var files: [(project: String, url: URL, key: String)] = []
+        /// 列不出內容的 project 名。它們底下的既有來源**不得**被當成消失。
+        var unreadableProjects: Set<String> = []
+    }
+
     /// 語料裡所有 `.jsonl`，附其所屬 project（= 語料根下的第一層目錄名）與 state 鍵。
     ///
     /// `key` 在**遍歷當下**由 project 目錄構造，不事後用語料根做字串前綴比對。
@@ -153,7 +165,7 @@ public struct CorpusScanner: Sendable {
     /// `/var/folders/…`，而 `contentsOfDirectory` 給 `/private/var/folders/…`。
     /// 前綴比對因此落空，鍵退化成絕對路徑：state 檔會夾帶本機路徑，換機器就
     /// 整份語料重解，而且沒有任何錯誤訊息。
-    public func sourceFiles() throws -> [(project: String, url: URL, key: String)] {
+    func sourceFiles() throws -> DirectoryWalk {
         let fm = FileManager.default
         var isDirectory: ObjCBool = false
         guard fm.fileExists(atPath: corpusRoot.path, isDirectory: &isDirectory),
@@ -161,23 +173,53 @@ public struct CorpusScanner: Sendable {
         else {
             throw ScanError.corpusRootUnreadable(path: corpusRoot.path)
         }
-        let projects = (try? fm.contentsOfDirectory(
-            at: corpusRoot, includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles])) ?? []
-        var found: [(project: String, url: URL, key: String)] = []
+        // **語料根列不出來就是 fatal，不是「零個 project」**（#26）。上面那個
+        // `isDirectory` 檢查已經對「根不是目錄」拋錯；列舉失敗（權限、I/O）是同一
+        // 類問題的另一種表現，卻先前被 `(try? …) ?? []` 吞成空陣列——而空陣列會讓
+        // `scan` 把**整份索引**作廢並回報成功。
+        let projects: [URL]
+        do {
+            projects = try fm.contentsOfDirectory(
+                at: corpusRoot, includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles])
+        } catch {
+            throw ScanError.corpusRootUnreadable(path: corpusRoot.path)
+        }
+        var walk = DirectoryWalk()
         for projectURL in projects.sorted(by: { $0.path < $1.path }) {
             guard (try? projectURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
             else { continue }
             let project = projectURL.lastPathComponent
+            // **必須用帶 `errorHandler` 的多載**（#26）。
+            //
+            // 先前是 `guard let walker = fm.enumerator(at:includingPropertiesForKeys:
+            // options:) else { continue }`，而那個 guard **實測不會 fire**：對一個
+            // 權限不足的目錄，`FileManager` 回的**不是 `nil`**，是一個安靜產出零個
+            // 項目的 enumerator。所以失敗不是走 `else`，是走「這個 project 是空的」
+            // ——比 issue 描述的更安靜。
+            //
+            // `errorHandler` 是唯一會被告知的管道。回 `true` 繼續遍歷其餘項目
+            // （單一子目錄失敗不該讓整個 project 消失），但**把失敗記下來**。
+            var enumerationFailed = false
             guard
                 let walker = fm.enumerator(
                     at: projectURL, includingPropertiesForKeys: nil,
-                    options: [.skipsHiddenFiles])
-            else { continue }
+                    options: [.skipsHiddenFiles],
+                    errorHandler: { _, _ in
+                        enumerationFailed = true
+                        return true
+                    })
+            else {
+                walk.unreadableProjects.insert(project)
+                continue
+            }
             var inProject: [URL] = []
             for case let fileURL as URL in walker where fileURL.pathExtension == "jsonl" {
                 inProject.append(fileURL)
             }
+            // 遍歷過程中有任何一次失敗 → 這個 project 的檔案清單**不完整**，
+            // 而不完整與「這些檔不見了」在下游是同一件事。
+            if enumerationFailed { walk.unreadableProjects.insert(project) }
             let projectPrefix = projectURL.path.hasSuffix("/") ? projectURL.path : projectURL.path + "/"
             for url in inProject.sorted(by: { $0.path < $1.path }) {
                 // enumerator 給的 URL 一定以它自己的起點為前綴（同一次遍歷、同一種
@@ -186,10 +228,11 @@ public struct CorpusScanner: Sendable {
                     url.path.hasPrefix(projectPrefix)
                     ? String(url.path.dropFirst(projectPrefix.count))
                     : url.lastPathComponent
-                found.append((project: project, url: url, key: "\(project)/\(withinProject)"))
+                walk.files.append(
+                    (project: project, url: url, key: "\(project)/\(withinProject)"))
             }
         }
-        return found
+        return walk
     }
 
     /// 掃描語料，只讀出上次之後的新內容。
@@ -203,7 +246,8 @@ public struct CorpusScanner: Sendable {
         var tally = SkipTally()
         var seenKeys: Set<String> = []
 
-        for (project, url, key) in try sourceFiles() {
+        let walk = try sourceFiles()
+        for (project, url, key) in walk.files {
             seenKeys.insert(key)
             guard let handle = try? FileHandle(forReadingFrom: url) else {
                 unreadable.insert(key)
@@ -243,6 +287,23 @@ public struct CorpusScanner: Sendable {
             let whole = (try? readBytes(handle, from: 0, count: processed)) ?? Data()
             nextState.files[key] = SourceFileState(
                 prefixHash: Self.hexDigest(whole), processedBytes: processed)
+        }
+
+        // **列不出內容的 project 底下的既有來源，一律視為讀不到而非消失**（#26）。
+        //
+        // 這一步必須在下面的作廢之前：`enumerator` 失敗會讓那個 project 一個檔都沒
+        // 被看到，而「沒看到」在下一段就是「消失」。一次權限錯誤因此會作廢那個
+        // project 的全部 chunk，**而且回報成功**——這正是 #26 的症狀。
+        //
+        // 保護的同時也要**說出來**：把它們併進 `unreadable`，那是
+        // `ScanResult.unreadableSources` 的 doc 一直宣稱涵蓋（「列目錄失敗、開檔
+        // 失敗」）而實際沒有涵蓋的一半。
+        for project in walk.unreadableProjects {
+            let prefix = "\(project)/"
+            for key in previous.files.keys where key.hasPrefix(prefix) {
+                unreadable.insert(key)
+                if let prior = previous.files[key] { nextState.files[key] = prior }
+            }
         }
 
         // 上一輪有、這一輪沒看到、而且不是「讀不到」的來源 → 它消失了，作廢它的 chunk。
