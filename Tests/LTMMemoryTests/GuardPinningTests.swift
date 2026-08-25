@@ -86,7 +86,25 @@ private func tempDir(_ tag: String) throws -> URL {
     #expect(!CorpusLocation.isInside(work.appendingPathComponent("plain.jsonl"), root: corpus))
 }
 
-@Test func anAlternateAbsolutePathToTheSameDirectoryIsRecognised() throws {
+/// 本機是否具備 firmlink 佈局（`/System/Volumes/Data` 前綴與語料根同 inode）。
+///
+/// 下面那條測試的**前提**。分開寫是因為它決定的是「這條能不能驗」，不是
+/// 「驗的結果如何」——兩者混在一起就會得到一個機器相依的紅燈（#22 item 17）。
+private var firmlinkLayoutPresent: Bool {
+    let root = CorpusLocation.readOnlyRoot
+    let alt = URL(fileURLWithPath: "/System/Volumes/Data" + root.path)
+    guard let rootID = CorpusLocation.identity(root.path),
+        let altID = CorpusLocation.identity(alt.path)
+    else { return false }
+    return rootID == altID
+}
+
+@Test(
+    .enabled(
+        if: firmlinkLayoutPresent,
+        "此機器上 /System/Volumes/Data 前綴與語料根不是同一個 inode（或語料根不存在），firmlink 這條的前提不成立"
+    ))
+func anAlternateAbsolutePathToTheSameDirectoryIsRecognised() throws {
     // R5 的 HIGH：macOS 的 firmlink 讓 `~/.claude/projects` 與
     // `/System/Volumes/Data/Users/…/.claude/projects` 是**同一個 inode 的兩條
     // 穩定路徑**，而 `realpath(3)` 不會把後者正規化。舊的元件比對因此判「在外」，
@@ -96,14 +114,10 @@ private func tempDir(_ tag: String) throws -> URL {
     let root = CorpusLocation.readOnlyRoot
     let alt = URL(fileURLWithPath: "/System/Volumes/Data" + root.path)
 
-    guard let rootID = CorpusLocation.identity(root.path),
-        let altID = CorpusLocation.identity(alt.path), rootID == altID
-    else {
-        // 本機沒有這個 firmlink 佈局（或語料根不存在）→ 這條的前提不成立。
-        // **不靜默通過**：印出來，讓「這台機器上沒驗到」是可見的事實。
-        Issue.record("此機器上 /System/Volumes/Data 前綴不是同一個 inode，firmlink 這條未驗到")
-        return
-    }
+    // 前提由 `.enabled(if:)` 擋在外面（#22 item 17）。先前是在 body 裡
+    // `Issue.record` 然後 return——那讓缺少該佈局的機器得到一個**紅燈**，於是
+    // 「測試全綠」變成一句機器相依的宣稱。skip 帶理由才是誠實的形狀：沒驗到
+    // 仍然看得見，但它不冒充成失敗。
 
     let target = alt.appendingPathComponent("ltm-firmlink-probe-never-written.jsonl")
     #expect(CorpusLocation.isInsideReadOnlyCorpus(target), "同一個 inode 的另一條路徑必須判為在語料內")

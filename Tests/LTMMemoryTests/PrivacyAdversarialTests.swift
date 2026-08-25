@@ -543,12 +543,29 @@ private func canonicalLine() throws -> Data {
     #expect(Anchor.normalize("   ") == "", "前提：純空白正規化後是空字串")
 
     // 解碼邊界。
+    //
+    // **這一段先前沒有測到它宣稱的東西**（#22 item 9）：它把空摘要**前綴**到
+    // 既有 hex 上，於是解出來是 128 字元，拋的是 `wrongLength(128)`——一條
+    // 長度檢查，不是空摘要那條邊界。而斷言寫 `throws: (any Error).self`，對
+    // 任何錯誤都成立，所以分辨不出這件事。測試名字比它的斷言強。
+    //
+    // 現在**整個換掉** hex 的值，讓解碼器真的看到 `sha256("")`，並斷言具體是
+    // 哪一個錯誤。變異驗證：守衛改成拋 `wrongLength(999)` → 變紅。
     let line = String(decoding: try canonicalLine(), as: UTF8.self)
-    let hostile = line.replacingOccurrences(
-        of: "\"hex\":\"", with: "\"hex\":\"\(ContentHash.emptyContentDigestHex)")
-    #expect(throws: (any Error).self) {
-        _ = try JSONDecoder().decode(Event.self, from: Data(hostile.prefix(hostile.count).utf8))
+    let hostile = try #require(
+        replacingHexValue(in: line, with: ContentHash.emptyContentDigestHex),
+        "前提：canonical 行裡找得到一個 hex 欄位可以替換")
+    #expect(throws: ContentHash.ValidationError.emptyContentDigest) {
+        _ = try JSONDecoder().decode(Event.self, from: Data(hostile.utf8))
     }
+}
+
+/// 把 canonical 行裡 `"hex":"…"` 的**值整個**換掉，回 `nil` 表示找不到。
+private func replacingHexValue(in line: String, with replacement: String) -> String? {
+    guard let start = line.range(of: "\"hex\":\""),
+        let end = line.range(of: "\"", range: start.upperBound..<line.endIndex)
+    else { return nil }
+    return line.replacingCharacters(in: start.upperBound..<end.lowerBound, with: replacement)
 }
 
 @Test func aWhitespaceOnlySpanCannotProduceAnAnchor() async {
