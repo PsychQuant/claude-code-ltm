@@ -569,3 +569,38 @@ private func event(
     #expect(report.startingSides.b == 0)
     #expect(report.startingSideCorrected == nil, "只有一層有觀測時，校正不可計算")
 }
+
+// MARK: - 事件自報的 policy（#21 item 2）
+
+@Test func anEventNamingADifferentStrategyThanTheAttributionIsReported() throws {
+    // 事件有 `policy`，紀錄有 `attribution`。兩者矛盾時 scorer 先前**靜默採信
+    // 紀錄**——而同一個迴圈往上十二行就有 `generationMismatch`，防的是同一個
+    // 缺陷類別。靜默採信其中一份，等於讓讀者看不到資料已經不一致。
+    let r = try presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"))
+    // 位置 a 歸給 archival（`startingSide: .a`），而事件宣稱它來自 human-like。
+    let mislabelled = Event.interaction(
+        .opened, anchor: evalAnchor("a"), at: evalInstant,
+        generation: evalGeneration, policy: humanLike, presentation: r.id)
+
+    #expect(
+        throws: ComparisonDataError.policyMismatch(
+            presentation: r.id, reported: humanLike, attributed: archival)
+    ) {
+        _ = try ComparisonScorer.report(records: [r], events: [mislabelled])
+    }
+}
+
+@Test func theInterleavedReservedPolicyIsCompatibleWithAnyAttribution() throws {
+    // 不對稱是刻意的：保留值宣告的正是「這次呈現沒有單一策略」，所以它與任何
+    // 逐位置歸屬都相容。這是比較模式下**每一筆**事件的實際形狀——嚴格相等會
+    // 把它們全部判成資料不一致。
+    let r = try presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"))
+    let normal = Event.interaction(
+        .opened, anchor: evalAnchor("a"), at: evalInstant,
+        generation: evalGeneration, policy: .interleaved, presentation: r.id)
+
+    let report = try ComparisonScorer.report(records: [r], events: [normal])
+    #expect(report.skipped.notFromAPresentation == 0)
+    #expect(report.skipped.fromNullComparison == 0)
+    #expect(report.skipped.presentationNotTracked == 0, "保留值不該被判成不一致")
+}
