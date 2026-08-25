@@ -56,6 +56,28 @@
     窮舉測試**——讀者因此知道哪一種未來改動會打破它。
 
 ### Changed
+- **#14：seam 的兩條 SHALL NOT 改寫成具名執行點**（Spectra change
+  `name-seam-enforcement-points`）。原文「Retrieval SHALL NOT read the event store
+  directly, and no strategy SHALL read the corpus directly」沒有執行點，而 issue 提的
+  兩個方向（把 `Event: Codable` 移出 `LTMCore`、把 `CorpusReader` 變 internal）**交不出
+  它們承諾的編譯期事實**：一個策略要讀事件檔或語料，需要的是 Foundation 的
+  `Data(contentsOf:)` 與 `JSONSerialization`，不是被提議移走的那些便利型別——當初推翻
+  該宣稱的兩個反例正是這樣做的，**移走型別不會讓它們失敗**。所以那個代價（動依賴圖
+  底層、波及所有模組）換不到承諾的東西。
+  - **改寫成它實際保護的兩件事，各自指名執行點**：排序正確性由 seam 自己的七項檢查
+    執行，每項列出它拋的違規名（`unauthorizedStrategy` / `negativeDisplacementBound` /
+    `crossedRelevanceBand` / `candidateSetChanged` / `displacementBoundExceeded` /
+    `movedAcrossTieRuns` / `misreportedDisplacement` + `misreportedMovement`）；隱私
+    邊界的執行點在 canonical store **落地 bytes** 的 round-trip 檢查。
+  - **列舉本身寫成可查證的**：spec 明寫「seam 公開入口可達的 `throw` 恰為列出的這些」，
+    兩個方向都對過（八個 `throw` ↔ 七個列舉項）。**無人能對照實作查證的列舉，是一份
+    穿著清單外衣的摘要。**
+  - `ValidatedCandidates` 的 `internal` init 記為**刻意的信任邊界**（doc 指向 spec），
+    不是遺漏。四處過期註解一併修掉；**第四處由獨立掃描步驟找到、不在 proposal 的
+    Impact 內**——與 `#34` 那次同形狀，但這次在宣稱完成**之前**被抓到，因為那一步是
+    獨立掃描而不是「我記得我改了哪些檔」。
+  - **Swift 改動全部是註解**：`git diff -U0 -- '*.swift'` 排除註解行後零輸出，測試 397
+    條與改動前逐字相同。
 - **#36 階段 4–5：測試品質與 artifact 對齊**。
   - **未知策略的結束碼有回歸鎖了**。`#33` 的 blocking 修正把它從 trap 改成具名錯誤
     （4 → 2），而那個 change 的 AC3 寫著「不帶旗標時 byte-identical」——字面上與該
