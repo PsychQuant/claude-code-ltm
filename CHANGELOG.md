@@ -66,9 +66,11 @@
   底層、波及所有模組）換不到承諾的東西。
   - **改寫成它實際保護的兩件事，各自指名執行點**：排序正確性由 seam 的**十項檢查**
     執行（依入口實際執行順序列出），每項列出它拋的違規名，共 11 個名字；隱私邊界的
-    執行點在 canonical store **落地 bytes** 的 round-trip 檢查。第 5 項（
-    `malformedStatistics`）是唯一有條件的一項——只對宣告會消費歷史的策略執行，因為
-    `archival` 的契約逐字是「不論給它什麼 projection 都產出相同輸出」。
+    執行點在 canonical store **落地 bytes** 的 round-trip 檢查。**其中八項每次呼叫
+    都跑，兩項有條件**：第 5 項（`malformedStatistics`）只對宣告會消費歷史的策略
+    執行；第 9 項（`movedAcrossTieRuns`）只在策略的有效位置約束非空時執行——三個
+    出貨策略裡只有 `conservative` 帶著 tie-run 約束。兩個閘門各有刻意的理由（見
+    spec 與 authority table 的條目），但**假設每一項都會跑的讀者會誤診那兩項**。
   - **列舉本身寫成可查證的，而且把查法寫在旁邊**：spec 明寫這 11 個名字必須與
     `StrategyViolation` 的 case、以及公開入口可達的 `throw` 站點**三者逐一對應**。
     實測 11 = 11 = 11、三個集合互減皆為空。

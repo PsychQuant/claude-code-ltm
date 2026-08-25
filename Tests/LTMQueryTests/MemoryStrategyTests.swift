@@ -12,7 +12,7 @@ import Testing
 // Foundation 直接讀檔即可繞過。把它寫成「編譯期事實」是過度宣稱，已更正。
 //
 // **但「沒有執行點」也是過度宣稱**（這裡先前正是那樣寫的）。那條 SHALL NOT 想保護
-// 的東西有執行點，只是不在依賴圖上：排序正確性在 seam 的七道檢查，隱私在 canonical
+// 的東西有執行點，只是不在依賴圖上：排序正確性在 seam 的那組檢查，隱私在 canonical
 // store 的 bytes 層 round-trip。逐一具名寫在 `memory-strategy` spec 的
 // 「MemoryStrategy is the sole seam between retrieval and memory」requirement。
 

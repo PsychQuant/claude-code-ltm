@@ -216,9 +216,13 @@ public enum StrategyViolation: Error, Sendable, Equatable {
 ///
 /// **這個 internal `init` 是刻意的信任邊界，不是遺漏**，而那一點現在寫在
 /// `memory-strategy` spec 的「MemoryStrategy is the sole seam between retrieval
-/// and memory」requirement 裡（連同 seam 的七道檢查與隱私的執行點）。
-/// 套件外造不出這個值 → 呼叫不到 `rerankChecked`；套件內造得出來 → seam 自己的
-/// 違規測試寫得出來。**沒被記錄的信任邊界與疏漏無法區分**，所以它被記錄了。
+/// and memory」requirement 裡（連同 seam 的那組檢查與隱私的執行點）。
+///
+/// **它買到的東西比「不可繞過」窄**：套件外造不出這個值 → 拿不到一份憑空捏造的
+/// 候選清單冒充已驗證；套件內造得出來 → seam 自己的違規測試寫得出來。**它不保證
+/// `rerankChecked` 不會被直接呼叫**——上面那段已經說明為什麼（token 可儲存、
+/// 可轉手），這裡不再把那個被推翻的推論寫第二次。
+/// **沒被記錄的信任邊界與疏漏無法區分**，所以它被記錄了。
 /// 理由只寫在 spec 一份，這裡不重述。
 ///
 /// 在那之前，**消費端不得因為「seam 保證過了」而省掉自己的檢查**——交錯器
