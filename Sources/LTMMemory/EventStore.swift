@@ -67,10 +67,21 @@ public struct CorpusPolicy: CorpusContainmentPolicy {
 }
 
 public enum CorpusLocation {
+    /// 預設語料根。
+    ///
+    /// **認得 `CLAUDE_CONFIG_DIR`**（#20 item 5）。先前寫死 `$HOME/.claude`，
+    /// 所以使用者搬過設定目錄之後，守衛看的是一個空目錄——「不得寫進語料」
+    /// 這條保護整條靜默失效，而失效的方向是放行。
+    ///
+    /// 這是**預設值**，不是唯一的根：語料根還可以被 facade 覆寫（`CorpusPolicy`
+    /// 的額外根，#27）。兩者都要檢查。
     public static var readOnlyRoot: URL {
-        URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".claude")
-            .appendingPathComponent("projects")
+        let configDirectory =
+            ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"].map {
+                URL(fileURLWithPath: $0)
+            }
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude")
+        return configDirectory.appendingPathComponent("projects")
     }
 
     /// 判斷路徑是否落在語料根底下，**逐層解析 symlink**。
@@ -185,8 +196,21 @@ public enum CorpusLocation {
     /// 改法是把解析交給 `realpath(3)`——它就是 kernel 的解析器。因為目標檔案
     /// 通常還不存在（append 會建它），所以拆成兩段：父目錄交給 realpath 完整
     /// 解析，最後一段自己處理 symlink（含 dangling，遞迴且有上限）。
-    static func fullyResolve(_ path: String, depth: Int = 0) -> String? {
-        guard depth < 40 else { return path }  // SYMLOOP_MAX 量級；迴圈時停手
+    /// - Parameters:
+    ///   - symlinkHops: symlink 展開的次數。`SYMLOOP_MAX` 量級的預算。
+    ///   - ancestorSteps: 往上遞推不存在父層的次數。**與 symlink 預算分開計**
+    ///     （#20 item 7）：先前兩者共用一個 40，於是一條夠深的路徑可能在還沒
+    ///     遇到任何 symlink 迴圈前就耗盡預算。
+    ///
+    /// 預算耗盡回 `nil` 而不是回原路徑（#20 item 7）。耗盡的意思是**解析不出來**，
+    /// 而呼叫端對 `nil` 的姿態是 fail-closed（當成在語料內、拒絕寫入）。先前回
+    /// 原路徑讓那條分支永遠不會執行——註解宣稱的 fail-closed 姿態沒有執行點，
+    /// 是死碼。
+    static func fullyResolve(
+        _ path: String, symlinkHops: Int = 0, ancestorSteps: Int = 0
+    ) -> String? {
+        guard symlinkHops < 40 else { return nil }  // SYMLOOP_MAX 量級；迴圈時停手
+        guard ancestorSteps < 256 else { return nil }  // 路徑深度上限，與上面獨立
         let absolute =
             path.hasPrefix("/") ? path : FileManager.default.currentDirectoryPath + "/" + path
         let url = URL(fileURLWithPath: absolute)
@@ -196,7 +220,10 @@ public enum CorpusLocation {
         // 父目錄必須解析成 kernel 真正會走到的目錄。它若不存在，往上遞推。
         guard let realParent = Self.realpath(parent) else {
             guard parent != "/" , parent != absolute else { return absolute }
-            guard let resolvedParent = Self.fullyResolve(parent, depth: depth + 1) else { return nil }
+            guard
+                let resolvedParent = Self.fullyResolve(
+                    parent, symlinkHops: symlinkHops, ancestorSteps: ancestorSteps + 1)
+            else { return nil }
             return resolvedParent + "/" + base
         }
 
@@ -209,7 +236,8 @@ public enum CorpusLocation {
             let target = try? FileManager.default.destinationOfSymbolicLink(atPath: candidate)
         {
             let next = target.hasPrefix("/") ? target : realParent + "/" + target
-            return Self.fullyResolve(next, depth: depth + 1)
+            return Self.fullyResolve(
+                next, symlinkHops: symlinkHops + 1, ancestorSteps: ancestorSteps)
         }
         return candidate
     }
@@ -425,8 +453,15 @@ public struct FileEventStore: EventStore {
             // 於是一次進行中的 append（多次 write 之間）會被讀成損壞——修復工具
             // 照著 `corruptLines` 去刪，刪掉的是一筆好紀錄（#1 verify R6）。
             //
-            // 取不到就照讀：讀取沒有正確性風險（最壞是看到半行並回報損壞，
-            // 與先前行為相同），為它引入一個新的阻塞點不划算。
+            // **取不到就照讀，但「照讀」之前會等**（#20 item 8 更正）：
+            // `readRegularFile` 的共享鎖是非阻塞加有界重試，最多約 2 秒
+            // （200 次 × 10ms）。先前這裡寫「不引入新的阻塞點」，而那個迴圈
+            // 本身就是一個——註解描述的是一個沒有實作的版本。
+            //
+            // 為什麼是有界而不是無限：讀取沒有正確性風險（最壞是看到半行並
+            // 回報損壞），所以等到天荒地老換不到任何保證；而完全不等會讓
+            // 「一次進行中的 append 被讀成損壞」重新變成常態。有界重試買的是
+            // 前者的機率下降，代價是一個具名的、有上限的延遲。
             //
             // **從這個 fd 讀，不要另開一次路徑**（#1 verify R7 的 CRITICAL）。
             // R6 開了一個 `O_NONBLOCK` 的 fd、在它上面取鎖，然後用

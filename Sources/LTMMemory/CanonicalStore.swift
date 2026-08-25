@@ -52,8 +52,14 @@ public enum CanonicalStore {
         // 任何人都能把那個檔案換掉、rename 掉、或先建一個自己的版本。
         // 記憶層是本專案唯一必須備份的資料，這個檢查值得在建構時就做。
         //
-        // sticky bit 例外：`/tmp` 是 1777，但 sticky 讓非擁有者無法 unlink
-        // 別人的檔案，所以那個組合是可接受的。
+        // sticky bit 例外：`/tmp` 是 1777，而 sticky 讓非擁有者無法 unlink 或
+        // rename 別人的**既有**檔案。
+        //
+        // **它擋的只有這個**（#20 item 4 更正了先前寫在這裡的理由）。sticky
+        // **不擋建立**，而 `open` 目前沒有 `O_NOFOLLOW`——所以在檔案還不存在時，
+        // 別人仍然可以先放一個 symlink 到那個位置。上面的擁有者檢查涵蓋了
+        // 大部分情形（別人擁有的目錄一律拒絕），剩下的 TOCTOU 窗口追蹤於 #40：
+        // **在那之前，這條守衛防的是意外，不是攻擊者。**
         // **用解析後的路徑取父目錄。** 同一個 initializer 裡兩個檢查先前看的是
         // 不同的路徑：`isInsideReadOnlyCorpus` 走 `fullyResolve`（會解析最後一段
         // 的 symlink），而這裡用 `deletingLastPathComponent()`——純字面。於是
@@ -64,13 +70,24 @@ public enum CanonicalStore {
             CorpusLocation.fullyResolve(absolute.path) ?? absolute.path
         let parent = URL(fileURLWithPath: resolvedForPermissions)
             .deletingLastPathComponent().path
+        // **`stat` 失敗要拒絕，不是跳過**（#20 item 4）。先前是
+        // `if stat(...) == 0 { … }`，於是 stat 失敗時整段檢查被略過而路徑照樣
+        // 放行——一個「查不到就當作安全」的守衛，方向錯得跟沒有守衛一樣。
         var info = stat()
-        if stat(parent, &info) == 0 {
-            let worldOrGroupWritable = (info.st_mode & (S_IWGRP | S_IWOTH)) != 0
-            let sticky = (info.st_mode & S_ISVTX) != 0
-            guard !worldOrGroupWritable || sticky else {
-                throw EventStoreError.insecureDirectory(path: parent)
-            }
+        guard stat(parent, &info) == 0 else {
+            throw EventStoreError.insecureDirectory(path: parent)
+        }
+
+        // **目錄必須是自己的**（#20 item 4）。先前只看寫入位元：一個
+        // 0755、但屬於別人的目錄會通過，而那個人隨時能換掉整條路徑。
+        guard info.st_uid == getuid() else {
+            throw EventStoreError.insecureDirectory(path: parent)
+        }
+
+        let worldOrGroupWritable = (info.st_mode & (S_IWGRP | S_IWOTH)) != 0
+        let sticky = (info.st_mode & S_ISVTX) != 0
+        guard !worldOrGroupWritable || sticky else {
+            throw EventStoreError.insecureDirectory(path: parent)
         }
         return absolute
     }
@@ -183,17 +200,36 @@ public enum CanonicalStore {
         //
         // `F_FULLFSYNC` 在某些檔案系統／掛載上回 ENOTSUP，那時退回 `fsync`
         // ——那是平台能力的限制，不是我們的錯誤，但要退得明白而不是靜默。
+        //
+        // **只有能力不足才退回**（#20 item 2）。先前是「任何 errno 都退回」，
+        // 於是 `EIO` 這種真正的 IO 錯誤也走同一條路：裝置根本沒把資料寫下去，
+        // 而我們用一個較弱的 `fsync` 蓋過它、回報成功。退回的理由是「這個平台
+        // 做不到更強的保證」，不是「這次寫入失敗了」——兩者混在一起，後者就
+        // 永遠不會被看見。
         if fcntl(fd, F_FULLFSYNC) != 0 {
-            guard fsync(fd) == 0 else {
+            let fullsyncErrno = errno
+            switch fullsyncErrno {
+            case ENOTSUP, EINVAL, EOPNOTSUPP:
+                guard fsync(fd) == 0 else {
+                    throw EventStoreError.appendFailed(
+                        path: url.path, underlying: "fsync 失敗：errno \(errno)（資料可能未落盤）")
+                }
+            default:
                 throw EventStoreError.appendFailed(
-                    path: url.path, underlying: "fsync 失敗：errno \(errno)（資料可能未落盤）")
+                    path: url.path,
+                    underlying: "F_FULLFSYNC 失敗：errno \(fullsyncErrno)（資料可能未落盤）")
             }
         }
 
         // **新建檔案時，目錄項本身也要落盤。** 只 fsync 檔案而不 fsync 目錄，
         // 斷電後可能出現「檔案內容在、但目錄裡沒有這個名字」。成本是一次
         // syscall，且只在這條路徑上。
-        let dirPath = url.deletingLastPathComponent().path
+        // **解析後的父層，不是字面的**（#20 item 3）。葉節點是 symlink 時，
+        // 字面父層是「連結所在的目錄」，而目錄項實際建立在**目標所在的目錄**。
+        // 同一個檔案裡的權限檢查早就改用 `fullyResolve` 了，這裡落後約 140 行
+        // ——literal-vs-resolved 是這個檔案已經被咬過一次的同一個 bug。
+        let resolvedFile = CorpusLocation.fullyResolve(url.path) ?? url.path
+        let dirPath = URL(fileURLWithPath: resolvedFile).deletingLastPathComponent().path
         let dirFD = open(dirPath, O_RDONLY)
         if dirFD >= 0 {
             defer { close(dirFD) }
