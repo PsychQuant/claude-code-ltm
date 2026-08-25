@@ -92,7 +92,11 @@ public enum CorpusLocation {
     /// - **語料根不存在時退回元件比對**：沒有 inode 可比。此時它只擋字面前綴。
     ///
     /// 後兩者的結構解是 `openat` + `O_NOFOLLOW` 逐段開 + `fstat`，需要重寫
-    /// append 路徑，追蹤於 #14。**在那之前，這條守衛防的是意外，不是攻擊者。**
+    /// append 路徑，**追蹤於 #40**。**在那之前，這條守衛防的是意外，不是攻擊者。**
+    ///
+    /// （這裡先前寫「追蹤於 #14」，而 #14 是 seam 的兩條 SHALL NOT，全文沒有
+    /// `openat`、沒有 TOCTOU、沒有 append 路徑——**那個限度因此有兩個月沒有任何
+    /// issue 在追**。由 `#27` 的診斷核對指標時發現。）
     public static func isInsideReadOnlyCorpus(_ url: URL) -> Bool {
         isInside(url, root: readOnlyRoot)
     }
@@ -106,7 +110,9 @@ public enum CorpusLocation {
     /// 全部在合成樹上跑」）。其餘九條仍以真實 `~/.claude/projects` 為標的——
     /// 它們只做路徑判斷與 symlink 佈局，不寫入語料，但確實碰真實路徑。
     /// 要全部搬到合成樹，`FileEventStore.init` 也得能收語料根（目前它直接用
-    /// `CorpusLocation.readOnlyRoot`），那是介面改動，追蹤於 #14。
+    /// `CorpusLocation.readOnlyRoot`），那是介面改動，**追蹤於 #27**。
+    ///
+    /// （這裡先前寫「追蹤於 #14」，而 #14 不涵蓋語料根注入。指標指錯了 issue。）
     /// 公開可見（原為 internal）：`LTMService.MemoryCorpusPolicy` 需要對**當下實際
     /// 使用的**語料根做同一份判定。複製這段邏輯是不可接受的替代方案——它被
     /// symlink、`..`、dangling link、firmlink 各咬過一次，兩份實作必然漂移，
