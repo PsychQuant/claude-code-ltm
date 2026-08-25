@@ -78,18 +78,12 @@ struct PreloadedCorpusReader: CorpusReader {
 ///
 /// 現在它同時保護兩者：預設語料根**與**這次實際使用的語料根。少任何一邊都有洞：
 /// 只看預設 → 覆寫路徑沒守衛；只看當下 → 有人把 derived 指進預設語料。
-public struct MemoryCorpusPolicy: CorpusContainmentPolicy {
-    private let additionalRoots: [URL]
-
-    public init(corpusRoots: [URL] = []) {
-        self.additionalRoots = corpusRoots
-    }
-
-    public func isInsideReadOnlyCorpus(_ url: URL) -> Bool {
-        if CorpusLocation.isInsideReadOnlyCorpus(url) { return true }
-        return additionalRoots.contains { CorpusLocation.isInside(url, root: $0) }
-    }
-}
+/// 語料圍籬。**實作在 `LTMMemory.CorpusPolicy`**，這裡只是既有名字的別名（#27）。
+///
+/// 先前這裡是第二份實作。它與 `FileEventStore` 用的那份是同一件事的兩個寫者，
+/// 而記憶層那份只認固定預設根——於是 facade 有雙重保護、library 層沒有，兩者
+/// 在 `LTM_CORPUS_ROOT` 被覆寫時給出不同答案。
+public typealias MemoryCorpusPolicy = CorpusPolicy
 
 /// 一筆回傳給呼叫端的結果。
 ///

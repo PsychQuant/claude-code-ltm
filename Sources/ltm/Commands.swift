@@ -44,7 +44,8 @@ enum CommandSupport {
             corpusRoot: corpusRoot, derivedRoot: derivedRoot,
             embedder: embedder, eventStore: nil, memoryRoot: memoryRoot)
         guard needsEventStore else { return probe }
-        let store = try FileEventStore(url: memoryEventsURL(validatedRoot: memoryRoot))
+        let store = try FileEventStore(
+            url: memoryEventsURL(validatedRoot: memoryRoot), policy: corpusPolicy())
         let records =
             needsRecordStore
             ? try FilePresentationRecordStore(
@@ -65,13 +66,21 @@ enum CommandSupport {
     ///
     /// 判定沿用 `MemoryCorpusPolicy`（inode 身分、symlink、firmlink），不自己重寫
     /// 一份：複製那份判定會漂移，而漂移的方向是「放行了不該放行的路徑」且不報錯。
-    static func validatedMemoryRoot() throws -> URL {
-        let corpusRoot =
+    /// 涵蓋**當下實際使用**的語料根的圍籬。
+    ///
+    /// 一處而不是三處（#27）：先前 `LTM_CORPUS_ROOT` 的解析散在三個地方，而
+    /// `FileEventStore` 一個都沒收到——它用的是固定預設根。
+    static func corpusPolicy() -> CorpusPolicy {
+        CorpusPolicy(corpusRoots: [
             ProcessInfo.processInfo.environment["LTM_CORPUS_ROOT"].map {
                 URL(fileURLWithPath: $0)
             } ?? CorpusLocation.readOnlyRoot
+        ])
+    }
+
+    static func validatedMemoryRoot() throws -> URL {
         let root = memoryRootURL()
-        let policy = MemoryCorpusPolicy(corpusRoots: [corpusRoot])
+        let policy = corpusPolicy()
         guard !policy.isInsideReadOnlyCorpus(root) else {
             throw LTMService.ServiceError.rootInsideCorpus(path: root.path)
         }

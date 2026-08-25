@@ -7,18 +7,9 @@ import LTMCore
 /// 五輪 verify 換來的 symlink／firmlink／inode 身分處理），而 LTMIndex 刻意不
 /// 依賴 LTMMemory——索引不該看得到事件儲存。
 ///
-/// 兩個被否決的替代方案，理由留著免得日後有人「順手簡化」：
-///
-/// 1. **LTMIndex 直接依賴 LTMMemory**——會讓索引看得到 `FileEventStore`。依賴
-///    宣告是那條紀律唯一的執行點（見 Package.swift 檔頭）。
-/// 2. **在 LTMIndex 自己寫一份路徑檢查**——那段邏輯被 symlink、`..`、dangling
-///    link、firmlink 各咬過一次。複製它等於保證兩份實作日後會漂移，而漂移的
-///    方向是「其中一份放行了不該放行的路徑」，且不會有任何錯誤訊息。
-///
-/// 所以：需求在這裡宣告，實作由 facade 注入。
-public protocol CorpusContainmentPolicy: Sendable {
-    func isInsideReadOnlyCorpus(_ url: URL) -> Bool
-}
+/// 需求協定 `CorpusContainmentPolicy` **已移到 `LTMCore`**（#27）：記憶層需要
+/// 同一個形狀，而 `LTMIndex` 與 `LTMMemory` 是同層，共用一份宣告的唯一位置是
+/// 底層模組。被否決的替代方案與理由跟著搬過去了。
 
 /// 衍生產物的根。**所有**索引輸出都必須經過這裡取得路徑。
 ///

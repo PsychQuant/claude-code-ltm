@@ -45,6 +45,27 @@ public enum EventStoreError: Error, Sendable {
 /// 不變式 1 說「`~/.claude/projects/` 唯讀，出現任何寫入路徑就是 bug」。#1 的
 /// verify 指出：在 `FileEventStore(url:)` 吃任意 URL 的情況下，那個寫入路徑
 /// **就是公開 API 的一部分**，不是呼叫端紀律問題。所以把檢查放進建構子。
+/// 語料圍籬的**實作**：預設根，加上呼叫端知道而 library 層不知道的實際根。
+///
+/// 判定本身住在 `CorpusLocation.isInside(_:root:)`，這裡只做「檢查哪些根」。
+/// 兩者分開的理由是 #27：`FileEventStore` 先前直接呼叫固定預設根的版本，於是
+/// `LTM_CORPUS_ROOT` 指到別處時，守衛檢查的是**錯的樹**——而放行的方向正是
+/// 危險的那一邊（事件寫進唯讀語料）。
+///
+/// **預設根永遠檢查，額外根是加上去的**，不是取代。覆寫語料根不該放寬任何守衛。
+public struct CorpusPolicy: CorpusContainmentPolicy {
+    private let additionalRoots: [URL]
+
+    public init(corpusRoots: [URL] = []) {
+        self.additionalRoots = corpusRoots
+    }
+
+    public func isInsideReadOnlyCorpus(_ url: URL) -> Bool {
+        if CorpusLocation.isInsideReadOnlyCorpus(url) { return true }
+        return additionalRoots.contains { CorpusLocation.isInside(url, root: $0) }
+    }
+}
+
 public enum CorpusLocation {
     public static var readOnlyRoot: URL {
         URL(fileURLWithPath: NSHomeDirectory())
@@ -212,8 +233,14 @@ public struct FileEventStore: EventStore {
     ///
     /// 守衛的**實作**在 `CanonicalStore.validatedPath`：同一條規則現在有兩個
     /// 存放檔要遵守（events 與 presentations），複製一份就是複製一份會漂移的規格。
-    public init(url: URL) throws {
-        self.url = try CanonicalStore.validatedPath(url)
+    /// - Parameter policy: 語料圍籬。**預設只認預設語料根**，與 #27 之前的行為
+    ///   相同；知道實際語料根的呼叫端（facade、CLI）必須傳一個涵蓋它的 policy，
+    ///   否則守衛檢查的是錯的樹。
+    ///
+    ///   預設值刻意保留：`FileEventStore` 是公開 API，而「不傳就沒有保護」比
+    ///   「不傳就用預設根」更糟。預設值給的是**下界**，不是完整保護。
+    public init(url: URL, policy: any CorpusContainmentPolicy = CorpusPolicy()) throws {
+        self.url = try CanonicalStore.validatedPath(url, policy: policy)
     }
 
     /// 每次呼叫新建 encoder。

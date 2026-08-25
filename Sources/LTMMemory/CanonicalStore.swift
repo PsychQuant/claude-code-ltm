@@ -29,7 +29,9 @@ public enum CanonicalStore {
     /// 先正規化成絕對路徑再檢查：相對 URL 會讓守衛檢查的字串與 `open()` 實際
     /// 走的路徑**不是同一條**（守衛看 `pathComponents`，kernel 看 cwd + 相對路徑），
     /// 於是檢查通過而寫入落在別處（#1 verify R3）。
-    public static func validatedPath(_ url: URL) throws -> URL {
+    public static func validatedPath(
+        _ url: URL, policy: any CorpusContainmentPolicy = CorpusPolicy()
+    ) throws -> URL {
         // **只補絕對路徑，不做正規化。** `standardizedFileURL` 會把 `..` 字面
         // 消解，而 `..` 在 symlink 之後的語意是「解析後那個目錄的父層」——
         // 用它等於重新引入 R2 修掉的那個穿透（我第一版就這樣寫，被
@@ -40,7 +42,9 @@ public enum CanonicalStore {
             ? url.path
             : FileManager.default.currentDirectoryPath + "/" + url.path
         let absolute = URL(fileURLWithPath: absolutePath)
-        guard !CorpusLocation.isInsideReadOnlyCorpus(absolute) else {
+        // **經 policy 而不是直接呼叫預設根版本**（#27）：語料根可被覆寫，而
+        // library 層不知道它被覆寫到哪。
+        guard !policy.isInsideReadOnlyCorpus(absolute) else {
             throw EventStoreError.pathInsideReadOnlyCorpus(path: absolute.path)
         }
         // **檔案 0o600 擋不住一個誰都能寫的目錄**（#1 verify R5）。權限檢查

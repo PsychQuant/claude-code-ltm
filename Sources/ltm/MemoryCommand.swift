@@ -55,7 +55,7 @@ enum MemoryCommand {
                 print("（沒有事件檔：\(url.path)）")
                 return LTMCommandLine.ExitCode.success.rawValue
             }
-            let store = try FileEventStore(url: url)
+            let store = try FileEventStore(url: url, policy: CommandSupport.corpusPolicy())
             let result = try store.allEvents(skippingUnusable: true)
 
             print("事件檔：\(url.path)")
