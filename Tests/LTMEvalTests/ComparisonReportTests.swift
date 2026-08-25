@@ -604,3 +604,22 @@ private func event(
     #expect(report.skipped.fromNullComparison == 0)
     #expect(report.skipped.presentationNotTracked == 0, "保留值不該被判成不一致")
 }
+
+@Test func aStrategyPresentedButNeverInteractedWithAppearsAsZeroRatherThanVanishing() throws {
+    // #21 item 3：報告先前只從**事件**建 key，所以一個確實被呈現、卻一次都沒被
+    // 互動的策略整列消失。讀者看到的是「沒有這一列」——那讀成「這個策略沒參加」，
+    // 而事實是「參加了，沒被選過」。兩者意思完全不同。
+    let r = try presentation(.cjk2char, a: evalAnchor("a"), b: evalAnchor("b"))
+    // 只有 archival 那一側被開啟；human-like 一次事件都沒有。
+    let onlyArchival = Event.interaction(
+        .opened, anchor: evalAnchor("a"), at: evalInstant,
+        generation: evalGeneration, policy: .interleaved, presentation: r.id)
+
+    let report = try ComparisonScorer.report(records: [r], events: [onlyArchival])
+    let row = try #require(report.classRows.first { $0.queryClass == .cjk2char })
+
+    let quiet = try #require(row.scores[humanLike], "零事件的策略必須出現，值為 0")
+    #expect(quiet.credits == 0)
+    #expect(quiet.penalties == 0)
+    #expect(try #require(row.scores[archival]).credits == 1)
+}

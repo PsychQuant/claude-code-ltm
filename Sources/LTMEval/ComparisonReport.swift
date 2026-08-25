@@ -356,7 +356,40 @@ public enum ComparisonScorer {
         }
         let correctedPreferences: [RankingPolicyID: Double]? = corrected.isEmpty ? nil : corrected
 
-        let allKeys = Set(credits.keys).union(penalties.keys).union(presented.keys)
+        // **從紀錄補種子，不只從事件**（#21 item 3）。
+        //
+        // `credits` / `penalties` / `presented` 全是事件推導的，所以一個確實被
+        // 呈現、但一次都沒被互動的策略連 key 都沒有——它整列從報告裡消失。
+        // 讀者看到的是「沒有這一列」，而那與「這一列是 0」意思完全不同：前者
+        // 讀成「這個策略沒參加」，後者讀成「參加了，沒被選過」。
+        //
+        // null comparison 的紀錄一樣要算：它們也是**被呈現過**的，只是依 spec
+        // 不得歸屬。把它們排除會讓「這個類別下大部分呈現是平手」變成看不見。
+        var seededKeys: Set<Key> = []
+        for record in records where !record.isNullComparison {
+            // **null comparison 不補種**，而這一條是被既有測試逼出來的：第一版
+            // 對所有紀錄補種，於是 `nullComparisonsAreExcludedFromScoring` 變紅
+            // ——它斷言 null-only 的報告完全沒有列，而那個斷言是對的。
+            //
+            // 理由：`presented` 數的是 `shown` 事件。null comparison 產出的
+            // `presented: 0` 會讀成「零曝光」，而實際上有曝光、只是依 spec 不得
+            // 歸屬。用一個會被誤讀的 0 取代「沒有這一列」，不比原本好。
+            //
+            // 補種要解的是另一種情形：**這次比較有真實歸屬，而其中一個策略一次
+            // 都沒被互動**。那時「沒有這一列」讀成「這個策略沒參加」，而事實是
+            // 「參加了，沒被選過」——兩者意思完全不同。
+            //
+            // 用 `strategyA` / `strategyB` 而不是 `attribution` 的 `creditedTo`：
+            // 後者對個別位置可以是 `nil`，而我們要的是「這次比較有哪兩個策略」。
+            for policy in [record.strategyA, record.strategyB] {
+                seededKeys.insert(
+                    Key(
+                        policy: policy, queryClass: record.queryClass,
+                        generation: record.generation))
+            }
+        }
+        let allKeys =
+            Set(credits.keys).union(penalties.keys).union(presented.keys).union(seededKeys)
 
         func table(_ filter: (Key) -> Bool) -> ComparisonReport.StrategyScoreTable {
             var result: ComparisonReport.StrategyScoreTable = [:]
