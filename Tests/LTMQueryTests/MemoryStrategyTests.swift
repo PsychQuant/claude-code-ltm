@@ -515,8 +515,21 @@ private struct HistoryFabricator: MemoryStrategy {
     //
     // `misreportedDisplacement` 的存在理由逐字是「provenance 若可以說謊，比較
     // 實驗讀到的就不是實際發生的事」，而那條理由對 history 一樣適用。
-    #expect(throws: StrategyViolation.self) {
+    // **斷言具體是哪一個違規。** 第一版寫 `throws: StrategyViolation.self`，而
+    // 變異測試當場證明它為錯的理由通過：`"history-fabricator"` 當時不在
+    // `testIdentifiers` 裡，所以 seam 拋的是 `unauthorizedStrategy`——把 history
+    // 檢查整條關掉，這條測試照樣綠。
+    //
+    // 與 #22 item 9 是同一個形狀（`throws: (any Error).self` 分辨不出是哪一個），
+    // 而我在修完那一條之後的同一個工作階段又犯了一次。
+    do {
         _ = try HistoryFabricator().rerank(candidates(["a", "b"]), with: .empty(at: instant))
+        Issue.record("編造的 history 應該被擋下來")
+    } catch let violation as StrategyViolation {
+        guard case .misreportedHistory = violation else {
+            Issue.record("擋下來了，但不是因為 history：\(violation)")
+            return
+        }
     }
 }
 

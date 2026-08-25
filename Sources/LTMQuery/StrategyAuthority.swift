@@ -158,7 +158,7 @@ public enum StrategyRegistry {
     static let testIdentifiers = [
         "identity-probe", "lying", "band-crossing", "set-changing",
         "far-jumping", "movement-liar", "negative-bound", "misbehaving",
-        "rogue", "truncating",
+        "rogue", "truncating", "history-fabricator",
     ]
 
     /// 碰這個屬性即完成註冊。回傳值無意義，重點是初始化的副作用。
