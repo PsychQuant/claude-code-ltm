@@ -10,31 +10,25 @@ func defaultCorpusRootHonoursTheConfigDirectoryOverride() throws {
     // 先前 `readOnlyRoot` 寫死 `$HOME/.claude/projects`。使用者搬過設定目錄之後，
     // 守衛看的是一個**空目錄**——「不得寫進語料」整條靜默失效，而失效的方向是
     // 放行：真正的語料落在別處，路徑檢查對它沒有意見。
-    let sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("ltm-config-dir-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: sandbox) }
-
-    let previous = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]
-    setenv("CLAUDE_CONFIG_DIR", sandbox.path, 1)
-    defer {
-        if let previous { setenv("CLAUDE_CONFIG_DIR", previous, 1) } else {
-            unsetenv("CLAUDE_CONFIG_DIR")
-        }
-    }
-
-    let root = CorpusLocation.readOnlyRoot
-    #expect(root.deletingLastPathComponent().path == sandbox.path)
-    #expect(root.lastPathComponent == "projects")
-
-    // 而圍籬要跟著動：搬過去之後，那棵樹底下的路徑必須被擋。
     //
-    // 這棵樹要真的存在：圍籬用 `(st_dev, st_ino)` 比身分，而一個不存在的目錄
-    // 沒有 inode 可比。那不是弱點——不存在的語料沒有東西需要保護——但它是這條
-    // 測試必須自己滿足的前提，寫出來免得下一個人以為斷言在驗別的東西。
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let insideRelocated = root.appendingPathComponent("a-project/events.jsonl")
-    #expect(CorpusPolicy().isInsideReadOnlyCorpus(insideRelocated))
+    // **這條不動 `CLAUDE_CONFIG_DIR`**。第一版動了，而那個環境變數是 process
+    // 全域的、swift-testing 預設平行跑——於是它讓
+    // `multiHopDanglingSymlinkChainIsFollowedToTheEnd` 三次跑紅一次。純函式版本
+    // 把環境當參數收，測試因此不必污染別人。
+    let relocated = CorpusLocation.readOnlyRoot(
+        configDirectory: "/somewhere/else/.claude", home: "/unused")
+    #expect(relocated.path == "/somewhere/else/.claude/projects")
+
+    // 沒設時退回 `$HOME/.claude/projects`。
+    let fallback = CorpusLocation.readOnlyRoot(configDirectory: nil, home: "/Users/probe")
+    #expect(fallback.path == "/Users/probe/.claude/projects")
+
+    // 而生產路徑讀的就是這個函式——兩者不得分岔。
+    #expect(
+        CorpusLocation.readOnlyRoot
+            == CorpusLocation.readOnlyRoot(
+                configDirectory: ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"],
+                home: NSHomeDirectory()))
 }
 
 @Test("symlink 迴圈耗盡預算時解析回 nil，讓 fail-closed 分支真的可達")

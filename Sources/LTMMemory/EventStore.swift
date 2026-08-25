@@ -76,12 +76,26 @@ public enum CorpusLocation {
     /// 這是**預設值**，不是唯一的根：語料根還可以被 facade 覆寫（`CorpusPolicy`
     /// 的額外根，#27）。兩者都要檢查。
     public static var readOnlyRoot: URL {
-        let configDirectory =
-            ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"].map {
-                URL(fileURLWithPath: $0)
-            }
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude")
-        return configDirectory.appendingPathComponent("projects")
+        readOnlyRoot(
+            configDirectory: ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"],
+            home: NSHomeDirectory())
+    }
+
+    /// 上面那個的**純函式版本**，環境由呼叫端給。
+    ///
+    /// 分出來是為了讓測試不必動 `CLAUDE_CONFIG_DIR`（#20 item 5 的測試原本會改
+    /// 它）。那個環境變數是 **process 全域**的，而 swift-testing 預設平行跑，
+    /// 所以一個改它的測試會讓**任何同時在讀 `readOnlyRoot` 的測試**看到被搬走
+    /// 的根——實測：`multiHopDanglingSymlinkChainIsFollowedToTheEnd` 三次跑紅
+    /// 一次。
+    ///
+    /// **偶爾成功的測試比偶爾失敗的更糟**（`CLAUDE.md`），而這裡兩者都會發生：
+    /// 受害者偶爾紅，而改環境的那條在別人沒同時跑時偶爾綠得毫無根據。
+    static func readOnlyRoot(configDirectory: String?, home: String) -> URL {
+        let base =
+            configDirectory.map { URL(fileURLWithPath: $0) }
+            ?? URL(fileURLWithPath: home).appendingPathComponent(".claude")
+        return base.appendingPathComponent("projects")
     }
 
     /// 判斷路徑是否落在語料根底下，**逐層解析 symlink**。
