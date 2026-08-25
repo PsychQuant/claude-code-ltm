@@ -578,3 +578,26 @@ private func replacingHexValue(in line: String, with replacement: String) -> Str
         _ = Anchor(source: "s", turn: turn, span: 3..<6)  // 只涵蓋三個空白
     }
 }
+
+@Test func anOutOfBoundsSpanTrapsNamingTheSpanRatherThanTheEmptyDigest() async {
+    // #22 item 11：這個修復（`Turn.slice(...) ?? ""` → `guard let`）**沒有任何鎖**。
+    // 實測把它整個 revert，414 條全綠。
+    //
+    // 原因是兩版在**行為上不可分辨**：`?? ""` 產出的 `sha256("")` 會被下游的空
+    // 摘要守衛擋下，所以兩者都 trap，`processExitsWith: .failure` 兩邊都滿足。
+    //
+    // 能分辨的只有**訊息**，而那正是這個修復買到的東西：越界是呼叫端給錯了，
+    // 不是語料變了。舊版把它報成一個永遠 orphan 的紀錄、orphan 原因顯示為
+    // `.spanOutOfBounds`——看起來像語料變了。訊息指名 span 與長度，讀者才知道
+    // 該去看呼叫端。
+    let result = await #expect(
+        processExitsWith: .failure,
+        observing: [\.standardErrorContent],
+        performing: {
+            let turn = Turn(
+                id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "abc")
+            _ = Anchor(source: "s", turn: turn, span: 0..<99)  // 越界
+        })
+    let stderr = String(decoding: result?.standardErrorContent ?? [], as: UTF8.self)
+    #expect(stderr.contains("越界"), "訊息必須指名越界，而不是報成空摘要")
+}
