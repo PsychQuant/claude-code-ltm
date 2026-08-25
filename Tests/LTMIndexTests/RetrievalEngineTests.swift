@@ -25,13 +25,27 @@ func fusionRanksMultiChannelHitsHigher() throws {
 
     // 融合分數必須隨命中通道數單調——這是 production 融合邏輯的性質，
     // 不是測試自己算出來的。
+    // **前提失敗必須變紅，不能靜默跳過**（#28）。先前這裡是 `if let ... , let ...`
+    // ——兩個綁定任一失敗，核心斷言就**完全不執行而測試通過**。那正是「不可能失敗的
+    // 測試」的形狀：它在覆蓋率與閱讀上都算數，於是那個性質看起來有人守。
+    //
+    // 語料若哪天變成「沒有多通道命中」或「沒有單通道命中」，這條測試該告訴我們，
+    // 而不是安靜地什麼都不驗。
     let byChannelCount = Dictionary(grouping: hits, by: { $0.channels.count })
-    if let multi = byChannelCount.filter({ $0.key > 1 }).values.flatMap({ $0 }).max(by: { $0.fusedScore < $1.fusedScore }),
-       let single = byChannelCount[1]?.max(by: { $0.fusedScore < $1.fusedScore })
-    {
-        #expect(multi.fusedScore > single.fusedScore,
-                "命中越多通道，RRF 分數應越高——這是融合實作的性質")
+    guard
+        let multi = byChannelCount.filter({ $0.key > 1 }).values.flatMap({ $0 })
+            .max(by: { $0.fusedScore < $1.fusedScore })
+    else {
+        Issue.record("前提不成立：這份語料沒有任何多通道命中，融合單調性無從驗起")
+        return
     }
+    guard let single = byChannelCount[1]?.max(by: { $0.fusedScore < $1.fusedScore }) else {
+        Issue.record("前提不成立：這份語料沒有任何單通道命中，融合單調性無從驗起")
+        return
+    }
+    #expect(
+        multi.fusedScore > single.fusedScore,
+        "命中越多通道，RRF 分數應越高——這是融合實作的性質")
     // 名次連續。
     #expect(hits.map(\.emittedRank) == Array(0..<hits.count))
     // **band-major**：先相關度層，層內才是融合分數降冪。

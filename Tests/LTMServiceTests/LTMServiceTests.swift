@@ -357,8 +357,37 @@ func usageHistorySurvivesSessionResume() throws {
     // 關鍵：resume 之後，先前記錄的 anchor 仍然指向同一段內容。
     let second = try service.query(text: "跨越 resume", limit: 10, scope: .allProjects)
     let nowAnchors = Set(second.hits.map(\.anchor))
-    #expect(!recordedAnchors.isDisjoint(with: nowAnchors),
-            "resume 後 anchor 對不上 —— 使用歷史會安靜蒸發，正是 B3 的病灶")
+
+    // **先前這裡只有一條 `!isDisjoint`（#28）**——「有交集」。那比要保住的性質弱兩步：
+    // 這個 change 要保住的不是「anchor 字串沒變」，是**使用歷史還在**，而中間還有
+    //   (a) 那些 anchor 解不解析得回 turn
+    //   (b) 事件有沒有被 projection 計入
+    // 兩者任一斷掉，`!isDisjoint` 照樣綠。以下把兩步都斷言出來。
+
+    // (0) 從「有交集」收緊成「**全部倖存**」。resume 不刪東西，所以先前記錄的每一個
+    //     anchor 都該還在——有交集可能只是碰巧有一筆對上。
+    #expect(
+        recordedAnchors.isSubset(of: nowAnchors),
+        "resume 後有 anchor 消失 —— 使用歷史會安靜蒸發，正是 B3 的病灶")
+
+    // (a) anchor 解析得回 turn：命中帶得出 snippet 與四元組指標，就代表它 dereference
+    //     成功了（`QueryHit` 是由 anchor 對照 `scored` 建出來的，見不變式 3）。
+    for hit in second.hits where recordedAnchors.contains(hit.anchor) {
+        #expect(!hit.snippet.isEmpty, "anchor 解析不回內容 —— 指標還在但指向空的")
+        #expect(!hit.uuid.isEmpty)
+        #expect(!hit.sessionSources.isEmpty)
+    }
+
+    // (b) resume 真的被偵測到：同一則 turn 現在活在**兩份**檔裡，所以它的來源集合
+    //     應該有兩個元素。這條同時證明 (0) 的倖存不是因為 resume 沒被看見。
+    let shared = second.hits.first { recordedAnchors.contains($0.anchor) }
+    guard let shared else {
+        Issue.record("前提不成立：沒有任何命中屬於先前記錄的 anchor")
+        return
+    }
+    #expect(
+        shared.sessionSources.count == 2,
+        "resume 後來源集合仍只有一個元素——那代表新檔案沒被認出來，這條測試的前提沒成立")
 }
 
 // MARK: - Task 3.1/3.2：band 語意與策略生效（B1 的回歸鎖）
@@ -378,11 +407,15 @@ func bandIsDerivedFromChannelCount() throws {
     let outcome = try service.query(text: "記憶策略", limit: 10, scope: .allProjects)
     #expect(!outcome.hits.isEmpty)
 
-    // 核心斷言：band 不再等於名次。名次必然 0,1,2,...；band 是分層，會有重複值。
-    let bands = outcome.hits.map(\.band)
-    #expect(bands != Array(0..<outcome.hits.count),
-            "band 等於名次 ⇒ 每筆自成一帶 ⇒ 任何策略都動不了任何東西（B1）")
-
+    // **排除法斷言已刪除**（#28）。先前這裡有一條
+    // `bands != Array(0..<outcome.hits.count)`——「band 不等於名次」。它剛好抓得到
+    // 當時那個 bug（舊實作的 band 就是融合名次），但它是**排除法**：它只說 band
+    // 不是某一個特定的錯值，沒說它是什麼。
+    //
+    // **接手的是下面那條正面斷言**：`band == 3 - channels.count`。它蘊含排除法那條
+    // ——通道數 ∈ {1,2,3} 所以 band ∈ {0,1,2}，命中超過三筆時就不可能等於名次序列。
+    // 跨帶排序另由 `queryOutputIsBandMajorOnInvertedCorpus` 驗（含前提檢查）。
+    //
     // 命中通道數越多，band 越高（數值越小）。
     for hit in outcome.hits {
         let expectedBand = 3 - hit.channels.count
