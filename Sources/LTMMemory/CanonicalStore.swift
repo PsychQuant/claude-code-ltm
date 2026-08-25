@@ -206,24 +206,45 @@ public enum CanonicalStore {
         // 而我們用一個較弱的 `fsync` 蓋過它、回報成功。退回的理由是「這個平台
         // 做不到更強的保證」，不是「這次寫入失敗了」——兩者混在一起，後者就
         // 永遠不會被看見。
-        if fcntl(fd, F_FULLFSYNC) != 0 {
-            let fullsyncErrno = errno
-            switch fullsyncErrno {
-            case ENOTSUP, EINVAL, EOPNOTSUPP:
-                guard fsync(fd) == 0 else {
-                    throw EventStoreError.appendFailed(
-                        path: url.path, underlying: "fsync 失敗：errno \(errno)（資料可能未落盤）")
-                }
-            default:
-                throw EventStoreError.appendFailed(
-                    path: url.path,
-                    underlying: "F_FULLFSYNC 失敗：errno \(fullsyncErrno)（資料可能未落盤）")
-            }
-        }
+        try syncToDevice(fd: fd, path: url.path)
 
         // **新建檔案時，目錄項本身也要落盤。** 只 fsync 檔案而不 fsync 目錄，
         // 斷電後可能出現「檔案內容在、但目錄裡沒有這個名字」。成本是一次
         // syscall，且只在這條路徑上。
+        try fsyncDirectory(of: url)
+    }
+
+    /// 把一個 fd 的內容真正推到裝置上。
+    ///
+    /// **一個寫者**（#31）：`appendLine` 與 `FileEventStore.pruneUnusable` 先前各有
+    /// 一份，而 prune 那份是純 `fsync`——同一份持久性規格的兩個實作，其中一個弱。
+    static func syncToDevice(fd: Int32, path: String) throws {
+        // `F_FULLFSYNC` 在某些檔案系統／掛載上回 ENOTSUP，那時退回 `fsync`
+        // ——那是平台能力的限制，不是我們的錯誤，但要退得明白而不是靜默。
+        //
+        // **只有能力不足才退回**（#20 item 2）。先前是「任何 errno 都退回」，
+        // 於是 `EIO` 這種真正的 IO 錯誤也走同一條路：裝置根本沒把資料寫下去，
+        // 而我們用一個較弱的 `fsync` 蓋過它、回報成功。
+        guard fcntl(fd, F_FULLFSYNC) != 0 else { return }
+        let fullsyncErrno = errno
+        switch fullsyncErrno {
+        case ENOTSUP, EINVAL, EOPNOTSUPP:
+            guard fsync(fd) == 0 else {
+                throw EventStoreError.appendFailed(
+                    path: path, underlying: "fsync 失敗：errno \(errno)（資料可能未落盤）")
+            }
+        default:
+            throw EventStoreError.appendFailed(
+                path: path,
+                underlying: "F_FULLFSYNC 失敗：errno \(fullsyncErrno)（資料可能未落盤）")
+        }
+    }
+
+    /// 讓一個檔案的**目錄項**落盤。
+    ///
+    /// 只 fsync 檔案不 fsync 目錄，斷電後可能出現「檔案內容在、但目錄裡沒有這個
+    /// 名字」。對備份檔而言那正好是它要防的那個窗口（#31）。
+    static func fsyncDirectory(of url: URL) throws {
         // **解析後的父層，不是字面的**（#20 item 3）。葉節點是 symlink 時，
         // 字面父層是「連結所在的目錄」，而目錄項實際建立在**目標所在的目錄**。
         // 同一個檔案裡的權限檢查早就改用 `fullyResolve` 了，這裡落後約 140 行
@@ -236,6 +257,7 @@ public enum CanonicalStore {
             _ = fsync(dirFD)
         }
     }
+
 
     /// 確認開到的是一般檔案，且權限收到 owner-only。
     ///

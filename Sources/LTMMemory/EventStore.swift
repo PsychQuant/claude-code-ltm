@@ -331,8 +331,26 @@ public struct FileEventStore: EventStore {
     /// 在呼叫這裡之前一定先備份。兩者相比，並發靜默丟資料比崩潰窗口糟得多：
     /// 前者無聲、日常可達，後者有備份且需要剛好崩在幾毫秒內。
     @discardableResult
-    public func pruneUnusable() throws -> (kept: Int, corruptLines: [Int], supersededLines: [Int]) {
-        guard FileManager.default.fileExists(atPath: url.path) else { return (0, [], []) }
+    /// - Returns: 保留筆數、丟掉的行號，以及**這次修剪建立的備份**（沒有東西可丟
+    ///   時為 `nil`——沒有覆寫就沒有需要保險的窗口）。
+    ///
+    /// ## 備份是這個方法的責任，不是呼叫端的（#31）
+    ///
+    /// 先前備份寫在 `ltm memory` 裡，而這裡只有一則「呼叫端必須先備份」的註解。
+    /// **一條叫呼叫端別走某條路的註解，遠弱於把那條路拆掉**：任何繞過 CLI 直接
+    /// 呼叫的路徑（含日後的 MCP server）都沒有保險，而就地覆寫的崩潰窗口對它們
+    /// 一樣存在。
+    ///
+    /// 備份在**獨占鎖內、用剛讀到的那份 bytes** 寫出，所以「備份 == 即將被覆寫的
+    /// 內容」是由構造保證的，不是靠兩次讀取碰巧一致——先前的 `copyItem` 是另一次
+    /// 獨立讀取，中間可以有 append。
+    ///
+    /// 備份未確認落地就**中止修剪**（原檔一個 byte 都沒動）。記憶層是本 repo 唯一
+    /// 不可重建的資料，判準因此不是「崩潰機率多低」而是「崩潰之後還剩什麼」。
+    public func pruneUnusable() throws -> (
+        kept: Int, corruptLines: [Int], supersededLines: [Int], backup: URL?
+    ) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return (0, [], [], nil) }
         let fd = open(url.path, O_RDWR | O_NONBLOCK)
         guard fd >= 0 else {
             throw EventStoreError.readFailed(
@@ -385,7 +403,46 @@ public struct FileEventStore: EventStore {
                 corrupt.append(index + 1)
             }
         }
-        guard !corrupt.isEmpty || !superseded.isEmpty else { return (kept.count, [], []) }
+        guard !corrupt.isEmpty || !superseded.isEmpty else { return (kept.count, [], [], nil) }
+
+        // ── 備份，並且確認它真的在磁碟上，才動原檔 ──
+        let backup = url.appendingPathExtension(
+            "bak-\(UUID().uuidString.prefix(8))")
+        let backupFD = open(backup.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard backupFD >= 0 else {
+            throw EventStoreError.appendFailed(
+                path: backup.path, underlying: "無法建立備份：errno \(errno)（未修剪）")
+        }
+        do {
+            try bytes.withUnsafeBytes { raw in
+                var offset = 0
+                while offset < raw.count {
+                    let n = write(backupFD, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                    if n > 0 { offset += n } else if n < 0, errno == EINTR { continue } else {
+                        throw EventStoreError.appendFailed(
+                            path: backup.path, underlying: "備份寫入失敗：errno \(errno)（未修剪）")
+                    }
+                }
+            }
+            try CanonicalStore.syncToDevice(fd: backupFD, path: backup.path)
+        } catch {
+            close(backupFD)
+            try? FileManager.default.removeItem(at: backup)
+            throw error
+        }
+        close(backupFD)
+        // 目錄項也要落盤，否則備份可能「內容在、名字不在」——正好是它要防的窗口。
+        try CanonicalStore.fsyncDirectory(of: backup)
+
+        // **讀回來比對。** `write` 回傳成功不等於磁碟上的內容等於我們手上的；
+        // 而備份是就地覆寫的唯一保險，一份沒被確認過的保險等於沒有保險。
+        let readback = try CanonicalStore.readRegularFile(at: backup)
+        guard readback == bytes else {
+            try? FileManager.default.removeItem(at: backup)
+            throw EventStoreError.appendFailed(
+                path: backup.path,
+                underlying: "備份內容與原檔不符（\(readback.count) vs \(bytes.count) bytes）——未修剪")
+        }
 
         var payload = Data()
         for event in kept {
@@ -408,11 +465,11 @@ public struct FileEventStore: EventStore {
                 }
             }
         }
-        guard fsync(fd) == 0 else {
-            throw EventStoreError.appendFailed(
-                path: url.path, underlying: "fsync 失敗：errno \(errno)")
-        }
-        return (kept.count, corrupt, superseded)
+        // 與 `append` 走同一個 helper（#31 附帶發現）：先前這裡是純 `fsync`，
+        // 而 append 用 `F_FULLFSYNC`——同一份持久性規格的兩個實作，弱的那個
+        // 剛好在唯一會覆寫既有資料的路徑上。
+        try CanonicalStore.syncToDevice(fd: fd, path: url.path)
+        return (kept.count, corrupt, superseded, backup)
     }
 
     public func allEvents() throws -> [Event] {

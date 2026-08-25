@@ -99,23 +99,23 @@ enum MemoryCommand {
                 return LTMCommandLine.ExitCode.usageError.rawValue
             }
 
-            // **先備份再改**。這是 canonical 資料，而被丟掉的那幾筆裡，「舊規則」
-            // 那一類的內容仍然是真的——只是指向一個已經不成立的定址方式。日後若
-            // 有人寫得出遷移，備份是唯一還原得回來的東西。
+            // **備份由 `pruneUnusable` 自己做**（#31）。先前這裡有一次
+            // `copyItem`，而那是**另一次獨立讀取**——與即將被覆寫的內容之間隔著
+            // 一個可以有 append 的窗口。現在備份在獨占鎖內、用剛讀到的那份 bytes
+            // 寫出，並且確認落地與內容相符之後才動原檔。
             //
-            // 備份也是就地覆寫的崩潰窗口的唯一保險：`pruneUnusable` 為了不換 inode
-            // （換掉會讓 `append` 的 flock 失效）放棄了原子替換。
-            let backup = url.appendingPathExtension(
-                "bak-\(UUID().uuidString.prefix(8))-\(Int(Date().timeIntervalSince1970))")
-            try FileManager.default.copyItem(at: url, to: backup)
-
+            // 這也讓保險不再依賴呼叫端記得做：任何繞過本命令直接呼叫的路徑
+            // （含日後的 MCP server）都吃得到同一份保障。
+            //
             // **上面那次讀取的結果不拿來當寫入依據。** `pruneUnusable` 自己在
             // 獨占鎖內重讀一次——先前是「讀完、放鎖、再把讀到的寫回去」，中間任何
             // 一筆 append 都會被靜默丟掉。
             let pruned = try store.pruneUnusable()
             let dropped = pruned.corruptLines.count + pruned.supersededLines.count
             print("")
-            print("  ✓ 已備份原檔：\(backup.lastPathComponent)")
+            if let backup = pruned.backup {
+                print("  ✓ 已備份原檔：\(backup.lastPathComponent)")
+            }
             print("  ✓ 保留 \(pruned.kept) 筆可用紀錄，丟掉 \(dropped) 筆")
             if dropped != unusable {
                 print("    （與上面的清單不同：修剪在獨占鎖內重讀了一次，期間檔案有變動）")
