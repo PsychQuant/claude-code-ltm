@@ -154,20 +154,51 @@ private struct RogueStrategy: MemoryStrategy {
     private let authorized = StrategyRegistry.readyForTesting
     let consumedSignals: Set<EventKind> = []
 
-    let displacementBound = 99
+    /// **上限由 mode 決定，因為現在是 seam 在讀它**（#22 item 13）。
+    ///
+    /// 先前這裡寫死 99，而 `.jumpFourPlaces(bound:)` 的那個值是傳給 double
+    /// 自己的守衛呼叫的——於是「超過上限會被擋」那條測試釘的是 double 的參數，
+    /// seam 看到的一直是 99。拿掉自願呼叫之後它當場變綠（沒有錯誤被拋），
+    /// 這條測試因此從來沒有測到它宣稱的東西。
+    var displacementBound: Int {
+        switch mode {
+        case .crossBand: return 99
+        case .jumpFourPlaces(let bound): return bound
+        }
+    }
+
+    /// **這個 double 刻意不呼叫 `RankingGuard`**（#22 item 13）。
+    ///
+    /// 先前它自己呼叫守衛再回傳結果，於是「守衛會擋」那兩條測試釘住的是**這個
+    /// double 的自願呼叫**，不是 seam 的強制——把 seam 那一段整個刪掉，測試照樣
+    /// 綠。那正是本 repo 反覆抓到的「回歸鎖裝在 helper 上、生產路徑那行可以整行
+    /// 刪掉」。
+    ///
+    /// 現在它只回傳違規的排列，誠實回報自己的位移，讓 seam 去擋。
     func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws -> [RankedResult] {
         let candidates = input.candidates
+        let reordered: [Candidate]
         switch mode {
         case .crossBand:
-            let reordered = Array(candidates.reversed())  // 把第 1 帶推到第 0 帶前面
-            return try RankingGuard.check(original: candidates, reordered: reordered, bound: 99)
-                .map { RankedResult(candidate: $0.candidate, displacement: $0.displacement, reason: RankingReason(history: .none, movement: .unmoved)) }
-        case .jumpFourPlaces(let bound):
-            var reordered = candidates
-            let moved = reordered.remove(at: 4)
-            reordered.insert(moved, at: 0)
-            return try RankingGuard.check(original: candidates, reordered: reordered, bound: bound)
-                .map { RankedResult(candidate: $0.candidate, displacement: $0.displacement, reason: RankingReason(history: .none, movement: .unmoved)) }
+            reordered = Array(candidates.reversed())  // 把第 1 帶推到第 0 帶前面
+        case .jumpFourPlaces:
+            var shuffled = candidates
+            let moved = shuffled.remove(at: 4)
+            shuffled.insert(moved, at: 0)
+            reordered = shuffled
+        }
+        // 位移誠實回報：這個 double 要被擋的理由是**跨帶／超過上限**，不是說謊。
+        var originalIndex: [Anchor: Int] = [:]
+        for (index, candidate) in candidates.enumerated() { originalIndex[candidate.anchor] = index }
+        return reordered.enumerated().map { newIndex, candidate in
+            let displacement = (originalIndex[candidate.anchor] ?? newIndex) - newIndex
+            let movement: RankingReason.Movement =
+                displacement > 0
+                ? .advanced(positions: displacement)
+                : (displacement < 0 ? .receded(positions: -displacement) : .unmoved)
+            return RankedResult(
+                candidate: candidate, displacement: displacement,
+                reason: RankingReason(history: .none, movement: movement))
         }
     }
 }
