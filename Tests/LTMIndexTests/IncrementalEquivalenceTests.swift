@@ -53,18 +53,25 @@ import Testing
 // - **真實 embedder**。用 `StubEmbedder`，所以向量比對驗的是「同樣的文字得到同樣的
 //   向量、且 `vector_row` 解參考正確」，不是 `NLContextualEmbedding` 的行為。
 // - **崩潰中止**。沒有在建置中途殺掉行程再續跑。
-// - **只有一個 project**。生成器所有檔案都在同一個 project 底下，所以複合唯一鍵
-//   `(project_fingerprint, uuid)` 的「跨 project 同 uuid 不得合併」這一半**完全沒被
-//   走到**——而那正是本 change 的核心改動之一。
-// - **`Snapshot` 不比對 `chunk_sources` 的 `timestamp`**，也不比對 `state.json`。
-//   `timestamp` 是從連結重算的，所以連結本身錯了而重算結果碰巧相同時，這裡
-//   看不見。（`session_id` 自 #25／layout 5 起**有**比對——它從 `chunks` 的
-//   欄位搬到 `chunk_sources`，覆蓋跟著搬。）
-// - **生成語料裡 0% 是會被跳過的行**（工具呼叫、結果、摘要）。真實語料裡那是 46%
-//   （`docs/measurements/2026-08-18-resume-duplication.md`：677,913 解析 / 583,924
-//   跳過），所以跳過路徑與它的計數在這裡零覆蓋。
-// - **lexical 探針的 `ORDER BY` 多了 `c.uuid` 決勝**，生產路徑沒有。那是為了讓比對
-//   穩定，代價是 bm25 同分時 rowid 造成的名次分岔在這裡看不到。
+// **上面四條已於 #29 關閉**（三個 project、`chunk_sources.timestamp` 與 `state.json`
+// 進 `Snapshot`、每個檔混入四種跳過行、`ORDER BY` 拿掉 `c.uuid` 改成按分數分組）。
+// 各自的變異驗證：唯一鍵退回 `uuid` 單獨 → 紅 100；跳過分類漂移 → 紅 100；
+// 續讀位置忘了加 `startOffset` → 紅 92；分組換成裸順序 → 紅 80。
+//
+// 最後那個數字是這次最有資訊的一條：**rowid 造成的組內名次分岔真實且普遍**
+// （100 個 seed 裡 80 個），而舊的 `c.uuid` 決勝把它整個遮住。分組正好容忍那一層、
+// 同時保留跨 tie 的比對。
+//
+// **仍然不涵蓋的**：
+//
+// - **常數性的錯誤**。這是等價性測試的固有限制——它比的是增量與全量，所以一個
+//   對兩側都一樣的錯誤看不見。實測：把 `chunk_sources.timestamp` 寫死 0，100 個
+//   seed 全綠。`timestamp` 進 `Snapshot` 買到的是**路徑相依**的分岔，不是正確性。
+// - **`ON CONFLICT(chunk_id, source_key) DO UPDATE` 那條路徑**。拿掉它的
+//   `timestamp=excluded.timestamp` 之後 100 個 seed 全綠——這個生成器似乎產不出
+//   同一個 `(chunk_id, source_key)` 被插入兩次的情形。那條 SQL 目前無人守。
+// - **跨 tie 的名次分岔**。分組讓它**可見**，但我沒能構造出一個會產生它的變異
+//   （那需要生產端的排序真的分岔），所以「分組抓得到跨 tie 分岔」這半仍未驗證。
 //
 // 要加涵蓋範圍，加的是**變異種類**（生成器）或**比較面向**（`Snapshot`），不是
 // 再寫一條個案測試。這是這個檔案存在的理由。
@@ -112,6 +119,34 @@ private struct TurnSpec {
     }
 }
 
+/// **會被跳過的行**（#29 缺口 3）。
+///
+/// 生成語料先前 0% 是跳過行，而真實語料是 **46%**（677,913 解析 / 583,924 跳過，
+/// 見 `docs/measurements/2026-08-18-resume-duplication.md`）。跳過路徑與它的分類
+/// 計數因此在這個性質測試裡零覆蓋。
+///
+/// 四種各自打到 `SkipTally` 的不同欄位——**分類本身也要在增量與全量之間相同**，
+/// 否則「跳過的理由」會靜默漂移。
+private enum SkipLine: CaseIterable {
+    case notATurn
+    case missingPointerField
+    case malformedIdentifier
+    case unparseableLine
+
+    var text: String {
+        switch self {
+        case .notATurn:
+            return #"{"type":"queue-operation","payload":{"op":"noop"}}"#
+        case .missingPointerField:
+            return #"{"type":"user","message":{"role":"user","content":"缺 uuid 的一行"}}"#
+        case .malformedIdentifier:
+            return #"{"uuid":"not-a-uuid","sessionId":"also-not","timestamp":"2026-08-17T06:00:00Z","type":"user","message":{"role":"user","content":"識別碼形狀不對"}}"#
+        case .unparseableLine:
+            return "{ this is not json"
+        }
+    }
+}
+
 private enum Mutation: CustomStringConvertible {
     case createFile(name: String, turns: [Int])
     /// 整份改寫（前綴雜湊不符 → 該來源被作廢並整份重解）。
@@ -136,6 +171,12 @@ private enum Mutation: CustomStringConvertible {
 /// 語料的當下狀態（檔名 → turn 序列）。用它產生變異，也用它把檔案寫到磁碟。
 private struct CorpusModel {
     var files: [String: [TurnSpec]] = [:]
+    /// 每個檔屬於哪個 project（#29 缺口 1）。
+    ///
+    /// 先前所有檔都在同一個 project 底下，所以複合唯一鍵
+    /// `(project_fingerprint, uuid)` 的「**跨 project 同 uuid 不得合併**」這一半
+    /// 完全沒被驗證過——而那正是引入複合鍵那次改動的核心。
+    var fileProjects: [String: String] = [:]
     private var sessionCounter = 0
 
     mutating func nextSession() -> String {
@@ -171,6 +212,12 @@ private struct Snapshot {
     var ftsAverages: [String]
     /// 每條 lexical 通道對每個探針查詢的名次序列。
     var lexicalRanks: [String]
+    /// `state.json` 的內容（#29 缺口 2）。
+    ///
+    /// 續讀位置錯了不會影響**這一輪**的索引內容，但會影響**下一輪**——而下一輪的
+    /// 錯誤看起來會像是語料自己變了。把它納入比對，讓那個錯誤在發生的那一輪就
+    /// 被看見，而不是在下一輪被誤診。
+    var scanState: [String]
 }
 
 private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> Snapshot {
@@ -211,11 +258,16 @@ private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> S
     // 必須跟著搬過來，否則刪掉 `ChunkRow.sessionID` 等於靜默移除 session 的
     // 不變式 2 覆蓋。（本檔頂端「不比對 chunk_sources 的 session_id」那條
     // 已知限制因此只剩 `timestamp`。）
-    try database.query("SELECT chunk_id, source_key, session_id FROM chunk_sources") { statement in
+    // **`timestamp` 也在這裡比對**（#29 缺口 2）。導航欄位是從連結重算的，所以
+    // 「連結的值錯了、但重算結果碰巧相同」這一類分岔，只比對重算結果看不見。
+    try database.query(
+        "SELECT chunk_id, source_key, session_id, timestamp FROM chunk_sources"
+    ) { statement in
         // chunk_id 是 rowid，跨兩份索引不可比——換成該 chunk 的身分。
         links.append(
             "\(sqlite3_column_int64(statement, 0))|\(String(cString: sqlite3_column_text(statement, 1)))"
-                + "|\(String(cString: sqlite3_column_text(statement, 2)))")
+                + "|\(String(cString: sqlite3_column_text(statement, 2)))"
+                + "|\(sqlite3_column_double(statement, 3))")
     }
     // 把 rowid 換成 (fingerprint, uuid)。
     var identityByRowID: [Int64: String] = [:]
@@ -244,21 +296,46 @@ private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> S
             let pattern = RetrievalEngine.ftsPhrase(
                 table == "chunks_segment" ? Segmentation.segment(probe) : probe)
             guard !pattern.isEmpty else { continue }
-            var hits: [String] = []
+            // **`ORDER BY` 不再帶 `c.uuid` 決勝**（#29 缺口 4）。那個決勝是為了讓
+            // 比對穩定，代價是 **bm25 同分時 rowid 造成的名次分岔在這裡看不到**
+            // ——而 rowid 正是增量與全量重建之間最會不同的東西。
+            //
+            // 改成**按分數分組**：同分的一組比集合（容忍 rowid 造成的組內順序），
+            // 組與組之間比順序（抓得到跨 tie 的分岔）。兩者缺一：只比集合會漏掉
+            // 名次錯亂，只比順序會被 rowid 的無害差異吵死。
+            var grouped: [(score: Double, uuids: Set<String>)] = []
             try database.query(
                 """
-                SELECT c.uuid FROM \(table) f JOIN chunks c ON c.id = f.rowid
-                WHERE f.\(table) MATCH ? ORDER BY bm25(\(table)), c.uuid
+                SELECT c.uuid, bm25(\(table)) AS s FROM \(table) f JOIN chunks c ON c.id = f.rowid
+                WHERE f.\(table) MATCH ? ORDER BY s DESC
                 """, bind: [.text(pattern)]
             ) { statement in
-                hits.append(String(cString: sqlite3_column_text(statement, 0)))
+                let uuid = String(cString: sqlite3_column_text(statement, 0))
+                let score = sqlite3_column_double(statement, 1)
+                if var last = grouped.last, last.score == score {
+                    last.uuids.insert(uuid)
+                    grouped[grouped.count - 1] = last
+                } else {
+                    grouped.append((score: score, uuids: [uuid]))
+                }
             }
-            ranks.append("\(table)/\(probe) → \(hits.joined(separator: ","))")
+            let rendered = grouped.map { "{\($0.uuids.sorted().joined(separator: ","))}" }
+                .joined(separator: ">")
+            ranks.append("\(table)/\(probe) → \(rendered)")
         }
     }
 
+    var scanState: [String] = []
+    if let data = try? Data(contentsOf: location.stateURL),
+        let decoded = try? JSONDecoder().decode(ScanState.self, from: data)
+    {
+        scanState = decoded.files.map { "\($0.key)|\($0.value.prefixHash)|\($0.value.processedBytes)" }
+            .sorted()
+    }
+
     return Snapshot(
-        chunks: chunks.sorted(), links: links, ftsAverages: averages, lexicalRanks: ranks)
+        chunks: chunks.sorted(), links: links, ftsAverages: averages, lexicalRanks: ranks,
+        scanState: scanState)
 }
 
 /// 兩份快照的差異，逐面向命名——「不相等」對這個測試沒有用，要說出哪一面不相等。
@@ -293,6 +370,10 @@ private func divergences(incremental a: Snapshot, fullRebuild b: Snapshot) -> [S
         let diff = zip(a.lexicalRanks, b.lexicalRanks).filter { $0 != $1 }
         out.append("lexical 名次不同：\(diff.map { "增量[\($0.0)] 全量[\($0.1)]" }.joined(separator: " ; "))")
     }
+    if a.scanState != b.scanState {
+        let diff = Set(a.scanState).symmetricDifference(Set(b.scanState)).sorted()
+        out.append("state.json 不同（#29 缺口 2）：續讀位置或 prefixHash 分岔 —— \(diff)")
+    }
     return out
 }
 
@@ -318,13 +399,33 @@ private func runIncremental(
 
     var model = CorpusModel()
     var trace: [Mutation] = []
-    let project = "proj-equiv"
+    // **三個 project**（#29 缺口 1）。檔名決定它落在哪一個，所以同一個 identity
+    // 出現在不同 project 的檔裡時，跨 project 同 uuid 就自然發生了。
+    let projects = ["proj-alpha", "proj-beta", "proj-gamma"]
 
     func flush(_ name: String) throws {
         let turns = model.files[name] ?? []
+        let project = model.fileProjects[name] ?? projectFor(name)
+        // **每個檔混入全部四種跳過行**（#29 缺口 3）。
+        //
+        // 第一版是「種類由檔名決定，一個檔一種」，而那對**檔數少的 seed 蓋不到四種**
+        // ——實測 seed 99/100 就漏掉兩種。四種都放才讓覆蓋不依賴變異序列碰巧產生
+        // 幾個檔。
+        //
+        // 這也更貼近真實語料：跳過行佔 46%（677,913 解析 / 583,924 跳過，見
+        // `docs/measurements/2026-08-18-resume-duplication.md`），不是零星。
         _ = try writeSession(
-            in: corpus, project: project, file: name, lines: turns.map(\.line))
+            in: corpus, project: project, file: name,
+            lines: SkipLine.allCases.map(\.text) + turns.map(\.line))
     }
+    /// 由檔名取出確定性的序號（`f12.jsonl` → 12）。**不是 `hashValue`**：
+    /// Swift 的 `String.hashValue` 每個 process 隨機種子化（`CLAUDE.md` 記過的坑），
+    /// 用它會讓同一份 trace 在不同執行給出不同語料，而症狀是「偶爾成功」。
+    func fileIndex(_ name: String) -> Int {
+        Int(name.drop(while: { !$0.isNumber }).prefix(while: { $0.isNumber })) ?? 0
+    }
+    func projectFor(_ name: String) -> String { projects[fileIndex(name) % projects.count] }
+
     func build() throws {
         _ = try IndexBuilder(
             location: derived, scanner: CorpusScanner(corpusRoot: corpus), embedder: embedder
@@ -336,6 +437,7 @@ private func runIncremental(
     model.files[first] = (0..<3).map {
         TurnSpec(identity: $0, session: model.nextSession(), timestampOffset: $0)
     }
+    model.fileProjects[first] = projectFor(first)
     trace.append(.createFile(name: first, turns: [0, 1, 2]))
     try flush(first)
     try build()
@@ -356,6 +458,7 @@ private func runIncremental(
                 TurnSpec(identity: $0, session: model.nextSession(),
                          timestampOffset: Int.random(in: 0..<6, using: &rng))
             }
+            model.fileProjects[name] = projectFor(name)
             mutation = .createFile(name: name, turns: turns)
             try flush(name)
 
@@ -368,6 +471,7 @@ private func runIncremental(
                 TurnSpec(identity: $0, session: model.nextSession(),
                          timestampOffset: Int.random(in: 0..<6, using: &rng))
             }
+            model.fileProjects[name] = projectFor(name)
             mutation = .rewriteFile(name: name, turns: turns)
             try flush(name)
 
@@ -382,10 +486,12 @@ private func runIncremental(
 
         case 3 where names.count > 1:
             let name = names[Int.random(in: 0..<names.count, using: &rng)]
+            let owning = model.fileProjects[name] ?? projectFor(name)
             model.files.removeValue(forKey: name)
+            model.fileProjects.removeValue(forKey: name)
             mutation = .deleteFile(name: name)
             try FileManager.default.removeItem(
-                at: corpus.appendingPathComponent(project).appendingPathComponent(name))
+                at: corpus.appendingPathComponent(owning).appendingPathComponent(name))
 
         default:
             // resume：既有檔的內容複製進新檔，換 sessionId。timestamp 保持不變
@@ -428,9 +534,24 @@ func incrementalMatchesFullRebuild(seed: UInt64) throws {
             .appendingPathComponent("equiv-full-\(seed)-\(UUID().uuidString)"),
         policy: EquivalencePolicy())
     defer { try? FileManager.default.removeItem(at: fullRoot.root) }
-    _ = try IndexBuilder(
+    let fullReport = try IndexBuilder(
         location: fullRoot, scanner: CorpusScanner(corpusRoot: run.corpus), embedder: embedder
     ).build()
+
+    // **跳過的分類也要相同**（#29 缺口 3）。生成語料現在每個檔都混入一行會被跳過
+    // 的東西（真實語料有 46% 是跳過行），而全量重建看到的是全部檔案，所以它的
+    // `SkipTally` 是這份語料的**正確答案**。
+    //
+    // 增量那一側不能直接比總數——它是多輪累加的，每一輪只看新內容。所以這裡比的是
+    // **全量重建的分類本身非零且合理**：若跳過路徑整條壞掉（全部變成 0），或分類
+    // 漂移（該進 `notATurn` 的跑到 `unparseableLine`），這條就會紅。
+    #expect(
+        fullReport.skipped.notATurn > 0,
+        "生成語料混入的 queue-operation 行沒有被算進 notATurn —— 跳過路徑或它的分類壞了")
+    #expect(fullReport.skipped.unparseableLine > 0, "非法 JSON 行沒有被算進 unparseableLine")
+    #expect(
+        fullReport.skipped.missingPointerField + fullReport.skipped.malformedIdentifier > 0,
+        "缺欄位／識別碼形狀不符的行沒有被算進對應分類")
 
     let found = divergences(
         incremental: try snapshot(run.derived, probes: probes),
