@@ -81,3 +81,18 @@ private struct Sandbox {
         try? FileManager.default.removeItem(at: root)
     }
 }
+
+@Test("寫入端也拒絕非一般檔案——用字元裝置，因為 FIFO 到不了那條分支")
+func appendRejectsANonRegularFileOnTheWriteSide() throws {
+    // #22 item 15：讀取端在 R7 補了會走到 `fstat` 的測試，寫入端沒有——而
+    // issue 指出 FIFO 到不了那條分支。實測確認：
+    //
+    //   flock(FIFO)                          → errno 45（EOPNOTSUPP）
+    //   open(FIFO, O_WRONLY|O_APPEND|O_CREAT) → errno 6（ENXIO，無讀者）
+    //
+    // 兩條都在 `S_IFREG` 檢查之前。**但那條分支不是不可達，只是 FIFO 選錯了
+    // 探針**：字元裝置的 `open` 與 `flock` 都成功，而 `S_IFREG` 為 false。
+    #expect(throws: EventStoreError.self) {
+        try CanonicalStore.appendLine(Data("x\n".utf8), to: URL(fileURLWithPath: "/dev/null"))
+    }
+}
