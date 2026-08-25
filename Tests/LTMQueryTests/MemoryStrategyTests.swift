@@ -541,3 +541,20 @@ private struct HistoryFabricator: MemoryStrategy {
     let output = try IdentityProbe().rerank(candidates(["a", "b"]), with: .empty(at: instant))
     #expect(output.allSatisfy { $0.reason.history == .none })
 }
+
+@Test func netStrengthWithoutNamedSignalsIsMalformed() throws {
+    // #21 item 4：`counted` 卻指不出任何訊號。
+    //
+    // 與 `misreportedHistory` 是同一條線的兩側——一個編造來源，一個宣稱有來源
+    // 卻拿不出來。兩者對讀者的後果相同：他讀到的不是實際發生的事。
+    let silent = AnchorStatistics(
+        reinforcement: 5, suppression: 0, impressions: 0,
+        lastDeliberateInteraction: nil, deliberateCounts: [:])
+    #expect(silent.malformation == .countedWithoutSignals)
+
+    // 淨強度為零時沒有訊號是正常的——那是「歷史沒有讓它動」，不是「說不出話」。
+    let quiet = AnchorStatistics(
+        reinforcement: 0, suppression: 0, impressions: 7,
+        lastDeliberateInteraction: nil, deliberateCounts: [:])
+    #expect(quiet.malformation == nil)
+}

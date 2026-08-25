@@ -56,10 +56,32 @@ public struct AnchorStatistics: Sendable, Equatable {
             // 一次曝光在 reason 裡冒充成增強訊號（#1 verify R6）。
             if kind == .shown { return .impressionAsDeliberateSignal }
         }
+        // **淨強度非零就必須指得出訊號**（#21 item 4）。
+        //
+        // `AnchorStatistics(reinforcement: 5, …, deliberateCounts: [:])` 先前是
+        // 合法的，於是 `RankingReason.describing` 會產出
+        // `history: .counted(signals: [:], netStrength: 5)`——一句「有訊號促成」
+        // 而指不出任何訊號。
+        //
+        // 那是 provenance 說不出話，與 `misreportedHistory` 擋的「provenance 說謊」
+        // 是同一條線的兩側：一個編造來源，一個宣稱有來源卻拿不出來。兩者對讀者
+        // 的後果相同——他讀到的不是實際發生的事。
+        //
+        // 擋在 `malformation` 而不是建構子，理由與這個型別的其餘檢查相同（見上）：
+        // `Projection` 是 seam 的公開輸入型別，而檢查放在呼叫端要記得走的路徑上
+        // 就會有人不走。seam 是唯一無條件會執行的位置。
+        if netStrength != 0 && deliberateCounts.isEmpty {
+            return .countedWithoutSignals
+        }
         return nil
     }
 
     public enum Malformation: Sendable, Equatable {
+        /// 淨強度非零，卻沒有任何具名的 deliberate 訊號。
+        ///
+        /// reason 會因此說「有訊號促成」而指不出是哪些（#21 item 4）。
+        case countedWithoutSignals
+
         /// NaN／Infinity。**這是靜默失效而不是崩潰**：`NaN > x` 與 `x > NaN`
         /// 都為 false，於是有界重排的比較恆偽、策略不重排也不報錯，直接退化成
         /// `archival`——正是守衛存在要防的「不合規策略偽裝成合規」。
