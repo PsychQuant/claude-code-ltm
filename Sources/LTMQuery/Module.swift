@@ -29,5 +29,6 @@
 // 於是它們一起變成過期的規格。一個數字被複述 N 次就是 N 份會漂移的規格。
 //
 // 而「移出 LTMCore 就會成真」同樣是錯的：那只拿掉便利型別，`Data(contentsOf:)`
-// 加 `JSONSerialization` 仍可繞過——**推翻原宣稱的那兩個測試都沒有用到要被移走的
-// 型別**。依賴圖控制 API 可及性，不控制 capability。
+// 加 `JSONSerialization` 仍可繞過。**理由不是「那兩個反例沒用到要被移走的型別」**
+// ——其中一個用了 `CorpusReader`，變 internal 會讓它編不過；理由是兩個都能用標準
+// 函式庫重寫並再次通過。依賴圖控制 API 可及性，不控制 capability。

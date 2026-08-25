@@ -61,9 +61,12 @@
   directly, and no strategy SHALL read the corpus directly」沒有執行點，而 issue 提的
   兩個方向（把 `Event: Codable` 移出 `LTMCore`、把 `CorpusReader` 變 internal）**交不出
   它們承諾的編譯期事實**：一個策略要讀事件檔或語料，需要的是 Foundation 的
-  `Data(contentsOf:)` 與 `JSONSerialization`，不是被提議移走的那些便利型別——當初推翻
-  該宣稱的兩個反例正是這樣做的，**移走型別不會讓它們失敗**。所以那個代價（動依賴圖
-  底層、波及所有模組）換不到承諾的東西。
+  `Data(contentsOf:)` 與 `JSONSerialization`，不是被提議移走的那些便利型別。
+  **理由不是「兩個反例都沒用到那些型別」**——R3 抓到那句是假的，其中一個用了
+  `CorpusReader`，變 internal 會讓它編不過（而推翻它的正是我自己寫在同一份 spec
+  裡的 Example）。成立的理由是：**兩個反例都能用標準函式庫重寫並再次通過**，所以
+  藏起型別拿掉的是某一段程式碼、不是它行使的 capability。那個代價（動依賴圖底層、
+  波及所有模組）仍然換不到承諾的東西，但結論的理由換了一個。
   - **改寫成它實際保護的兩件事，各自指名執行點**：排序正確性由 seam 的**十項檢查**
     執行（依入口實際執行順序列出），每項列出它拋的違規名，共 11 個名字；隱私邊界的
     執行點在 canonical store **落地 bytes** 的 round-trip 檢查。**其中八項每次呼叫

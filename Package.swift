@@ -48,17 +48,20 @@ let package = Package(
         // **「移出 LTMCore 就會成真」是錯的**，而這裡先前正是那樣寫的。移走
         // `Event` 的編碼表示只拿掉一個**便利型別**——讀那個檔需要的是
         // `Data(contentsOf:)` 與 `JSONSerialization`，兩者都在 Foundation，而格式
-        // 是 JSON Lines、欄位名寫在 spec 裡。**當初推翻原宣稱的那兩個測試都沒有用
-        // 到要被移走的型別，所以移走不會讓它們失敗。**
+        // 是 line-delimited JSON。**理由不是「那兩個反例沒用到要被移走的型別」**
+        // ——其中一個用了 `CorpusReader`，把它變 internal 會讓那個測試編不過。
+        // 理由是**兩個反例都能用標準函式庫重寫並再次通過**：藏起型別拿掉的是
+        // 某一段程式碼，不是它行使的那個 capability。
         //
         // 依賴圖控制的是 API 可及性，不是 capability。**在一個模組能開檔案的語言裡，
         // 「不要讀某個檔」沒有型別層的表達方式。**
         //
         // 真正在守的是別的東西，逐一具名寫在 `memory-strategy` spec 的
         // 「MemoryStrategy is the sole seam between retrieval and memory」
-        // requirement 裡：排序正確性由 seam 的七道檢查守、隱私由 canonical store
-        // 的 bytes 層 round-trip 守。**理由只寫在那裡一份**——這裡不重述，
-        // 因為同一個理由寫在多處就是多份會漂移的規格。
+        // requirement 裡：排序正確性由 seam 在入口跑的那組檢查守、隱私由 canonical
+        // store 的 bytes 層 round-trip 守。**理由與檢查的條數都只寫在那裡一份**
+        // ——這裡不重述。同一個理由寫在多處就是多份會漂移的規格，而這一行正是
+        // 實例：它寫著「七道檢查」撐過了 #14 的兩輪修正，第三輪才被抓到。
         .target(name: "LTMQuery", dependencies: ["LTMCore"]),
         .target(name: "LTMEval", dependencies: ["LTMCore", "LTMMemory", "LTMQuery"]),
         // 索引層：語料掃描、chunk、FTS5 + 向量。只依賴 LTMCore 的值型別
