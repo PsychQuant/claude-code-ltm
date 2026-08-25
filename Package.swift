@@ -45,8 +45,20 @@ let package = Package(
         // 通過了。原本各處寫的「編譯期事實」是**過度宣稱**，已全數降級為
         // 「依賴宣告上的慣例」。
         //
-        // 要讓那個宣稱成真，`Event` 的編碼表示必須移出 LTMCore（或改為
-        // LTMMemory-internal）。那是獨立的重構，追蹤於 follow-up issue。
+        // **「移出 LTMCore 就會成真」是錯的**，而這裡先前正是那樣寫的。移走
+        // `Event` 的編碼表示只拿掉一個**便利型別**——讀那個檔需要的是
+        // `Data(contentsOf:)` 與 `JSONSerialization`，兩者都在 Foundation，而格式
+        // 是 JSON Lines、欄位名寫在 spec 裡。**當初推翻原宣稱的那兩個測試都沒有用
+        // 到要被移走的型別，所以移走不會讓它們失敗。**
+        //
+        // 依賴圖控制的是 API 可及性，不是 capability。**在一個模組能開檔案的語言裡，
+        // 「不要讀某個檔」沒有型別層的表達方式。**
+        //
+        // 真正在守的是別的東西，逐一具名寫在 `memory-strategy` spec 的
+        // 「MemoryStrategy is the sole seam between retrieval and memory」
+        // requirement 裡：排序正確性由 seam 的七道檢查守、隱私由 canonical store
+        // 的 bytes 層 round-trip 守。**理由只寫在那裡一份**——這裡不重述，
+        // 因為同一個理由寫在多處就是多份會漂移的規格。
         .target(name: "LTMQuery", dependencies: ["LTMCore"]),
         .target(name: "LTMEval", dependencies: ["LTMCore", "LTMMemory", "LTMQuery"]),
         // 索引層：語料掃描、chunk、FTS5 + 向量。只依賴 LTMCore 的值型別

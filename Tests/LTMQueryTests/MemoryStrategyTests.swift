@@ -9,8 +9,12 @@ import Testing
 //
 // **這條約束比先前寫的弱**（#1 verify 2026-08-11，devils-advocate 實測）：擋住的
 // 只是那個便利型別，JSON Lines 格式與 `Event: Codable` 都在 LTMCore，用
-// Foundation 直接讀檔即可繞過。spec 的 "Retrieval SHALL NOT read the event store
-// directly" 目前**沒有執行點**——把它寫成「編譯期事實」是過度宣稱，已更正。
+// Foundation 直接讀檔即可繞過。把它寫成「編譯期事實」是過度宣稱，已更正。
+//
+// **但「沒有執行點」也是過度宣稱**（這裡先前正是那樣寫的）。那條 SHALL NOT 想保護
+// 的東西有執行點，只是不在依賴圖上：排序正確性在 seam 的七道檢查，隱私在 canonical
+// store 的 bytes 層 round-trip。逐一具名寫在 `memory-strategy` spec 的
+// 「MemoryStrategy is the sole seam between retrieval and memory」requirement。
 
 let instant = Date(timeIntervalSince1970: 3_000_000)
 

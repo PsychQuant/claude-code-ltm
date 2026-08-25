@@ -212,8 +212,14 @@ public enum StrategyViolation: Error, Sendable, Equatable {
 /// token），但它擋不住刻意。
 ///
 /// 要真正關掉，token 必須綁死在該次呼叫上（不可儲存、不可轉手），或者
-/// `rerankChecked` 完全不能是 public requirement。兩者都是介面層的重新設計，
-/// 追蹤於 #14（該 issue 已在追蹤「seam 的 SHALL NOT 沒有執行點」）。
+/// `rerankChecked` 完全不能是 public requirement。兩者都是介面層的重新設計。
+///
+/// **這個 internal `init` 是刻意的信任邊界，不是遺漏**，而那一點現在寫在
+/// `memory-strategy` spec 的「MemoryStrategy is the sole seam between retrieval
+/// and memory」requirement 裡（連同 seam 的七道檢查與隱私的執行點）。
+/// 套件外造不出這個值 → 呼叫不到 `rerankChecked`；套件內造得出來 → seam 自己的
+/// 違規測試寫得出來。**沒被記錄的信任邊界與疏漏無法區分**，所以它被記錄了。
+/// 理由只寫在 spec 一份，這裡不重述。
 ///
 /// 在那之前，**消費端不得因為「seam 保證過了」而省掉自己的檢查**——交錯器
 /// 正是這樣刪掉自己那道排列檢查的，而它依據的就是上面那句假宣稱。

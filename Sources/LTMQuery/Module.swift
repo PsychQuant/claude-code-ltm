@@ -13,7 +13,19 @@
 //   LTMMemory，所以看不到 `FileEventStore`；但 JSON Lines 格式與
 //   `Event: Codable` 住在 LTMCore，用 Foundation 直接讀檔即可繞過。
 //
-// 兩條 spec requirement（"Retrieval SHALL NOT read the event store directly,
-// and no strategy SHALL read the corpus directly"）目前**沒有執行點**。要讓它們
-// 成為事實，`Event` 的編碼表示需要移出 LTMCore。追蹤於 follow-up issue；
-// 在那之前，這裡寫的是實情而不是願望。
+// **「目前沒有執行點」是錯的**，而這裡先前正是那樣寫的。那兩條 spec requirement
+// （"Retrieval SHALL NOT read the event store directly, and no strategy SHALL read
+// the corpus directly"）想保護的東西**各自都有執行點，只是都不在那句話宣稱的地方**：
+//
+// - **排序正確性** → seam 的**七道檢查**，每次呼叫都跑。一個偷讀語料的策略仍然
+//   交不出這七道接受的輸出，除非那個輸出本來就是合法的重排。
+// - **隱私邊界** → **落地的 bytes**：canonical store 的 round-trip 比對。策略讀了
+//   什麼不是危害，語料原文**寫進**記憶層的檔案才是，而那在寫入時被擋。
+//
+// 七道檢查與它們各自的違規逐一列在 `memory-strategy` spec 的
+// 「MemoryStrategy is the sole seam between retrieval and memory」requirement。
+// **理由只寫在那裡一份**，這裡不重述。
+//
+// 而「移出 LTMCore 就會成真」同樣是錯的：那只拿掉便利型別，`Data(contentsOf:)`
+// 加 `JSONSerialization` 仍可繞過——**推翻原宣稱的那兩個測試都沒有用到要被移走的
+// 型別**。依賴圖控制 API 可及性，不控制 capability。
