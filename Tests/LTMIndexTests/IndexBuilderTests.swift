@@ -564,3 +564,46 @@ func rerunAfterCrashDoesNotRecomputeCompletedWork() throws {
         counting.callCount < total,
         "重跑算了 \(counting.callCount) 次而總共 \(total) 筆——已完成的 \(doneBeforeCrash) 筆不該重算")
 }
+
+/// **#44 ②：build 進行中，另一個寫入者撞上寫鎖會怎樣。**
+///
+/// 這一條在 #44 開單時被列為「仍未實測」——而它決定 ② 的嚴重度：具名失敗是可
+/// 接受的（使用者看得懂），靜默阻塞或誤報索引損壞高一級。
+///
+/// 分批之後，寫鎖只在每批的那個交易內持有（不再是全程），所以撞上的窗口小得多。
+/// 但「小」不是「沒有」，而這條測試釘的是**撞上時的行為**，不是機率。
+@Test(.timeLimit(.minutes(1)))
+func aSecondWriterMeetsANamedFailureNotASilentHang() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["內容一", "內容二"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "r")).build()
+
+    // 另一個行程持有 build lock 時，第二個 build 必須**具名拒絕**而不是等。
+    // `BuildError.locked` 的 doc 逐字寫著「不等待：建置可能跑很久，讓第二個
+    // 行程無限期等下去比失敗更糟」——這條就是那句話的執行點。
+    let lockPath = derived.root.appendingPathComponent("build.lock").path
+    let holder = open(lockPath, O_RDWR | O_CREAT, 0o600)
+    #expect(holder >= 0)
+    defer { close(holder) }
+    #expect(flock(holder, LOCK_EX | LOCK_NB) == 0, "沒拿到鎖的話這條測試什麼都沒測")
+
+    do {
+        _ = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "r")).build()
+        Issue.record("第二個 build 應該被拒絕")
+    } catch let error as IndexBuilder.BuildError {
+        // **具名為「鎖被持有」**，不是逾時、不是「索引損壞」、不是掛住。
+        //
+        // 這個區分是重點：一個回報「索引損壞」的並發衝突會讓使用者去跑
+        // `--full` 重建（丟掉正確的索引），而 `lockHeld` 讓他知道該做的是等。
+        guard case .lockHeld(let path) = error else {
+            Issue.record("應該是 lockHeld，實際是 \(error)")
+            return
+        }
+        #expect(path.hasSuffix("build.lock"), "錯誤要指名是哪個鎖：\(path)")
+    }
+}
