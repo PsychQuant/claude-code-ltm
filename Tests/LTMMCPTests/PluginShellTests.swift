@@ -36,22 +36,54 @@ func pluginAndWorkspaceDeclareTheSameServerName() throws {
     #expect(pluginServers.keys.contains("claude-ltm"))
 }
 
-@Test("宣告的 executable 是 Package.swift 真的產出的那個")
-func declaredExecutableExistsInThePackage() throws {
+@Test("每個 MCP 宣告最終都落到 Package.swift 真的產出的那個 executable 的真子命令上")
+func declaredEntryPointsResolveToARealSubcommandOfARealExecutable() throws {
+    let root = repositoryRoot()
     let manifest = try String(
-        contentsOf: repositoryRoot().appendingPathComponent("Package.swift"), encoding: .utf8)
+        contentsOf: root.appendingPathComponent("Package.swift"), encoding: .utf8)
     // 一個指向不存在 target 的宣告會讓 client 靜默地少一個 server。
-    #expect(manifest.contains(#".executable(name: "ltm-mcp""#))
-    #expect(manifest.contains(#".executableTarget(name: "ltm-mcp""#))
+    #expect(manifest.contains(#".executable(name: "ltm""#))
+    #expect(manifest.contains(#".executableTarget(name: "ltm""#))
+    // **`ltm-mcp` 不得再是一個 executable。** 合併之後若有人把它加回來，兩份
+    // 出貨規格就重新分岔（見 `Sources/ltm/MCPCommand.swift`），而 pipeline 只會
+    // 出貨其中一個且不報錯。
+    #expect(!manifest.contains(#"name: "ltm-mcp""#), "ltm-mcp 已併入 `ltm mcp`，不該再是 target")
 
-    for (source, path) in [
-        ("plugin.json", try json(at: "plugin/.claude-plugin/plugin.json")),
-        (".mcp.json", try json(at: ".mcp.json")),
-    ].map({ ($0.0, $0.1["mcpServers"] as? [String: Any] ?? [:]) }) {
-        let entry = try #require(path["claude-ltm"] as? [String: Any], "\(source) 缺 claude-ltm")
-        let command = try #require(entry["command"] as? String, "\(source) 缺 command")
-        #expect(command.hasSuffix("ltm-mcp"), "\(source) 指向的不是 ltm-mcp")
-    }
+    // 這條測試現在驗的是**整條鏈**，不是一個字尾。先前它斷言 command 以
+    // `ltm-mcp` 結尾——那在 plugin 改用 wrapper 之後就只是在比對一個檔名，
+    // 而 wrapper 裡面 exec 什麼完全沒被看著。
+    //
+    // 兩個入口的形狀不同，所以各自驗各自的那一段：
+    //  · `.mcp.json`（開發用，直接指 binary）→ command 指 `ltm`，args 帶子命令
+    //  · `plugin.json`（出貨用，指 wrapper）→ wrapper 存在、可執行、且 exec `ltm mcp`
+    let workspace = try #require(
+        (try json(at: ".mcp.json")["mcpServers"] as? [String: Any])?["claude-ltm"]
+            as? [String: Any])
+    let workspaceCommand = try #require(workspace["command"] as? String)
+    #expect(workspaceCommand.hasSuffix("/ltm"), ".mcp.json 應直接指向 ltm binary")
+    #expect(
+        (workspace["args"] as? [String]) == ["mcp"],
+        ".mcp.json 少了 `mcp` 子命令——沒有它 server 不會啟動，而 client 只會看到它退出")
+
+    let plugin = try #require(
+        (try json(at: "plugin/.claude-plugin/plugin.json")["mcpServers"] as? [String: Any])?[
+            "claude-ltm"] as? [String: Any])
+    let pluginCommand = try #require(plugin["command"] as? String)
+    let wrapperName = try #require(pluginCommand.split(separator: "/").last).description
+    let wrapper = root.appendingPathComponent("plugin/bin/\(wrapperName)")
+    #expect(
+        FileManager.default.isExecutableFile(atPath: wrapper.path),
+        "plugin.json 指向 \(wrapperName)，但它不存在或沒有執行權限")
+    let script = try String(contentsOf: wrapper, encoding: .utf8)
+    #expect(
+        script.contains(#"exec "$LTM" mcp"#),
+        "wrapper 沒有 exec `ltm mcp`——plugin.json 指到它，而它指到哪沒有人看著")
+
+    // 子命令必須真的存在於派發表裡。這一段是先前整條鏈上唯一沒被驗的一環：
+    // `ltm mcp` 打錯字的話，上面每一條斷言都仍然成立。
+    let dispatcher = try String(
+        contentsOf: root.appendingPathComponent("Sources/ltm/CommandLine.swift"), encoding: .utf8)
+    #expect(dispatcher.contains(#"case "mcp":"#), "派發表裡沒有 `mcp` 子命令")
 }
 
 @Test("skill 的 frontmatter 有 name 與 description，且 description 寫得出觸發語")

@@ -6,6 +6,81 @@ Claude Code 的長期記憶（long-term memory）。
 對話逐字記錄——那就是 source of truth，而且它一直都在。缺的不是儲存，是**檢索**。
 claude-LTM 在它之上建可拋棄的索引與可插拔的記憶策略，讓 Claude 能回頭讀自己的過去。
 
+## 安裝
+
+> **這一節是寫給 agent 看的**：每一步都是可以直接執行的命令，每一步都附一條驗證。
+> 不要憑印象跳步，也不要在這裡自己發明別的裝法——`ltm` 是單一 binary，MCP server
+> 是它的 `mcp` 子命令，其餘寫法都是舊的。
+
+### 給使用者（從 release 裝）
+
+```bash
+# 1. 裝 plugin（marketplace 名稱以實際註冊為準）
+claude plugin install claude-ltm@psychquant-claude-plugins
+
+# 2. 建索引。**這一步不能省**——沒有索引時 MCP server 會啟動、會回應、但查不到
+#    任何東西，而那看起來像「這個工具沒用」而不是「還沒建索引」。
+ltm build
+
+# 3. 驗證
+ltm query "任意關鍵字" | head -5      # 有命中 → 索引好了
+```
+
+`ltm` 由 plugin 的 wrapper 在第一次啟動 MCP server 時自動從 GitHub Release 下載到
+`~/bin/`。若 `ltm` 不在 PATH，把 `~/bin` 加進去，或直接用 `~/bin/ltm`。
+
+### 從原始碼裝（開發、或不想等 release）
+
+```bash
+git clone https://github.com/PsychQuant/claude-LTM.git
+cd claude-LTM
+swift build -c release                # 產出 .build/release/ltm
+./.build/release/ltm build            # 建索引
+```
+
+MCP server 用同一個 binary：
+
+```bash
+./.build/release/ltm mcp              # 由 client 啟動，手動跑只會停在那裡等 stdin
+```
+
+要讓 Claude Code 在**這個 repo 裡**就用得到它，repo 根目錄的 `.mcp.json` 已經指好；
+要在別的專案用，裝 plugin（上一節）或把 `plugin/` 傳給 `claude --plugin-dir`：
+
+```bash
+claude --plugin-dir /path/to/claude-LTM/plugin
+```
+
+### 驗證裝好了（三層，各自獨立）
+
+```bash
+# ① binary 在，而且版本對得上
+ltm --help
+# ② 索引在
+ltm query "test" >/dev/null && echo "索引可查"
+# ③ MCP 協定真的會回話（不需要索引也該通）
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | ltm mcp
+#    → 應印出含 "ltm_query" 的 JSON
+```
+
+三層分開驗是刻意的：**它們的失敗看起來一樣**（模型說「查不到東西」），但補救
+完全不同——分別是重裝 binary、跑 `ltm build`、檢查 plugin 設定。
+
+### 出貨流程（maintainer）
+
+單一 binary、單一 asset，走生態既有的 pipeline，**不要在這個 repo 另寫一份**：
+
+```
+/harness-devtools:mcp-deploy      # 在本 repo 跑：編譯 universal → GitHub Release 上傳 asset
+/harness-devtools:plugin-deploy   # 首次上架到 marketplace
+/harness-devtools:plugin-update   # 之後每次改 plugin shell
+```
+
+改版本號**只改 `Sources/LTMCore/Version.swift`**，然後 `swift test`——
+`ReleaseVersionSyncTests` 會指名 `mcpb/manifest.json`、`plugin.json`、wrapper 的
+`DESIRED_VERSION` 哪一處沒跟上。三者不同步的失敗方式是**四步都「成功」而版本各不
+相同**，所以那條檢查不是禮貌。
+
 ## 名字裡的類比
 
 叫它 LTM 不只是取名。要達成的是**類似人類長期記憶的功能**：過去的對話不是躺在磁碟
@@ -107,7 +182,8 @@ repo 能保證的事。
 比較層（LTMQuery／LTMMemory／LTMEval）在此之前就已存在，這一步補上的是它們的
 輸入端——語料掃描、chunk 切分、FTS5 與向量兩路檢索，以及把它們接起來的 facade。
 
-尚未實作：MCP server 與 plugin（追蹤於 issue #24 的 Stage 2）。
+**MCP server 與 plugin 也在了**（#24／#35，已 close）：MCP server 是 `ltm mcp`
+子命令，plugin shell 在 `plugin/`。安裝與出貨見上面的〈安裝〉。
 
 ```bash
 swift build                      # 產出 .build/debug/ltm

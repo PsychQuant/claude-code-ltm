@@ -46,3 +46,10 @@ openspec/.vector-search.db*
 
 # Python 匯入 script 當模組時產生的 bytecode 快取（純衍生物）
 __pycache__/
+
+# mcpb 的建置產物：universal binary 與打包好的 bundle 都是 release 產出，
+# 不進 git（幾十 MB 的二進位）。`mcpb/manifest.json` 與 `server/.gitkeep` 追蹤。
+mcpb/server/*
+!mcpb/server/.gitkeep
+mcpb/*.mcpb
+mcpb/*.sha256

@@ -31,7 +31,6 @@ let package = Package(
         .library(name: "LTMIndex", targets: ["LTMIndex"]),
         .library(name: "LTMService", targets: ["LTMService"]),
         .executable(name: "ltm", targets: ["ltm"]),
-        .executable(name: "ltm-mcp", targets: ["ltm-mcp"]),
     ],
     targets: [
         .target(name: "LTMCore"),
@@ -87,8 +86,12 @@ let package = Package(
         // （每一個依賴都是一條需要自己審的供應鏈），手寫解析的成本遠低於那個代價。
         .target(
             name: "LTMMCP", dependencies: ["LTMService", "LTMCore", "LTMIndex"]),
-        .executableTarget(name: "ltm", dependencies: ["LTMService", "LTMCore", "LTMEval"]),
-        .executableTarget(name: "ltm-mcp", dependencies: ["LTMMCP", "LTMService"]),
+        // **單一 executable。** MCP server 是 `ltm mcp` 子命令而不是第二個
+        // binary——理由在 `Sources/ltm/MCPCommand.swift`：出貨 pipeline 是單
+        // binary 假設，餵它兩個只有一個會出貨且不報錯。
+        // 宣告刻意留在**一行**：`PackageDependencyTests` 對 `.executableTarget(name: "ltm"`
+        // 下字面比對。把它拆行會讓那條測試紅，而放寬那條測試等於讓它不再看著任何東西。
+        .executableTarget(name: "ltm", dependencies: ["LTMService", "LTMCore", "LTMEval", "LTMMCP", "LTMIndex", "LTMMemory"]),
         // 量測腳本。**是一個 target 而不是 `swiftc` 單檔**：它要用索引層與評估層
         // 的型別，而單檔編譯只能把 source 檔複製進來——那就是同一件事的第二個
         // 寫者。`path`/`sources` 指名單一檔案，`scripts/` 下的其他探針不受影響
