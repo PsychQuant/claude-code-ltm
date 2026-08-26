@@ -619,6 +619,43 @@ func identicalTimestampsKeepEverySourceAfterBuild() throws {
 /// 計數與 `refusing` 不同：後者測「這段文字產不出向量」（正常路徑），這個測
 /// 「向量算到一半整個爆掉」（異常路徑）。兩者的正確行為相反——前者跳過該 chunk
 /// 繼續，後者必須讓已完成的部分留下來。
+/// `writeStamps` 被移到批次迴圈**之前**（為了讓崩掉的 build 不會因為「版本未知」
+/// 而觸發全量重建）。regression lens 指出那個前移新開了另一個窗口：崩在
+/// 「DB 已建立、還沒有任何批次提交」之間時，索引存在而續讀游標不存在，於是下一次
+/// build 硬失敗在 `stateUnreadable`，補救只剩 `--full`——正是 #44 存在要消除的
+/// 「中斷全丟」。
+///
+/// 續讀游標搬進 DB 之後這個窗口關掉了，但**關掉的理由必須被釘住**：判準從
+/// 「state.json 在不在」換成「索引裡到底有沒有內容」。沒有內容就沒有東西可疊，
+/// 當成空 state 從頭掃是對的；有內容而沒有游標才是那個危險狀態。
+@Test("崩在第一批之前，下一次仍可增量續做，不會被逼去 --full")
+func crashingBeforeTheFirstBatchDoesNotBrickTheIndex() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["甲", "乙", "丙"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+
+    // failAfter: 0 —— 第一個 embedding 就炸，所以沒有任何批次提交得了。
+    let doomed = FailingAfterNEmbedder(revision: "rev-A", failAfter: 0)
+    #expect(throws: FailingAfterNEmbedder.Boom.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner, embedder: doomed,
+                             batchChunkTarget: 1).build()
+    }
+
+    // DB 檔已經在了（stamps 也寫過），而索引裡沒有內容。
+    #expect(FileManager.default.fileExists(atPath: derived.databaseURL.path))
+
+    // 這一次不該丟 stateUnreadable，也不該被迫走 --full。
+    let recovered = try IndexBuilder(
+        location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")
+    ).build()
+    #expect(!recovered.wasFullRebuild, "被迫全量重建就等於中斷全丟")
+    #expect(recovered.chunksIndexed == 3)
+}
+
 final class FailingAfterNEmbedder: EmbeddingProvider, @unchecked Sendable {
     let revision: String
     let dimension: Int = 4

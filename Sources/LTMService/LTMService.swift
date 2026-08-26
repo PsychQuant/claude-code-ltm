@@ -158,15 +158,26 @@ public struct RefreshReport: Sendable {
     public let sourcesInvalidated: Int
     /// 跳過的紀錄分類統計。
     public let skipped: SkipTally
+    /// 這一輪**沒有**併入新內容，因為有另一個建置正在跑。
+    ///
+    /// 查詢照常從既有索引回答——那是對的，拒答會更糟。但**不併入就必須說出來**，
+    /// 與 `sourcesUnreadable` 同一條原則：否則使用者看到的是一次成功的查詢，
+    /// 而剛剛那段對話不在裡面，他不會知道要再查一次。
+    ///
+    /// #44 ② 問「查詢路徑撞上 build 的鎖會怎樣」，並列出三種可能：阻塞、逾時、
+    /// 具名錯誤。實際答案是**第四種**——靜默降級。跨模型盲驗指出這一點時，
+    /// 它既沒有被測試釘住，也沒有任何管道告訴使用者。
+    public let mergeDeferredForConcurrentBuild: Bool
 
     public init(
         sourcesRefreshed: Int, sourcesUnreadable: [String], sourcesInvalidated: Int,
-        skipped: SkipTally
+        skipped: SkipTally, mergeDeferredForConcurrentBuild: Bool = false
     ) {
         self.sourcesRefreshed = sourcesRefreshed
         self.sourcesUnreadable = sourcesUnreadable
         self.sourcesInvalidated = sourcesInvalidated
         self.skipped = skipped
+        self.mergeDeferredForConcurrentBuild = mergeDeferredForConcurrentBuild
     }
 }
 
@@ -834,9 +845,11 @@ public struct LTMService {
                 sourcesInvalidated: report.sourcesInvalidated,
                 skipped: report.skipped)
         } catch IndexBuilder.BuildError.lockHeld {
+            // 不拒答：既有索引仍然有效，為了「有人在建置」而讓查詢失敗是過度反應。
+            // 但也不靜默：把它記進 report，由呈現層說出來。
             return RefreshReport(
                 sourcesRefreshed: 0, sourcesUnreadable: [], sourcesInvalidated: 0,
-                skipped: SkipTally())
+                skipped: SkipTally(), mergeDeferredForConcurrentBuild: true)
         }
     }
 

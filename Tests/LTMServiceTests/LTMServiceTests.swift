@@ -538,11 +538,29 @@ func queryPathHonoursTheBuildLock() throws {
     // 語料前進，但鎖被別人持有 → 查詢仍應回答（用既有索引），只是不併入新內容。
     try workspace.writeSession(texts: ["最初的內容", "後來補上的內容"])
     let held = try FileLock.acquire(at: workspace.derived.lockURL)
-    defer { held.release() }
+    // 沒有 defer：這條測試中途就要放掉鎖去驗對照組，二次 release 會關到別人的 fd。
 
+    // #44 ② 逐字問「撞上寫鎖會怎樣」，並列了三種可能：阻塞、逾時、具名錯誤。
+    // 實際答案是第四種——**靜默降級**。這裡把三件事一起釘住：
+    //   (1) 在有界時間內回來（不是阻塞）
+    //   (2) 不把 lockHeld 漏給呼叫端（不是具名失敗）
+    //   (3) **說出來**（不是靜默）——先前只有前兩件成立
+    let start = Date()
     let outcome = try service.query(text: "最初", limit: 10, scope: .allProjects)
+    let elapsed = Date().timeIntervalSince(start)
+
+    #expect(elapsed < 5, "撞上鎖不得阻塞——實際 \(elapsed) 秒")
     #expect(outcome.refresh.sourcesRefreshed == 0, "鎖被持有時不得寫入索引")
     #expect(!outcome.hits.isEmpty, "查詢仍應以既有索引回答，不因為拿不到鎖而失敗")
+    #expect(
+        outcome.refresh.mergeDeferredForConcurrentBuild,
+        "不併入就必須說出來——否則使用者看到一次成功的查詢，而剛講完的話不在裡面")
+
+    // 對照：沒有人持鎖時這個旗標必須是 false，否則它永遠為真、等於沒有訊號。
+    held.release()
+    let normal = try service.query(text: "後來", limit: 10, scope: .allProjects)
+    #expect(!normal.refresh.mergeDeferredForConcurrentBuild)
+    #expect(normal.refresh.sourcesRefreshed > 0, "鎖放掉之後新內容應該併得進來")
 }
 
 // MARK: - band 分層屬於檢索層，且必須在生產路徑上被鎖住（round-3 verify HIGH）

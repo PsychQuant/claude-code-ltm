@@ -713,6 +713,12 @@ enum QueryCommand {
         if refresh.skipped.total > 0 {
             Output.error("  ⚠ 併入時跳過 \(refresh.skipped.total) 筆紀錄（`ltm build` 可看分類）")
         }
+        // 同一條原則：沒併入就要說。使用者剛講完的那段話可能不在這次結果裡，
+        // 而他從答案本身看不出這件事。
+        if refresh.mergeDeferredForConcurrentBuild {
+            Output.error(
+                "  ⚠ 有另一個 `ltm build` 正在跑，本輪未併入新內容（答案來自既有索引）")
+        }
     }
 
     static func printJSON(_ outcome: QueryOutcome) throws {
