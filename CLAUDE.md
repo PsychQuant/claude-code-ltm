@@ -294,6 +294,20 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 
 本專案走 IDD（issue-driven development）：先開 issue、診斷、實作、驗證，commit 引用 `#N`。
 
+**變異測試的還原一律用檔案備份，不要用 `git checkout -- <file>`。** 本 session
+踩了三次，每次都丟掉未 commit 的真實工作。第三次特別值得記，因為它發生在已經
+學到「變異前先 commit」之後：那次要變異的**就是還沒 commit 的修法本身**，於是
+「先 commit」這條規則在它最該生效的地方剛好不適用，而 `git checkout` 把工作還原
+到了**上一版的實作**——測試照樣全綠，因為綠燈來自舊版而不是新版。
+
+正確做法：`cp <file> /tmp/x.good` → 改 → 跑 → `cp /tmp/x.good <file>`。判準不是
+「有沒有 commit」，是**還原的目標是不是我手上這一份**。
+
+**變異測試要驗的是「這條測試由誰扛」，不只是「它會不會紅」。** #40 的第一版修法
+加了一個守衛、測試也綠，但退掉那個守衛**零測試變紅**——真正在扛的是同一次改動裡
+的另一行。驅動不了的守衛要拆掉，不是留著加註解（同 `conservative` 自檢那次的
+處置）。做法是**逐一退掉**每個新增的機制，而不是整批退。
+
 **`/idd-verify` 的 codex leg 目前跑不動——Codex 額度用完，不是設定問題。** 所以跑
 verify 時傳 `codexEnabled: false`，別再讓它失敗一次然後把 `cross-model pass
 incomplete` 報成 process gap（前四輪都這樣報，歸類是錯的）。
