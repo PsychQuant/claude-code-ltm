@@ -187,6 +187,7 @@ public enum StrategyViolation: Error, Sendable, Equatable {
     /// 受檢」的後門，而那是最容易不小心做到的事——授權表是封閉集合，新增一檔
     /// 策略本來就要動 spec。
     case unauthorizedStrategy(RankingPolicyID)
+    case unauthorizedDisplacementBound(declared: Int, ceiling: Int)
     case misreportedHistory(Anchor, reported: RankingReason.History, actual: RankingReason.History)
 }
 
@@ -637,6 +638,20 @@ extension MemoryStrategy {
         // 而先擋能給出指名那個值的錯誤。
         guard displacementBound >= 0 else {
             throw StrategyViolation.negativeDisplacementBound(displacementBound)
+        }
+
+        // **上限也要經過授權**（#38）。`placementConstraints` 走聯集（策略只能往上
+        // 加），bound 走天花板（策略只能往下收）——同一個形狀的兩側，而保證都來自
+        // **合成的方向**，不是靠記住策略上次宣告過什麼。
+        //
+        // **超過就拋，不靜默截斷。** 一個要求 bound 99 卻拿到 10 的呼叫端沒有任何
+        // 訊號，而它會以為自己的策略在做它沒在做的事——靜默收窄與靜默放寬一樣糟，
+        // 只是方向相反。
+        if let ceiling = StrategyRegistry.authorizedBoundCeiling(for: declaredID),
+            displacementBound > ceiling
+        {
+            throw StrategyViolation.unauthorizedDisplacementBound(
+                declared: displacementBound, ceiling: ceiling)
         }
 
         // ## 聯集合成：策略只能給自己加約束，永遠不能減（#34）

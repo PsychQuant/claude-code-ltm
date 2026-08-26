@@ -96,6 +96,62 @@ public enum StrategyRegistry {
         }
     }
 
+    /// 這個識別碼的位移上限**天花板**。
+    ///
+    /// ## 表承載的是上界，不是值（#38）
+    ///
+    /// `#34` 把 `placementConstraints` 用「表 ∪ 實例」關掉了，而同一招對
+    /// `displacementBound` 行不通——spec 要求 bound 可在建構時組態，所以
+    /// `human-like(displacementBound: 3)` 與 `human-like(displacementBound: 1)`
+    /// 是**同一個識別碼的兩個實例**，表沒辦法說出「那個值」。
+    ///
+    /// 但表說得出「**最多不能超過多少**」。合成因此取 `min`：
+    ///
+    /// | 東西 | 合成 | 策略只能 |
+    /// |---|---|---|
+    /// | `placementConstraints` | 聯集 | 往上加 |
+    /// | `displacementBound` | 取小 | 往下收 |
+    ///
+    /// 兩者是同一個形狀的兩側：**保證來自合成的方向，不是靠記住策略上次宣告
+    /// 過什麼**。一個冒用 `human-like` 卻自報 `bound: 99` 的 conformer 拿到的
+    /// 是天花板，而不是它要的那個數。
+    ///
+    /// ## 這關掉了什麼、沒關掉什麼
+    ///
+    /// **關掉**：自報一個比授權更寬的上限。
+    ///
+    /// **沒關掉**：策略仍然可以自報一個**更小**的值，而沒有東西驗證它真的照那個
+    /// 值行動——但那不是漏洞，收緊是安全的方向，而實際位移本來就被 `RankingGuard`
+    /// 對照過。
+    ///
+    /// 未登錄的識別碼回 `nil`：識別碼本身的授權由 `authorizedConstraints` 判定
+    /// 並具名拒絕，這裡不重複那個判斷。
+    static func authorizedBoundCeiling(for id: RankingPolicyID) -> Int? {
+        switch id.value {
+        case "archival":
+            // 它從不重排。天花板 0 讓「任何移動都是違規」不必靠它自報。
+            return 0
+        case "human-like", "conservative":
+            // 出貨的建構式預設 1，而兩者都允許呼叫端調高。**天花板不是預設值**
+            // ——它是「再怎麼調也不能超過」的那個數。
+            //
+            // 10 的來源可查：`grep -roE "displacementBound: [0-9]+" Sources Tests`
+            // ——本 repo 內所有建構點用過的最大值。取它，所以這個改動**不改變任何
+            // 既有行為**，只擋住比既有用法更寬的自報。
+            //
+            // **這個數字沒有量測支撐，也不宣稱有。** 它不是「10 位是對的」，是
+            // 「目前沒有人需要超過 10」。裝上的是**機制**，不是那個數：要調高的人
+            // 得改這裡，而那個動作本身就是複查點。
+            //
+            // 第一版寫 3，理由掛在「`ltm-cli` spec 對 `--bound` 的說明」——**那份
+            // spec 根本沒提 `--bound`**，是我編的出處。查了 grep 才發現既有用法
+            // 最大到 10。留這段是因為「先寫理由再查」是本 session 反覆犯的錯。
+            return 10
+        default:
+            return nil
+        }
+    }
+
     /// switch 那一半。分出來只是為了讓上面的聯集讀得出來。
     private static func shippedConstraints(for id: RankingPolicyID)
         -> Set<PlacementConstraint>?

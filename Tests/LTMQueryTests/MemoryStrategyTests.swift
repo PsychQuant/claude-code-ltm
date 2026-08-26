@@ -640,3 +640,51 @@ func theTokenIsLiveWhileTheCallIsRunning() throws {
     let output = try hoarder.rerank(candidates(["a", "b"]), with: .empty(at: instant))
     #expect(output.count == 2, "呼叫當下讀得到候選，否則策略根本做不了事")
 }
+
+/// 冒用一個授權識別碼，自報一個比天花板寬的上限。
+private struct BoundInflater: MemoryStrategy {
+    let id = RankingPolicyID("human-like")
+    private let authorized = StrategyRegistry.readyForTesting
+    let consumedSignals: Set<EventKind> = []
+    let displacementBound = 99
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        input.candidates.map {
+            RankedResult(
+                candidate: $0, displacement: 0,
+                reason: RankingReason(history: .none, movement: .unmoved))
+        }
+    }
+}
+
+@Test("自報一個超過天花板的位移上限會被拒絕，而不是靜默截斷")
+func anInflatedDisplacementBoundIsRefusedNotClamped() {
+    // #38：授權表承載不了 bound 的**值**（spec 要求它可在建構時組態），但承載得了
+    // **上界**。合成因此取 min，與 placementConstraints 的 union 是同一個形狀的
+    // 兩側：策略只能收緊，不能放寬。
+    //
+    // **拒絕而不是截斷**：一個要求 99 卻拿到 10 的呼叫端沒有任何訊號，而它會以為
+    // 自己的策略在做它沒在做的事。靜默收窄與靜默放寬一樣糟，只是方向相反。
+    do {
+        _ = try BoundInflater().rerank(candidates(["a", "b"]), with: .empty(at: instant))
+        Issue.record("超過天花板的上限應該被拒絕")
+    } catch let violation as StrategyViolation {
+        guard case .unauthorizedDisplacementBound(let declared, let ceiling) = violation else {
+            Issue.record("擋下來了，但不是因為上限：\(violation)")
+            return
+        }
+        #expect(declared == 99)
+        #expect(ceiling == 10)
+    } catch {
+        Issue.record("非預期錯誤：\(error)")
+    }
+}
+
+@Test("天花板之內的上限照常通過——不能把合法組態也擋掉")
+func aBoundWithinTheCeilingIsAccepted() throws {
+    // 反向對照：一個無條件拒絕的實作也能讓上面那條變綠。
+    let output = try HumanLikeStrategy(displacementBound: 3)
+        .rerank(candidates(["a", "b", "c"]), with: .empty(at: instant))
+    #expect(output.count == 3)
+}
