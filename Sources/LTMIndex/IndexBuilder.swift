@@ -47,14 +47,36 @@ public struct IndexBuilder: Sendable {
     /// 用 callback 而不是讓 `IndexBuilder` 自己 print：這一層不該決定輸出去哪
     /// （stdout 的 `--json` 形態是給程式讀的），那是 CLI 的決定。
     private let progress: (@Sendable (BuildProgress) -> Void)?
-    /// 一批最多累積幾個 chunk 的向量再落地（#44 分批、#46 記憶體上界）。
+    /// 一批**至少**累積幾個 chunk 才切（#44 分批）。**這不是上界。**
     ///
-    /// 以 **chunk 數**為單位而不是來源數：一個來源可能有數千個 chunk，按來源
-    /// 分批的話上界仍由最大的那個來源決定。
+    /// 名字裡的 `target` 是字面意思。批次以整個來源為單位組裝，切點只在
+    /// **加完一整個來源之後**判斷，所以實際上界是
     ///
-    /// **預設值 2,000 沒有量測支撐**（#46）。2,000 × 512 維 × 4 B ≈ 4 MB 的向量
-    /// 累積，對任何機器都不算什麼——選它是為了「明顯安全」，不是為了最佳。要調
-    /// 它得先有 `docs/measurements/` 的峰值 RSS vs 語料規模紀錄。
+    /// ```
+    /// max(batchChunkTarget, 單一來源的最大 chunk 數)
+    /// ```
+    ///
+    /// 而且**右項隨語料成長**：session 檔會隨 resume 單調變長，所以「最大來源的
+    /// chunk 數」本身就是語料規模的遞增函數。
+    ///
+    /// 為什麼是結構後果而不是疏忽：`ScanState` 的續讀游標 `processedBytes` 是
+    /// **per-file** 的，一個來源切一半就沒有地方記「這個檔處理到哪」。要真正以
+    /// chunk 為單位分批，得先讓 state 能表達來源內的位置——見 #47。
+    ///
+    /// **這條註解先前寫的是相反的話**（「以 chunk 數為單位而不是來源數……避免
+    /// 上界由最大的那個來源決定」），而實作做的正是它說要避免的事。跨模型盲驗
+    /// 在使用者自己的語料上抓到反例：單一 session 檔 4,322 chunk > 2,000，該檔
+    /// 整個進同一批。查法：
+    ///
+    /// ```
+    /// wc -l < <最大的 .jsonl>          # 行數
+    /// grep -c '"type":"text"' <同檔>    # 可索引 chunk 的下界
+    /// ```
+    ///
+    /// **預設值 2,000 沒有量測支撐**（#46）。選它是為了「明顯安全」，不是為了
+    /// 最佳。要調它得先有 `docs/measurements/` 的**批次大小 trade-off** 紀錄
+    /// （fsync 次數 vs 中斷代價），而現有的 `2026-08-26-build-peak-memory.md`
+    /// 量的是另一個變數。
     ///
     /// 可注入的第一個理由是測試：分批的行為只有在批次小於語料時才觀察得到，
     /// 而寫一個 2,000 chunk 的 fixture 只是為了驗分批，成本與收益不成比例。
@@ -190,12 +212,15 @@ public struct IndexBuilder: Sendable {
         // rowID↔vectorRow 最直觀是寫在同一個迴圈，而那迴圈已在交易內（insert
         // 需要）。embedding 是被「順路」拉進去的，不是設計決定。
         //
-        // ## 每批的四段順序，以及為什麼不能改
+        // ## 每批的三段順序，以及為什麼不能改
         //
-        // ① 交易外算向量 → ② 交易內 delete+insert 取 rowID → ③ 交易外側車
-        // append+fsync → ④ 交易內提交指標。
+        // ① 交易外算向量 → ② 交易外側車 append+fsync → ③ 單一交易內
+        // delete+insert+提交指標+更新 vector_count。
         //
-        // **③ 必須在 ④ 之前**（原註解已寫，是付過代價的）：`truncateSidecar` 對
+        // row 編號在 ② 就決定（不必先 insert 拿 rowID），所以 delete、insert
+        // 與指標更新才能併進同一個交易。
+        //
+        // **② 必須在 ③ 之前**（原註解已寫，是付過代價的）：`truncateSidecar` 對
         // 較短的檔案呼叫 `ftruncate` 會**補零延長**（POSIX 語意）而非重建缺口，
         // 於是「DB 宣稱 N 個向量、檔案只有 N−k 個」會演變成永久且靜默的 row
         // 錯位——A 的向量被算到 B 身上，而檢索不會報錯。
@@ -213,7 +238,7 @@ public struct IndexBuilder: Sendable {
         // 變異序列下出現，逐案想不出來。
         //
         // 重複索引的風險改用另一個方式縮小：insert 與指標更新併進**同一個**
-        // 交易（見下方 ②④），把窗口壓到「交易提交 → 寫 state」之間。
+        // 交易（見下方 ③），把窗口壓到「交易提交 → 寫 state」之間。
         let grouped = Dictionary(grouping: scan.chunks, by: \.sourceKey)
 
         // 只失效、沒有新 chunk 的來源（檔案被刪／改寫成空）先清掉。
@@ -224,8 +249,13 @@ public struct IndexBuilder: Sendable {
             }
         }
 
-        // 批次以 **chunk 數**為單位而不是來源數：一個來源可能有數千個 chunk，
-        // 按來源分批的話記憶體上界仍然由最大的那個來源決定。
+        // **批次以整個來源為單位。** `batchChunkTarget` 是切點的下限、不是上界：
+        // 這個迴圈把一整個來源 append 進去之後才判斷有沒有越線，所以實際上界是
+        // `max(batchChunkTarget, 單一來源的最大 chunk 數)`，且右項隨語料成長。
+        //
+        // 不是疏忽：`ScanState.processedBytes` 是 per-file 的，來源切一半沒有地方
+        // 記進度。要真正以 chunk 分批得先擴充 state——見 #47。在那之前，`batchChunkTarget`
+        // 對「語料裡有個超大 session 檔」這個情況不提供任何保護。
         //
         var batches: [[String]] = []
         var current: [String] = []
@@ -321,7 +351,7 @@ public struct IndexBuilder: Sendable {
                 try database.setMeta("vector_count", String(vectorRow))
             }
 
-            // ⑤ 本批來源的 state 落地。
+            // ④ 本批來源的 state 落地。
             for sourceKey in batch {
                 if let entry = scan.state.files[sourceKey] { committedState.files[sourceKey] = entry }
             }
