@@ -52,7 +52,13 @@ on-device embedding。量測基線（280,000 chunk、112.9 段/秒）見 repo �
 ltm build
 ```
 
-跑得久，**放背景並回報進度**，不要讓它把整個 session 卡住。完成後驗證：
+跑得久，**放背景**，不要讓它把整個 session 卡住。
+
+`ltm build` 會把進度寫 **stderr**（`… 第 3/47 批，chunk 6000/94000`），所以背景跑時
+把 stderr 導到檔案再定期讀它，就有真的進度可以回報——不要從外面用 `ps` 或檔案大小
+去猜。`--quiet` 可關掉（CI／腳本用）。
+
+完成後驗證：
 
 ```bash
 ltm query "任意你記得談過的關鍵字" | head -5

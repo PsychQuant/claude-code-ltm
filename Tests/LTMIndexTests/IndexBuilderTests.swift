@@ -441,3 +441,126 @@ func identicalTimestampsKeepEverySourceAfterBuild() throws {
         sources == [sessionA, sessionB],
         "兩個來源都要留著（依 source_key 字典序），實得 \(sources)")
 }
+
+// MARK: - #44：中斷的代價必須是「最後一批」，不是「全部」
+
+/// 在第 N 次呼叫時拋錯的 embedder，用來製造「build 跑到一半死掉」。
+///
+/// 計數與 `refusing` 不同：後者測「這段文字產不出向量」（正常路徑），這個測
+/// 「向量算到一半整個爆掉」（異常路徑）。兩者的正確行為相反——前者跳過該 chunk
+/// 繼續，後者必須讓已完成的部分留下來。
+final class FailingAfterNEmbedder: EmbeddingProvider, @unchecked Sendable {
+    let revision: String
+    let dimension: Int = 4
+    private let failAfter: Int
+    private let lock = NSLock()
+    private var calls = 0
+
+    var callCount: Int { lock.lock(); defer { lock.unlock() }; return calls }
+
+    init(revision: String, failAfter: Int) {
+        self.revision = revision
+        self.failAfter = failAfter
+    }
+
+    struct Boom: Error {}
+
+    func vector(for text: String) throws -> [Float]? {
+        lock.lock()
+        calls += 1
+        let n = calls
+        lock.unlock()
+        if n > failAfter { throw Boom() }
+        var seed = Float(deterministicSeed(text + revision) % 1000) / 1000
+        return (0..<dimension).map { _ in
+            seed = (seed * 1.7).truncatingRemainder(dividingBy: 1)
+            return seed
+        }
+    }
+}
+
+/// 寫多個 project，讓「分批」有邊界可分。
+private func writeManyProjects(in corpus: URL, projects: Int, turnsEach: Int) throws {
+    for p in 0..<projects {
+        var lines: [String] = []
+        for i in 0..<turnsEach {
+            lines.append(
+                turnLine(
+                    uuid: String(format: "%08x-aaaa-bbbb-cccc-%012x", i, p),
+                    session: session, role: i.isMultiple(of: 2) ? "user" : "assistant",
+                    text: "專案 \(p) 的第 \(i) 段內容，長度要夠讓它成為一個 chunk。"))
+        }
+        _ = try writeSession(in: corpus, project: "proj-\(p)", file: "session.jsonl", lines: lines)
+    }
+}
+
+/// **中斷之後，已完成的批次必須留在磁碟上。**
+///
+/// 這是 #44 的核心斷言。實測過現行實作的後果：1 小時 20 分的 build 被中斷後，
+/// `index.sqlite3` 停在 4 KB、WAL 751 MB、`chunks` 為 0——整個交易從未提交，
+/// 80 分鐘的 on-device embedding 全部作廢。
+///
+/// 破壞實作確認過會紅：把 `build()` 改回單一交易包住整個 embedding 迴圈，
+/// 這條會看到 `vector_count` 為 0（或 meta 讀不到）。
+@Test("build 中斷後，已完成的批次是持久的")
+func aCrashMidBuildKeepsCompletedBatches() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeManyProjects(in: corpus, projects: 6, turnsEach: 2)
+
+    let flaky = FailingAfterNEmbedder(revision: "rev-A", failAfter: 4)
+    // 批次設小，否則 12 個 chunk 全落在同一批，分批的行為觀察不到。
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: flaky, batchChunkTarget: 2)
+
+    #expect(throws: (any Error).self) { _ = try builder.build() }
+
+    // 已完成的批次留下來了嗎？
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    let committed = Int(try database.meta("vector_count") ?? "0") ?? 0
+    #expect(committed > 0, "中斷前完成的批次應該已提交，實際 vector_count=\(committed)")
+    #expect(committed <= 4, "不該提交超過 embedder 成功產出的數量")
+
+    // 側車與宣稱的筆數一致——這是那條「永久且靜默的 row 錯位」不變式。
+    let sidecar = try VectorSidecar.open(url: derived.vectorsURL, dimension: 4)
+    #expect(sidecar.count == committed, "側車 \(sidecar.count) 筆 vs 宣稱 \(committed) 筆")
+}
+
+/// **重跑只做剩下的，不從零開始。**
+///
+/// 沒有這條，上一條可以被「提交了但 state 沒寫」滿足——那樣重跑仍會重算全部，
+/// 而使用者感受到的「中斷代價」一點都沒降低。
+@Test("中斷後重跑不重算已完成的部分")
+func rerunAfterCrashDoesNotRecomputeCompletedWork() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeManyProjects(in: corpus, projects: 6, turnsEach: 2)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+
+    let flaky = FailingAfterNEmbedder(revision: "rev-A", failAfter: 4)
+    #expect(throws: (any Error).self) {
+        _ = try IndexBuilder(
+            location: derived, scanner: scanner, embedder: flaky, batchChunkTarget: 2).build()
+    }
+    let doneBeforeCrash = Int(
+        try IndexDatabase(path: derived.databaseURL.path).meta("vector_count") ?? "0") ?? 0
+
+    // 第二次用正常 embedder，數它算了幾次。
+    let counting = FailingAfterNEmbedder(revision: "rev-A", failAfter: .max)
+    _ = try IndexBuilder(
+        location: derived, scanner: scanner, embedder: counting, batchChunkTarget: 2).build()
+
+    let total = Int(try IndexDatabase(path: derived.databaseURL.path).meta("vector_count") ?? "0") ?? 0
+    #expect(total > doneBeforeCrash, "重跑應該把剩下的做完")
+    #expect(
+        counting.callCount < total,
+        "重跑算了 \(counting.callCount) 次而總共 \(total) 筆——已完成的 \(doneBeforeCrash) 筆不該重算")
+}

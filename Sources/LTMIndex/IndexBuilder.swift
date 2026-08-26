@@ -25,15 +25,52 @@ public struct BuildReport: Sendable, Equatable {
 }
 
 /// 把掃描、索引、向量三件事串起來的建置流程。
+/// 一次分批提交的進度（#45）。
+///
+/// **這個型別存在的前提是 #44 的分批提交。** 在那之前沒有可回報的中間狀態——
+/// 整個 build 在單一交易內，外部讀取者看到的 `chunks` 是 0，`index.sqlite3` 停在
+/// 4 KB。那不是「有進度但沒印」，是**進度在提交之前不存在**。
+public struct BuildProgress: Sendable, Equatable {
+    /// 已完成的批次（由 1 起算）。
+    public let batch: Int
+    public let totalBatches: Int
+    public let chunksDone: Int
+    public let chunksTotal: Int
+}
+
 public struct IndexBuilder: Sendable {
     public let location: DerivedLocation
     public let scanner: CorpusScanner
     private let embedder: any EmbeddingProvider
+    /// 每批提交後被呼叫。`nil` = 不回報（既有呼叫端的行為不變）。
+    ///
+    /// 用 callback 而不是讓 `IndexBuilder` 自己 print：這一層不該決定輸出去哪
+    /// （stdout 的 `--json` 形態是給程式讀的），那是 CLI 的決定。
+    private let progress: (@Sendable (BuildProgress) -> Void)?
+    /// 一批最多累積幾個 chunk 的向量再落地（#44 分批、#46 記憶體上界）。
+    ///
+    /// 以 **chunk 數**為單位而不是來源數：一個來源可能有數千個 chunk，按來源
+    /// 分批的話上界仍由最大的那個來源決定。
+    ///
+    /// **預設值 2,000 沒有量測支撐**（#46）。2,000 × 512 維 × 4 B ≈ 4 MB 的向量
+    /// 累積，對任何機器都不算什麼——選它是為了「明顯安全」，不是為了最佳。要調
+    /// 它得先有 `docs/measurements/` 的峰值 RSS vs 語料規模紀錄。
+    ///
+    /// 可注入的第一個理由是測試：分批的行為只有在批次小於語料時才觀察得到，
+    /// 而寫一個 2,000 chunk 的 fixture 只是為了驗分批，成本與收益不成比例。
+    public let batchChunkTarget: Int
 
-    public init(location: DerivedLocation, scanner: CorpusScanner, embedder: any EmbeddingProvider) {
+    public init(
+        location: DerivedLocation, scanner: CorpusScanner, embedder: any EmbeddingProvider,
+        progress: (@Sendable (BuildProgress) -> Void)? = nil,
+        batchChunkTarget: Int = 2_000
+    ) {
         self.location = location
         self.scanner = scanner
         self.embedder = embedder
+        self.progress = progress
+        precondition(batchChunkTarget > 0, "批次大小必須為正——0 或負數會讓迴圈永遠不落地")
+        self.batchChunkTarget = batchChunkTarget
     }
 
     public enum BuildError: Error, Sendable, Equatable {
@@ -132,53 +169,174 @@ public struct IndexBuilder: Sendable {
         // row 編號與實際內容錯開。
         try truncateSidecar(toRows: vectorRow)
 
-        var newVectors: [[Float]] = []
-        var pendingRowUpdates: [(chunkRowID: Int64, vectorRow: Int)] = []
         var indexed = 0
 
-        // 第一階段（交易外）：算向量、決定 row 編號，但**還不提交任何指標**。
-        // 第二階段：側車落地並 fsync。第三階段：交易內一次提交 chunk 與指標。
+        // ## 分批提交（#44）
         //
-        // 順序是刻意的，而且先前寫反了：舊實作在交易內就提交了 `vector_count`，
-        // 交易外才 append 側車。崩潰落在兩者之間會留下「DB 宣稱 N 個向量、檔案只有
-        // N−k 個」，而下一輪的 `truncateSidecar` 對**較短**的檔案呼叫 ftruncate 會
-        // **補零延長**（POSIX 語意）而不是重建缺口，接著從較大的 row 繼續 append
-        // ——永久且靜默的 row 錯位：A 的向量被算到 B 身上。
-        try database.transaction {
-            for sourceKey in scan.invalidatedSources {
-                try database.deleteChunks(sourceKey: sourceKey)
-            }
-            let grouped = Dictionary(grouping: scan.chunks, by: \.sourceKey)
-            for (sourceKey, chunks) in grouped.sorted(by: { $0.key < $1.key }) {
-                let rowIDs = try database.insert(chunks: chunks, sourceKey: sourceKey)
-                for (offset, chunk) in chunks.enumerated() {
-                    // 產不出向量的 chunk 仍然留在 lexical 通道裡——少一路比整段
-                    // 不可檢索好，而且 `vector_row` 為 NULL 讓「這一筆沒有向量」
-                    // 是可查詢的事實，不是猜測。
-                    guard let vector = try embedder.vector(for: chunk.text) else { continue }
-                    newVectors.append(vector)
-                    pendingRowUpdates.append((chunkRowID: rowIDs[offset], vectorRow: vectorRow))
-                    vectorRow += 1
-                }
-                indexed += chunks.count
+        // **先前整個嵌入迴圈在單一 `database.transaction` 內**——而這個檔案上面
+        // 那段註解逐字寫著「第一階段（**交易外**）：算向量」。code 與它自己的
+        // 設計說明分岔了，而三個後果全部由此而來：
+        //
+        // | 後果 | 機制 |
+        // |---|---|
+        // | 中斷全丟 | 沒有中間 COMMIT |
+        // | 寫鎖握滿全程 | `BEGIN IMMEDIATE` 持有到最後 |
+        // | 記憶體無上限 | 向量必須撐到交易結束才能寫檔 |
+        //
+        // 實測代價：一次 1 小時 20 分的全量 build 被中斷後，`index.sqlite3` 停在
+        // 4 KB、WAL 751 MB、`chunks` 為 0——全部 rollback。
+        //
+        // **推測 code 為何分岔**：`insert(chunks:)` 回傳 rowID，而配對
+        // rowID↔vectorRow 最直觀是寫在同一個迴圈，而那迴圈已在交易內（insert
+        // 需要）。embedding 是被「順路」拉進去的，不是設計決定。
+        //
+        // ## 每批的四段順序，以及為什麼不能改
+        //
+        // ① 交易外算向量 → ② 交易內 delete+insert 取 rowID → ③ 交易外側車
+        // append+fsync → ④ 交易內提交指標。
+        //
+        // **③ 必須在 ④ 之前**（原註解已寫，是付過代價的）：`truncateSidecar` 對
+        // 較短的檔案呼叫 `ftruncate` 會**補零延長**（POSIX 語意）而非重建缺口，
+        // 於是「DB 宣稱 N 個向量、檔案只有 N−k 個」會演變成永久且靜默的 row
+        // 錯位——A 的向量被算到 B 身上，而檢索不會報錯。
+        //
+        // ## 只刪 invalidated 來源——**不可**無條件刪整批
+        //
+        // 第一版對每批的每個來源都先 `deleteChunks` 再 insert，理由是「崩在
+        // insert 與寫 state 之間會重複索引」。**那個修法破壞了 append 語意**：
+        // 一個檔案被追加內容時，scanner 只吐出**新增的** chunk（prefix 相符 →
+        // 不是 invalidated），無條件刪會把先前已索引的部分一起刪掉。
+        //
+        // 由不變式 2 的 property test 抓到（seed 47）：`create(f2,[2])` 之後
+        // `append(f2,#5)`，增量少了 turn 2 的 chunk 而全量重建有。**那正是那條
+        // 測試存在的理由**——它守的是「增量 ≡ 全量」，而這個 bug 只在特定的
+        // 變異序列下出現，逐案想不出來。
+        //
+        // 重複索引的風險改用另一個方式縮小：insert 與指標更新併進**同一個**
+        // 交易（見下方 ②④），把窗口壓到「交易提交 → 寫 state」之間。
+        let grouped = Dictionary(grouping: scan.chunks, by: \.sourceKey)
+
+        // 只失效、沒有新 chunk 的來源（檔案被刪／改寫成空）先清掉。
+        let deleteOnly = scan.invalidatedSources.subtracting(grouped.keys)
+        if !deleteOnly.isEmpty {
+            try database.transaction {
+                for sourceKey in deleteOnly.sorted() { try database.deleteChunks(sourceKey: sourceKey) }
             }
         }
 
-        // 側車先完整落地並 fsync，**之後**才提交指向它的指標。這樣崩潰最多留下
-        // 多餘的 bytes（下一輪 truncate 得掉），而不會留下指向不存在向量的指標。
-        try appendVectors(newVectors)
-
-        try database.transaction {
-            for update in pendingRowUpdates {
-                try database.execute(
-                    "UPDATE chunks SET vector_row = ? WHERE id = ?",
-                    bind: [.integer(Int64(update.vectorRow)), .integer(update.chunkRowID)])
+        // 批次以 **chunk 數**為單位而不是來源數：一個來源可能有數千個 chunk，
+        // 按來源分批的話記憶體上界仍然由最大的那個來源決定。
+        //
+        var batches: [[String]] = []
+        var current: [String] = []
+        var currentCount = 0
+        for sourceKey in grouped.keys.sorted() {
+            current.append(sourceKey)
+            currentCount += grouped[sourceKey]?.count ?? 0
+            if currentCount >= batchChunkTarget {
+                batches.append(current)
+                current = []
+                currentCount = 0
             }
-            try database.setMeta("vector_count", String(vectorRow))
+        }
+        if !current.isEmpty { batches.append(current) }
+
+        // **stamps 與 dimension 在批次開始之前就寫**（#44）。
+        //
+        // 它們描述的是**這個 builder**（layout 版本、embedding revision、維度），
+        // 不是內容——所以不該等內容做完才寫。
+        //
+        // 分批重構的第一版把它們留在批次內，於是崩掉的 build 從未寫 layout 版本，
+        // 第二次跑看到「未知」→ 判定需要**全量重建** → 把已完成的批次全丟掉。
+        // 症狀正好與 #44 要修的東西相同（重跑從零開始），但根因在別處——被
+        // `rerunAfterCrashDoesNotRecomputeCompletedWork` 抓到。
+        //
+        // 順帶：批次數為零時（沒有新 chunk 的增量、空語料）這裡仍然會寫，
+        // 所以「零批次的 build 讓索引宣稱未知版本」那個 bug 也一併關掉。
+        try database.transaction {
             try database.setMeta("vector_dimension", String(embedder.dimension))
+            try database.setMeta("vector_count", String(vectorRow))
             try database.writeStamps(embeddingRevision: embedder.revision)
         }
 
+        // state 逐批累積：崩在中途時，已完成來源的 entry 已經在磁碟上，重跑
+        // 的 scanner 不會再吐出它們。**沒有這一步，分批提交只降低了「資料丟失」
+        // 而沒有降低「重算成本」**——使用者感受到的中斷代價一點都沒變。
+        var committedState = previousState
+        let totalChunks = scan.chunks.count
+        var doneChunks = 0
+
+        for (batchIndex, batch) in batches.enumerated() {
+            let batchChunks = batch.flatMap { grouped[$0] ?? [] }
+
+            // ① 交易外：算向量。慢、不持鎖、可中斷。
+            var vectors: [[Float]?] = []
+            vectors.reserveCapacity(batchChunks.count)
+            for chunk in batchChunks {
+                // 產不出向量的 chunk 仍然留在 lexical 通道裡——少一路比整段
+                // 不可檢索好，而且 `vector_row` 為 NULL 讓「這一筆沒有向量」
+                // 是可查詢的事實，不是猜測。
+                vectors.append(try embedder.vector(for: chunk.text))
+            }
+
+            // ② 交易外：側車落地並 fsync。**必須在寫指標的交易之前**。
+            //
+            // row 編號在這裡就決定了，所以不需要先 insert 拿 rowID——這讓 insert
+            // 與指標更新可以合成同一個交易（下面 ③）。
+            var batchVectors: [[Float]] = []
+            var rowForChunk: [Int?] = []
+            for vector in vectors {
+                if let vector {
+                    batchVectors.append(vector)
+                    rowForChunk.append(vectorRow)
+                    vectorRow += 1
+                } else {
+                    rowForChunk.append(nil)
+                }
+            }
+            try appendVectors(batchVectors)
+
+            // ③ 單一交易：刪失效來源 + insert + 寫指標 + 更新 vector_count。
+            //
+            // 合成一個交易的理由是**縮小重複索引的窗口**：insert 與指標若分兩個
+            // 交易，崩在中間會留下 vector_row 為 NULL 的 chunk，而它們既已提交、
+            // state 又沒寫，下一輪會再插一次。
+            try database.transaction {
+                for sourceKey in batch where scan.invalidatedSources.contains(sourceKey) {
+                    try database.deleteChunks(sourceKey: sourceKey)
+                }
+                var cursor = 0
+                for sourceKey in batch {
+                    guard let chunks = grouped[sourceKey] else { continue }
+                    let ids = try database.insert(chunks: chunks, sourceKey: sourceKey)
+                    for id in ids {
+                        if let row = rowForChunk[cursor] {
+                            try database.execute(
+                                "UPDATE chunks SET vector_row = ? WHERE id = ?",
+                                bind: [.integer(Int64(row)), .integer(id)])
+                        }
+                        cursor += 1
+                    }
+                }
+                try database.setMeta("vector_count", String(vectorRow))
+            }
+
+            // ⑤ 本批來源的 state 落地。
+            for sourceKey in batch {
+                if let entry = scan.state.files[sourceKey] { committedState.files[sourceKey] = entry }
+            }
+            for sourceKey in deleteOnly { committedState.files.removeValue(forKey: sourceKey) }
+            try writeState(committedState)
+
+            indexed += batchChunks.count
+            doneChunks += batchChunks.count
+            progress?(
+                BuildProgress(
+                    batch: batchIndex + 1, totalBatches: batches.count,
+                    chunksDone: doneChunks, chunksTotal: totalChunks))
+        }
+
+        // 全部批次成功之後才寫完整 state——涵蓋沒有新 chunk 但 metadata 有變的來源。
         try writeState(scan.state)
 
         return BuildReport(

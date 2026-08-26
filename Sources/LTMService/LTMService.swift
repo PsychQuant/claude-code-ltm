@@ -417,9 +417,16 @@ public struct LTMService {
     // MARK: - 建置
 
     @discardableResult
-    public func build(full: Bool = false) throws -> BuildReport {
+    /// - Parameter progress: 每批提交後被呼叫（#45）。`nil` = 不回報。
+    ///
+    ///   由呼叫端決定輸出去哪：CLI 寫 stderr（stdout 的 `--json` 形態是給程式
+    ///   讀的），MCP server 不回報（它的 client 讀的是 JSON-RPC，不是終端機）。
+    public func build(
+        full: Bool = false, progress: (@Sendable (BuildProgress) -> Void)? = nil
+    ) throws -> BuildReport {
         try IndexBuilder(
-            location: location, scanner: CorpusScanner(corpusRoot: corpusRoot, anchorKey: anchorKey), embedder: embedder
+            location: location, scanner: CorpusScanner(corpusRoot: corpusRoot, anchorKey: anchorKey),
+            embedder: embedder, progress: progress
         ).build(full: full)
     }
 

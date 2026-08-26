@@ -182,10 +182,11 @@ enum CommandSupport {
 
 enum BuildCommand {
     static let usage = """
-        用法：ltm build [--full]
+        用法：ltm build [--full] [--quiet]
 
         選項：
           --full    捨棄既有索引，從零重建
+          --quiet   不印進度（進度預設寫 stderr；CI／腳本可關掉）
           -h, --help
         """
 
@@ -195,7 +196,7 @@ enum BuildCommand {
             print(usage)
             return LTMCommandLine.ExitCode.success.rawValue
         }
-        let unknown = arguments.unknown(known: ["full", "help", "h"])
+        let unknown = arguments.unknown(known: ["full", "quiet", "help", "h"])
         guard unknown.isEmpty else {
             Output.error("未知選項：\(unknown.joined(separator: ", "))\n\n\(usage)")
             return LTMCommandLine.ExitCode.usageError.rawValue
@@ -203,7 +204,18 @@ enum BuildCommand {
 
         do {
             let service = try CommandSupport.makeService(needsEventStore: false)
-            let report = try service.build(full: arguments.has("full"))
+            // **進度寫 stderr，不寫 stdout**（#45）。stdout 要留給 `--json`
+            // 之類給程式讀的形態；把進度混進去會讓消費端拿到不是 JSON 的東西。
+            //
+            // 沒有這個之前，`ltm build` 在完成前一個字都不印——而全量建索引是
+            // 數十分鐘等級的工作。**一個跑數十分鐘、完成前完全沉默的命令，跟
+            // 卡死在外觀上是同一個樣子。**
+            let quiet = arguments.has("quiet")
+            let report = try service.build(full: arguments.has("full")) { p in
+                guard !quiet else { return }
+                FileHandle.standardError.write(
+                    Data("  … 第 \(p.batch)/\(p.totalBatches) 批，chunk \(p.chunksDone)/\(p.chunksTotal)\n".utf8))
+            }
             print(
                 """
                 ✓ 索引完成（\(report.wasFullRebuild ? "全量重建" : "增量")）
