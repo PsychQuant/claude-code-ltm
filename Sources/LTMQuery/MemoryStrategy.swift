@@ -405,7 +405,8 @@ public enum MemoryStrategySupport {
 /// 而 `displacementBound` 關不掉的理由不同（表以識別碼為鍵，而 spec 要求 bound
 /// 可在建構時組態，同一個識別碼的兩個實例可以帶不同的 bound）。三者都是具名的
 /// 已知限制，見 `MemoryStrategy.placementConstraints` 與 `displacementBound` 的
-/// 說明；`ValidatedCandidates` 的 token 逃生口（#14）是第四個。
+/// 說明。**`ValidatedCandidates` 的 token 逃生口先前是第四個，已經關掉**（#14）：
+/// token 在 seam 呼叫返回時作廢，所以存下來的那一份之後拿不到候選。
 ///
 /// ## 這個列舉為什麼不違反「列舉會漏，性質不會」
 ///
@@ -430,8 +431,11 @@ public enum PlacementConstraint: Sendable, Hashable, CaseIterable {
 /// 漏改）：簽章不收 CorpusReader 是型別層事實，但 `CorpusReader` 與
 /// `Anchor.dereference` 都是 LTMCore 的 public API，策略側自建 reader 仍可還原
 /// 原文；依賴宣告擋掉的只是 `FileEventStore` 這個便利型別，`Event: Codable`
-/// 在 LTMCore，用 Foundation 直接讀檔即可繞過。兩條 SHALL NOT 目前**沒有
-/// 執行點**，追蹤於 #14。
+/// 在 LTMCore，用 Foundation 直接讀檔即可繞過。
+///
+/// 那兩條 SHALL NOT 已經改寫成它們**實際保護的東西並各自指名執行點**（#14）：
+/// 排序正確性由 seam 的那組檢查執行，隱私邊界由 canonical store 落地 bytes 的
+/// round-trip 執行。它們不再宣稱自己是型別層事實。
 public protocol MemoryStrategy: Sendable {
     /// 策略識別碼。由「消費哪些訊號」定義，不由調整幅度定義——所以同一個策略
     /// 配不同位移上限仍是同一個 id。
@@ -591,10 +595,19 @@ extension MemoryStrategy {
     /// 新策略只要不呼叫就完全不受約束——而 seam 的全部意義就是「不可繞過」。
     /// 那時的「入口」只是一個約定俗成的第一行。
     ///
-    /// **誠實邊界**：這些檢查只在呼叫端走 `rerank` 時執行。`rerankChecked` 是
-    /// public requirement，任何持有 `ValidatedCandidates` 的人都能直接呼叫它而
-    /// 跳過全部檢查——那個 token 可儲存、可轉手（見該型別的說明，R6 實測）。
-    /// 具體型別上另外定義同名 `rerank` 也仍會被靜態呼叫選中。追蹤於 #14。
+    /// **誠實邊界**：這些檢查只在呼叫端走 `rerank` 時執行。
+    ///
+    /// `rerankChecked` 仍是 public requirement，但**存下 token 之後再呼叫它已經
+    /// 沒有用**（#14）：token 在這個方法返回時作廢，所以那條路徑通往的是一張
+    /// 死掉的 token，不是「被 seam 驗過的候選」。
+    ///
+    /// 仍然開著的是**別的東西**，而它們不是繞過：
+    ///
+    /// - 具體型別上另外定義同名 `rerank`，持有具體型別的呼叫端會靜態選中它。
+    /// - 任何人都可以完全不碰這個 seam、自己造 `[RankedResult]`。
+    ///
+    /// 兩者都不是「跳過檢查取得已驗證的東西」，是「根本沒使用這個 seam」——而
+    /// 那時沒有任何地方會宣稱它的輸出通過了檢查。差別在於**有沒有人被誤導**。
     public func rerank(_ candidates: [Candidate], with projection: Projection) throws
         -> [RankedResult]
     {
