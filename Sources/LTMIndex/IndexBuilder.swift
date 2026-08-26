@@ -42,6 +42,18 @@ public enum BuildProgress: Sendable, Equatable {
     /// 相同的數字合成一個會讓日後真的分岔時沒有地方放。
     case scanCompleted(files: Int, chunks: Int, vectorsNeeded: Int)
 
+    /// 分批算完之後的計畫，含**可以精確算出來**的那一項記憶體上界。
+    ///
+    /// `estimatedVectorBytes` 是最大那一批的向量累積：
+    /// `largestBatchChunks × dimension × 4 B × 2`（×2 是因為 `VectorSidecar.encode`
+    /// 產生的 `Data` 與 `batchVectors` 同時存活）。
+    ///
+    /// **它不是整個 build 的峰值 RSS。** 量測顯示 RSS 隨 chunk 數線性成長，而
+    /// 成長的來源尚未被隔離量測定位（`docs/measurements/2026-08-26-build-peak-memory.md`）。
+    /// 這裡報的是那條線裡**唯一算得準**的一項——把它印出來，是為了讓「無上限」
+    /// 從看不見變成看得見，不是為了假裝整體可預測。
+    case batchPlan(batches: Int, largestBatchChunks: Int, estimatedVectorBytes: Int)
+
     /// 嵌入進行中的心跳。**每 N 個 chunk 或每 T 秒，先到者發。**
     ///
     /// 只有批次邊界的回報不夠：批次可以很大（#47），而使用者要判斷的是「它還活著
@@ -96,6 +108,10 @@ public struct IndexBuilder: Sendable {
     /// 可注入的第一個理由是測試：分批的行為只有在批次小於語料時才觀察得到，
     /// 而寫一個 2,000 chunk 的 fixture 只是為了驗分批，成本與收益不成比例。
     public let batchChunkTarget: Int
+    /// 向量累積的預算（bytes）。`nil` = 不設限。
+    ///
+    /// **沒有預設值是刻意的**，見 `BuildError.memoryBudgetExceeded`。
+    public let memoryBudgetBytes: Int?
     /// 嵌入期間每幾個 chunk 發一次心跳。與 `progressTimeInterval` 是 **or**：
     /// 先到者發。兩個都要的理由是它們各自漏掉一種情況——chunk 很慢時只有時間
     /// 觸發得了，chunk 很快時只有計數不會把 stderr 洗版。
@@ -107,6 +123,7 @@ public struct IndexBuilder: Sendable {
         location: DerivedLocation, scanner: CorpusScanner, embedder: any EmbeddingProvider,
         progress: (@Sendable (BuildProgress) -> Void)? = nil,
         batchChunkTarget: Int = 2_000,
+        memoryBudgetBytes: Int? = nil,
         progressChunkInterval: Int = 200,
         progressTimeInterval: TimeInterval = 5
     ) {
@@ -114,6 +131,7 @@ public struct IndexBuilder: Sendable {
         self.scanner = scanner
         self.embedder = embedder
         self.progress = progress
+        self.memoryBudgetBytes = memoryBudgetBytes
         precondition(progressChunkInterval > 0, "心跳間隔必須為正")
         self.progressChunkInterval = progressChunkInterval
         self.progressTimeInterval = progressTimeInterval
@@ -141,6 +159,19 @@ public struct IndexBuilder: Sendable {
         /// 需要整份重建，但呼叫端不允許（查詢路徑）。
         case fullRebuildRequired(detail: String)
         case stateUnreadable(detail: String)
+        /// 估算的向量累積超過使用者設定的預算。
+        ///
+        /// **只在使用者顯式設了預算時才可能發生**——沒有預設值，因為本 repo 沒有
+        /// 任何量測支撐得起一個門檻（`docs/measurements/2026-08-26-build-peak-memory.md`
+        /// 的「不支持」一節逐字寫著這件事）。憑感覺挑一個預設，會把「OS 決定後果」
+        /// 換成「一個我編的數字決定後果」，那不是改善。
+        ///
+        /// 誠實邊界：這個守衛擋的是**向量累積**，不是整個 build 的 RSS。後者的
+        /// 成長來源尚未定位，所以擋不了。這一點必須寫在錯誤訊息裡，否則使用者
+        /// 會以為設了預算就安全。
+        case memoryBudgetExceeded(
+            estimatedBytes: Int, budgetBytes: Int, largestBatchChunks: Int,
+            largestSourceChunks: Int)
     }
 
     /// 建置索引。
@@ -329,6 +360,26 @@ public struct IndexBuilder: Sendable {
             }
         }
         if !current.isEmpty { batches.append(current) }
+
+        // 這裡是唯一一個「上界算得準」的時點：批次已經定案，維度已知。
+        let largestBatchChunks = batches.map { batch in
+            batch.reduce(0) { $0 + (grouped[$1]?.count ?? 0) }
+        }.max() ?? 0
+        // ×2：`appendVectors` 呼叫 `VectorSidecar.encode`，產生的 `Data` 與
+        // `batchVectors` 同時存活。少算這個 2 會讓守衛在最需要的時候放行。
+        let estimatedVectorBytes = largestBatchChunks * embedder.dimension * 4 * 2
+        progress?(
+            .batchPlan(
+                batches: batches.count, largestBatchChunks: largestBatchChunks,
+                estimatedVectorBytes: estimatedVectorBytes))
+
+        if let budget = memoryBudgetBytes, estimatedVectorBytes > budget {
+            let largestSourceChunks = grouped.values.map(\.count).max() ?? 0
+            throw BuildError.memoryBudgetExceeded(
+                estimatedBytes: estimatedVectorBytes, budgetBytes: budget,
+                largestBatchChunks: largestBatchChunks,
+                largestSourceChunks: largestSourceChunks)
+        }
 
         // **stamps 與 dimension 在批次開始之前就寫**（#44）。
         //

@@ -656,6 +656,100 @@ func crashingBeforeTheFirstBatchDoesNotBrickTheIndex() throws {
     #expect(recovered.chunksIndexed == 3)
 }
 
+// MARK: - 記憶體預算與具名拒絕（#46 Expected ②③）
+
+/// #46 ③ 逐字要的是「到達上限時**具名拒絕**，而不是讓 OS 決定」。
+///
+/// 「具名」有兩個要求，兩個都測：訊息說得出**補救**，而且拒絕發生在**做事之前**
+/// ——跑了四十分鐘才說「我不該開始」不是拒絕，是浪費。
+@Test("超過預算時在算任何向量之前就具名拒絕")
+func exceedingTheMemoryBudgetRefusesBeforeEmbeddingAnything() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["甲", "乙", "丙", "丁"])
+
+    let counting = FailingAfterNEmbedder(revision: "rev-A", failAfter: .max)
+    // 4 chunk × 4 維 × 4 B × 2 = 128 B。預算設 64 B 必然超過。
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: counting, batchChunkTarget: 100, memoryBudgetBytes: 64)
+
+    do {
+        _ = try builder.build()
+        Issue.record("應該拒絕")
+        return
+    } catch let error as IndexBuilder.BuildError {
+        guard case .memoryBudgetExceeded(let estimated, let budget, let batch, let source) = error
+        else {
+            Issue.record("應該是 memoryBudgetExceeded，實際是 \(error)")
+            return
+        }
+        #expect(estimated == 128)
+        #expect(budget == 64)
+        #expect(batch == 4)
+        #expect(source == 4)
+    }
+
+    // **一個向量都不該算過。** 拒絕要發生在花掉時間之前。
+    #expect(counting.callCount == 0, "拒絕之前就開始 embedding，等於沒有拒絕")
+    // 也不該留下半份索引。
+    #expect(try IndexDatabase(path: derived.databaseURL.path).chunkCount() == 0)
+}
+
+/// 預設不設限是**刻意**的：本 repo 沒有任何量測支撐得起一個門檻。這條測試把
+/// 那個決定釘住——日後有人「順手加個合理預設」時，它會紅。
+@Test("不設預算時同一份語料照跑——預設無上限是刻意的")
+func withoutABudgetTheSameCorpusBuildsFine() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["甲", "乙", "丙", "丁"])
+
+    let report = try IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A")
+    ).build()
+    #expect(report.chunksIndexed == 4)
+}
+
+/// 估算式必須把 `VectorSidecar.encode` 產生的那份 `Data` 算進去——它與
+/// `batchVectors` 同時存活。少算那個 2 會讓守衛在最需要的時候放行。
+@Test("估算值含 encode 的第二份拷貝：chunk × 維度 × 4 B × 2")
+func theEstimateAccountsForTheEncodedCopy() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["甲", "乙", "丙", "丁"])
+
+    final class Box: @unchecked Sendable {
+        var estimated: Int?
+        var largestBatch: Int?
+    }
+    let box = Box()
+    _ = try IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"),
+        progress: { progress in
+            if case .batchPlan(_, let largest, let bytes) = progress {
+                box.estimated = bytes
+                box.largestBatch = largest
+            }
+        },
+        batchChunkTarget: 100
+    ).build()
+
+    #expect(box.largestBatch == 4)
+    // StubEmbedder 是 4 維：4 chunk × 4 維 × 4 B × 2 = 128。
+    #expect(box.estimated == 128, "少算 encode 的那一份會讓守衛在最需要時放行")
+}
+
 final class FailingAfterNEmbedder: EmbeddingProvider, @unchecked Sendable {
     let revision: String
     let dimension: Int = 4

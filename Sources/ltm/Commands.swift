@@ -192,6 +192,9 @@ enum BuildCommand {
         case .scanCompleted(let files, let chunks, let vectorsNeeded):
             line = "  掃描完成：\(files) 個來源檔，\(chunks) 個新 chunk，"
                 + "其中 \(vectorsNeeded) 個要算向量"
+        case .batchPlan(let batches, let largestBatchChunks, let estimatedVectorBytes):
+            line = "  分批：\(batches) 批，最大一批 \(largestBatchChunks) chunk"
+                + "，向量累積上界 \(Self.megabytes(estimatedVectorBytes))"
         case .embedding(let done, let total, let elapsed):
             line = "  … 嵌入 \(done)/\(total) chunk（已用 \(Self.duration(elapsed))）"
         case .batchCommitted(let batch, let totalBatches, let done, let total, let elapsed):
@@ -200,6 +203,10 @@ enum BuildCommand {
         }
         // `try?`：EPIPE／stderr 被關掉都只讓這一行消失，不影響索引。
         try? FileHandle.standardError.write(contentsOf: Data((line + "\n").utf8))
+    }
+
+    static func megabytes(_ bytes: Int) -> String {
+        String(format: "%.1f MB", Double(bytes) / 1_048_576)
     }
 
     static func duration(_ seconds: TimeInterval) -> String {
@@ -211,21 +218,31 @@ enum BuildCommand {
     }
 
     static let usage = """
-        用法：ltm build [--full] [--quiet]
+        用法：ltm build [--full] [--quiet] [--batch-chunks N] [--memory-budget-mb N]
 
         選項：
-          --full    捨棄既有索引，從零重建
-          --quiet   不印進度（進度預設寫 stderr；CI／腳本可關掉）
+          --full                捨棄既有索引，從零重建
+          --quiet               不印進度（進度預設寫 stderr；CI／腳本可關掉）
+          --batch-chunks N      批次切點的下限（預設 2000）。**不是上界**：批次以
+                                整個來源檔為單位組裝，所以實際上界是
+                                max(N, 最大來源檔的 chunk 數)。見 issue #47。
+                                環境變數：LTM_BUILD_BATCH_CHUNKS
+          --memory-budget-mb N  向量累積超過 N MB 就具名拒絕，不跑。
+                                **預設不設限**——本 repo 沒有量測支撐得起一個門檻，
+                                憑感覺挑一個只是換一個東西替你決定後果。
+                                擋的是向量累積，不是整個 build 的峰值記憶體。
+                                環境變數：LTM_BUILD_MEMORY_BUDGET_MB
           -h, --help
         """
 
     static func run(arguments raw: [String]) -> Int32 {
-        let arguments = Arguments(raw, valueOptions: [])
+        let arguments = Arguments(raw, valueOptions: ["memory-budget-mb", "batch-chunks"])
         if arguments.has("help") || arguments.has("h") {
             print(usage)
             return LTMCommandLine.ExitCode.success.rawValue
         }
-        let unknown = arguments.unknown(known: ["full", "quiet", "help", "h"])
+        let unknown = arguments.unknown(
+            known: ["full", "quiet", "help", "h", "memory-budget-mb", "batch-chunks"])
         guard unknown.isEmpty else {
             Output.error("未知選項：\(unknown.joined(separator: ", "))\n\n\(usage)")
             return LTMCommandLine.ExitCode.usageError.rawValue
@@ -240,7 +257,38 @@ enum BuildCommand {
             // 數十分鐘等級的工作。**一個跑數十分鐘、完成前完全沉默的命令，跟
             // 卡死在外觀上是同一個樣子。**
             let quiet = arguments.has("quiet")
-            let report = try service.build(full: arguments.has("full")) { progress in
+
+            // 旗標優先於環境變數；兩者都沒有 → nil = 不設限。
+            //
+            // **不設限是預設，而且是刻意的**（#46）：本 repo 沒有任何量測支撐得起
+            // 一個門檻，憑感覺挑一個只是把「OS 決定後果」換成「一個編出來的數字
+            // 決定後果」。使用者設了它，就代表他知道自己在限制什麼。
+            let budgetMB = arguments.value("memory-budget-mb")
+                ?? ProcessInfo.processInfo.environment["LTM_BUILD_MEMORY_BUDGET_MB"]
+            var memoryBudgetBytes: Int?
+            if let budgetMB {
+                guard let value = Int(budgetMB), value > 0 else {
+                    Output.error("✗ --memory-budget-mb 需要正整數（MB），實際收到：\(budgetMB)")
+                    return LTMCommandLine.ExitCode.usageError.rawValue
+                }
+                memoryBudgetBytes = value * 1_048_576
+            }
+
+            let batchChunksRaw = arguments.value("batch-chunks")
+                ?? ProcessInfo.processInfo.environment["LTM_BUILD_BATCH_CHUNKS"]
+            var batchChunkTarget = 2_000
+            if let batchChunksRaw {
+                guard let value = Int(batchChunksRaw), value > 0 else {
+                    Output.error("✗ --batch-chunks 需要正整數，實際收到：\(batchChunksRaw)")
+                    return LTMCommandLine.ExitCode.usageError.rawValue
+                }
+                batchChunkTarget = value
+            }
+
+            let report = try service.build(
+                full: arguments.has("full"), batchChunkTarget: batchChunkTarget,
+                memoryBudgetBytes: memoryBudgetBytes
+            ) { progress in
                 guard !quiet else { return }
                 BuildCommand.writeProgress(progress)
             }
@@ -289,6 +337,28 @@ enum BuildCommand {
                     ✗ 取不到建置鎖，而且**不是**因為別人正在建置：\(detail)（errno \(code)）
                     路徑：\(path)
                     這通常是權限、磁碟空間或開檔數上限的問題——等待不會讓它好轉。
+                    """)
+                return LTMCommandLine.ExitCode.indexStateError.rawValue
+            case .memoryBudgetExceeded(
+                let estimated, let budget, let largestBatch, let largestSource):
+                Output.error(
+                    """
+                    ✗ 向量累積的估計值 \(Self.megabytes(estimated)) 超過你設定的預算 \
+                    \(Self.megabytes(budget))
+                      最大的一批有 \(largestBatch) 個 chunk，其中最大的單一來源檔佔 \
+                    \(largestSource) 個。
+
+                    補救（依有效程度排序）：
+                      1. 分次索引：用 LTM_CORPUS_ROOT 指向較少的 project，分幾次跑。
+                         這是唯一對「單一超大 session 檔」有效的做法。
+                      2. 提高預算：--memory-budget-mb <N>，或不設它（預設無上限）。
+                      3. 縮小批次：--batch-chunks <N>。**只在最大來源本身小於 N 時有效**
+                         ——批次以整個來源為單位組裝（見 issue #47），所以它壓不下
+                         一個 \(largestSource) chunk 的檔案。
+
+                    誠實邊界：這個預算擋的是**向量累積**，不是整個 build 的峰值記憶體。
+                    後者隨 chunk 數線性成長而成長來源尚未定位，見
+                    docs/measurements/2026-08-26-build-peak-memory.md。設了預算不等於安全。
                     """)
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .stateUnreadable(let detail):
@@ -513,6 +583,17 @@ enum QueryCommand {
                     """)
             case .lockHeld(let path):
                 Output.error("✗ 意外的鎖錯誤（\(path)）——查詢路徑本應吞掉它。這是 bug。")
+            case .memoryBudgetExceeded(let estimated, let budget, _, _):
+                // 查詢路徑不設預算（見下方 makeService），所以這裡到不了。
+                // 但仍然要有分支：真的到了就是有人在別處設了它，而安靜地用舊索引
+                // 回答會讓新語料從此不再併入。
+                Output.error(
+                    """
+                    ✗ 增量併入時向量累積估計 \(BuildCommand.megabytes(estimated)) 超過預算 \
+                    \(BuildCommand.megabytes(budget))
+                    索引還在，但這一輪沒有併入新內容。查詢路徑不該設這個預算——
+                    請檢查是誰設的。
+                    """)
             case .lockUnavailable(let path, let code, let detail):
                 // 這個**不**被 facade 吞掉，而且不該吞：它不是「有人正在建置」，
                 // 是環境壞了（權限／磁碟／fd 上限）。安靜地用舊索引回答會讓

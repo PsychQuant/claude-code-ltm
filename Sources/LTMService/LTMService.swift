@@ -432,12 +432,19 @@ public struct LTMService {
     ///
     ///   由呼叫端決定輸出去哪：CLI 寫 stderr（stdout 的 `--json` 形態是給程式
     ///   讀的），MCP server 不回報（它的 client 讀的是 JSON-RPC，不是終端機）。
+    /// - Parameter memoryBudgetBytes: 向量累積的預算。`nil` = 不設限（預設）。
+    ///   **沒有預設值是刻意的**——本 repo 沒有任何量測支撐得起一個門檻，憑感覺挑
+    ///   一個只是把「OS 決定後果」換成「一個編出來的數字決定後果」。見 #46 與
+    ///   `docs/measurements/2026-08-26-build-peak-memory.md`。
+    /// - Parameter batchChunkTarget: 批次切點的**下限**，不是上界（見 #47）。
     public func build(
-        full: Bool = false, progress: (@Sendable (BuildProgress) -> Void)? = nil
+        full: Bool = false, batchChunkTarget: Int = 2_000, memoryBudgetBytes: Int? = nil,
+        progress: (@Sendable (BuildProgress) -> Void)? = nil
     ) throws -> BuildReport {
         try IndexBuilder(
             location: location, scanner: CorpusScanner(corpusRoot: corpusRoot, anchorKey: anchorKey),
-            embedder: embedder, progress: progress
+            embedder: embedder, progress: progress, batchChunkTarget: batchChunkTarget,
+            memoryBudgetBytes: memoryBudgetBytes
         ).build(full: full)
     }
 
