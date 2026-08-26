@@ -601,3 +601,49 @@ private func replacingHexValue(in line: String, with replacement: String) -> Str
     let stderr = String(decoding: result?.standardErrorContent ?? [], as: UTF8.self)
     #expect(stderr.contains("越界"), "訊息必須指名越界，而不是報成空摘要")
 }
+
+// MARK: - #41：錯誤訊息不得夾帶那個非法字元
+
+/// 非法字元之所以非法，正是因為它像第三方逐字內容（CJK、標點、換行）。把它印進
+/// 錯誤訊息，等於讓語料的一個字元跟著訊息離開這台機器——`OpaqueIdentifier.require`
+/// 的訊息會進 crash report，而 macOS 的診斷回報是**對外通道**。
+///
+/// 一個字元的資訊量很小，但關掉它的成本更小，而「零對外通道」是硬規則不是比例
+/// 原則。位置足以定位問題，那才是排錯真正需要的東西。
+///
+/// 破壞實作確認過會紅：把 `illegalCharacter(at:)` 改回帶 `Character`。
+@Test("識別碼驗證的錯誤只說位置，不說那個字元是什麼")
+func validationErrorNamesThePositionNotTheCharacter() throws {
+    let offending = "協調會逐字稿"
+    do {
+        try OpaqueIdentifier.validate("ok-" + offending)
+        Issue.record("含 CJK 的識別碼應該被拒絕")
+    } catch let error as OpaqueIdentifier.ValidationError {
+        guard case .illegalCharacter(let at) = error else {
+            Issue.record("應該是 illegalCharacter，實際是 \(error)")
+            return
+        }
+        #expect(at == 3, "位置要指到第一個非法字元")
+        let rendered = "\(error)"
+        for character in offending {
+            #expect(!rendered.contains(character), "錯誤訊息不得含語料字元：\(rendered)")
+        }
+    }
+}
+
+/// 同一條紀律套在 `ContentHash` 上——它的欄位同樣來自可能損壞的 canonical 行。
+@Test("ContentHash 的驗證錯誤同樣只說位置")
+func contentHashValidationErrorNamesThePositionNotTheCharacter() throws {
+    let hex = String(repeating: "a", count: 63) + "。"
+    do {
+        try ContentHash.validate(hex)
+        Issue.record("含全形句號的 hex 應該被拒絕")
+    } catch let error as ContentHash.ValidationError {
+        guard case .illegalCharacter(let at) = error else {
+            Issue.record("應該是 illegalCharacter，實際是 \(error)")
+            return
+        }
+        #expect(at == 63)
+        #expect(!"\(error)".contains("。"))
+    }
+}

@@ -18,16 +18,26 @@ public enum OpaqueIdentifier {
     public enum ValidationError: Error, Sendable, Equatable {
         case empty
         case tooLong(length: Int)
-        case illegalCharacter(Character)
+        /// **帶的是位置，不是那個字元本身**（#41）。
+        ///
+        /// 這個錯誤的訊息會出現在兩個地方：`require` 的 `preconditionFailure`
+        /// （進 crash report，而 macOS 的診斷回報是**對外通道**），以及解碼
+        /// 失敗回給呼叫端的訊息。非法字元之所以非法，正是因為它像第三方逐字
+        /// 內容（CJK、標點、換行）——把它原樣印出來，等於讓語料的一個字元跟著
+        /// 錯誤訊息離開這台機器。
+        ///
+        /// 一個字元的資訊量很小，但關掉它的成本更小，而「零對外通道」是硬規則
+        /// 不是比例原則。位置足以定位問題，這是排錯真正需要的東西。
+        case illegalCharacter(at: Int)
     }
 
     public static func validate(_ raw: String) throws {
         guard !raw.isEmpty else { throw ValidationError.empty }
         guard raw.count <= maxLength else { throw ValidationError.tooLong(length: raw.count) }
-        for character in raw {
+        for (offset, character) in raw.enumerated() {
             let ok = character.isASCII
                 && (character.isLetter || character.isNumber || "._-".contains(character))
-            guard ok else { throw ValidationError.illegalCharacter(character) }
+            guard ok else { throw ValidationError.illegalCharacter(at: offset) }
         }
     }
 

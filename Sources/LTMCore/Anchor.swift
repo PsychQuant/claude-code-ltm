@@ -83,7 +83,8 @@ public struct ContentHash: Sendable, Hashable, Codable, CustomStringConvertible 
 
     public enum ValidationError: Error, Sendable, Equatable {
         case wrongLength(Int)
-        case illegalCharacter(Character)
+        /// 帶位置不帶字元，理由同 `OpaqueIdentifier.ValidationError`（#41）。
+        case illegalCharacter(at: Int)
         /// 這是 `sha256("")`。
         case emptyContentDigest
     }
@@ -133,9 +134,9 @@ public struct ContentHash: Sendable, Hashable, Codable, CustomStringConvertible 
         guard hex != ContentHash.emptyContentDigestHex else {
             throw ValidationError.emptyContentDigest
         }
-        for character in hex {
+        for (offset, character) in hex.enumerated() {
             guard character.isASCII, character.isHexDigit, !character.isUppercase else {
-                throw ValidationError.illegalCharacter(character)
+                throw ValidationError.illegalCharacter(at: offset)
             }
         }
     }
@@ -162,6 +163,22 @@ public struct ContentHash: Sendable, Hashable, Codable, CustomStringConvertible 
 ///
 /// 現行的 `source` 是 project 指紋，理由與它自己的誠實邊界見 `ProjectFingerprint`。
 public struct Anchor: Sendable, Hashable, Codable {
+    /// 這則 turn 的來源 **project 指紋**——32 個小寫十六進位字元，由
+    /// `ProjectFingerprint.of(directoryName:)` 產生。
+    ///
+    /// ## 型別是 `String`，而約束比型別窄（#41）
+    ///
+    /// 這個欄位的**值域**是指紋，但**型別**只擋 `OpaqueIdentifier` 的通用識別碼
+    /// 規則（≤64 字元、ASCII 英數與 `._-`）。那個落差是刻意的，理由在解碼側：
+    ///
+    /// 舊定址規則（sessionId，36 字元含連字號）寫的紀錄必須被**具名拒絕並回報
+    /// 行號**（`memory-events` 的 "refused, not reinterpreted"），而那要求它們
+    /// 先解碼得出來。把指紋形狀升成型別約束，那些紀錄會在解碼時就變成一般的
+    /// 格式錯誤——具名的、可修復的拒絕退化成「這行壞了」，行號還在但診斷沒了。
+    ///
+    /// 所以形狀由 `ProjectFingerprint.hasCurrentRuleShape` 在**讀取時**判定，
+    /// 而不是由型別。#41 問過要不要改存 slug（會放寬到 152 字元）：**不改**，
+    /// 兩個理由寫在 `ProjectFingerprint` 的 doc——長度與隱私，任一都足夠。
     public let source: String
     public let turnID: String
     public let contentHash: ContentHash
