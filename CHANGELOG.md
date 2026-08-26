@@ -4,6 +4,39 @@
 
 ## Unreleased
 
+## [0.1.0] - 2026-08-26
+
+**首次發布。** 這一版之前的所有條目都列在下面——本檔從 repo 開始就在記，所以
+0.1.0 的內容就是「到目前為止的全部」，不是這一次改了什麼。
+
+以下是**為了讓它能被安裝**而做的改動，其餘條目是既有功能的紀錄：
+
+### Added
+
+- **`ltm mcp` 子命令**：MCP server 從獨立的 `ltm-mcp` executable 併進 `ltm`。
+  理由是出貨形狀——生態的 release pipeline（`harness-devtools:mcp-deploy`）從頭到尾
+  是單 binary 假設，餵它兩個要出貨的 binary 只有一個會出貨**且不報錯**。
+- **`Sources/LTMCore/Version.swift`**：版本號的單一來源，由 `ReleaseVersionSyncTests`
+  看守其餘三處（`mcpb/manifest.json`、`plugin.json`、wrapper 的 `DESIRED_VERSION`）。
+  三者不同步的失敗方式是**四步都「成功」而版本各不相同**。
+- **`mcpb/manifest.json`**、**`plugin/bin/ltm-mcp-wrapper.sh`**（自動下載 wrapper）。
+- **README〈安裝〉**：使用者路徑、原始碼路徑、三層獨立驗證、maintainer 出貨流程。
+  三層分開驗是刻意的——它們的失敗看起來一樣（模型說「查不到東西」），補救分別是
+  重裝 binary、跑 `ltm build`、檢查 plugin 設定。
+
+### Changed
+
+- `PluginShellTests` 從比對 command 字尾改成驗**整條鏈**（`.mcp.json` 的 args →
+  wrapper 存在且可執行 → wrapper 確實 `exec "$LTM" mcp` → 派發表裡有 `case "mcp"`）。
+  先前那條斷言在 plugin 改用 wrapper 之後只是在比對一個檔名，而 wrapper 裡面 exec
+  什麼完全沒被看著。
+
+### 發布形式
+
+Developer ID 簽章 + Apple notarization（`spctl` 回 `source=Notarized Developer ID`）。
+**不是 ad-hoc**：本專案用 Keychain 存 anchor key，而 ad-hoc 簽章每次 build 換一個
+code identity，會讓使用者反覆看到 Keychain 授權對話框。
+
 ### Added
 - **#36 階段 1–3：兩輪 verify 的非阻擋 findings 收攏（前三階段）**。`#36` 收的是
   `#33`（21 條）與 `#34`（25 條）判為非阻擋的 findings，共 46 條。診斷把它分成五群

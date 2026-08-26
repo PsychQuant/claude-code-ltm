@@ -6,6 +6,15 @@ Claude Code 的長期記憶（long-term memory）。
 對話逐字記錄——那就是 source of truth，而且它一直都在。缺的不是儲存，是**檢索**。
 claude-LTM 在它之上建可拋棄的索引與可插拔的記憶策略，讓 Claude 能回頭讀自己的過去。
 
+## 版本
+
+| 版本 | 內容 |
+|---|---|
+| v0.1.0 | 首次發布。檢索路徑、記憶層、策略層、MCP server（`ltm mcp`）、plugin shell。Developer ID 簽章 + notarized。|
+
+改版本號**只改 `Sources/LTMCore/Version.swift`**——其餘三處由 `ReleaseVersionSyncTests`
+看守，見〈安裝〉最後一段。
+
 ## 安裝
 
 > **這一節是寫給 agent 看的**：每一步都是可以直接執行的命令，每一步都附一條驗證。

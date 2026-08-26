@@ -29,7 +29,9 @@
     "entry_point": "server/ltm",
     "mcp_config": {
       "command": "${__dirname}/server/ltm",
-      "args": ["mcp"],
+      "args": [
+        "mcp"
+      ],
       "env": {}
     }
   },
@@ -38,9 +40,5 @@
       "name": "ltm_query",
       "description": "Query past Claude Code conversations on this machine. Returns hits carrying (project, sessions, uuid, timestamp) pointers so you can read the original. Defaults to the project matching the current working directory."
     }
-  ],
-  "compatibility": {
-    "platforms": ["darwin"],
-    "runtimes": {}
-  }
+  ]
 }

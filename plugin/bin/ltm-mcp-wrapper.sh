@@ -49,7 +49,11 @@ ensure_binary() {
     fi
 
     if $need_download; then
-        local asset="${name}-macos-universal"
+        # **asset 名就是 binary 名**，因為 `harness-devtools:mcp-deploy` 是這樣上傳的
+        # （`?name=$BINARY_NAME`）。先前這裡寫 `${name}-macos-universal`，那會 404
+        # ——而 404 的症狀是「plugin 裝好了但 MCP server 起不來」，不是一個看得懂的
+        # 錯誤。判準：**wrapper 遷就 pipeline，不是反過來**，因為 pipeline 是共用的。
+        local asset="${name}"
         local base="https://github.com/${GITHUB_REPO}/releases/download/v${DESIRED_VERSION}"
         local tmp="${installed}.tmp.$$"
         echo "claude-ltm: 下載 ${name} v${DESIRED_VERSION}" >&2
