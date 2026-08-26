@@ -787,3 +787,64 @@ func scopeDefaultsToTheCurrentProjectRatherThanWidening() throws {
     #expect(refused.code != 0, "推不出範圍就要拒絕")
     #expect(refused.err.contains("project"), "拒絕訊息要說明是範圍問題")
 }
+
+@Test("ltm mark 寫出 deliberate 事件——在它之前全 repo 只寫得出 shown")
+func markProducesDeliberateEvents() throws {
+    // #35，經 #24 落地。在這個命令之前，`Sources/` 裡唯一的事件寫入端固定寫
+    // `shown`，而 `shown` 被 `Projection` 明確排除在 reinforcement 之外。後果不是
+    // 「少了一個功能」，是三個機制**從來沒有執行過**：淨強度恆為 0（human-like
+    // 與 archival 的輸出必然相同）、擴散迴圈一次都沒跑、每次比較都是 null。
+    let workspace = try CLIWorkspace.make(texts: [
+        "記憶策略的量測結果甲。", "記憶策略的量測結果乙。", "記憶策略的量測結果丙。",
+    ])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let compared = try runCLI(
+        ["query", "量測", "--all-projects", "--compare"], environment: workspace.environment)
+    #expect(compared.code == 0)
+    let id = try #require(
+        presentationID(in: compared.out),
+        "footer 必須印出呈現識別碼——沒有它，mark 沒有入口")
+
+    let marked = try runCLI(["mark", id, "1", "--opened"], environment: workspace.environment)
+    #expect(marked.code == 0, "mark 失敗：\(marked.err)")
+
+    let events = try String(contentsOf: workspace.eventsFile, encoding: .utf8)
+    #expect(events.contains("\"opened\""), "deliberate 事件沒有被寫出來")
+    // **只印指標，不印內容**——與 `ltm memory` 同一條隱私紀律，這個輸出會進
+    // shell 歷史。
+    #expect(!marked.out.contains("量測結果"), "mark 的輸出不得含語料原文")
+}
+
+@Test("mark 拒絕矛盾與越界，而不是靜默取一個")
+func markRefusesContradictoryAndOutOfRangeInput() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的量測結果甲。"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    let compared = try runCLI(
+        ["query", "量測", "--all-projects", "--compare"], environment: workspace.environment)
+    let id = try #require(presentationID(in: compared.out))
+
+    // `--opened --dismissed` 對同一筆同時說「有用」與「無關」。靜默取其一會讓
+    // 使用歷史記到**反向**的東西。
+    let both = try runCLI(
+        ["mark", id, "1", "--opened", "--dismissed"], environment: workspace.environment)
+    #expect(both.code != 0)
+    #expect(both.err.contains("一次只能記一種"))
+
+    let far = try runCLI(["mark", id, "99", "--opened"], environment: workspace.environment)
+    #expect(far.code != 0)
+    #expect(far.err.contains("超出範圍"))
+}
+
+/// 從輸出裡取呈現識別碼。
+///
+/// 用定位而不是 `split(separator: " ")`：footer 的欄位分隔是**全形空格**，
+/// ASCII 空格切不開它——第一版就是這樣失敗的。
+private func presentationID(in output: String) -> String? {
+    guard let marker = output.range(of: "呈現 ") else { return nil }
+    let rest = output[marker.upperBound...]
+    let id = String(rest.prefix(36))
+    return id.count == 36 ? id : nil
+}

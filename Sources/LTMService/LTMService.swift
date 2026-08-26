@@ -225,6 +225,14 @@ public struct LTMService {
     private let anchorKey: AnchorKey
 
     public enum ServiceError: Error, Sendable, Equatable {
+        /// `mark` 需要事件存放，而這個 service 沒有。
+        case markRequiresEventStore
+        /// `mark` 需要呈現紀錄存放，而這個 service 沒有。
+        case markRequiresRecordStore
+        /// `shown` 是曝光不是 deliberate 訊號——它由呈現當下自動寫入。
+        case markRequiresDeliberateKind
+        case presentationNotFound(PresentationID)
+        case rankOutOfRange(rank: Int, presented: Int)
         /// 索引不存在。訊息一律指名 `ltm build`。
         case indexMissing(path: String)
         /// 索引裡的向量與目前的 embedding revision 不同代。
@@ -781,6 +789,56 @@ public struct LTMService {
     /// ——見該處生成 `PresentationID` 的理由（#15）。
     /// `generation` 由呼叫端傳入（索引戳記導出）——**不在這裡自己算**：紀錄與
     /// 事件必須帶同一個值，而只有呼叫端同時握著兩者。
+    /// 對一次呈現裡的某個名次記一則 deliberate 事件（#35，經 #24 落地）。
+    ///
+    /// ## 為什麼這個方法非有不可
+    ///
+    /// 在它之前，**全 repo 只有一個事件寫入端，而它固定寫 `shown`**。於是：
+    ///
+    /// - `Projection` 的淨強度只由 deliberate 事件推動（`shown` 被明確排除、
+    ///   只計 impressions），所以每個 anchor 的淨強度恆為 0。
+    /// - 擴散由 `opened`／`cited`／`pinned` 驅動，所以那個迴圈**一次都沒跑過**。
+    /// - 交錯比較的每一次都是 null comparison，跑一萬次也一樣。
+    ///
+    /// 缺的從來不是時間，是一個把互動記成 deliberate 事件的產生端。
+    ///
+    /// ## 為什麼是「呈現 + 名次」而不是「anchor」
+    ///
+    /// 呼叫端（人或模型）手上有的是一份輸出，而輸出上有名次。要它自己把名次翻回
+    /// anchor，等於把「哪一筆是第 3 名」這個知識複製到呼叫端——而那份知識已經
+    /// 在紀錄裡了。名次翻譯留在這裡，呼叫端只說「第 3 筆我開了」。
+    ///
+    /// - Parameter rank: **1-based**，與輸出上印的編號一致。用 0-based 會讓
+    ///   「第 3 筆」與 `rank: 3` 指到不同的東西，而那不會有錯誤訊息。
+    @discardableResult
+    public func mark(
+        presentation: PresentationID, rank: Int, kind: EventKind, now: Date = Date()
+    ) throws -> Anchor {
+        guard kind != .shown else { throw ServiceError.markRequiresDeliberateKind }
+        guard let eventStore else { throw ServiceError.markRequiresEventStore }
+        guard let recordStore else { throw ServiceError.markRequiresRecordStore }
+
+        guard let record = try recordStore.allRecords().first(where: { $0.id == presentation })
+        else { throw ServiceError.presentationNotFound(presentation) }
+
+        let presented = record.attribution.map(\.anchor)
+        guard rank >= 1, rank <= presented.count else {
+            throw ServiceError.rankOutOfRange(rank: rank, presented: presented.count)
+        }
+        let anchor = presented[rank - 1]
+
+        // policy 用**紀錄自己的歸屬**，不是呼叫端說的——呼叫端不知道那個位置是
+        // 哪個策略貢獻的，而那正是比較實驗要問的事。null comparison 沒有歸屬，
+        // 那時用保留值（`interleaved`），與呈現當下寫 `shown` 的那一則一致。
+        let policy = record.credit(for: anchor) ?? .interleaved
+
+        try eventStore.append(
+            Event(
+                kind: kind, anchor: anchor, timestamp: now, generation: record.generation,
+                policy: policy, noteRef: nil, presentation: presentation))
+        return anchor
+    }
+
     private func record(
         kind: EventKind, anchors: [Anchor], policy: RankingPolicyID, store: any EventStore,
         now: Date, generation: GenerationID, presentation: PresentationID? = nil

@@ -472,6 +472,31 @@ enum QueryCommand {
     /// 失敗一律指名補救命令。
     static func report(_ error: LTMService.ServiceError) -> Int32 {
         switch error {
+        case .markRequiresEventStore, .markRequiresRecordStore:
+            Output.error(
+                """
+                ✗ 這條路徑沒有事件／呈現紀錄存放。
+                `ltm mark` 要記的是互動，而互動要記在某個地方——請確認 memory root 可用。
+                """)
+            return LTMCommandLine.ExitCode.indexStateError.rawValue
+        case .markRequiresDeliberateKind:
+            Output.error(
+                """
+                ✗ `shown` 是曝光不是 deliberate 訊號，它由呈現當下自動寫入。
+                可記的是：--opened / --cited / --pinned / --dismissed。
+                """)
+            return LTMCommandLine.ExitCode.usageError.rawValue
+        case .presentationNotFound(let id):
+            Output.error(
+                """
+                ✗ 找不到呈現紀錄：\(id)
+                只有 `--compare` 的查詢會寫呈現紀錄，而 id 印在它的 footer 上。
+                （`--record` 只寫 shown 事件、不寫紀錄——名次要翻回 anchor 需要那份紀錄。）
+                """)
+            return LTMCommandLine.ExitCode.usageError.rawValue
+        case .rankOutOfRange(let rank, let presented):
+            Output.error("✗ 名次 \(rank) 超出範圍——那次呈現有 \(presented) 筆（名次由 1 起算）。")
+            return LTMCommandLine.ExitCode.usageError.rawValue
         case .indexMissing(let path):
             Output.error("✗ 索引不存在（\(path)）。先跑 `ltm build`。")
             return LTMCommandLine.ExitCode.indexStateError.rawValue
@@ -596,7 +621,16 @@ enum QueryCommand {
         if outcome.refresh.sourcesRefreshed > 0 {
             footer += "　查詢前併入 \(outcome.refresh.sourcesRefreshed) 個來源檔的新內容"
         }
-        if outcome.eventsRecorded > 0 { footer += "　已記錄 \(outcome.eventsRecorded) 筆 shown 事件" }
+        if outcome.eventsRecorded > 0 {
+            footer += "　已記錄 \(outcome.eventsRecorded) 筆 shown 事件"
+            // **呈現識別碼要印出來**（#24／#35）。`ltm mark` 用它定位那次呈現，
+            // 而它先前只出現在 `--compare` 的 footer——於是 `mark` 的說明寫著
+            // 「id 印在 --record 或 --compare 的輸出上」而 `--record` 沒有印。
+            // 一個沒有入口的命令等於不存在。
+            if let presentation = outcome.hits.first?.presentation {
+                footer += "　呈現 \(presentation)"
+            }
+        }
         print("— \(footer)")
 
         printRefreshDiagnostics(outcome.refresh)
