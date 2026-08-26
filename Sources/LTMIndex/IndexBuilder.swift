@@ -290,8 +290,12 @@ public struct IndexBuilder: Sendable {
         // | 寫鎖握滿全程 | `BEGIN IMMEDIATE` 持有到最後 |
         // | 記憶體無上限 | 向量必須撐到交易結束才能寫檔 |
         //
-        // 實測代價：一次 1 小時 20 分的全量 build 被中斷後，`index.sqlite3` 停在
-        // 4 KB、WAL 751 MB、`chunks` 為 0——全部 rollback。
+        // 實測代價（`docs/measurements/2026-08-26-interrupted-full-build.md`）：
+        // 一次全量 build 跑到 41 分鐘時，`index.sqlite3` 仍停在 4 KB、WAL 358 MB、
+        // **外部讀取者看到的 `chunks` 是 0**——40 分鐘的工作對其他行程還不存在。
+        //
+        // 查法：build 期間另開終端機跑
+        // `sqlite3 ~/.claude-ltm/index.sqlite3 'select count(*) from chunks'`。
         //
         // **推測 code 為何分岔**：`insert(chunks:)` 回傳 rowID，而配對
         // rowID↔vectorRow 最直觀是寫在同一個迴圈，而那迴圈已在交易內（insert
@@ -606,12 +610,49 @@ public struct IndexBuilder: Sendable {
             let temporary = location.vectorsURL.appendingPathExtension("tmp")
             try data.write(to: temporary, options: [.atomic])
             _ = try FileManager.default.replaceItemAt(location.vectorsURL, withItemAt: temporary)
-            // rename 之後再 fsync 一次目錄項次：`.atomic` 保證的是「不會看到半份」，
-            // 不保證 bytes 已經到磁碟。
-            if let handle = try? FileHandle(forWritingTo: location.vectorsURL) {
-                try? handle.synchronize()
-                try? handle.close()
-            }
+
+            // `.atomic` 保證的是「讀者不會看到半份」，**不保證 bytes 已經到磁碟**。
+            // 所以 rename 之後要 fsync 兩樣東西，而先前只做了第一樣：
+            //
+            //   1. 檔案本身 —— 內容落地。
+            //   2. **父目錄** —— rename 這個「目錄項次的改變」本身落地。
+            //
+            // 少了第 2 步，硬重啟後可能出現「檔案內容在磁碟上，但那個名字不在」
+            // ——側車檔整個消失，而 `vector_count` 宣稱它有 N 筆。
+            // 註解先前逐字寫著「再 fsync 一次目錄項次」，而程式碼 fsync 的是檔案。
+            // （由跨模型盲驗指出。）
+            let handle = try FileHandle(forWritingTo: location.vectorsURL)
+            try handle.synchronize()
+            try handle.close()
+            try Self.synchronizeDirectory(location.vectorsURL.deletingLastPathComponent())
+        }
+    }
+
+    /// fsync 一個目錄，讓其中的建檔／改名落地。
+    ///
+    /// 這裡**不是** best-effort。整條四段順序（算向量 → 側車落地 → 提交指標）
+    /// 的意義就在於「側車先真的到磁碟」；把它寫成 `try?` 等於在第一批上放棄
+    /// 那條不變式，而第一批正是側車檔被建立的那一批。
+    private static func synchronizeDirectory(_ url: URL) throws {
+        let descriptor = open(url.path, O_RDONLY)
+        guard descriptor >= 0 else {
+            throw CocoaError(
+                .fileWriteUnknown,
+                userInfo: [
+                    NSFilePathErrorKey: url.path,
+                    NSLocalizedDescriptionKey:
+                        "開不了 derived 目錄做 fsync：\(String(cString: strerror(errno)))",
+                ])
+        }
+        defer { close(descriptor) }
+        guard fsync(descriptor) == 0 else {
+            throw CocoaError(
+                .fileWriteUnknown,
+                userInfo: [
+                    NSFilePathErrorKey: url.path,
+                    NSLocalizedDescriptionKey:
+                        "fsync derived 目錄失敗：\(String(cString: strerror(errno)))",
+                ])
         }
     }
 

@@ -292,6 +292,48 @@ func aClosedStderrDoesNotKillTheBuild() throws {
     #expect(out.contains("索引完成"))
 }
 
+/// `IndexBuilder.init` 對 `batchChunkTarget` 用 `precondition`，而 release build 的
+/// `precondition` 是 **trap 整個行程**。在 `--batch-chunks` 存在之前那不是問題
+/// （沒有使用者輸入到得了它）；現在到得了，所以 CLI 必須在它之前擋下來。
+///
+/// 一個把「輸入 0」變成 SIGILL 的 CLI 沒有辦法讓使用者知道自己打錯了什麼。
+@Test("--batch-chunks / --memory-budget-mb 的壞值給 usage error，不是 crash")
+func badNumericFlagsGiveUsageErrorsNotCrashes() throws {
+    let workspace = try CLIWorkspace.make(texts: ["內容"])
+    defer { workspace.cleanup() }
+
+    for (flag, value) in [
+        ("--batch-chunks", "0"), ("--batch-chunks", "-3"), ("--batch-chunks", "abc"),
+        ("--memory-budget-mb", "0"), ("--memory-budget-mb", "x"),
+    ] {
+        let result = try runCLI(["build", flag, value], environment: workspace.environment)
+        #expect(
+            result.code == LTMCommandLine.ExitCode.usageError.rawValue,
+            "\(flag) \(value) 的結束碼是 \(result.code)，stderr：\(result.err)")
+        #expect(result.err.contains(flag), "訊息要指名是哪個旗標")
+    }
+}
+
+@Test("預算被超過時 CLI 具名拒絕，並列出補救")
+func exceedingTheBudgetFromTheCLINamesRemedies() throws {
+    let workspace = try CLIWorkspace.make(
+        texts: (0..<600).map { "第 \($0) 段內容需要足夠長度才能切成 chunk" })
+    defer { workspace.cleanup() }
+
+    let result = try runCLI(
+        ["build", "--memory-budget-mb", "1"], environment: workspace.environment)
+
+    #expect(result.code != 0)
+    #expect(result.err.contains("超過你設定的預算"))
+    #expect(result.err.contains("分次索引"), "訊息要說得出補救")
+    #expect(
+        result.err.contains("不是整個 build 的峰值記憶體"),
+        "誠實邊界要在訊息裡，否則使用者以為設了預算就安全")
+    // 索引不該留下半份。
+    #expect(!FileManager.default.fileExists(
+        atPath: workspace.derived.appendingPathComponent("vectors.bin").path))
+}
+
 @Test("索引不存在時 ltm query 非零結束，且訊息指名 ltm build")
 func queryWithoutIndexNamesBuild() throws {
     let workspace = try CLIWorkspace.make(texts: ["內容"])

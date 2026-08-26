@@ -220,6 +220,8 @@ repo 能保證的事。
 ```bash
 swift build                      # 產出 .build/debug/ltm
 ltm build                        # 掃語料、建索引（預設增量，--full 從零重建）
+                                 #   進度寫 stderr（--quiet 關掉），stdout 只有最終報告
+                                 #   --batch-chunks N / --memory-budget-mb N 見 `ltm build --help`
 ltm query "要找的內容" --json     # 查詢；預設只搜當前 project
 ltm memory                       # 檢查記憶層，列出讀不回來的紀錄（唯讀）
 ltm memory --prune               # 丟掉那些紀錄，先備份原檔

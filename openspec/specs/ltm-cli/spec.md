@@ -8,7 +8,11 @@ TBD - created by archiving change 'retrieval-engine-and-cli'. Update Purpose aft
 
 ### Requirement: ltm build constructs the derivative and writes nowhere else
 
-`ltm build` SHALL run the indexing pipeline incrementally by default and from nothing when `--full` is given. All writes SHALL land under `~/.claude-ltm/`. On success it SHALL exit 0; on failure it SHALL exit non-zero with a message naming the reason (corpus root unreadable, embedding model unavailable, lock held).
+`ltm build` SHALL run the indexing pipeline incrementally by default and from nothing when `--full` is given. All writes SHALL land under `~/.claude-ltm/`. On success it SHALL exit 0; on failure it SHALL exit non-zero with a message naming the reason (corpus root unreadable, embedding model unavailable, lock held, lock unavailable for another reason, memory budget exceeded).
+
+`ltm build` SHALL write progress to **stderr** and reserve stdout for the final report, so that a caller may consume stdout without filtering. It SHALL emit the scan denominator (source files, new chunks, vectors needed) **before any embedding begins**, including when the scan finds nothing new, and SHALL emit a heartbeat during embedding at whichever comes first of a fixed chunk count or a fixed interval. `--quiet` SHALL suppress every progress line and SHALL NOT suppress the final report. A failure to write progress SHALL NOT fail the build.
+
+`ltm build` SHALL accept `--batch-chunks N` (equivalently `LTM_BUILD_BATCH_CHUNKS`) and `--memory-budget-mb N` (equivalently `LTM_BUILD_MEMORY_BUDGET_MB`). `--batch-chunks` is the **lower bound** at which a batch is cut, not an upper bound on batch size: batches are assembled whole-source, so the actual bound is `max(N, largest source's chunk count)` — see issue #47. When a memory budget is given and the estimated vector accumulation of the largest batch exceeds it, `ltm build` SHALL refuse **before embedding anything** with a message naming remedies, and SHALL state that the budget bounds vector accumulation rather than total peak memory. There SHALL be no default budget: this repository has no measurement that supports a threshold, and inventing one substitutes a fabricated number for the operating system as the thing that decides the outcome.
 
 #### Scenario: Incremental is the default
 
