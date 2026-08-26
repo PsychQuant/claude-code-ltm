@@ -229,3 +229,40 @@ private func anchorForLockTest() -> Anchor {
         turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
         span: 0..<4, key: .forTesting)
 }
+
+/// #42：讀取端逾時後**照讀**，而寫入端逾時後**失敗**——不對稱要兩邊都有執行點。
+///
+/// 上面那條釘住寫入端。沒有這一條，把讀取端也改成「逾時就拋」不會有任何測試
+/// 變紅——而那個改動會讓一次進行中的 append 把整個查詢變成錯誤。
+///
+/// 這條測試會真的等滿約 2 秒（讀取端的重試上限），那是被測行為本身。
+@Test(.timeLimit(.minutes(1))) func readingProceedsAfterTheLockWaitExpires() throws {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("ltm-rlock-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let path = dir.appendingPathComponent("events.jsonl")
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let store = try FileEventStore(url: path)
+    try store.append(
+        .interaction(
+            .shown, anchor: anchorForLockTest(), at: Date(),
+            generation: GenerationID("g1"), policy: RankingPolicyID("archival")))
+
+    let holder = open(path.path, O_WRONLY)
+    #expect(holder >= 0)
+    defer { close(holder) }
+    #expect(flock(holder, LOCK_EX | LOCK_NB) == 0, "沒拿到鎖的話這條測試什麼都沒測")
+
+    // 前提對照：同樣被鎖住時，寫入端**會**失敗。兩條斷言擺在一起，不對稱才是
+    // 被斷言的東西，而不是「讀取剛好會成功」。
+    #expect(throws: (any Error).self) {
+        try store.append(
+            .interaction(
+                .shown, anchor: anchorForLockTest(), at: Date(),
+                generation: GenerationID("g1"), policy: RankingPolicyID("archival")))
+    }
+    #expect(throws: Never.self) {
+        _ = try store.allEvents()
+    }
+}
