@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "claude-ltm",
   "display_name": "Claude LTM",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Retrieve past Claude Code conversations from this machine's own transcript corpus, with pointers back to the original turns.",
   "long_description": "claude-LTM indexes the Claude Code transcripts already on this machine (~/.claude/projects) and lets a model look things up in them. Retrieval is navigation, not answering: every hit carries (project, sessions, uuid, timestamp) so you can go read the original turn. Fully on-device — semantic vectors via NLContextualEmbedding, lexical search via SQLite FTS5, no API key and no cloud dependency. The transcript corpus is treated as strictly read-only. Run `ltm build` once before first use to create the index; the index is a pure derivative and is always safe to delete and rebuild.",
   "author": {

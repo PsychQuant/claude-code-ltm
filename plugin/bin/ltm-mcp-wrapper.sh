@@ -22,7 +22,7 @@ GITHUB_REPO="PsychQuant/claude-LTM"
 # 用不到（`ensure_binary` 收參數），存在的理由就是讓那道 gate 打得到。
 BINARY_NAME="ltm"
 INSTALL_DIR="$HOME/bin"
-DESIRED_VERSION="0.2.0"   # 與 Sources/LTMCore/Version.swift 同步（ReleaseVersionSyncTests 釘住）
+DESIRED_VERSION="0.2.1"   # 與 Sources/LTMCore/Version.swift 同步（ReleaseVersionSyncTests 釘住）
 DOWNLOAD_TIMEOUT=300      # universal binary 較大，給足時間
 SOURCE_ROOT="$HOME/Developer/claude-LTM"
 
