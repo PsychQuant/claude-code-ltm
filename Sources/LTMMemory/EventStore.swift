@@ -137,8 +137,34 @@ public enum CorpusLocation {
     /// - **擋不住 TOCTOU。** 檢查與開檔之間任何一段都可能被換掉。
     /// - **語料根不存在時退回元件比對**：沒有 inode 可比。此時它只擋字面前綴。
     ///
-    /// 後兩者的結構解是 `openat` + `O_NOFOLLOW` 逐段開 + `fstat`，需要重寫
-    /// append 路徑，**追蹤於 #40**。**在那之前，這條守衛防的是意外，不是攻擊者。**
+    /// ## 這兩條是**被接受的**限度，不是待辦（#40 已決）
+    ///
+    /// 結構解是 `openat` + `O_NOFOLLOW` 逐段開 + `fstat`，需要重寫 append 路徑。
+    /// **決定是不做**，而理由不是成本：
+    ///
+    /// 這條守衛的職責是執行不變式 1（不得寫進語料），而它防的是**這個程式自己的
+    /// bug**——一條算錯的路徑、一個沒想到的 symlink 擺法。它不是對抗邊界。要利用
+    /// TOCTOU，攻擊者得能在 `~/.claude/projects/` 的樹裡即時換掉一段路徑；而一個
+    /// 已經能寫進使用者家目錄的攻擊者，有比這條窗口直接得多的手段（直接寫
+    /// `~/.claude-ltm/`、換掉這個 binary）。**對這個威脅模型，`openat` 重寫買到的
+    /// 是零。**
+    ///
+    /// 第二條同理，而且更弱：語料根**確定不存在**時，沒有任何東西可能在它裡面，
+    /// 元件比對只是第二層保險。
+    ///
+    /// 所以本檔對這兩條的姿態是：**防的是意外，不是攻擊者**——而那句話現在是一個
+    /// 決定，不是一張欠條。
+    ///
+    /// ## 但 #40 在查證時找到第三件事，而它是缺陷不是限度
+    ///
+    /// 上面第二條寫「語料根**不存在**時」，而實作分不出「不存在」與「看不到」。
+    /// 語料根 `stat` 得到 EACCES 時，守衛整條 fail **open**——實測連語料根的直接
+    /// 子檔都被判成「在語料外」（`unreadableCorpusRootRefusesRatherThanAllowing`）。
+    /// 那條路徑**意外可達**（權限漂移、換使用者、sandbox），所以它不屬於上面那個
+    /// 威脅模型的射程。已修：元件比對的兩邊改用同一個解析器，見 `isInside`。
+    ///
+    /// **這是「接受一條限度」時該做的事**：接受之前先確認自己接受的是它本來的
+    /// 形狀。issue 提的兩個選項都預設那是攻擊者才碰得到的東西，而查證推翻了。
     ///
     /// （這裡先前寫「追蹤於 #14」，而 #14 是 seam 的兩條 SHALL NOT，全文沒有
     /// `openat`、沒有 TOCTOU、沒有 append 路徑——**那個限度因此有兩個月沒有任何
@@ -175,6 +201,18 @@ public enum CorpusLocation {
         // 「不確定就不要寫」，而不是「不確定就放行」。
         guard let resolved = Self.fullyResolve(url.path) else { return true }
 
+        // **修法在下面的元件比對，不在這裡**（#40）。
+        //
+        // 語料根 `stat` 不到時（EACCES、ELOOP…）這一整段跳過，先前就此 fail
+        // **open**：元件比對拿 `realpath(root)`，它同樣失敗、退回**字面**路徑，
+        // 而目標走的是 `fullyResolve`——`/var` vs `/private/var` 兩邊形式不同，
+        // 永遠對不上。實測連語料根的直接子檔都被判成「在語料外」。
+        //
+        // 第一版的修法是把 `stat` 的失敗拆成「確定不存在」與「不知道」、後者
+        // fail closed。**變異測試證明那是驅動不了的**：退掉它零測試變紅，因為
+        // 一個 `stat` 不到的根同樣**解析**不到，而解析失敗在本函式第一行就已經
+        // fail closed。構造不出「根 stat 不到但解析得到」的輸入，那個分支就沒有
+        // 執行點——本 repo 的紀律是拆掉它，不是留著加註解。整段移除。
         if let rootID = Self.identity(root.path) {
             // 從解析後的目標往上走：任何一層與語料根同 inode 就是在裡面。
             // 目標檔案通常還不存在（append 會建它），所以第一次 stat 失敗是正常的，
@@ -192,14 +230,24 @@ public enum CorpusLocation {
 
         // 語料根不存在（或走到根都沒對上）→ 元件比對當第二層。
         // 用元件而非字串前綴：`/a/bc` 不該被 `/a/b` 判成在內。
-        let rootPath = Self.realpath(root.path) ?? root.path
+        //
+        // **兩邊都走 `fullyResolve`**（#40）。先前根走 `realpath`、目標走
+        // `fullyResolve`，而兩者對同一棵樹給的形式不同——macOS 的
+        // `/var` vs `/private/var` 就是實例。用同一個解析器是這個比對能成立的
+        // 前提，不是風格選擇。
+        let rootPath = Self.fullyResolve(root.path) ?? root.path
         let rootParts = URL(fileURLWithPath: rootPath).pathComponents
         let targetParts = URL(fileURLWithPath: resolved).pathComponents
         guard targetParts.count >= rootParts.count else { return false }
         return Array(targetParts.prefix(rootParts.count)) == rootParts
     }
 
-    /// 檔案系統身分。`nil` 代表這條路徑目前不存在。
+    /// 檔案系統身分。`nil` 代表**取不到**——不區分為什麼取不到。
+    ///
+    /// 先前這裡寫「`nil` 代表這條路徑目前不存在」，那是錯的：`stat` 也會因
+    /// EACCES、ELOOP、ENAMETOOLONG 失敗（#40）。往上走祖先的迴圈用得起這個
+    /// 形狀（取不到就跳過這一層繼續往上），而**語料根取不到時的正確姿態由元件
+    /// 比對那一層負責**——見 `isInside`。
     static func identity(_ path: String) -> (dev: dev_t, ino: ino_t)? {
         var info = stat()
         guard stat(path, &info) == 0 else { return nil }

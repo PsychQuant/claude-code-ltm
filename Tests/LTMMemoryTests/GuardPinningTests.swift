@@ -197,3 +197,86 @@ func anAlternateAbsolutePathToTheSameDirectoryIsRecognised() throws {
     let anchor = Anchor(source: "s", turnID: "t", contentHash: Anchor.hash("abc", key: .forTesting), span: 0..<3)
     #expect(anchor.span == 0..<3)
 }
+
+// MARK: - #40：「stat 不到」的兩種意思，姿態相反
+
+/// 語料根**看不到**（EACCES）時守衛必須 fail closed。
+///
+/// 這是 #40 診斷出來的第三件事，而它不在該 issue 提的兩個選項裡：那兩個選項
+/// （實作 `openat` vs 接受並明寫）都把限度當成**攻擊者才碰得到**的東西。這一條
+/// 是**意外可達**的——權限漂移、換使用者、sandbox——而它的失效方向是放行。
+///
+/// **這條測試自己糾正過一次我的修法。** 第一版加了一個三態的 `rootIdentity`
+/// （把「確定不存在」與「不知道」分開、後者 fail closed），而變異測試顯示退掉
+/// 它零測試變紅——真正在扛的是元件比對兩邊改用同一個解析器。三態因此被移除：
+/// 構造不出「根 stat 不到但解析得到」的輸入，那個分支沒有執行點。
+///
+/// 破壞實作確認過會紅：把元件比對的 `Self.fullyResolve(root.path)` 改回
+/// `Self.realpath(root.path)`，這條與下面那條會一起紅。
+@Test("語料根不可讀時，守衛拒絕而不是放行")
+func unreadableCorpusRootRefusesRatherThanAllowing() throws {
+    let fm = FileManager.default
+    let base = fm.temporaryDirectory.appendingPathComponent("ltm-40-\(UUID().uuidString)")
+    let outer = base.appendingPathComponent("outer")
+    let root = outer.appendingPathComponent("projects")
+    let target = root.appendingPathComponent("proj/s.jsonl")
+    try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+    defer {
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: outer.path)
+        try? fm.removeItem(at: base)
+    }
+
+    // 前提：可讀時擋得住。不先確認這件事，下面的斷言可能只是「一直都 true」。
+    #expect(CorpusLocation.isInside(target, root: root), "可讀時語料根的子檔本來就該被擋")
+
+    try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: outer.path)
+    var info = stat()
+    _ = stat(root.path, &info)
+    try #require(errno == EACCES, "這個探針要的是 EACCES，實際 errno=\(errno)")
+
+    #expect(
+        CorpusLocation.isInside(target, root: root),
+        "語料根 stat 不到時要當成在語料內（不變式 1：不確定就不要寫）")
+}
+
+/// 對照組：語料根**確定不存在**（ENOENT）時不該一併變成恆真。
+///
+/// 沒有這條，上面那條可以被「`isInside` 永遠回 true」滿足——而那會讓整個記憶層
+/// 寫不進去，卻仍然「通過測試」。
+@Test("語料根確定不存在時，語料外的路徑仍判為在外")
+func absentCorpusRootStillAllowsPathsOutsideIt() throws {
+    let fm = FileManager.default
+    let base = fm.temporaryDirectory.appendingPathComponent("ltm-40b-\(UUID().uuidString)")
+    try fm.createDirectory(at: base, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: base) }
+
+    let absentRoot = base.appendingPathComponent("never-created/projects")
+    let outside = base.appendingPathComponent("elsewhere/events.jsonl")
+    try fm.createDirectory(at: outside.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+    #expect(CorpusLocation.identity(absentRoot.path) == nil, "前提：這個根真的不存在")
+    #expect(
+        !CorpusLocation.isInside(outside, root: absentRoot),
+        "根確定不存在時，沒有東西在它裡面——這條路徑必須仍然可寫")
+}
+
+/// 元件比對的兩邊要用**同一個解析器**。
+///
+/// macOS 的 `temporaryDirectory` 給 `/var/…`，`realpath` 給 `/private/var/…`
+/// （`CLAUDE.md` 記過這個坑）。先前根走 `realpath`、目標走 `fullyResolve`，
+/// 根解析失敗退回字面路徑時兩邊形式不同，比對永遠落空。
+@Test("語料根不存在時，字面落在它底下的路徑仍判為在內")
+func componentFallbackResolvesBothSidesTheSameWay() throws {
+    let fm = FileManager.default
+    let base = fm.temporaryDirectory.appendingPathComponent("ltm-40c-\(UUID().uuidString)")
+    try fm.createDirectory(at: base, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: base) }
+
+    let absentRoot = base.appendingPathComponent("projects")
+    let inside = absentRoot.appendingPathComponent("proj/s.jsonl")
+
+    #expect(CorpusLocation.identity(absentRoot.path) == nil, "前提：這個根真的不存在")
+    #expect(
+        CorpusLocation.isInside(inside, root: absentRoot),
+        "根還沒被建立，但這條路徑就在它底下——元件比對要抓得到")
+}
