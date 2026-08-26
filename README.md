@@ -23,20 +23,37 @@ claude-LTM 在它之上建可拋棄的索引與可插拔的記憶策略，讓 Cl
 
 ### 給使用者（從 release 裝）
 
+**plugin 尚未上架 marketplace**，所以現在是手動三步。這三行實跑驗證過：
+
 ```bash
-# 1. 裝 plugin（marketplace 名稱以實際註冊為準）
-claude plugin install claude-ltm@psychquant-claude-plugins
+# 1. 拿 binary。Developer ID 簽章 + notarized，Gatekeeper 直接放行
+curl -fL https://github.com/PsychQuant/claude-LTM/releases/download/v0.1.0/ltm -o ~/bin/ltm
+chmod +x ~/bin/ltm
 
 # 2. 建索引。**這一步不能省**——沒有索引時 MCP server 會啟動、會回應、但查不到
 #    任何東西，而那看起來像「這個工具沒用」而不是「還沒建索引」。
-ltm build
+~/bin/ltm build
 
-# 3. 驗證
-ltm query "任意關鍵字" | head -5      # 有命中 → 索引好了
+# 3. 接上 Claude Code
+claude mcp add --scope user --transport stdio claude-ltm -- ~/bin/ltm mcp
 ```
 
-`ltm` 由 plugin 的 wrapper 在第一次啟動 MCP server 時自動從 GitHub Release 下載到
-`~/bin/`。若 `ltm` 不在 PATH，把 `~/bin` 加進去，或直接用 `~/bin/ltm`。
+要核對下載完整性（擋的是截斷，不是竄改——雜湊與 binary 走同一條 TLS）：
+
+```bash
+curl -fsL https://github.com/PsychQuant/claude-LTM/releases/download/v0.1.0/ltm.sha256
+shasum -a 256 ~/bin/ltm
+```
+
+**上架之後**改成一行，`ltm` 由 plugin 的 wrapper 在第一次啟動 MCP server 時自動從
+GitHub Release 下載到 `~/bin/`：
+
+```bash
+claude plugin install claude-ltm@<marketplace>
+```
+
+Claude Desktop 走 release 頁的 `claude-ltm-0.1.0.mcpb`，雙擊安裝；裝完仍要跑一次
+`ltm build`。
 
 ### 從原始碼裝（開發、或不想等 release）
 
