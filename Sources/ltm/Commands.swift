@@ -246,8 +246,19 @@ enum BuildCommand {
         } catch let error as IndexBuilder.BuildError {
             switch error {
             case .lockHeld(let path):
-                Output.error("✗ 另一個建置正在進行（鎖：\(path)）。等它結束，或確認沒有殘留的鎖檔後再試。")
+                // 「確認沒有殘留的鎖檔」這句已經刪掉：鎖現在掛在 `flock` 上，
+                // 行程死亡時由核心釋放，所以殘留的**檔案**不再擋任何人。
+                // 留著那句會把使用者導向一個不需要、而且有 race 的手動 `rm`。
+                Output.error("✗ 另一個建置正在進行（鎖：\(path)）。等它結束再試。")
                 return LTMCommandLine.ExitCode.lockHeld.rawValue
+            case .lockUnavailable(let path, let code, let detail):
+                Output.error(
+                    """
+                    ✗ 取不到建置鎖，而且**不是**因為別人正在建置：\(detail)（errno \(code)）
+                    路徑：\(path)
+                    這通常是權限、磁碟空間或開檔數上限的問題——等待不會讓它好轉。
+                    """)
+                return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .stateUnreadable(let detail):
                 Output.error("✗ 續讀狀態無法讀取：\(detail)。用 `ltm build --full` 從零重建。")
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
@@ -470,6 +481,16 @@ enum QueryCommand {
                     """)
             case .lockHeld(let path):
                 Output.error("✗ 意外的鎖錯誤（\(path)）——查詢路徑本應吞掉它。這是 bug。")
+            case .lockUnavailable(let path, let code, let detail):
+                // 這個**不**被 facade 吞掉，而且不該吞：它不是「有人正在建置」，
+                // 是環境壞了（權限／磁碟／fd 上限）。安靜地用舊索引回答會讓
+                // 使用者以為一切正常，而新語料從此不再併入。
+                Output.error(
+                    """
+                    ✗ 取不到建置鎖，而且不是因為別人正在建置：\(detail)（errno \(code)）
+                    路徑：\(path)
+                    索引還在，但這一輪沒有併入新內容，而且重試不會好轉——先修上面那件事。
+                    """)
             }
             return LTMCommandLine.ExitCode.indexStateError.rawValue
         } catch let error as ContextualEmbeddingProvider.EmbeddingError {

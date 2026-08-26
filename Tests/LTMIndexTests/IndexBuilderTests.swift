@@ -188,6 +188,69 @@ func concurrentBuildIsRefused() throws {
     }
 }
 
+/// 這條測試釘的是 `#44` 的**前提**，不是它的效果。
+///
+/// `#44` 逐字把「Ctrl-C、當機、睡眠、OOM」列為要處理的中斷，而分批提交省下的
+/// 計算，在第一版的鎖形狀下**恰好在這幾種中斷後拿不到**：`release()` 只在 Swift
+/// 正常 unwind 的 `defer` 裡跑，SIGKILL 之後 `build.lock` 永久留下，
+/// 下一次 `open(O_EXCL)` 必然 `EEXIST`。
+///
+/// 所以「已完成的批次還在磁碟上」與「重跑能續做」是兩件事——第二件先前不成立。
+///
+/// **為什麼用殘留檔案而不是真的 SIGKILL 一個子行程**：兩者對受測程式是同一個
+/// 輸入。核心在行程死亡時做的就是「釋放 flock、保留 inode」，而這裡直接構造
+/// 那個狀態。真正的子行程 SIGKILL 測試更忠實但需要另一個可執行檔，成本與這條
+/// 要釘的性質不成比例——那條列在 #44 的 follow-up。
+@Test("上一個行程被 SIGKILL 留下的鎖檔不擋下一次建置")
+func staleLockFileDoesNotBlockNextBuild() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["內容"])
+    try derived.createRootIfNeeded()
+
+    // 構造殘留：檔案在、內容是一個早就不存在的 pid、**沒有人持有 flock**。
+    // 這正是 SIGKILL 之後磁碟上的狀態。
+    try "999999\n".write(to: derived.lockURL, atomically: true, encoding: .utf8)
+    #expect(FileManager.default.fileExists(atPath: derived.lockURL.path))
+
+    let report = try IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A")
+    ).build()
+    #expect(report.chunksIndexed == 1)
+}
+
+/// `lockHeld` 與「鎖檔開不起來」是兩件事，補救動作相反：前者該等，後者等再久
+/// 也不會好。第一版把兩者混成一個 `lockHeld`，於是磁碟滿或權限不足的使用者
+/// 會去等一個不存在的建置。
+@Test("開不了鎖檔時給的是 lockUnavailable，不是叫人去等的 lockHeld")
+func aBrokenLockPathIsNotReportedAsAnotherBuildInProgress() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try derived.createRootIfNeeded()
+
+    // 把鎖的路徑做成一個**目錄**：`open` 會回 EISDIR，而那顯然不是「別人在建置」。
+    try FileManager.default.createDirectory(
+        at: derived.lockURL, withIntermediateDirectories: true)
+
+    do {
+        _ = try FileLock.acquire(at: derived.lockURL)
+        Issue.record("應該拋錯")
+    } catch let error as IndexBuilder.BuildError {
+        guard case .lockUnavailable(_, let code, _) = error else {
+            Issue.record("應該是 lockUnavailable，實際是 \(error)")
+            return
+        }
+        #expect(code == EISDIR)
+    }
+}
+
 @Test("建置完成後鎖被釋放，下一次建置拿得到")
 func lockIsReleasedAfterBuild() throws {
     let (corpus, derived) = try makeWorkspace()
@@ -201,7 +264,9 @@ func lockIsReleasedAfterBuild() throws {
     _ = try IndexBuilder(
         location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")
     ).build()
-    #expect(!FileManager.default.fileExists(atPath: derived.lockURL.path))
+    // **不再斷言鎖檔消失。** 鎖現在掛在 `flock` 上，`release()` 刻意不刪檔
+    // （刪檔會開一個 race，見 `FileLock` 的型別註解）。所以「檔案不存在」
+    // 不再是釋放的證據——「下一次拿得到」才是，而那正是下面那一行。
     // 再跑一次不該因為殘留的鎖而失敗。
     _ = try IndexBuilder(
         location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")

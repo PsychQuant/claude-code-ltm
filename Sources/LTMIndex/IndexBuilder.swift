@@ -99,6 +99,13 @@ public struct IndexBuilder: Sendable {
         /// 另一個建置正在進行。**不等待**：建置可能跑很久，讓第二個行程無限期
         /// 卡住比明確失敗更糟——呼叫端無從得知它是在做事還是在等。
         case lockHeld(path: String)
+        /// 鎖檔開不起來，而**不是**因為別人持有：權限、磁碟滿、`EMFILE`、
+        /// 路徑不是檔案……。
+        ///
+        /// 與 `lockHeld` 分開的理由是補救動作完全不同：`lockHeld` 該等，
+        /// 這個該去看 `code`／`detail` 說的那件事。第一版把兩者混成一個，
+        /// 於是磁碟滿的使用者會去等一個不存在的建置。
+        case lockUnavailable(path: String, code: Int32, detail: String)
         /// 側車檔比索引宣稱的短。
         ///
         /// 這**不能**靠 `ftruncate` 修：對較短的檔案指定較大的 offset 是
@@ -479,27 +486,68 @@ public struct IndexBuilder: Sendable {
     }
 }
 
-/// 單寫者鎖。
+/// 單寫者鎖。**所有權由 `flock(2)` 表示，不是由鎖檔存在表示。**
 ///
-/// `O_CREAT | O_EXCL` 的建檔在 POSIX 上是原子的，所以「誰建成功誰持有」不需要
-/// 額外的協調。**不等待**：建置可能很久，讓第二個行程無限期等待會讓它看起來
-/// 像當掉了。
+/// ## 為什麼不是 `O_CREAT | O_EXCL`
+///
+/// 第一版用建檔的原子性當所有權，`release()` 刪檔。那在**正常結束**時是對的，
+/// 在**中斷**時是錯的——而中斷正是 `#44` 存在的理由：
+///
+/// `release()` 只在 Swift 正常 unwind 的 `defer` 裡執行。SIGKILL、未處理的
+/// SIGINT/SIGHUP、kernel panic、OOM kill 都不會跑 `defer`，於是 `build.lock`
+/// 永久留下，下一次 `open(O_EXCL)` 必然回 `EEXIST`。**已完成的批次明明在磁碟上，
+/// 卻要使用者手動 `rm` 才能續跑**——分批提交省下的計算被鎖檔擋在門外。
+///
+/// 把 pid 寫進檔案只讓人**看得到**是誰留下的，沒有讓系統**恢復**。
+///
+/// `flock` 的鎖掛在**開啟的檔案描述子**上，行程死亡時由核心釋放，不需要任何
+/// 清理程式碼跑得到。這是唯一在 SIGKILL 下仍然正確的形狀。
+///
+/// ## 為什麼 `release()` 不刪檔
+///
+/// 刪檔會開一個 race：A 持有 flock、B 開啟同一個路徑等待、A 刪檔並結束、
+/// C 建立一個**新的** inode 並取得它的 flock——此時 B 與 C 各自持有不同 inode
+/// 上的鎖，兩個都認為自己是唯一寫者。鎖檔留著不刪就沒有這個問題，代價只是
+/// derived 目錄裡多一個 0–8 bytes 的檔案。
+///
+/// **不等待**：建置可能很久，讓第二個行程無限期等待會讓它看起來像當掉了。
 public struct FileLock: Sendable {
     public let url: URL
+    /// 持鎖的檔案描述子。關閉它就是釋放鎖——所以它必須活到 `release()`。
+    private let descriptor: Int32
 
     public static func acquire(at url: URL) throws -> FileLock {
-        let descriptor = open(url.path, O_CREAT | O_EXCL | O_WRONLY, 0o644)
+        // 不用 O_EXCL：檔案存在不代表有人持鎖（見型別註解）。
+        let descriptor = open(url.path, O_CREAT | O_RDWR, 0o644)
         guard descriptor >= 0 else {
-            throw IndexBuilder.BuildError.lockHeld(path: url.path)
+            // 開不起來的原因不只一種，而把它們全報成「另一個 build 正在進行」
+            // 會讓使用者去等一個不存在的行程。權限、磁碟滿、EMFILE 各自要說。
+            throw IndexBuilder.BuildError.lockUnavailable(
+                path: url.path, code: errno, detail: String(cString: strerror(errno)))
         }
-        // 把 pid 寫進去：鎖檔殘留時（行程被 SIGKILL）使用者看得出是誰留下的。
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            let code = errno
+            close(descriptor)
+            // EWOULDBLOCK（= EAGAIN）才是「別人正持有」。其餘是別的問題。
+            if code == EWOULDBLOCK {
+                throw IndexBuilder.BuildError.lockHeld(path: url.path)
+            }
+            throw IndexBuilder.BuildError.lockUnavailable(
+                path: url.path, code: code, detail: String(cString: strerror(code)))
+        }
+        // pid 只作診斷用途，不再承載所有權。先截短：舊內容可能比新 pid 長。
+        ftruncate(descriptor, 0)
+        lseek(descriptor, 0, SEEK_SET)
         let pid = "\(ProcessInfo.processInfo.processIdentifier)\n"
         _ = pid.withCString { write(descriptor, $0, strlen($0)) }
-        close(descriptor)
-        return FileLock(url: url)
+        return FileLock(url: url, descriptor: descriptor)
     }
 
+    /// 釋放鎖。**必須且只能呼叫一次**（`build()` 用 `defer` 保證這件事）。
+    ///
+    /// 不刪鎖檔——理由見型別註解的 race。
     public func release() {
-        try? FileManager.default.removeItem(at: url)
+        flock(descriptor, LOCK_UN)
+        close(descriptor)
     }
 }
