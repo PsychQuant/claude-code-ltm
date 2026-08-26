@@ -1,6 +1,6 @@
 # Privacy
 
-claude-LTM indexes the Claude Code transcripts already on this machine and lets a
+claude-code-ltm indexes the Claude Code transcripts already on this machine and lets a
 model search them. That is a lot of access, so here is exactly what it does.
 
 ## What it reads

@@ -1,9 +1,9 @@
 ---
 name: ltm-setup
-description: Use when claude-LTM is not yet usable — the user just installed the plugin, a `ltm_query` call came back with `索引不存在` / `indexMissing`, the user asks "how do I set this up", "為什麼查不到", "ltm 要怎麼開始用", "要先做什麼嗎", or wants to rebuild the index after an upgrade. Checks binary and index state, explains the one-time cost, and runs `ltm build` with the user's consent.
+description: Use when claude-code-ltm is not yet usable — the user just installed the plugin, a `ltm_query` call came back with `索引不存在` / `indexMissing`, the user asks "how do I set this up", "為什麼查不到", "ltm 要怎麼開始用", "要先做什麼嗎", or wants to rebuild the index after an upgrade. Checks binary and index state, explains the one-time cost, and runs `ltm build` with the user's consent.
 ---
 
-# 讓 claude-LTM 可用
+# 讓 claude-code-ltm 可用
 
 **分清楚兩件事**，因為它們的成本差三個數量級：
 

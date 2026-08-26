@@ -21,7 +21,7 @@ import PackageDescription
 // 下面的 `dependencies:` 清單本身——它是編譯期強制的，只是強制它的是 SwiftPM
 // 而不是一個測試檔。
 let package = Package(
-    name: "claude-LTM",
+    name: "claude-code-ltm",
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "LTMCore", targets: ["LTMCore"]),

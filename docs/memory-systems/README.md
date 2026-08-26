@@ -42,10 +42,10 @@
 `human-like` 的公式沿用 `PsychQuant/ai4o` 的 `docs/memory/implementation/`
 （`memory-strength.md` / `consolidation.md`），那套已按 Wixted & Ebbesen (1991) 的
 power-law 調過，不重推。**參數是否適用於本語料未經校準**——AI4o 的值是在日常聊天
-語料上調的，claude-LTM 是技術對話，性質差很多。
+語料上調的，claude-code-ltm 是技術對話，性質差很多。
 
 **一處刻意的偏離**：AI4o 會把低 strength 記憶 `archived = true` 排除於候選之外，
-理由是省 recall window 的 token。claude-LTM 是全庫檢索、沒有 window 壓力，照抄
+理由是省 recall window 的 token。claude-code-ltm 是全庫檢索、沒有 window 壓力，照抄
 archive 會讓正回饋**把記憶永久埋掉**。因此 `human-like` 的低 strength 只回到中性
 （boost = 1.0），永遠留在候選集。
 
@@ -238,7 +238,7 @@ interleaving 是這個決定的直接後果，不是疏忽。**
 策略可切換只解決一半；另一半是**怎麼知道哪個比較好**。
 
 評估需要一組 `(查詢, 應該命中的 turn 指標)`。這組資料只能從真實回溯情境累積——
-每次實際用 claude-LTM 找東西並找到了，就記一筆。**冷啟動時它是空的，這是誠實的
+每次實際用 claude-code-ltm 找東西並找到了，就記一筆。**冷啟動時它是空的，這是誠實的
 限制，不是可以繞過的細節。**
 
 在有評估集之前，任何「策略 X 比較好」的說法都沒有根據，包括本文件的推薦。

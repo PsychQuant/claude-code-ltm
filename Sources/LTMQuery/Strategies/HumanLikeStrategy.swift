@@ -26,7 +26,7 @@ public struct HumanLikeStrategy: MemoryStrategy {
     /// 而多少是對的沒有任何證據，兩個方向都沒有。
     ///
     /// **不要為了讓效果看起來明顯而調高它**：那會讓比較實驗量到的是參數，不是策略。
-    /// 追蹤於 claude-LTM #1。
+    /// 追蹤於 claude-code-ltm #1。
     public let displacementBound: Int
 
     public init(displacementBound: Int = 1) {

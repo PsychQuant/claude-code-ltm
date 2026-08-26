@@ -33,7 +33,7 @@ Changes can be parked（暫存）— temporarily moved out of `openspec/changes/
 
 ## 這是什麼
 
-claude-LTM＝Claude Code 的長期記憶。在既有的 `~/.claude/projects/**/*.jsonl`
+claude-code-ltm＝Claude Code 的長期記憶。在既有的 `~/.claude/projects/**/*.jsonl`
 （immutable、帶時間戳的對話逐字記錄）之上建可拋棄的索引與**可插拔的記憶策略**。
 
 定位見 [README.md](README.md)；量測基線見 [docs/measurements/](docs/measurements/)；

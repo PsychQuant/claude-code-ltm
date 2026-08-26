@@ -1,10 +1,10 @@
-# claude-LTM
+# claude-code-ltm
 
 Claude Code 的長期記憶（long-term memory）。
 
 **核心命題**：`~/.claude/projects/**/*.jsonl` 已經是一份完整、immutable、帶時間戳的
 對話逐字記錄——那就是 source of truth，而且它一直都在。缺的不是儲存，是**檢索**。
-claude-LTM 在它之上建可拋棄的索引與可插拔的記憶策略，讓 Claude 能回頭讀自己的過去。
+claude-code-ltm 在它之上建可拋棄的索引與可插拔的記憶策略，讓 Claude 能回頭讀自己的過去。
 
 ## 版本
 
@@ -65,7 +65,7 @@ Claude Desktop 走 release 頁的 `claude-ltm-0.1.0.mcpb`，雙擊安裝；裝�
 
 ```bash
 git clone https://github.com/PsychQuant/claude-code-ltm.git
-cd claude-LTM
+cd claude-code-ltm
 swift build -c release                # 產出 .build/release/ltm
 ./.build/release/ltm build            # 建索引
 ```
@@ -80,7 +80,7 @@ MCP server 用同一個 binary：
 要在別的專案用，裝 plugin（上一節）或把 `plugin/` 傳給 `claude --plugin-dir`：
 
 ```bash
-claude --plugin-dir /path/to/claude-LTM/plugin
+claude --plugin-dir /path/to/claude-code-ltm/plugin
 ```
 
 ### 驗證裝好了（三層，各自獨立）
