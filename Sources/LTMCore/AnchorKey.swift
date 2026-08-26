@@ -42,6 +42,35 @@ public struct AnchorKey: Sendable, Equatable {
         self.material = SymmetricKey(data: material)
     }
 
+    /// 從十六進位字串建構。長度為奇數、含非十六進位字元、或不足 32 bytes 時回 `nil`。
+    ///
+    /// 解析只寫在這裡一份：`ltm memory --import-key` 與 `AnchorKeyStore` 的
+    /// `LTM_ANCHOR_KEY` 都用它，而「同一件事有兩個寫者」在這裡的漂移方向是
+    /// 「其中一份接受了另一份會拒絕的字串」。
+    public init?(hex: String) {
+        let ascii = Array(hex.utf8)
+        guard ascii.count % 2 == 0 else { return nil }
+        func nibble(_ c: UInt8) -> UInt8? {
+            switch c {
+            case 0x30...0x39: return c - 0x30
+            case 0x61...0x66: return c - 0x61 + 10
+            case 0x41...0x46: return c - 0x41 + 10
+            default: return nil
+            }
+        }
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(ascii.count / 2)
+        for i in stride(from: 0, to: ascii.count, by: 2) {
+            guard let h = nibble(ascii[i]), let l = nibble(ascii[i + 1]) else { return nil }
+            bytes.append(h << 4 | l)
+        }
+        guard bytes.count >= 32 else { return nil }
+        self.init(material: Data(bytes))
+    }
+
+    /// 十六進位表示。**這是秘密**——只用於明示的匯出。
+    public var hexEncoded: String { exported.map { String(format: "%02x", $0) }.joined() }
+
     /// 產生一把新的隨機密鑰。
     public static func generate() -> AnchorKey {
         AnchorKey(material: SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) })

@@ -48,10 +48,10 @@ public enum AnchorKeyStore {
     ///    要求每個跑測試的人手動點掉對話框。
     public static func loadOrCreate() throws -> AnchorKey {
         if let hex = ProcessInfo.processInfo.environment["LTM_ANCHOR_KEY"] {
-            guard let material = Data(hexEncoded: hex), material.count >= 32 else {
+            guard let key = AnchorKey(hex: hex) else {
                 throw StoreError.malformedKey(bytes: hex.count / 2)
             }
-            return AnchorKey(material: material)
+            return key
         }
         if let existing = try load() { return existing }
         let fresh = AnchorKey.generate()
@@ -110,30 +110,5 @@ public enum AnchorKeyStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: "default",
         ]
-    }
-}
-
-extension Data {
-    /// 十六進位字串 → bytes。長度為奇數或含非十六進位字元時回 `nil`。
-    init?(hexEncoded hex: String) {
-        let scalars = Array(hex.utf8)
-        guard scalars.count % 2 == 0 else { return nil }
-        var bytes = [UInt8]()
-        bytes.reserveCapacity(scalars.count / 2)
-        for i in stride(from: 0, to: scalars.count, by: 2) {
-            guard let high = Data.nibble(scalars[i]), let low = Data.nibble(scalars[i + 1])
-            else { return nil }
-            bytes.append(high << 4 | low)
-        }
-        self.init(bytes)
-    }
-
-    private static func nibble(_ ascii: UInt8) -> UInt8? {
-        switch ascii {
-        case 0x30...0x39: return ascii - 0x30
-        case 0x61...0x66: return ascii - 0x61 + 10
-        case 0x41...0x46: return ascii - 0x41 + 10
-        default: return nil
-        }
     }
 }

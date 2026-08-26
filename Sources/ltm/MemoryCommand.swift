@@ -19,22 +19,31 @@ import LTMService
 /// 所以這個命令存在的理由不是便利，是讓那句「失敗訊息要指名補救命令」有東西可以指。
 enum MemoryCommand {
     static let usage = """
-        用法：ltm memory [--prune] [--force]
+        用法：ltm memory [--prune] [--force] [--export-key] [--import-key <hex>]
 
         檢查記憶層事件檔，逐行報出讀不回來的紀錄：
           - 損壞：解不開的行（半途中斷的 append、外來寫入者）
           - 舊規則：用已被取代的 anchor 定址規則寫的行
 
         選項：
-          --prune       把可用的紀錄寫回去，丟掉上面兩類。**先備份原檔**
-          --force       允許「一筆都不保留」的修剪（整份歷史都讀不回來時才需要）
-          -h, --help    顯示本說明
+          --prune            把可用的紀錄寫回去，丟掉上面兩類。**先備份原檔**
+          --force            允許「一筆都不保留」的修剪（整份歷史都讀不回來時才需要）
+          --export-key       印出這台機器的 anchor 密鑰（64 個十六進位字元）
+          --import-key <hex> 把密鑰寫進這台機器的 Keychain（換機器時用）
+          -h, --help         顯示本說明
 
         不帶 --prune 時只讀不寫。
+
+        密鑰：anchor 的內容摘要是 HMAC，密鑰存在 Keychain 且**不與事件檔一起
+        備份**——那正是它擋「備份外流即可還原原文」的方式。所以換機器時要自己
+        把密鑰搬過去，否則舊紀錄會全體讀不回來（顯示為「舊規則」）。
+
+        搬法：舊機器 `ltm memory --export-key`，新機器 `--import-key <那串>`。
+        **匯出的是秘密**，別貼進會被記錄的地方。
         """
 
     static func run(arguments raw: [String]) -> Int32 {
-        let arguments = Arguments(raw, valueOptions: [])
+        let arguments = Arguments(raw, valueOptions: ["import-key"])
         if arguments.has("help") || arguments.has("h") {
             print(usage)
             return LTMCommandLine.ExitCode.success.rawValue
@@ -42,10 +51,18 @@ enum MemoryCommand {
         // 未知選項一律拒絕。少了這道檢查，`--prune=true` 會被解析成 values 而不是
         // flags，於是 `has("prune")` 為假——**命令安靜地什麼都不做而回 0**。
         // 現在多了 `--force`，打錯字的代價從「沒修剪」變成「以為加了保護其實沒加」。
-        let unknown = arguments.unknown(known: ["prune", "force", "help", "h"])
+        let unknown = arguments.unknown(
+            known: ["prune", "force", "export-key", "import-key", "help", "h"])
         guard unknown.isEmpty else {
             Output.error("✗ 未知選項：\(unknown.map { "--\($0)" }.joined(separator: ", "))\n\n\(usage)")
             return LTMCommandLine.ExitCode.usageError.rawValue
+        }
+
+        if arguments.has("export-key") {
+            return exportKey()
+        }
+        if let hex = arguments.value("import-key") {
+            return importKey(hex)
         }
 
         do {
@@ -134,6 +151,53 @@ enum MemoryCommand {
             return LTMCommandLine.ExitCode.indexStateError.rawValue
         } catch {
             Output.error("✗ \(error)")
+            return LTMCommandLine.ExitCode.indexStateError.rawValue
+        }
+    }
+
+    /// 印出這台機器的 anchor 密鑰。
+    ///
+    /// **這是秘密。** 印到 stdout 是刻意的——使用者要能把它導進檔案或密碼管理
+    /// 器；但它會進 shell 歷史與任何在錄的終端機，所以說明裡寫明了這一點。
+    private static func exportKey() -> Int32 {
+        do {
+            let key = try AnchorKeyStore.loadOrCreate()
+            print(key.hexEncoded)
+            return LTMCommandLine.ExitCode.success.rawValue
+        } catch {
+            Output.error("✗ 讀不到 anchor 密鑰：\(error)")
+            return LTMCommandLine.ExitCode.indexStateError.rawValue
+        }
+    }
+
+    /// 把密鑰寫進這台機器的 Keychain。
+    ///
+    /// **會覆寫既有的那一把**，而那會讓這台機器上既有的 anchor 全體讀不回來。
+    /// 所以先檢查是否已有一把、且與要匯入的不同——是的話拒絕並說明，不靜默
+    /// 覆蓋掉一份不可重建的資料的鑰匙。
+    private static func importKey(_ hex: String) -> Int32 {
+        guard let incoming = AnchorKey(hex: hex) else {
+            Output.error("✗ 密鑰格式不對：要 64 個十六進位字元（32 bytes）")
+            return LTMCommandLine.ExitCode.usageError.rawValue
+        }
+        do {
+            if let existing = try AnchorKeyStore.load(), existing != incoming {
+                Output.error(
+                    """
+                    ✗ 這台機器已經有一把不同的 anchor 密鑰。
+                    覆寫它會讓現有的紀錄全部讀不回來（顯示為「舊規則」），而記憶層是
+                    這裡唯一不可重建的資料。
+                    確定要換的話，先自己備份：`ltm memory --export-key > old-key.txt`，
+                    再用 `security` 刪掉 Keychain 裡 service 為 claude-ltm-anchor-key
+                    的項目，然後重跑這個命令。
+                    """)
+                return LTMCommandLine.ExitCode.indexStateError.rawValue
+            }
+            try AnchorKeyStore.save(incoming)
+            print("✓ 已匯入 anchor 密鑰")
+            return LTMCommandLine.ExitCode.success.rawValue
+        } catch {
+            Output.error("✗ 寫入 Keychain 失敗：\(error)")
             return LTMCommandLine.ExitCode.indexStateError.rawValue
         }
     }
