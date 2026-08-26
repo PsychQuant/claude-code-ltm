@@ -188,6 +188,7 @@ public enum StrategyViolation: Error, Sendable, Equatable {
     /// 策略本來就要動 spec。
     case unauthorizedStrategy(RankingPolicyID)
     case unauthorizedDisplacementBound(declared: Int, ceiling: Int)
+    case impersonatedShippedStrategy(declared: RankingPolicyID, actual: String)
     case misreportedHistory(Anchor, reported: RankingReason.History, actual: RankingReason.History)
 }
 
@@ -620,9 +621,9 @@ extension MemoryStrategy {
         // `unauthorizedStrategy` 指名一個**從未被用來查表**的識別碼——錯誤訊息
         // 說 A 被拒，實際被拒的是 B。
         //
-        // 這**不解決** #37（`id` 本身仍是未經驗證的 per-call 自報，交替回值仍能
-        // 在兩次 `rerank` 之間換身分）。它只保證**單次呼叫內部一致**：這一次
-        // 用哪個識別碼查表，錯誤就指名哪一個。
+        // 這只保證**單次呼叫內部一致**：這一次用哪個識別碼查表，錯誤就指名
+        // 哪一個。跨呼叫換身分由下面的冒用檢查擋（#37），而那道檢查碰不到
+        // 套件內的測試識別碼——對那些，本段的單次一致性就是全部的保證。
         let declaredID = id
         guard
             let authorizedConstraints = StrategyRegistry.authorizedConstraints(for: declaredID)
@@ -684,6 +685,26 @@ extension MemoryStrategy {
         // 給每個識別碼一個上限，只會二選一：要嘛牴觸那條 requirement，要嘛讓
         // 建構參數變成裝飾。**所以 bound 的權威問題仍然未決**（見該成員的 doc），
         // 本次只確立了「識別碼鍵的表不是它的答案」。
+        // **冒用出貨識別碼的，型別必須真的是那個策略**（#37）。
+        //
+        // `#34` 把約束的權威移到一張以識別碼為鍵的表，而**那張表的鍵本身是同一個
+        // 形狀的自報**：`id` 是 `{ get }`，每次呼叫重讀。實測一個在 `conservative`
+        // 與 `human-like` 之間交替的 `id`（兩者都被授權，所以 `unauthorizedStrategy`
+        // 不 fire）——同一個 instance、同一組候選，第一次拋、第二次過。
+        //
+        // 修法不是「記住它上次說了什麼」（seam 刻意不記，見 #34），是**要求自報的
+        // 身分與實際型別相符**：`make(id:)` 造得出這個識別碼的話，造出來的型別就
+        // 必須等於眼前這個。交替的 conformer 因此**每一次**都被拒絕，而不是有時。
+        //
+        // `make` 回 `nil` 的識別碼（測試註冊的）跳過這道檢查——它們不冒用任何出貨
+        // 策略的身分，而檢查的標的正是冒用。
+        if let shipped = StrategyRegistry.make(declaredID),
+            type(of: shipped) != type(of: self)
+        {
+            throw StrategyViolation.impersonatedShippedStrategy(
+                declared: declaredID, actual: String(describing: type(of: self)))
+        }
+
         let effectiveConstraints = authorizedConstraints.union(placementConstraints)
         try MemoryStrategySupport.requireFiniteBaseScores(candidates)
         try MemoryStrategySupport.requireBandsInOrder(candidates)

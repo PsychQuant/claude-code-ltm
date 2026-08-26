@@ -305,10 +305,26 @@ private struct ImpersonatingStrategy: MemoryStrategy {
     }
 }
 
-@Test("冒用 conservative 之名卻宣告無約束的 conformer 被擋——表的內容是行為上可觀察的")
-func impersonatingAShippedIdentifierDoesNotEscapeItsConstraints() throws {
-    #expect(throws: StrategyViolation.movedAcrossTieRuns) {
+@Test("冒用 conservative 之名的 conformer 在查表之後、重排之前就被具名拒絕")
+func impersonatingAShippedIdentifierIsRefusedOutright() throws {
+    // **這條斷言在 #37 換過一次，換的方向要記下來。**
+    //
+    // 原本斷言 `movedAcrossTieRuns`：冒用者被放進來、排完之後才因為跨等分區段
+    // 被抓。#37 之後它在**更早**的門口就被擋——自報 `conservative` 而型別不是
+    // `ConservativeStrategy`，於是根本沒有機會重排。
+    //
+    // 改斷言不是遷就實作：更早拒絕是嚴格更強的保證（原本的攔截依賴「它剛好排出
+    // 一個違規的順序」，一個冒用身分卻**乖乖照排**的 conformer 從前是通過的）。
+    // 但代價要說清楚——見下一條測試。
+    do {
         _ = try ImpersonatingStrategy().rerank(exampleCandidates(), with: .empty(at: instant))
+        Issue.record("冒用出貨識別碼的 conformer 應該被拒絕")
+    } catch let violation as StrategyViolation {
+        guard case .impersonatedShippedStrategy(let declared, _) = violation else {
+            Issue.record("拒絕的理由應該是冒用，實際是 \(violation)")
+            return
+        }
+        #expect(declared == RankingPolicyID("conservative"), "錯誤要指名它自報的那個識別碼")
     }
 }
 
@@ -329,9 +345,23 @@ func theTestHookCannotSubtractFromAShippedAuthority() throws {
             == [.withinTieRuns],
         "註冊空集合不得減掉表裡的約束")
 
-    // 行為層：即使註冊了空集合，冒用者仍然被擋。
-    #expect(throws: StrategyViolation.movedAcrossTieRuns) {
+    // 行為層：即使註冊了空集合，冒用者仍然被擋——**但 #37 之後擋它的不再是聯集**。
+    //
+    // 誠實記下這條測試因此失去了什麼：冒用檢查在查表之後、聯集使用之前就拒絕，
+    // 所以「表的約束減不掉」這件事**不再有經由冒用者的行為觀察窗口**，只剩上面
+    // 那條 unit 斷言。這不是保證變弱（更早拒絕更強），是那個性質的執行點上移了。
+    //
+    // 聯集**另一側**（策略可以往上加）仍有行為鎖，而且不受 #37 影響——
+    // `aStrategyMayHoldItselfToMoreThanItsAuthority` 用的是測試識別碼，
+    // `make` 對它回 `nil`，冒用檢查因此碰不到它。
+    do {
         _ = try ImpersonatingStrategy().rerank(exampleCandidates(), with: .empty(at: instant))
+        Issue.record("註冊空集合之後，冒用者仍然應該被拒絕")
+    } catch let violation as StrategyViolation {
+        guard case .impersonatedShippedStrategy = violation else {
+            Issue.record("拒絕的理由應該是冒用，實際是 \(violation)")
+            return
+        }
     }
 }
 

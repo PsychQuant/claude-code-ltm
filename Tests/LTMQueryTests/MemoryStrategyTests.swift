@@ -688,3 +688,62 @@ func aBoundWithinTheCeilingIsAccepted() throws {
         .rerank(candidates(["a", "b", "c"]), with: .empty(at: instant))
     #expect(output.count == 3)
 }
+
+/// `id` 在兩個**都被授權**的識別碼之間交替——#37 的探針。
+private final class IdentityAlternator: @unchecked Sendable, MemoryStrategy {
+    private let lock = NSLock()
+    private var calls = 0
+    private let authorized = StrategyRegistry.readyForTesting
+    let consumedSignals: Set<EventKind> = []
+    let displacementBound = 3
+
+    var id: RankingPolicyID {
+        lock.lock()
+        defer { lock.unlock() }
+        calls += 1
+        // conservative 帶 tie-run 約束、human-like 不帶。交替就能讓約束時有時無。
+        return RankingPolicyID(calls % 2 == 1 ? "conservative" : "human-like")
+    }
+
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        // 跨等分區段的排序：帶 tie-run 約束時該被擋。
+        let reordered = Array(input.candidates.reversed())
+        var originalIndex: [Anchor: Int] = [:]
+        for (i, c) in input.candidates.enumerated() { originalIndex[c.anchor] = i }
+        return reordered.enumerated().map { newIndex, candidate in
+            let displacement = (originalIndex[candidate.anchor] ?? newIndex) - newIndex
+            let movement: RankingReason.Movement =
+                displacement > 0
+                ? .advanced(positions: displacement)
+                : (displacement < 0 ? .receded(positions: -displacement) : .unmoved)
+            return RankedResult(
+                candidate: candidate, displacement: displacement,
+                reason: RankingReason(history: .none, movement: movement))
+        }
+    }
+}
+
+@Test("交替的 id 減不掉型別帶來的約束——同一個 instance 每次呼叫結果一致")
+func anAlternatingIdentityCannotShedConstraints() {
+    // #37：`#34` 的授權表以識別碼為鍵，而**識別碼本身也是自報**（`{ get }`，
+    // 每次呼叫重讀）。實測一個在兩個都被授權的識別碼之間交替的 conformer：
+    // 同一個 instance、同一組候選，第一次拋、第二次過——#32 探針輸出的逐字重現。
+    //
+    // 型別偽造不了，所以 seam 另外從 `type(of: self)` 導一份授權並取聯集。
+    //
+    // **這條測的是「四次呼叫結果一致」，不是「一定會拋」**——一致才是那個性質。
+    // 一個無條件拋的實作也會讓「一定會拋」變綠。
+    let strategy = IdentityAlternator()
+    let input = candidates(["a", "b"])
+    let outcomes = (0..<4).map { _ -> Bool in
+        do {
+            _ = try strategy.rerank(input, with: .empty(at: instant))
+            return true
+        } catch {
+            return false
+        }
+    }
+    #expect(Set(outcomes).count == 1, "同一個 instance 的四次呼叫給出不同結果：\(outcomes)")
+}
