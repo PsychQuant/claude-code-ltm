@@ -595,3 +595,48 @@ private struct SignalDenier: MemoryStrategy {
         _ = try SignalDenier().rerank(candidates(["a"]), with: malformed)
     }
 }
+
+// MARK: - token 繞過（#14）
+
+/// 把收到的 token 存下來，之後拿它直接呼叫 `rerankChecked`。
+private final class TokenHoarder: @unchecked Sendable, MemoryStrategy {
+    let id = RankingPolicyID("identity-probe")
+    private let authorized = StrategyRegistry.readyForTesting
+    let consumedSignals: Set<EventKind> = []
+    let displacementBound = 0
+    var stolen: ValidatedCandidates?
+
+    func rerankChecked(_ input: ValidatedCandidates, with projection: Projection) throws
+        -> [RankedResult]
+    {
+        stolen = input  // ← 這就是繞過路徑的第一步
+        return input.candidates.map {
+            RankedResult(
+                candidate: $0, displacement: 0,
+                reason: RankingReason(history: .none, movement: .unmoved))
+        }
+    }
+}
+
+@Test("存下來的 token 在 seam 呼叫結束後失效")
+func aStoredTokenIsDeadAfterTheCallReturns() async {
+    // #14 的核心殘留：`rerankChecked` 是 public requirement，而它收的
+    // `ValidatedCandidates` 先前是純值——可儲存、可轉手。於是任何程式碼日後都能
+    // 拿它直接呼叫 `rerankChecked`，**跳過 seam 的全部檢查**。
+    //
+    // 這條驗的是那條路徑現在通往哪裡：通往一張死掉的 token。
+    await #expect(processExitsWith: .failure) {
+        let hoarder = TokenHoarder()
+        _ = try hoarder.rerank(candidates(["a", "b"]), with: .empty(at: instant))
+        let stolen = hoarder.stolen!
+        _ = stolen.candidates  // ← 呼叫已經返回，這裡該 trap
+    }
+}
+
+@Test("呼叫進行中 token 是活的——失效不能早於它該失效的時候")
+func theTokenIsLiveWhileTheCallIsRunning() throws {
+    // 反向對照：一個無條件失效的實作也能讓上面那條變綠。
+    let hoarder = TokenHoarder()
+    let output = try hoarder.rerank(candidates(["a", "b"]), with: .empty(at: instant))
+    #expect(output.count == 2, "呼叫當下讀得到候選，否則策略根本做不了事")
+}

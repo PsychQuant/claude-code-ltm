@@ -229,8 +229,65 @@ public enum StrategyViolation: Error, Sendable, Equatable {
 /// 在那之前，**消費端不得因為「seam 保證過了」而省掉自己的檢查**——交錯器
 /// 正是這樣刪掉自己那道排列檢查的，而它依據的就是上面那句假宣稱。
 public struct ValidatedCandidates: Sendable {
-    public let candidates: [Candidate]
-    init(_ candidates: [Candidate]) { self.candidates = candidates }
+    /// **這一次 seam 呼叫**驗過的候選。
+    ///
+    /// ## token 在呼叫結束時失效（#14）
+    ///
+    /// 先前這是一個純值：可儲存、可轉手。於是一個 conformer 只要把收到的
+    /// `ValidatedCandidates` 留下來，任何程式碼日後都能拿它直接呼叫
+    /// `rerankChecked`，**跳過 seam 的全部檢查**——而那正是 #14 選項 (b)
+    /// 「不可繞過的 StrategyRunner」要的性質。
+    ///
+    /// 現在它持有一個由 seam 擁有的 box，seam 在呼叫返回時把它作廢。存下來的
+    /// token 之後讀 `candidates` 會 trap 並指名原因。
+    ///
+    /// **買到的與買不到的，說清楚：**
+    ///
+    /// - 買到：**在 seam 呼叫之外拿不到被 seam 驗過的候選**。
+    /// - 買不到：策略在呼叫**當下**可以把 `candidates` 陣列複製走。那是資料，
+    ///   不是權限——它拿走的東西沒有任何「已通過檢查」的效力，因為效力來自
+    ///   結果回到 `rerank` 時被再驗一次，不是來自持有這個陣列。
+    /// - 買不到：一個第三方仍然可以完全不碰 seam、自己造 `[RankedResult]`。
+    ///   那時它沒有繞過任何東西——它根本沒有使用這個 seam，也沒有任何地方會
+    ///   宣稱它的輸出通過了檢查。
+    public var candidates: [Candidate] {
+        guard let live = box.candidates else {
+            preconditionFailure(
+                "ValidatedCandidates 已失效——它只在建立它的那一次 seam 呼叫內有效。"
+                    + "把它存下來日後再用，正是 #14 要擋的繞過路徑。")
+        }
+        return live
+    }
+
+    private let box: Box
+
+    init(_ candidates: [Candidate]) { self.box = Box(candidates) }
+
+    /// 讓 seam 在呼叫返回時作廢這張 token。
+    func expire() { box.expire() }
+
+    /// 可作廢的持有者。
+    ///
+    /// 用 class 而不是在 struct 上放旗標：struct 是值型別，策略拿到的是一份
+    /// **複本**，作廢複本不會影響它手上那一份。
+    private final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [Candidate]?
+
+        init(_ candidates: [Candidate]) { self.stored = candidates }
+
+        var candidates: [Candidate]? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+
+        func expire() {
+            lock.lock()
+            defer { lock.unlock() }
+            stored = nil
+        }
+    }
 }
 
 /// 所有策略共用的前置條件。
@@ -619,7 +676,12 @@ extension MemoryStrategy {
         if !effectiveSignals.isEmpty {
             try MemoryStrategySupport.requireWellFormedStatistics(projection)
         }
-        let results = try rerankChecked(ValidatedCandidates(candidates), with: projection)
+        // **token 只在這一次呼叫內有效**（#14）。返回前作廢，所以一個把它存下來
+        // 的 conformer 之後拿不到候選——繞過路徑因此不再通往「被 seam 驗過的
+        // 候選」，而那正是它唯一有價值的地方。
+        let token = ValidatedCandidates(candidates)
+        defer { token.expire() }
+        let results = try rerankChecked(token, with: projection)
 
         // 後置條件：排列性、帶保持、**位移上限**、以及每一筆自報的 displacement
         // 等於實際的位置變化。上限走 `check` 而不是 `verifyPermutation`——R5：
