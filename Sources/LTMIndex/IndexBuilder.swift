@@ -30,19 +30,34 @@ public struct BuildReport: Sendable, Equatable {
 /// **這個型別存在的前提是 #44 的分批提交。** 在那之前沒有可回報的中間狀態——
 /// 整個 build 在單一交易內，外部讀取者看到的 `chunks` 是 0，`index.sqlite3` 停在
 /// 4 KB。那不是「有進度但沒印」，是**進度在提交之前不存在**。
-public struct BuildProgress: Sendable, Equatable {
-    /// 已完成的批次（由 1 起算）。
-    public let batch: Int
-    public let totalBatches: Int
-    public let chunksDone: Int
-    public let chunksTotal: Int
+public enum BuildProgress: Sendable, Equatable {
+    /// **掃描結束，分母已知。** 在任何 embedding 之前發生，成本近乎零。
+    ///
+    /// 第一版沒有這一則，於是第一行輸出要等整批 embedding + 側車寫入 + DB commit
+    /// 全部完成——而一批的實際上界是最大的那個來源檔（見 #47），所以最壞情況下
+    /// 那仍然是數分鐘的沉默。#45 的核心症狀（「慢」與「卡死」外觀相同）原封不動。
+    ///
+    /// `vectorsNeeded` 在目前的設計裡**恆等於** `chunks`：每個新掃到的 chunk 都要
+    /// 算一次向量，沒有可以跳過的。分開列是因為 #45 逐字要了三個數字，而把兩個
+    /// 相同的數字合成一個會讓日後真的分岔時沒有地方放。
+    case scanCompleted(files: Int, chunks: Int, vectorsNeeded: Int)
+
+    /// 嵌入進行中的心跳。**每 N 個 chunk 或每 T 秒，先到者發。**
+    ///
+    /// 只有批次邊界的回報不夠：批次可以很大（#47），而使用者要判斷的是「它還活著
+    /// 嗎」，那個判斷不能等到一批做完。
+    case embedding(chunksDone: Int, chunksTotal: Int, elapsed: TimeInterval)
+
+    /// 一批提交完成。
+    case batchCommitted(
+        batch: Int, totalBatches: Int, chunksDone: Int, chunksTotal: Int, elapsed: TimeInterval)
 }
 
 public struct IndexBuilder: Sendable {
     public let location: DerivedLocation
     public let scanner: CorpusScanner
     private let embedder: any EmbeddingProvider
-    /// 每批提交後被呼叫。`nil` = 不回報（既有呼叫端的行為不變）。
+    /// 進度回報。`nil` = 不回報（既有呼叫端的行為不變）。
     ///
     /// 用 callback 而不是讓 `IndexBuilder` 自己 print：這一層不該決定輸出去哪
     /// （stdout 的 `--json` 形態是給程式讀的），那是 CLI 的決定。
@@ -81,16 +96,27 @@ public struct IndexBuilder: Sendable {
     /// 可注入的第一個理由是測試：分批的行為只有在批次小於語料時才觀察得到，
     /// 而寫一個 2,000 chunk 的 fixture 只是為了驗分批，成本與收益不成比例。
     public let batchChunkTarget: Int
+    /// 嵌入期間每幾個 chunk 發一次心跳。與 `progressTimeInterval` 是 **or**：
+    /// 先到者發。兩個都要的理由是它們各自漏掉一種情況——chunk 很慢時只有時間
+    /// 觸發得了，chunk 很快時只有計數不會把 stderr 洗版。
+    public let progressChunkInterval: Int
+    /// 嵌入期間至少每幾秒發一次心跳。
+    public let progressTimeInterval: TimeInterval
 
     public init(
         location: DerivedLocation, scanner: CorpusScanner, embedder: any EmbeddingProvider,
         progress: (@Sendable (BuildProgress) -> Void)? = nil,
-        batchChunkTarget: Int = 2_000
+        batchChunkTarget: Int = 2_000,
+        progressChunkInterval: Int = 200,
+        progressTimeInterval: TimeInterval = 5
     ) {
         self.location = location
         self.scanner = scanner
         self.embedder = embedder
         self.progress = progress
+        precondition(progressChunkInterval > 0, "心跳間隔必須為正")
+        self.progressChunkInterval = progressChunkInterval
+        self.progressTimeInterval = progressTimeInterval
         precondition(batchChunkTarget > 0, "批次大小必須為正——0 或負數會讓迴圈永遠不落地")
         self.batchChunkTarget = batchChunkTarget
     }
@@ -202,6 +228,16 @@ public struct IndexBuilder: Sendable {
         }
         let scan = try scanner.scan(previous: previousState)
         let refreshedSourceKeys = Set(scan.chunks.map(\.sourceKey))
+
+        // 分母在這裡就知道了，而 embedding 一個都還沒算。#45 Expected ① 指名的
+        // 就是這個時機：「這一步在嵌入開始之前就知道，成本近乎零」。
+        //
+        // 零 chunk 的增量也要報——「掃完了，沒有新東西」與「還在掃」是兩件事，
+        // 而使用者從沉默裡分不出來。
+        progress?(
+            .scanCompleted(
+                files: scan.state.files.count, chunks: scan.chunks.count,
+                vectorsNeeded: scan.chunks.count))
 
         var vectorRow = rebuildFromScratch ? 0 : (try database.meta("vector_count").flatMap(Int.init) ?? 0)
         // 上一輪若在寫側車檔途中中止，檔案會比 `vector_count` 記錄的長。先截回
@@ -317,6 +353,9 @@ public struct IndexBuilder: Sendable {
         // 而沒有降低「重算成本」**——使用者感受到的中斷代價一點都沒變。
         let totalChunks = scan.chunks.count
         var doneChunks = 0
+        let started = Date()
+        var lastBeat = started
+        var lastBeatChunks = 0
 
         for (batchIndex, batch) in batches.enumerated() {
             let batchChunks = batch.flatMap { grouped[$0] ?? [] }
@@ -325,6 +364,20 @@ public struct IndexBuilder: Sendable {
             var vectors: [[Float]?] = []
             vectors.reserveCapacity(batchChunks.count)
             for chunk in batchChunks {
+                // 心跳：每 N 個 chunk 或每 T 秒，先到者發。放在迴圈**內**是重點
+                // ——批次邊界的回報在一批很大時幫不上忙，而那正是最壞情況。
+                let sinceLastBeat = Date().timeIntervalSince(lastBeat)
+                if doneChunks - lastBeatChunks >= progressChunkInterval
+                    || sinceLastBeat >= progressTimeInterval
+                {
+                    lastBeat = Date()
+                    lastBeatChunks = doneChunks
+                    progress?(
+                        .embedding(
+                            chunksDone: doneChunks, chunksTotal: totalChunks,
+                            elapsed: Date().timeIntervalSince(started)))
+                }
+                doneChunks += 1
                 // 產不出向量的 chunk 仍然留在 lexical 通道裡——少一路比整段
                 // 不可檢索好，而且 `vector_row` 為 NULL 讓「這一筆沒有向量」
                 // 是可查詢的事實，不是猜測。
@@ -387,11 +440,13 @@ public struct IndexBuilder: Sendable {
             }
 
             indexed += batchChunks.count
-            doneChunks += batchChunks.count
+            lastBeat = Date()
+            lastBeatChunks = doneChunks
             progress?(
-                BuildProgress(
+                .batchCommitted(
                     batch: batchIndex + 1, totalBatches: batches.count,
-                    chunksDone: doneChunks, chunksTotal: totalChunks))
+                    chunksDone: doneChunks, chunksTotal: totalChunks,
+                    elapsed: Date().timeIntervalSince(started)))
         }
 
         // 全部批次成功之後補上剩下的來源——沒有新 chunk 但 metadata 有變的那些。

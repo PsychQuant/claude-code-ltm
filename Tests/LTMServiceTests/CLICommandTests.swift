@@ -179,6 +179,119 @@ func buildSucceedsAndLeavesCorpusUntouched() throws {
             atPath: workspace.derived.appendingPathComponent("index.sqlite3").path))
 }
 
+// MARK: - 進度輸出（#45）
+//
+// 這一組先前**完全不存在**——#45 的診斷 Blast radius 明列了要釘住的性質，而
+// 實作出貨時一條測試都沒有。跨模型盲驗把它列為 blocking：一個宣稱「解決了
+// 可觀測性」的改動，本身沒有任何可觀測性的證據。
+
+@Test("build 預設把進度寫 stderr，stdout 只有最終報告")
+func buildProgressGoesToStderrNotStdout() throws {
+    let workspace = try CLIWorkspace.make(texts: ["第一段", "第二段", "第三段"])
+    defer { workspace.cleanup() }
+
+    let result = try runCLI(["build"], environment: workspace.environment)
+
+    #expect(result.code == 0)
+    // stdout 要能被程式消費，所以進度不能混進去。
+    #expect(!result.out.contains("掃描完成"), "進度不得寫 stdout")
+    #expect(!result.out.contains("已提交"), "進度不得寫 stdout")
+    #expect(result.out.contains("索引完成"), "最終報告仍在 stdout")
+    #expect(result.err.contains("掃描完成"), "分母要在 stderr 上說")
+}
+
+@Test("掃描結束就報分母——嵌入開始之前就看得到檔案數與 chunk 數")
+func theDenominatorIsReportedBeforeEmbeddingStarts() throws {
+    let workspace = try CLIWorkspace.make(texts: ["第一段", "第二段", "第三段"])
+    defer { workspace.cleanup() }
+
+    let result = try runCLI(["build"], environment: workspace.environment)
+
+    #expect(result.code == 0)
+    #expect(result.err.contains("掃描完成"))
+    #expect(result.err.contains("3 個新 chunk"), "分母要是真的數字，stderr：\(result.err)")
+
+    // 順序：分母那一行必須在任何批次回報**之前**。#45 Expected ① 的重點就是
+    // 「這一步在嵌入開始之前就知道」——放在後面等於沒有做。
+    guard let scanLine = result.err.range(of: "掃描完成") else {
+        Issue.record("沒有掃描完成那一行")
+        return
+    }
+    if let batchLine = result.err.range(of: "已提交") {
+        #expect(scanLine.lowerBound < batchLine.lowerBound, "分母必須先於批次回報")
+    }
+}
+
+@Test("零 chunk 的增量也報分母——「掃完了沒有新東西」與「還在掃」是兩件事")
+func anIncrementalBuildWithNothingNewStillReportsTheDenominator() throws {
+    let workspace = try CLIWorkspace.make(texts: ["第一段"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+
+    let second = try runCLI(["build"], environment: workspace.environment)
+
+    #expect(second.code == 0)
+    #expect(second.err.contains("掃描完成"), "沉默無法與卡死區分，零新增也一樣")
+    #expect(second.err.contains("0 個新 chunk"), "stderr：\(second.err)")
+}
+
+@Test("--quiet 讓 stderr 完全沒有進度，但最終報告仍在 stdout")
+func quietSuppressesProgressButNotTheReport() throws {
+    let workspace = try CLIWorkspace.make(texts: ["第一段", "第二段"])
+    defer { workspace.cleanup() }
+
+    let result = try runCLI(["build", "--quiet"], environment: workspace.environment)
+
+    #expect(result.code == 0)
+    #expect(!result.err.contains("掃描完成"), "--quiet 下 stderr 不該有進度：\(result.err)")
+    #expect(!result.err.contains("已提交"))
+    #expect(result.out.contains("索引完成"), "--quiet 關的是進度，不是結果")
+}
+
+/// stderr 的讀端先走時，build 必須照樣完成。
+///
+/// **這條測試的第一版是裝飾性的**，跟跨模型盲驗才剛罵過的那條同一個病：它用
+/// `FileHandle(forWritingAtPath: "/dev/full")` 製造寫入失敗，而 **macOS 沒有
+/// `/dev/full`**——`FileHandle` 回 nil、fallback 到 `nullDevice`，寫入全部成功。
+/// 變異驗證抓到它：把修法還原成 legacy `FileHandle.write(_:)`，測試照樣綠。
+///
+/// 真正的機制也跟原本以為的不同。殺掉 build 的不是 ObjC 例外，是 **SIGPIPE**：
+/// 往沒有讀端的 pipe 寫會收到訊號，預設處置是終止行程，`write()` 根本不回傳，
+/// 所以「包在 `try?` 裡」對這個情況完全無效。實測 exit 141 = 128 + 13。
+/// 修法是 `main.swift` 的 `signal(SIGPIPE, SIG_IGN)`。
+@Test("stderr 讀端先關掉時 build 仍然成功——進度不該有能力殺掉主工作")
+func aClosedStderrDoesNotKillTheBuild() throws {
+    let workspace = try CLIWorkspace.make(texts: ["第一段", "第二段", "第三段"])
+    defer { workspace.cleanup() }
+
+    let binary = try ltmExecutable()
+    let process = Process()
+    process.executableURL = binary
+    process.arguments = ["build"]
+    var environment = ProcessInfo.processInfo.environment
+    environment["LTM_ANCHOR_KEY"] = String(repeating: "2a", count: 32)
+    for (key, value) in workspace.environment { environment[key] = value }
+    process.environment = environment
+
+    let outPipe = Pipe()
+    let errPipe = Pipe()
+    process.standardOutput = outPipe
+    process.standardError = errPipe
+    try process.run()
+    // 讀端立刻關掉 → 子行程往 stderr 寫進度時得到 EPIPE（或 SIGPIPE）。
+    try errPipe.fileHandleForReading.close()
+
+    let out = String(
+        data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    process.waitUntilExit()
+
+    #expect(
+        process.terminationReason == .exit,
+        "被訊號殺掉了——SIGPIPE 沒有被忽略")
+    #expect(process.terminationStatus == 0, "寫不出進度不該讓 build 失敗")
+    #expect(out.contains("索引完成"))
+}
+
 @Test("索引不存在時 ltm query 非零結束，且訊息指名 ltm build")
 func queryWithoutIndexNamesBuild() throws {
     let workspace = try CLIWorkspace.make(texts: ["內容"])

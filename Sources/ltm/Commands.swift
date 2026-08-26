@@ -181,6 +181,35 @@ enum CommandSupport {
 // MARK: - build
 
 enum BuildCommand {
+    /// 把一則進度寫到 stderr。
+    ///
+    /// **寫失敗絕不能中斷 build。** 先前用 legacy `FileHandle.write(_:)`，它在
+    /// EPIPE 時丟 ObjC 例外——`ltm build | head` 這種再普通不過的用法就會讓一個
+    /// 已經提交了若干批次的 build 硬中斷。進度是附屬品，不該有能力殺掉主工作。
+    static func writeProgress(_ progress: BuildProgress) {
+        let line: String
+        switch progress {
+        case .scanCompleted(let files, let chunks, let vectorsNeeded):
+            line = "  掃描完成：\(files) 個來源檔，\(chunks) 個新 chunk，"
+                + "其中 \(vectorsNeeded) 個要算向量"
+        case .embedding(let done, let total, let elapsed):
+            line = "  … 嵌入 \(done)/\(total) chunk（已用 \(Self.duration(elapsed))）"
+        case .batchCommitted(let batch, let totalBatches, let done, let total, let elapsed):
+            line = "  ✓ 第 \(batch)/\(totalBatches) 批已提交，chunk \(done)/\(total)"
+                + "（已用 \(Self.duration(elapsed))）"
+        }
+        // `try?`：EPIPE／stderr 被關掉都只讓這一行消失，不影響索引。
+        try? FileHandle.standardError.write(contentsOf: Data((line + "\n").utf8))
+    }
+
+    static func duration(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        if total < 60 { return "\(total) 秒" }
+        let minutes = total / 60
+        if minutes < 60 { return "\(minutes) 分 \(total % 60) 秒" }
+        return "\(minutes / 60) 小時 \(minutes % 60) 分"
+    }
+
     static let usage = """
         用法：ltm build [--full] [--quiet]
 
@@ -211,10 +240,9 @@ enum BuildCommand {
             // 數十分鐘等級的工作。**一個跑數十分鐘、完成前完全沉默的命令，跟
             // 卡死在外觀上是同一個樣子。**
             let quiet = arguments.has("quiet")
-            let report = try service.build(full: arguments.has("full")) { p in
+            let report = try service.build(full: arguments.has("full")) { progress in
                 guard !quiet else { return }
-                FileHandle.standardError.write(
-                    Data("  … 第 \(p.batch)/\(p.totalBatches) 批，chunk \(p.chunksDone)/\(p.chunksTotal)\n".utf8))
+                BuildCommand.writeProgress(progress)
             }
             print(
                 """
@@ -235,12 +263,16 @@ enum BuildCommand {
             if report.skipped.total > 0 {
                 // 跳過是正常的，但必須說得出跳了多少、為什麼——否則索引少了東西
                 // 沒有人會發現。
-                print(
-                    "  跳過 \(report.skipped.total) 筆紀錄"
-                        + "（非對話 \(report.skipped.notATurn)、缺欄位 \(report.skipped.missingPointerField)、"
-                        + "識別碼異常 \(report.skipped.malformedIdentifier)、"
-                        + "無可索引文字 \(report.skipped.noIndexableText)、"
-                        + "無法解析 \(report.skipped.unparseableLine)）")
+                // 拆成具名區域變數而不是一條長串接：Swift 的型別檢查對
+                // 「多段 String + 插值」的 `+` 鏈是指數的，加一段就可能超時。
+                let breakdown = [
+                    "非對話 \(report.skipped.notATurn)",
+                    "缺欄位 \(report.skipped.missingPointerField)",
+                    "識別碼異常 \(report.skipped.malformedIdentifier)",
+                    "無可索引文字 \(report.skipped.noIndexableText)",
+                    "無法解析 \(report.skipped.unparseableLine)",
+                ].joined(separator: "、")
+                print("  跳過 \(report.skipped.total) 筆紀錄（\(breakdown)）")
             }
             return LTMCommandLine.ExitCode.success.rawValue
         } catch let error as IndexBuilder.BuildError {
