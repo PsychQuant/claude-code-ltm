@@ -160,34 +160,97 @@ func malformedRecordsAreSkippedAndTallied() throws {
     #expect(result.skipped.unparseableLine == 1)
 }
 
-@Test("只有 tool payload 的 turn 沒有可索引文字，被跳過而不是造出空 anchor")
-func toolOnlyTurnIsSkipped() throws {
+@Test("只有 tool block 的 turn 現在會產出 chunk——但只含 metadata")
+func toolOnlyTurnIsIndexedAsMetadata() throws {
+    // **這條測試先前編碼的是相反的行為**（tool-only turn 被跳過）。#6 改掉了它：
+    // 實測語料裡 78.7% 的字元量對檢索完全不可見，而 tool-only turn 正是其中一大類。
+    //
+    // 改的是「收不收」，不是「收多少」——payload 仍然不收，見下一條。
     let root = try makeFixtureCorpus()
     defer { try? FileManager.default.removeItem(at: root) }
     let toolOnly = """
         {"type":"assistant","uuid":"aaaaaaaa-0000-0000-0000-00000000000a",\
         "sessionId":"11111111-2222-3333-4444-555555555555",\
         "timestamp":"2026-08-17T06:00:00.000Z",\
-        "message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}
+        "message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash",\
+        "input":{"command":"swift test"}}]}}
         """
     _ = try writeSession(
         in: root, project: "proj-one", file: "session.jsonl", lines: [toolOnly])
 
     let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
 
-    #expect(result.chunks.isEmpty)
-    #expect(result.skipped.noIndexableText == 1)
+    let chunk = try #require(result.chunks.first, "tool-only turn 現在該被索引")
+    #expect(chunk.text.contains("Bash"), "工具名要搜得到")
+    #expect(chunk.text.contains("swift test"), "指令要搜得到——那是「做了什麼」")
+    #expect(result.skipped.noIndexableText == 0)
 }
 
-@Test("block 陣列只取 text block")
-func blockArrayTakesTextBlocksOnly() {
+@Test("tool_use 的 payload 欄位不進索引，只有封閉列舉的 metadata 欄位")
+func toolPayloadFieldsAreNotIndexed() {
+    // #6 的**安全性質**：收的是「做了什麼」，不是「結果是什麼」。
+    //
+    // `content` / `new_string` / `old_string` 是 payload——一個 Write 呼叫的
+    // `content` 就是整個檔案內容，而語料裡那可能是第三方逐字內容。
+    let block: [String: Any] = [
+        "type": "tool_use", "name": "Write",
+        "input": [
+            "file_path": "/tmp/notes.md",
+            "content": "SENTINEL-第三方逐字內容-不得進索引",
+            "old_string": "SENTINEL-舊內容",
+        ],
+    ]
+    let text = CorpusScanner.indexableText(from: [block])
+
+    #expect(text.contains("Write"))
+    #expect(text.contains("/tmp/notes.md"), "路徑是 metadata")
+    #expect(!text.contains("SENTINEL"), "payload 欄位外洩到索引")
+}
+
+@Test("tool_result 只記成敗，不記內容")
+func toolResultRecordsOutcomeNotContent() {
+    // 丟掉的 65.7% 就是這一項。收成敗讓「那次跑掛了嗎」搜得到，而不把輸出收進來。
+    let ok: [String: Any] = ["type": "tool_result", "content": "SENTINEL-命令輸出"]
+    let bad: [String: Any] = [
+        "type": "tool_result", "is_error": true, "content": "SENTINEL-錯誤訊息",
+    ]
+    let text = CorpusScanner.indexableText(from: [ok, bad])
+
+    #expect(text.contains("ok"))
+    #expect(text.contains("error"))
+    #expect(!text.contains("SENTINEL"), "tool_result 的內容外洩到索引")
+}
+
+@Test("指令裡夾帶的長內容被截斷——而那不是一道邊界")
+func longCommandsAreClipped() {
+    let smuggled = String(repeating: "秘", count: 500)
+    let block: [String: Any] = [
+        "type": "tool_use", "name": "Bash",
+        "input": ["command": "echo \(smuggled) > f"],
+    ]
+    let text = CorpusScanner.indexableText(from: [block])
+
+    #expect(text.count < 300, "超過上限要截斷")
+    // **誠實邊界**：截斷讓夾帶的東西留不住完整，但一個**短的**夾帶仍然會整個進去。
+    // 這條測試釘的是截斷有發生，不是「夾帶被擋住了」——後者不成立。
+    let short: [String: Any] = [
+        "type": "tool_use", "name": "Bash", "input": ["command": "echo 短夾帶 > f"],
+    ]
+    #expect(CorpusScanner.indexableText(from: [short]).contains("短夾帶"))
+}
+
+@Test("block 陣列：text 逐字保留，tool block 轉成 metadata，thinking 不進索引")
+func blockArrayTakesTextAndToolMetadata() {
     let content: [[String: Any]] = [
         ["type": "thinking", "thinking": "內部推理不該進索引"],
         ["type": "text", "text": "第一段"],
-        ["type": "tool_use", "name": "Read"],
+        ["type": "tool_use", "name": "Read", "input": ["file_path": "/x"]],
         ["type": "text", "text": "第二段"],
     ]
-    #expect(CorpusScanner.indexableText(from: content) == "第一段\n第二段")
+    let text = CorpusScanner.indexableText(from: content)
+    #expect(text.contains("第一段") && text.contains("第二段"))
+    #expect(text.contains("Read") && text.contains("/x"))
+    #expect(!text.contains("內部推理"), "thinking 不進索引")
 }
 
 /// 判定「在語料內」的合成 policy：把指定前綴當成語料。

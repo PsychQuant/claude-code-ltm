@@ -436,17 +436,84 @@ public struct CorpusScanner: Sendable {
     /// 以及索引哪些欄位，追蹤於 issue #6）。`thinking` 同樣不取——它是模型的內部
     /// 推理，不是對話內容。這個決定改變時，anchor 因為內容定址而不需要重建語意，
     /// 但既有 chunk 的 span 會變，所以要走全量重建。
+    /// `tool_use.input` 裡**算作 metadata** 的欄位。
+    ///
+    /// **這是封閉列舉，不得依性質相似類推第八個**（`common-spec-prose-enumeration`）。
+    /// 每一個都是「做了什麼」，不是「結果是什麼」：
+    ///
+    /// | 欄位 | 為什麼算 metadata |
+    /// |---|---|
+    /// | `command` | 執行了哪一條指令 |
+    /// | `file_path` / `path` | 動了哪個檔 |
+    /// | `pattern` / `query` | 搜了什麼 |
+    /// | `url` | 取了哪個位址 |
+    /// | `description` | 呼叫端自己寫的一句話 |
+    ///
+    /// **刻意不在裡面的**：`content`、`new_string`、`old_string`、`body`、`prompt`
+    /// ——它們是 payload，不是 metadata。一個「看起來也像識別資訊」的新欄位要加
+    /// 進來，得先說明它為什麼不是 payload，而不是因為它像上面某一個。
+    static let toolMetadataFields = [
+        "command", "file_path", "path", "pattern", "query", "url", "description",
+    ]
+
+    /// 單一 metadata 欄位取多長。
+    ///
+    /// 上限存在的理由不是省空間，是**指令本身可以夾帶 payload**
+    /// （`echo "一整段內容" > f`）。截斷讓「跑了什麼」留得住，而夾帶的東西留不住
+    /// 完整。這**不是**一道邊界——一個短的夾帶仍然會進去。
+    static let toolMetadataFieldLimit = 200
+
+    /// 可索引的文字。
+    ///
+    /// ## tool block 只取 metadata，不取 payload（#6）
+    ///
+    /// 先前只取 `type == "text"`，其餘整個丟掉。實測（
+    /// `docs/measurements/2026-08-26-tool-payload-share.md`）：**看得見 21.3% 的
+    /// 字元量，看不見 78.7%**，而 `tool_result` 一項就佔 65.7%。
+    ///
+    /// 現在收 `tool_use` 的**工具名與封閉列舉的識別欄位**，以及 `tool_result` 的
+    /// **成敗**。這讓「那次跑 benchmark 的對話在哪」搜得到，而不把 payload 收進來。
+    ///
+    /// **payload 沒有被收，理由不是它沒價值，是還沒有東西能判斷它有多少價值**
+    /// ——那需要一組 `(查詢, 應命中的 turn)` 的評估集（#33）。而它含檔案內容與
+    /// 命令輸出，也就是可能含第三方逐字內容，所以在能判斷之前不收是安全的一側。
     static func indexableText(from content: Any?) -> String {
         if let text = content as? String { return text }
         guard let blocks = content as? [[String: Any]] else { return "" }
         var parts: [String] = []
         for block in blocks {
-            guard let kind = block["type"] as? String, kind == "text",
-                let text = block["text"] as? String, !text.isEmpty
-            else { continue }
-            parts.append(text)
+            guard let kind = block["type"] as? String else { continue }
+            switch kind {
+            case "text":
+                if let text = block["text"] as? String, !text.isEmpty { parts.append(text) }
+            case "tool_use":
+                parts.append(toolUseMetadata(from: block))
+            case "tool_result":
+                // **只記成敗，不記內容。** 這一項是丟掉的 65.7%。
+                let failed = (block["is_error"] as? Bool) ?? false
+                parts.append("⟨tool_result \(failed ? "error" : "ok")⟩")
+            default:
+                continue
+            }
         }
         return parts.joined(separator: "\n")
+    }
+
+    /// 一個 `tool_use` block 的 metadata 摘要。
+    static func toolUseMetadata(from block: [String: Any]) -> String {
+        let name = (block["name"] as? String) ?? "?"
+        var pieces = ["⟨tool \(name)"]
+        let input = (block["input"] as? [String: Any]) ?? [:]
+        for field in toolMetadataFields {
+            guard let raw = input[field] as? String, !raw.isEmpty else { continue }
+            let flattened = raw.replacingOccurrences(of: "\n", with: " ")
+            let clipped =
+                flattened.count > toolMetadataFieldLimit
+                ? String(flattened.prefix(toolMetadataFieldLimit)) + "…"
+                : flattened
+            pieces.append("\(field)=\(clipped)")
+        }
+        return pieces.joined(separator: " ") + "⟩"
     }
 
     /// ISO-8601，容許有無小數秒兩種寫法。
