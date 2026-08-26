@@ -132,14 +132,8 @@ enum CommandSupport {
     /// 目錄真的存在**，而不是相信轉換規則——規則是觀察來的，不是契約，猜錯時
     /// 「查不到東西」與「查錯專案」都不會有錯誤訊息。
     static func projectForWorkingDirectory(corpusRoot: URL) -> String? {
-        let cwd = FileManager.default.currentDirectoryPath
-        let candidate = cwd.replacingOccurrences(of: "/", with: "-")
-        var isDirectory: ObjCBool = false
-        let path = corpusRoot.appendingPathComponent(candidate).path
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
-            isDirectory.boolValue
-        else { return nil }
-        return candidate
+        LTMService.projectName(
+            forWorkingDirectory: FileManager.default.currentDirectoryPath, corpusRoot: corpusRoot)
     }
 
     /// 解析查詢範圍。無法決定時**要求明示**，不擴大成全語料。

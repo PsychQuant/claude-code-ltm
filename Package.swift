@@ -31,6 +31,7 @@ let package = Package(
         .library(name: "LTMIndex", targets: ["LTMIndex"]),
         .library(name: "LTMService", targets: ["LTMService"]),
         .executable(name: "ltm", targets: ["ltm"]),
+        .executable(name: "ltm-mcp", targets: ["ltm-mcp"]),
     ],
     targets: [
         .target(name: "LTMCore"),
@@ -84,7 +85,10 @@ let package = Package(
             dependencies: ["LTMCore", "LTMIndex", "LTMQuery", "LTMMemory", "LTMEval"]),
         // CLI。**不引入 swift-argument-parser**：零第三方依賴是隱私邊界的一部分
         // （每一個依賴都是一條需要自己審的供應鏈），手寫解析的成本遠低於那個代價。
+        .target(
+            name: "LTMMCP", dependencies: ["LTMService", "LTMCore", "LTMIndex"]),
         .executableTarget(name: "ltm", dependencies: ["LTMService", "LTMCore", "LTMEval"]),
+        .executableTarget(name: "ltm-mcp", dependencies: ["LTMMCP", "LTMService"]),
         // 量測腳本。**是一個 target 而不是 `swiftc` 單檔**：它要用索引層與評估層
         // 的型別，而單檔編譯只能把 source 檔複製進來——那就是同一件事的第二個
         // 寫者。`path`/`sources` 指名單一檔案，`scripts/` 下的其他探針不受影響
@@ -105,6 +109,7 @@ let package = Package(
             path: "scripts/measure-retrieval"),
         .testTarget(name: "LTMMemoryTests", dependencies: ["LTMCore", "LTMMemory"]),
         .testTarget(name: "LTMQueryTests", dependencies: ["LTMCore", "LTMQuery"]),
+        .testTarget(name: "LTMMCPTests", dependencies: ["LTMMCP", "LTMCore", "LTMService"]),
         .testTarget(name: "LTMEvalTests", dependencies: ["LTMCore", "LTMMemory", "LTMQuery", "LTMEval"]),
         .testTarget(name: "LTMIndexTests", dependencies: ["LTMCore", "LTMIndex"]),
         .testTarget(

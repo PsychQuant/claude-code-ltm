@@ -78,6 +78,28 @@ struct PreloadedCorpusReader: CorpusReader {
 ///
 /// 現在它同時保護兩者：預設語料根**與**這次實際使用的語料根。少任何一邊都有洞：
 /// 只看預設 → 覆寫路徑沒守衛；只看當下 → 有人把 derived 指進預設語料。
+extension LTMService {
+    /// 由工作目錄推出 project 名。
+    ///
+    /// Claude Code 把專案路徑的 `/` 換成 `-` 當目錄名。這裡**產生候選之後確認
+    /// 目錄真的存在**，而不是相信轉換規則——規則是觀察來的，不是契約，猜錯時
+    /// 「查不到東西」與「查錯專案」都不會有錯誤訊息。
+    ///
+    /// 住在 facade 而不是 CLI（#24）：MCP server 需要同一份推導，而兩份實作的
+    /// 漂移方向是「其中一個介面把使用者導到別的專案」——那不會有錯誤訊息。
+    public static func projectName(
+        forWorkingDirectory cwd: String, corpusRoot: URL = CorpusLocation.readOnlyRoot
+    ) -> String? {
+        let candidate = cwd.replacingOccurrences(of: "/", with: "-")
+        var isDirectory: ObjCBool = false
+        let path = corpusRoot.appendingPathComponent(candidate).path
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+            isDirectory.boolValue
+        else { return nil }
+        return candidate
+    }
+}
+
 /// 語料圍籬。**實作在 `LTMMemory.CorpusPolicy`**，這裡只是既有名字的別名（#27）。
 ///
 /// 先前這裡是第二份實作。它與 `FileEventStore` 用的那份是同一件事的兩個寫者，
