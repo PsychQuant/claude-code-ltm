@@ -545,3 +545,30 @@ private func makeOversizedGroupFixture(memberCount: Int, groupTag: String) -> (
     #expect(result.reinforcement(for: a) == 0)
     #expect(result.reinforcement(for: b) == 0)
 }
+
+@Test func theShippedDefaultActuallyEnablesSpreading() {
+    // #15：擴散的所有測試都**顯式**傳 `spreadingActivationFactor`，所以出貨的
+    // 預設值沒有任何鎖。實測：把預設改成 0，422 條全綠。
+    //
+    // 這比 issue 記的更糟一層。issue 記的是「擴散在生產路徑上零觸發」（沒有任何
+    // 地方寫 deliberate 事件），而這條說的是：**即使有了觸發，出貨的預設也可能
+    // 是關的，而沒有東西會發現。** 兩者疊起來，這個機制是雙重無守衛的。
+    let group = PresentationID.random()
+    let a = anchor("a", "同框呈現的第一則")
+    let b = anchor("b", "同框呈現的第二則")
+    let corpusReader = corpus([turn("a", "同框呈現的第一則"), turn("b", "同框呈現的第二則")])
+
+    let events: [Event] = [
+        .interaction(.shown, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.shown, anchor: b, at: instant, generation: gen, policy: policy, presentation: group),
+        .interaction(.opened, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
+    ]
+    // **刻意用預設值**——這條測的就是那個值。
+    let result = project(events, at: instant, resolvedBy: corpusReader, key: .forTesting)
+
+    #expect(result.reinforcement(for: a) > 0, "前提：A 被開了")
+    #expect(
+        result.reinforcement(for: b) > 0,
+        "出貨的預設必須讓擴散真的發生——否則這個機制在預設組態下不存在")
+    #expect(result.reinforcement(for: b) < result.reinforcement(for: a))
+}
