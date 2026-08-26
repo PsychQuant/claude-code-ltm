@@ -211,3 +211,29 @@ func hitsRecordTheirChannels() throws {
     #expect(!hits[0].channels.isEmpty)
     #expect(hits[0].channels.contains(.trigram))
 }
+
+@Test("用繁體查得到簡體寫的內容，反向亦然（#7）")
+func queriesMatchAcrossTraditionalAndSimplified() throws {
+    // 失效是**安靜的**：查「檢索」召不回「检索」，使用者只會覺得「沒這回事」。
+    //
+    // 語料裡簡體的比例量過（`docs/measurements/2026-08-26-simplified-share.md`）：
+    // 取樣 1,344 個有文字的 turn，含簡體特徵字的只有 1.3%。所以這條買到的不大
+    // ——但成本是一次字串轉換，而它擋的是一種查不到卻沒有任何訊號的失敗。
+    let built = try buildSearchableIndex(texts: [
+        "这一段用简体写的检索策略说明。",
+        "這一段用繁體寫的無關內容。",
+    ])
+    defer { for url in built.cleanup { try? FileManager.default.removeItem(at: url) } }
+
+    // 用**繁體**查，內容是**簡體**寫的。
+    let traditional = try built.engine.search(query: "檢索策略", limit: 10, scope: .allProjects)
+    #expect(
+        traditional.contains { $0.text.contains("检索策略") },
+        "繁體查詢召不回簡體內容")
+
+    // 反向：用簡體查繁體內容。
+    let simplified = try built.engine.search(query: "无关内容", limit: 10, scope: .allProjects)
+    #expect(
+        simplified.contains { $0.text.contains("無關內容") },
+        "簡體查詢召不回繁體內容")
+}

@@ -120,16 +120,39 @@ public struct RetrievalEngine {
         // 撈出來的東西。
         let channelDepth = max(limit * 5, 50)
 
+        // **lexical 兩路跑查詢的所有變體**（#7）。原詞的命中排在前面，其餘變體
+        // 接在後面去重——所以擴展只會**加上**原詞召不回的東西，不會把原詞的排序
+        // 推開。`variants` 的第一個永遠是原詞，這個順序是那個保證的來源。
+        //
+        // 向量通道不擴展：它本來就吃語意相近，而對同一段文字的兩種寫法算兩次
+        // 向量只是把同一個東西算兩遍。
+        let expansions = QueryExpansion.variants(of: query)
+
+        func unionAcrossVariants(_ hits: (String) throws -> [Int64]) rethrows -> [Int64] {
+            var seen = Set<Int64>()
+            var ordered: [Int64] = []
+            for variant in expansions {
+                for rowID in try hits(variant) where seen.insert(rowID).inserted {
+                    ordered.append(rowID)
+                }
+            }
+            return ordered
+        }
+
         let trigramHits =
             channels.contains(.trigram)
-            ? try lexicalHits(
-                table: .trigram, matchText: query, depth: channelDepth, scope: scope)
+            ? try unionAcrossVariants {
+                try lexicalHits(
+                    table: .trigram, matchText: $0, depth: channelDepth, scope: scope)
+            }
             : []
         let segmentHits =
             channels.contains(.segment)
-            ? try lexicalHits(
-                table: .segment, matchText: Segmentation.segment(query),
-                depth: channelDepth, scope: scope)
+            ? try unionAcrossVariants {
+                try lexicalHits(
+                    table: .segment, matchText: Segmentation.segment($0), depth: channelDepth,
+                    scope: scope)
+            }
             : []
         let vectorHits =
             channels.contains(.vector)
