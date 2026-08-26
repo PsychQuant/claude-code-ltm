@@ -305,8 +305,52 @@ func staleSidecarBytesAreTruncated() throws {
     #expect(sidecar.count == declared, "側車檔筆數與索引宣稱的筆數必須一致")
 }
 
-@Test("state 遺失而索引存在時丟出 stateUnreadable，不在舊索引上疊加")
-func missingStateWithExistingIndexIsRefused() throws {
+/// 這條測試釘的是 devil's advocate 在 #44 verify 抓到的那條——其他五個 reviewer
+/// 全部漏掉，而它的後果是**不變式 2 安靜失效**。
+///
+/// 舊形狀：批次內容 COMMIT 進 SQLite，續讀游標寫進 `state.json`。兩者都不 fsync
+/// （`PRAGMA synchronous=NORMAL` 下 COMMIT 不 fsync；`Data.write(.atomic)` 是
+/// temp+rename 也不 fsync），而 `CorpusScanner` 的續讀**只讀游標、從不回頭問 DB**。
+/// 硬重啟可以把 WAL 尾巴回滾到批次 2，而游標存活在批次 5 —— 批次 3/4/5 的 chunk
+/// **永遠不再被產出**，`ltm build` 照樣印「✓ 索引完成」。
+///
+/// 修法不是加 fsync（那只是把窗口縮小），是把游標放進**同一個交易**。於是
+/// 「回滾」對兩者是同一件事——這條測試直接釘那個等價關係：交易失敗時，
+/// 內容與游標必須**一起**不見。舊形狀下游標會活下來，因為它根本不在交易裡。
+@Test("交易回滾時，內容與續讀游標一起消失——不會留下超前的游標")
+func aRolledBackBatchLeavesNoCursorAheadOfTheContent() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try derived.createRootIfNeeded()
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    try database.createSchema()
+
+    struct Boom: Error {}
+    // 一個「寫了內容也寫了游標，然後崩掉」的批次。
+    #expect(throws: Boom.self) {
+        try database.transaction {
+            try database.upsertScanState(
+                sourceKey: "proj/s.jsonl", prefixHash: "deadbeef", processedBytes: 4_096)
+            throw Boom()
+        }
+    }
+
+    // 游標必須跟著回滾。舊形狀下它寫在交易外的檔案裡，這裡會是 4,096。
+    #expect(try database.scanState().files["proj/s.jsonl"] == nil,
+            "游標超前於內容，就是那個安靜漏語料的窗口")
+}
+
+/// 續讀游標搬進 DB 之後，**刪掉 `state.json` 已經無害**——它是鏡像，不是真相。
+///
+/// 這條測試取代了先前那條「刪掉 state.json 應該丟 stateUnreadable」。舊測試釘的
+/// 不是那條性質本身，是它當時的**載體**；載體換了，測試該跟著換，而不是把載體
+/// 留下來只為了讓測試維持綠色。
+@Test("刪掉 state.json 不影響續讀——游標在 DB 裡")
+func deletingTheStateMirrorIsHarmless() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
         try? FileManager.default.removeItem(at: corpus)
@@ -317,8 +361,36 @@ func missingStateWithExistingIndexIsRefused() throws {
     _ = try IndexBuilder(location: derived, scanner: scanner,
                          embedder: StubEmbedder(revision: "rev-A")).build()
 
-    // state 不見了，但 DB 還在——先前這會被當成空 state、重掃全語料 upsert。
     try FileManager.default.removeItem(at: derived.stateURL)
+
+    // 增量：沒有新內容，所以不該有任何 chunk 被重新索引。
+    let again = try IndexBuilder(location: derived, scanner: scanner,
+                                 embedder: StubEmbedder(revision: "rev-A")).build()
+    #expect(!again.wasFullRebuild)
+    #expect(again.chunksIndexed == 0, "游標還在 DB 裡，不該重掃")
+}
+
+/// 而「不在舊索引上安靜疊加」這條性質仍然要守，只是它的條件變了：**兩邊都沒有
+/// 游標**才是那個危險狀態。先前刪一個檔就到得了，現在要把 DB 裡的表也清空。
+@Test("兩邊都沒有續讀游標而索引有內容時丟出 stateUnreadable")
+func anIndexWithContentButNoCursorAnywhereIsRefused() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner,
+                         embedder: StubEmbedder(revision: "rev-A")).build()
+
+    try FileManager.default.removeItem(at: derived.stateURL)
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("DELETE FROM scan_state")
+        #expect(try database.chunkCount() > 0, "前提：索引裡確實有內容")
+    }
 
     #expect(throws: IndexBuilder.BuildError.self) {
         _ = try IndexBuilder(location: derived, scanner: scanner,
@@ -328,6 +400,39 @@ func missingStateWithExistingIndexIsRefused() throws {
     let recovered = try IndexBuilder(location: derived, scanner: scanner,
                                      embedder: StubEmbedder(revision: "rev-A")).build(full: true)
     #expect(recovered.wasFullRebuild)
+}
+
+/// 舊版本建的索引升級上來時，游標還在 `state.json` 裡而 DB 的表是空的。
+/// 那必須被當成**遷移**，不是「沒有游標」——否則升級一次就要重掃全語料。
+@Test("舊索引的 state.json 被遷移進 DB，不觸發重掃")
+func aLegacyStateFileIsMigratedIntoTheDatabase() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner,
+                         embedder: StubEmbedder(revision: "rev-A")).build()
+
+    // 構造「舊版本留下的索引」：DB 有內容、表是空的、鏡像檔還在。
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("DELETE FROM scan_state")
+    }
+    #expect(FileManager.default.fileExists(atPath: derived.stateURL.path))
+
+    let migrated = try IndexBuilder(location: derived, scanner: scanner,
+                                    embedder: StubEmbedder(revision: "rev-A")).build()
+    #expect(!migrated.wasFullRebuild)
+    #expect(migrated.chunksIndexed == 0, "遷移過來的游標應該讓這一輪沒有新內容")
+
+    // 遷移之後游標要真的在 DB 裡，否則下一次又要靠鏡像檔。
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(!(try database.scanState().files.isEmpty))
 }
 
 // MARK: - 刪檔作廢 × 去重的交互作用（round-2 verify HIGH）

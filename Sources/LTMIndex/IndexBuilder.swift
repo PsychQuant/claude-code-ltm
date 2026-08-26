@@ -175,18 +175,29 @@ public struct IndexBuilder: Sendable {
         // 那會在既有索引上重掃全語料 upsert（見 FTS 重複索引那條），而且使用者不會
         // 知道發生過什麼。`stateUnreadable` 先前宣告了卻從未被丟出——那條錯誤路徑
         // 是死的，CLI 的處理分支也因此永遠到不了。
+        // 續讀游標的真相來源是 DB 的 `scan_state` 表（見該表在 `createSchema()`
+        // 裡的註解）。`state.json` 只剩兩個角色：**一次性遷移的來源**，以及
+        // build 結束後寫出的**人類可讀鏡像**——它不再被拿來決定從哪裡續讀。
         var previousState = ScanState()
         if !rebuildFromScratch {
-            let stateExists = FileManager.default.fileExists(atPath: location.stateURL.path)
-            let databaseExists = FileManager.default.fileExists(atPath: location.databaseURL.path)
-            if stateExists {
-                do { previousState = try readState() } catch {
-                    throw BuildError.stateUnreadable(detail: "\(location.stateURL.path)：\(error)")
+            previousState = try database.scanState()
+            if previousState.files.isEmpty {
+                // 表是空的。兩種可能，後果完全不同：
+                //   (a) 舊版本建的索引，游標還在 state.json 裡 → 遷移。
+                //   (b) 索引裡有內容但兩邊都沒有游標 → 不知道該從哪續讀。
+                //       **不可**當成空 state 繼續：那會在既有索引上重掃全語料
+                //       upsert，而使用者不會知道發生過什麼。
+                let stateExists = FileManager.default.fileExists(atPath: location.stateURL.path)
+                if stateExists {
+                    do { previousState = try readState() } catch {
+                        throw BuildError.stateUnreadable(detail: "\(location.stateURL.path)：\(error)")
+                    }
+                } else if try database.chunkCount() > 0 {
+                    throw BuildError.stateUnreadable(
+                        detail: "索引裡有內容，但續讀游標在 DB 與 "
+                            + "\(location.stateURL.lastPathComponent) 都不存在；"
+                            + "用 `ltm build --full` 從零重建")
                 }
-            } else if databaseExists {
-                throw BuildError.stateUnreadable(
-                    detail: "索引存在但 \(location.stateURL.lastPathComponent) 不見了；"
-                        + "用 `ltm build --full` 從零重建")
             }
         }
         let scan = try scanner.scan(previous: previousState)
@@ -252,7 +263,12 @@ public struct IndexBuilder: Sendable {
         let deleteOnly = scan.invalidatedSources.subtracting(grouped.keys)
         if !deleteOnly.isEmpty {
             try database.transaction {
-                for sourceKey in deleteOnly.sorted() { try database.deleteChunks(sourceKey: sourceKey) }
+                for sourceKey in deleteOnly.sorted() {
+                    try database.deleteChunks(sourceKey: sourceKey)
+                    // 游標與內容同一個交易：來源消失了，它的續讀點也必須消失，
+                    // 而且兩件事要嘛都發生要嘛都不發生。
+                    try database.deleteScanState(sourceKey: sourceKey)
+                }
             }
         }
 
@@ -299,7 +315,6 @@ public struct IndexBuilder: Sendable {
         // state 逐批累積：崩在中途時，已完成來源的 entry 已經在磁碟上，重跑
         // 的 scanner 不會再吐出它們。**沒有這一步，分批提交只降低了「資料丟失」
         // 而沒有降低「重算成本」**——使用者感受到的中斷代價一點都沒變。
-        var committedState = previousState
         let totalChunks = scan.chunks.count
         var doneChunks = 0
 
@@ -356,14 +371,20 @@ public struct IndexBuilder: Sendable {
                     }
                 }
                 try database.setMeta("vector_count", String(vectorRow))
-            }
 
-            // ④ 本批來源的 state 落地。
-            for sourceKey in batch {
-                if let entry = scan.state.files[sourceKey] { committedState.files[sourceKey] = entry }
+                // ④ 本批來源的續讀游標——**在同一個交易內**。
+                //
+                // 這是這段程式碼最重要的一行位置。放到交易外（先前就是）會讓
+                // 「已索引到哪」與「索引裡有什麼」落在兩個各自不保證落地的域，
+                // 而 `synchronous=NORMAL` 下的 COMMIT 可以被硬重啟回滾。
+                // 詳見 `createSchema()` 裡 `scan_state` 的註解。
+                for sourceKey in batch {
+                    guard let entry = scan.state.files[sourceKey] else { continue }
+                    try database.upsertScanState(
+                        sourceKey: sourceKey, prefixHash: entry.prefixHash,
+                        processedBytes: entry.processedBytes)
+                }
             }
-            for sourceKey in deleteOnly { committedState.files.removeValue(forKey: sourceKey) }
-            try writeState(committedState)
 
             indexed += batchChunks.count
             doneChunks += batchChunks.count
@@ -373,8 +394,22 @@ public struct IndexBuilder: Sendable {
                     chunksDone: doneChunks, chunksTotal: totalChunks))
         }
 
-        // 全部批次成功之後才寫完整 state——涵蓋沒有新 chunk 但 metadata 有變的來源。
-        try writeState(scan.state)
+        // 全部批次成功之後補上剩下的來源——沒有新 chunk 但 metadata 有變的那些。
+        // 它們沒有內容要提交，所以不屬於任何批次，但游標仍要前進。
+        try database.transaction {
+            for (sourceKey, entry) in scan.state.files {
+                try database.upsertScanState(
+                    sourceKey: sourceKey, prefixHash: entry.prefixHash,
+                    processedBytes: entry.processedBytes)
+            }
+        }
+
+        // `state.json` 從此是**鏡像**，不是真相來源：build 成功後寫一次，供人閱讀
+        // 與舊版本遷移。它落不落地都不影響正確性——續讀讀的是 DB。
+        //
+        // 寫失敗**不讓 build 失敗**：索引已經完整且一致，為了一個診斷用的副本
+        // 把成功的 build 判成失敗，方向是錯的。
+        try? writeState(scan.state)
 
         return BuildReport(
             chunksIndexed: indexed,

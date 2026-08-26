@@ -43,6 +43,15 @@ public final class IndexDatabase {
         case statementFailed(sql: String, message: String)
         /// FTS5 或 trigram tokenizer 不可用。**大聲失敗**，附 SQLite 版本。
         case tokenizerUnavailable(sqliteVersion: String, detail: String)
+        /// 續讀游標的寫入不在交易內。
+        ///
+        /// 這是**機制而不是規則**。把游標寫進 DB 是為了讓它與內容共享一個持久性
+        /// 域；寫在交易外就等於把先前那個跨域窗口原樣搬進 DB，而且**沒有任何
+        /// 單元測試抓得到**——那個失敗模式需要「已提交的交易被硬重啟回滾」，
+        /// 測試造不出來（實測：把呼叫移到交易外，465 條測試全綠）。
+        ///
+        /// 所以這裡不是在註解裡叫呼叫端小心，是讓那條路走不通。
+        case scanStateWriteOutsideTransaction(sourceKey: String)
     }
 
     private var handle: OpaquePointer?
@@ -135,6 +144,37 @@ public final class IndexDatabase {
                 vector_row INTEGER
             )
             """)
+        // 掃描續讀游標。**放在 DB 裡而不是 state.json，是為了讓它與內容同進同出。**
+        //
+        // 先前它是一個獨立的 JSON 檔，每批用 `Data.write(.atomic)` 覆寫一次。
+        // 那讓「已索引到哪」與「索引裡有什麼」落在**兩個各自不保證落地的**持久性
+        // 域，而它們互相假設對方已落地：
+        //
+        //   - `PRAGMA synchronous=NORMAL` + WAL：COMMIT **不 fsync**，硬重啟可以
+        //     回滾已提交的交易（SQLite 明文）。
+        //   - `Data.write(.atomic)` 是 temp + rename，**也不 fsync**。
+        //   - `CorpusScanner` 的續讀判定**只讀 state**，從不回頭問 DB 有沒有那些 chunk。
+        //
+        // 交錯：批次 1–5 commit（WAL 未 fsync）→ 每批的 state 落地 → 斷電 →
+        // WAL 尾巴回滾到批次 2，而 state 存活在批次 5 → 重跑時 scanner 認為
+        // 3/4/5 的來源已處理、從 `processedBytes` 之後續讀 → **那些 chunk 永遠
+        // 不再被產出**。`ltm build` 印「✓ 索引完成」，`ltm query` 照常回答，
+        // 症狀只有「以前找得到的東西現在找不到」。違反不變式 2 且無訊號。
+        //
+        // 側車那側不會示警：它 fsync 過所以比回滾後的 `vector_count` 長，開頭的
+        // `truncateSidecar` 把它截短，兩邊筆數從此吻合。
+        //
+        // 放進同一個交易之後，回滾會把 state 一起帶走——兩者**由構造**一致，
+        // 不是靠加 fsync 去縮小窗口。（由跨模型盲驗的 devil's advocate 指出；
+        // 其他五個 reviewer 都沒看到這條。）
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS scan_state (
+                source_key TEXT PRIMARY KEY NOT NULL,
+                prefix_hash TEXT NOT NULL,
+                processed_bytes INTEGER NOT NULL
+            )
+            """)
         // 唯一鍵與 anchor 的 (source, turnID) 對齊，所以一個 anchor 恰好對應一個 chunk。
         //
         // 先前是 `uuid` 單獨 UNIQUE。那假設 turn 識別碼在整份語料裡唯一，而實測
@@ -186,6 +226,43 @@ public final class IndexDatabase {
         try execute(
             "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             bind: [.text(key), .text(value)])
+    }
+
+    /// 寫入一個來源的續讀游標。**呼叫端必須在批次的交易內呼叫它**——放在交易外
+    /// 就等於把先前那個跨持久性域的窗口原樣搬進 DB。
+    public func upsertScanState(sourceKey: String, prefixHash: String, processedBytes: Int) throws {
+        // autocommit 開著 = 不在交易內。見 `scanStateWriteOutsideTransaction`。
+        guard sqlite3_get_autocommit(handle) == 0 else {
+            throw DatabaseError.scanStateWriteOutsideTransaction(sourceKey: sourceKey)
+        }
+        try execute(
+            """
+            INSERT INTO scan_state(source_key, prefix_hash, processed_bytes) VALUES(?, ?, ?)
+            ON CONFLICT(source_key) DO UPDATE SET
+                prefix_hash = excluded.prefix_hash,
+                processed_bytes = excluded.processed_bytes
+            """,
+            bind: [.text(sourceKey), .text(prefixHash), .integer(Int64(processedBytes))])
+    }
+
+    public func deleteScanState(sourceKey: String) throws {
+        guard sqlite3_get_autocommit(handle) == 0 else {
+            throw DatabaseError.scanStateWriteOutsideTransaction(sourceKey: sourceKey)
+        }
+        try execute("DELETE FROM scan_state WHERE source_key = ?", bind: [.text(sourceKey)])
+    }
+
+    /// 讀回全部續讀游標。空表回空 state——呼叫端要自己分辨「沒有續讀點」與
+    /// 「表不存在」，後者在 `createSchema()` 之後不可能發生。
+    public func scanState() throws -> ScanState {
+        var files: [String: SourceFileState] = [:]
+        try query("SELECT source_key, prefix_hash, processed_bytes FROM scan_state") { statement in
+            let key = columnText(statement, 0)
+            let hash = columnText(statement, 1)
+            files[key] = SourceFileState(
+                prefixHash: hash, processedBytes: Int(sqlite3_column_int64(statement, 2)))
+        }
+        return ScanState(files: files)
     }
 
     public func meta(_ key: String) throws -> String? {
