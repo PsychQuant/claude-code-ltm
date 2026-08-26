@@ -647,3 +647,45 @@ func contentHashValidationErrorNamesThePositionNotTheCharacter() throws {
         #expect(!"\(error)".contains("。"))
     }
 }
+
+// MARK: - #45：沒有登入鑰匙圈時要回訊息，不要回一個等人點的視窗
+
+/// 舊版檔案式 keychain 找不到登入鑰匙圈時**彈 modal 並停在那裡等人點**——失敗沒有
+/// 變成 status code，變成一個視窗。實測踩過兩次（測試卡 116 秒、驗證 wrapper 時彈給
+/// 使用者），而 `SecItemAdd` 回的 `-60006` 逐字是 "The authorization was canceled by
+/// the user"，也就是那條路走到底了。
+///
+/// data-protection keychain 沒有登入鑰匙圈的概念、本來是對的解，但實測它要
+/// `keychain-access-groups` entitlement：ad-hoc 與 Developer ID 都回 `-34018`
+/// （errSecMissingEntitlement），而補上 entitlement 卻沒有 provisioning profile 會讓
+/// 行程被 SIGKILL。那條路對 Developer ID 的 CLI 發布關著。
+///
+/// 所以只剩「在呼叫之前判斷」。這兩條測試釘住那個判斷本身。
+@Test("沒有 login keychain 的目錄判定為不可用")
+func aDirectoryWithoutALoginKeychainIsReportedUnusable() throws {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-kc-\(UUID().uuidString)/Library/Keychains")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
+
+    #expect(!AnchorKeyStore.hasUsableLoginKeychain(inKeychainDirectory: dir.path))
+    // 目錄根本不存在時同樣是不可用——而不是因為 `contentsOfDirectory` 拋錯就當成可用。
+    #expect(!AnchorKeyStore.hasUsableLoginKeychain(inKeychainDirectory: dir.path + "/nope"))
+}
+
+/// 對照組：有 login keychain 檔就判定為可用。
+///
+/// 沒有這條，上面那條可以被「永遠回 false」滿足——而那會讓每個人都撞到
+/// `noLoginKeychain`，包含鑰匙圈好好的人。
+@Test("有 login keychain 檔的目錄判定為可用")
+func aDirectoryHoldingALoginKeychainIsReportedUsable() throws {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-kc-\(UUID().uuidString)/Library/Keychains")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
+    // macOS 兩種命名都算（`login.keychain` 與 `login.keychain-db`）。
+    FileManager.default.createFile(
+        atPath: dir.appendingPathComponent("login.keychain-db").path, contents: Data())
+
+    #expect(AnchorKeyStore.hasUsableLoginKeychain(inKeychainDirectory: dir.path))
+}

@@ -60,6 +60,14 @@ ltm build
 不同專案的對話可能含不該出現在這裡的內容。工作目錄對應不到任何 project 時，工具
 **拒絕**而不是擴大成全語料。
 
+## 沒有登入鑰匙圈的環境
+
+anchor 密鑰存在 macOS Keychain。SSH 進來、launchd、CI 這類沒有登入鑰匙圈的環境，
+`ltm` 會拒絕並指出補救——在有鑰匙圈的 session 跑 `ltm memory --export-key`，把值
+放進 `LTM_ANCHOR_KEY`。
+
+那**不是**關掉加密鑰，是換一個密鑰來源；給壞值一樣會拒絕。詳見 `ltm-setup` skill。
+
 ## 隱私
 
 語意向量用 Apple on-device `NLContextualEmbedding`，字面檢索用本機 SQLite FTS5。
