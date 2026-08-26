@@ -45,11 +45,14 @@ curl -fsL https://github.com/PsychQuant/claude-LTM/releases/download/v0.1.0/ltm.
 shasum -a 256 ~/bin/ltm
 ```
 
-**上架之後**改成一行，`ltm` 由 plugin 的 wrapper 在第一次啟動 MCP server 時自動從
+**或用 plugin**（這個 repo 自成 marketplace——binary 原始碼、plugin shell、
+marketplace catalog 都在這裡）。`ltm` 由 wrapper 在第一次啟動 MCP server 時自動從
 GitHub Release 下載到 `~/bin/`：
 
 ```bash
-claude plugin install claude-ltm@<marketplace>
+claude plugin marketplace add PsychQuant/claude-LTM
+claude plugin install claude-ltm@claude-ltm
+ltm build                              # 仍然要建一次索引
 ```
 
 Claude Desktop 走 release 頁的 `claude-ltm-0.1.0.mcpb`，雙擊安裝；裝完仍要跑一次

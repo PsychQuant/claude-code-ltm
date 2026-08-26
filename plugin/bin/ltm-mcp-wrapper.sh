@@ -16,6 +16,11 @@
 set -uo pipefail
 
 GITHUB_REPO="PsychQuant/claude-LTM"
+# **生態工具靠 `^BINARY_NAME=` 這一行認得這個 wrapper 要哪個 binary。**
+# `harness-devtools:plugin-deploy` 的 Step 2.5（「binary 有沒有在 release 裡」的
+# BLOCK）抽不到它就 `continue`——**靜默跳過整道關卡**。這一行本身在下面的邏輯裡
+# 用不到（`ensure_binary` 收參數），存在的理由就是讓那道 gate 打得到。
+BINARY_NAME="ltm"
 INSTALL_DIR="$HOME/bin"
 DESIRED_VERSION="0.1.0"   # 與 Sources/LTMCore/Version.swift 同步（ReleaseVersionSyncTests 釘住）
 DOWNLOAD_TIMEOUT=300      # universal binary 較大，給足時間
