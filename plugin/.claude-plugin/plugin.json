@@ -1,0 +1,12 @@
+{
+  "name": "claude-ltm",
+  "version": "0.1.0",
+  "description": "Retrieve past Claude Code conversations from this machine's own transcript corpus, with pointers back to the original turns.",
+  "author": { "name": "che cheng" },
+  "mcpServers": {
+    "claude-ltm": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/ltm-mcp",
+      "args": []
+    }
+  }
+}
