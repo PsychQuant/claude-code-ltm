@@ -1,0 +1,82 @@
+---
+name: ltm-setup
+description: Use when claude-LTM is not yet usable — the user just installed the plugin, a `ltm_query` call came back with `索引不存在` / `indexMissing`, the user asks "how do I set this up", "為什麼查不到", "ltm 要怎麼開始用", "要先做什麼嗎", or wants to rebuild the index after an upgrade. Checks binary and index state, explains the one-time cost, and runs `ltm build` with the user's consent.
+---
+
+# 讓 claude-LTM 可用
+
+**分清楚兩件事**，因為它們的成本差三個數量級：
+
+| | 誰做 | 成本 |
+|---|---|---|
+| 下載 `ltm` binary | **自動**（wrapper 在 MCP server 第一次啟動時做）| 幾秒，3 MB |
+| 建索引 `ltm build` | **要人同意才跑** | **首次數十分鐘**，之後自動增量 |
+
+所以「plugin 裝好了卻查不到東西」幾乎一定是第二件事沒做。
+
+## 先診斷，不要直接跑 build
+
+```bash
+command -v ltm || ls ~/bin/ltm          # ① binary 在嗎
+ltm query "test" 2>&1 | head -5         # ② 索引在嗎（錯誤訊息會直說）
+```
+
+| 症狀 | 意思 | 做什麼 |
+|---|---|---|
+| `ltm` 找不到 | wrapper 還沒跑過，或下載失敗 | 見下方〈binary 沒下載成功〉 |
+| `索引不存在（…）` | 只差建索引 | 往下走 |
+| `embedding revision 不同代` / `結構版本不符` / `定址規則不同` | 索引是舊的 | `ltm build --full`，成本同首次 |
+| 有結果 | 已經可用 | 不用做任何事 |
+
+## 建索引之前先告訴使用者代價
+
+**不要在沒說清楚的情況下啟動它。** 依語料規模，首次全量建索引是**數十分鐘**等級
+的工作——它要掃過 `~/.claude/projects` 底下每一個 `.jsonl`、切 chunk、逐段算
+on-device embedding。量測基線（280,000 chunk、112.9 段/秒）見 repo 的
+`docs/measurements/2026-08-08-baseline.md`。
+
+先讓使用者知道這三件事，再問要不要現在跑：
+
+1. **要跑多久**取決於他的語料大小——先報數字，別讓他自己猜：
+   ```bash
+   find ~/.claude/projects -name '*.jsonl' | wc -l
+   du -sh ~/.claude/projects
+   ```
+2. **全程在本機**，不連外。
+3. **只有第一次要等**：之後每次查詢會自動併入新內容（`refreshIncrementally`），
+   不必再手動跑。
+
+## 跑
+
+```bash
+ltm build
+```
+
+跑得久，**放背景並回報進度**，不要讓它把整個 session 卡住。完成後驗證：
+
+```bash
+ltm query "任意你記得談過的關鍵字" | head -5
+```
+
+有命中就結束。**沒有命中不代表失敗**——可能只是那個詞不在語料裡，換一個更確定
+談過的詞再試一次，再判斷。
+
+## binary 沒下載成功
+
+wrapper 會把它裝到 `~/bin/ltm`。手動補：
+
+```bash
+curl -fL https://github.com/PsychQuant/claude-LTM/releases/latest/download/ltm -o ~/bin/ltm
+chmod +x ~/bin/ltm
+```
+
+它是 Developer ID 簽章 + notarized 的，Gatekeeper 會直接放行。若 `~/bin` 不在 PATH，
+用完整路徑 `~/bin/ltm` 即可，不必為此改 shell 設定。
+
+## 不要做的事
+
+- **不要自作主張跑 `ltm build --full`**：那會丟掉現有索引重來。只有在錯誤訊息
+  明講需要重建時才用。
+- **不要碰 `~/.claude/projects`**：那是唯讀語料，是 source of truth。
+- **不要為了「讓它快一點」去縮語料範圍**：索引是純衍生物，刪掉重建永遠安全，
+  但砍語料不可逆。

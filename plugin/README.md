@@ -13,15 +13,20 @@ claude plugin marketplace add PsychQuant/claude-LTM
 claude plugin install claude-ltm@claude-ltm
 ```
 
-裝完**必須建一次索引**——沒有索引時 MCP server 會啟動、會回應、但查不到任何東西，
-而那看起來像「這個工具沒用」而不是「還沒建索引」：
+**binary 是自動的**：`ltm` 由 wrapper 在第一次啟動 MCP server 時從 GitHub Release
+下載到 `~/bin/`（Developer ID 簽章 + notarized）。你不用做任何事。
+
+**索引不是。** 建索引要掃過整份語料並逐段算 on-device embedding，是**數十分鐘**
+等級的工作，所以它不會偷偷在背景啟動：
 
 ```bash
 ltm build
 ```
 
-`ltm` 由 wrapper 在第一次啟動 MCP server 時自動從 GitHub Release 下載到 `~/bin/`
-（Developer ID 簽章 + notarized）。若它不在 PATH，加 `~/bin` 或直接用 `~/bin/ltm`。
+或者直接叫我「設定一下 ltm」——`ltm-setup` skill 會先報你的語料規模與預估成本，
+再問你要不要跑。
+
+**只有第一次要等**：之後每次查詢會自動併入新內容，不必再手動跑。
 
 ## 內容
 
@@ -29,6 +34,7 @@ ltm build
 |---|---|
 | `ltm_query`（MCP tool）| 查過去的對話，回傳帶指標的命中 |
 | `ltm-recall`（skill）| 告訴模型**什麼時候**該查，以及怎麼讀回傳值 |
+| `ltm-setup`（skill）| 還不能用時走這條：診斷 binary／索引狀態，說明成本，經同意後建索引 |
 
 `ltm-recall` 在使用者提到過去而模型不在場時觸發——「我們之前討論過 X」「為什麼當初
 選了 A」「上次那個 bug 怎麼修的」。它同時寫明**不要**用在哪：可以從當前 repo 的

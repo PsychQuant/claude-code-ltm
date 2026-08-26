@@ -470,102 +470,44 @@ enum QueryCommand {
     }
 
     /// 失敗一律指名補救命令。
+    /// 只做**結束碼**對應。訊息由 `ServiceError` 自己給（#44）。
+    ///
+    /// 先前這裡同時擁有文字與結束碼，而 MCP 路徑構不到這個函式——它走
+    /// `"✗ \(error)"`，拿到的是 enum 的預設描述（`indexMissing(path: "…")`）。
+    /// 於是同一個錯誤在 CLI 說得出補救、在 MCP 只倒出 case 名，而
+    /// `ServiceError.indexMissing` 的 doc 逐字寫著「訊息一律指名 `ltm build`」。
+    ///
+    /// **同一條規則兩個寫者，其中一個沒照做。** 修法是刪掉一份，不是把文字抄過去。
     static func report(_ error: LTMService.ServiceError) -> Int32 {
+        Output.error("✗ \(error)")
         switch error {
         case .markRequiresEventStore, .markRequiresRecordStore:
-            Output.error(
-                """
-                ✗ 這條路徑沒有事件／呈現紀錄存放。
-                `ltm mark` 要記的是互動，而互動要記在某個地方——請確認 memory root 可用。
-                """)
             return LTMCommandLine.ExitCode.indexStateError.rawValue
         case .markRequiresDeliberateKind:
-            Output.error(
-                """
-                ✗ `shown` 是曝光不是 deliberate 訊號，它由呈現當下自動寫入。
-                可記的是：--opened / --cited / --pinned / --dismissed。
-                """)
             return LTMCommandLine.ExitCode.usageError.rawValue
-        case .presentationNotFound(let id):
-            Output.error(
-                """
-                ✗ 找不到呈現紀錄：\(id)
-                只有 `--compare` 的查詢會寫呈現紀錄，而 id 印在它的 footer 上。
-                （`--record` 只寫 shown 事件、不寫紀錄——名次要翻回 anchor 需要那份紀錄。）
-                """)
+        case .presentationNotFound:
             return LTMCommandLine.ExitCode.usageError.rawValue
-        case .rankOutOfRange(let rank, let presented):
-            Output.error("✗ 名次 \(rank) 超出範圍——那次呈現有 \(presented) 筆（名次由 1 起算）。")
+        case .rankOutOfRange:
             return LTMCommandLine.ExitCode.usageError.rawValue
-        case .indexMissing(let path):
-            Output.error("✗ 索引不存在（\(path)）。先跑 `ltm build`。")
+        case .indexMissing:
             return LTMCommandLine.ExitCode.indexStateError.rawValue
-        case .embeddingRevisionMismatch(let indexed, let runtime):
-            Output.error(
-                """
-                ✗ 索引的 embedding revision 與目前的執行環境不同代
-                  索引：\(indexed)
-                  目前：\(runtime)
-                跨 revision 的向量距離沒有意義，所以不回答。請跑 `ltm build --full` 重建。
-                """)
+        case .embeddingRevisionMismatch:
             return LTMCommandLine.ExitCode.indexStateError.rawValue
-        case .layoutVersionMismatch(let indexed, let expected):
-            Output.error(
-                "✗ 索引結構版本不符（索引 \(indexed.map(String.init) ?? "未知")、需要 \(expected)）。請跑 `ltm build --full`。")
+        case .layoutVersionMismatch:
             return LTMCommandLine.ExitCode.indexStateError.rawValue
-        case .anchorSourceRuleMismatch(let indexed, let expected):
-            Output.error(
-                """
-                ✗ 索引的 anchor 定址規則與這個版本不同
-                  索引：\(indexed)
-                  需要：\(expected)
-                舊規則算出的指紋不能拿來跟新規則比對——結果會是「解析到錯的 turn」或
-                「報成 orphan」，而兩者都看不出異常。請跑 `ltm build --full` 重建。
-                """)
+        case .anchorSourceRuleMismatch:
             return LTMCommandLine.ExitCode.indexStateError.rawValue
         case .comparisonRequiresStores:
-            Output.error(
-                """
-                ✗ 比較模式需要事件與呈現紀錄的存放，但取不到
-                不能記錄的比較不會執行——一份記不下來的交錯結果與一份記下來的
-                在畫面上完全一樣，照做只會讓這次呈現的證據值安靜歸零。
-                請確認 LTM_MEMORY_ROOT 指到可寫、且不在語料內的位置。
-                """)
             return LTMCommandLine.ExitCode.indexStateError.rawValue
-        case .incompatibleComparisonPair(let a, let b):
-            Output.error(
-                """
-                ✗ \(a) 與 \(b) 無法交錯比較：兩者對擴散激發的要求不同
-                交錯器收單一 projection，而擴散的授權是逐策略的——共用一份必然
-                讓其中一邊看到 spec 沒授權它看的統計。這裡拒絕而不是挑一邊。
-                """)
+        case .incompatibleComparisonPair:
             return LTMCommandLine.ExitCode.usageError.rawValue
-        case .unknownStrategy(let name):
-            Output.error(
-                "未知策略：\(name)（可用：\(StrategyRegistry.known.joined(separator: "、"))）")
+        case .unknownStrategy:
             return LTMCommandLine.ExitCode.usageError.rawValue
-        case .rootInsideCorpus(let path):
-            Output.error(
-                """
-                ✗ 這個路徑落在唯讀語料裡：\(path)
-                語料是 source of truth，任何寫入都是 bug。請把 LTM_DERIVED_ROOT /
-                LTM_MEMORY_ROOT 指到語料之外的位置。
-                """)
+        case .rootInsideCorpus:
             return LTMCommandLine.ExitCode.corpusError.rawValue
-        case .vectorSidecarMismatch(let declared, let found):
-            Output.error(
-                """
-                ✗ 向量側車檔與索引不一致（索引宣稱 \(declared) 筆、檔案有 \(found) 筆）
-                少一路向量通道的結果看起來完全正常，所以這裡拒答而不是降級。
-                請跑 `ltm build --full` 重建。
-                """)
+        case .vectorSidecarMismatch:
             return LTMCommandLine.ExitCode.indexStateError.rawValue
-        case .ambiguousScope(let detail):
-            Output.error(
-                """
-                ✗ 無法決定查詢範圍：\(detail)
-                請用 `--project <名稱>` 指定，或用 `--all-projects` 明示要跨全部 project。
-                """)
+        case .ambiguousScope:
             return LTMCommandLine.ExitCode.scopeError.rawValue
         }
     }

@@ -52,8 +52,11 @@ GitHub Release 下載到 `~/bin/`：
 ```bash
 claude plugin marketplace add PsychQuant/claude-LTM
 claude plugin install claude-ltm@claude-ltm
-ltm build                              # 仍然要建一次索引
 ```
+
+**binary 自動下載，索引不自動建。** 後者是數十分鐘的本機運算，所以它由
+`ltm-setup` skill 在說明成本、取得同意之後才跑——直接跟模型說「設定一下 ltm」
+即可，或自己跑 `ltm build`。
 
 Claude Desktop 走 release 頁的 `claude-ltm-0.1.0.mcpb`，雙擊安裝；裝完仍要跑一次
 `ltm build`。

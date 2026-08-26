@@ -224,7 +224,16 @@ public struct LTMService {
     /// 的知識——索引層與記憶層都只宣告需要它。
     private let anchorKey: AnchorKey
 
-    public enum ServiceError: Error, Sendable, Equatable {
+    /// 服務層的錯誤。**訊息住在這裡，不住在呼叫端**（#44）。
+    ///
+    /// 先前每一則訊息只存在於 CLI 的 `QueryCommand.report`，而 MCP 路徑構不到它
+    /// ——後者走 `"✗ \(error)"`，於是拿到 enum 的預設描述（`indexMissing(path: "…")`）。
+    /// 同一個錯誤在 CLI 說得出補救、在 MCP 只倒出 case 名，**而 `indexMissing` 的
+    /// doc 逐字寫著「訊息一律指名 `ltm build`」**。
+    ///
+    /// 「失敗訊息要說出補救命令」是 `ltm-cli` capability 的 requirement，不是禮貌
+    /// ——而一個只在其中一條路徑上成立的 requirement 沒有被滿足。
+    public enum ServiceError: Error, Sendable, Equatable, CustomStringConvertible {
         /// `mark` 需要事件存放，而這個 service 沒有。
         case markRequiresEventStore
         /// `mark` 需要呈現紀錄存放，而這個 service 沒有。
@@ -254,6 +263,85 @@ public struct LTMService {
         case vectorSidecarMismatch(declared: Int, found: Int)
         /// 某個要寫入的根落在語料裡。
         case rootInsideCorpus(path: String)
+
+        public var description: String {
+            switch self {
+            case .markRequiresEventStore, .markRequiresRecordStore:
+                return """
+                    這條路徑沒有事件／呈現紀錄存放。
+                    `ltm mark` 要記的是互動，而互動要記在某個地方——請確認 memory root 可用。
+                    """
+            case .markRequiresDeliberateKind:
+                return """
+                    `shown` 是曝光不是 deliberate 訊號，它由呈現當下自動寫入。
+                    可記的是：--opened / --cited / --pinned / --dismissed。
+                    """
+            case .presentationNotFound(let id):
+                return """
+                    找不到呈現紀錄：\(id)
+                    只有 `--compare` 的查詢會寫呈現紀錄，而 id 印在它的 footer 上。
+                    （`--record` 只寫 shown 事件、不寫紀錄——名次要翻回 anchor 需要那份紀錄。）
+                    """
+            case .rankOutOfRange(let rank, let presented):
+                return "名次 \(rank) 超出範圍——那次呈現有 \(presented) 筆（名次由 1 起算）。"
+            case .indexMissing(let path):
+                return """
+                    索引不存在（\(path)）。先跑 `ltm build`。
+                    首次建索引要掃過整份語料並算 embedding，會跑一段時間；之後每次查詢
+                    會自動併入新內容，不必再手動跑。
+                    """
+            case .embeddingRevisionMismatch(let indexed, let runtime):
+                return """
+                    索引的 embedding revision 與目前的執行環境不同代
+                      索引：\(indexed)
+                      目前：\(runtime)
+                    跨 revision 的向量距離沒有意義，所以不回答。請跑 `ltm build --full` 重建。
+                    """
+            case .layoutVersionMismatch(let indexed, let expected):
+                return "索引結構版本不符（索引 \(indexed.map(String.init) ?? "未知")、需要 \(expected)）。請跑 `ltm build --full`。"
+            case .anchorSourceRuleMismatch(let indexed, let expected):
+                return """
+                    索引的 anchor 定址規則與這個版本不同
+                      索引：\(indexed)
+                      需要：\(expected)
+                    舊規則算出的指紋不能拿來跟新規則比對——結果會是「解析到錯的 turn」或
+                    「報成 orphan」，而兩者都看不出異常。請跑 `ltm build --full` 重建。
+                    """
+            case .comparisonRequiresStores:
+                return """
+                    比較模式需要事件與呈現紀錄的存放，但取不到
+                    不能記錄的比較不會執行——一份記不下來的交錯結果與一份記下來的
+                    在畫面上完全一樣，照做只會讓這次呈現的證據值安靜歸零。
+                    請確認 LTM_MEMORY_ROOT 指到可寫、且不在語料內的位置。
+                    """
+            case .incompatibleComparisonPair(let a, let b):
+                return """
+                    \(a) 與 \(b) 無法交錯比較：兩者對擴散激發的要求不同
+                    交錯器收單一 projection，而擴散的授權是逐策略的——共用一份必然
+                    讓其中一邊看到 spec 沒授權它看的統計。這裡拒絕而不是挑一邊。
+                    """
+            case .unknownStrategy(let name):
+                return "未知策略：\(name)（可用：\(StrategyRegistry.known.joined(separator: "、"))）"
+            case .rootInsideCorpus(let path):
+                return """
+                    這個路徑落在唯讀語料裡：\(path)
+                    語料是 source of truth，任何寫入都是 bug。請把 LTM_DERIVED_ROOT /
+                    LTM_MEMORY_ROOT 指到語料之外的位置。
+                    """
+            case .vectorSidecarMismatch(let declared, let found):
+                return """
+                    向量側車檔與索引不一致（索引宣稱 \(declared) 筆、檔案有 \(found) 筆）
+                    少一路向量通道的結果看起來完全正常，所以這裡拒答而不是降級。
+                    請跑 `ltm build --full` 重建。
+                    """
+            case .ambiguousScope(let detail):
+                return """
+                    無法決定查詢範圍：\(detail)
+                    CLI 請用 `--project <名稱>` 指定，或 `--all-projects` 明示跨全部 project；
+                    MCP 請帶 `all_projects: true`。
+                    """
+            }
+        }
         /// 指名了一個不存在的策略識別碼。
         ///
         /// **不退回預設值**：靜默改用 archival 會讓一個打錯的名字看起來像成功
