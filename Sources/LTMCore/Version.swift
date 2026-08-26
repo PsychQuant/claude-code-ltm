@@ -22,5 +22,5 @@ import Foundation
 /// 改版本時只改這裡，然後跑 `swift test`；哪一處沒跟上，測試會指名它。
 public enum LTMVersion {
     /// Semantic version，不帶 `v` 前綴。git tag 是 `v` + 這個值。
-    public static let current = "0.2.1"
+    public static let current = "0.3.0"
 }

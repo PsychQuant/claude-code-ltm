@@ -15,16 +15,30 @@
 
 set -uo pipefail
 
-GITHUB_REPO="PsychQuant/claude-LTM"
+GITHUB_REPO="PsychQuant/claude-code-ltm"
 # **生態工具靠 `^BINARY_NAME=` 這一行認得這個 wrapper 要哪個 binary。**
 # `harness-devtools:plugin-deploy` 的 Step 2.5（「binary 有沒有在 release 裡」的
 # BLOCK）抽不到它就 `continue`——**靜默跳過整道關卡**。這一行本身在下面的邏輯裡
 # 用不到（`ensure_binary` 收參數），存在的理由就是讓那道 gate 打得到。
 BINARY_NAME="ltm"
 INSTALL_DIR="$HOME/bin"
-DESIRED_VERSION="0.2.1"   # 與 Sources/LTMCore/Version.swift 同步（ReleaseVersionSyncTests 釘住）
+DESIRED_VERSION="0.3.0"   # 與 Sources/LTMCore/Version.swift 同步（ReleaseVersionSyncTests 釘住）
 DOWNLOAD_TIMEOUT=300      # universal binary 較大，給足時間
-SOURCE_ROOT="$HOME/Developer/claude-LTM"
+
+# **一律用 GitHub Release 的 binary，不撿本機的原始碼建置。**
+#
+# 先前的搜尋順序含 `~/Developer/<repo>/.build/{release,debug}/` 與
+# `/usr/local/bin`、`~/.local/bin`。那讓「我跑的是哪一版」失去單一答案：
+# plugin 說 0.3.0、`~/bin/.ltm.version` 說 0.3.0，而實際 exec 的可能是某個
+# 半小時前的 debug build。**版本檢查只套用在 `$INSTALL_DIR` 那一份**，撿到別處
+# 的就整個跳過檢查——所以那不只是「偏好」，是一個會讓版本宣稱失效的洞。
+#
+# 順帶消掉的：repo 於 2026-08-26 由 claude-LTM 改名 claude-code-ltm，而寫死的
+# 目錄名在改名後會**安靜地**失效（症狀是「它每次都重新下載」，看起來像效能問題
+# 而不是路徑錯了）。列舉兩個目錄名可以擋這一次，擋不住下一次。
+#
+# 開發者要跑自己的 build：直接執行 `.build/release/ltm mcp`，或 `make install`
+# 覆蓋 `~/bin/ltm`（下次版本不符時會被換掉，那是對的——它本來就不是那一版）。
 
 mkdir -p "$INSTALL_DIR"
 
@@ -35,23 +49,12 @@ ensure_binary() {
     local installed_version=""
     [[ -f "$version_file" ]] && installed_version=$(tr -d '[:space:]' < "$version_file" 2>/dev/null || true)
 
+    # 只看 `$INSTALL_DIR` 那一份，而且版本必須相符——**兩個條件缺一都重抓**。
     local found=""
-    for loc in \
-        "$installed" \
-        "/usr/local/bin/$name" \
-        "$HOME/.local/bin/$name" \
-        "$SOURCE_ROOT/.build/release/$name" \
-        "$SOURCE_ROOT/.build/debug/$name"
-    do
-        [[ -x "$loc" ]] && { found="$loc"; break; }
-    done
+    [[ -x "$installed" && "$installed_version" == "$DESIRED_VERSION" ]] && found="$installed"
 
     local need_download=false
-    if [[ -z "$found" ]]; then
-        need_download=true
-    elif [[ "$found" == "$installed" && "$installed_version" != "$DESIRED_VERSION" ]]; then
-        need_download=true
-    fi
+    [[ -z "$found" ]] && need_download=true
 
     if $need_download; then
         # **asset 名就是 binary 名**，因為 `harness-devtools:mcp-deploy` 是這樣上傳的
@@ -61,10 +64,10 @@ ensure_binary() {
         local asset="${name}"
         local base="https://github.com/${GITHUB_REPO}/releases/download/v${DESIRED_VERSION}"
         local tmp="${installed}.tmp.$$"
-        echo "claude-ltm: 下載 ${name} v${DESIRED_VERSION}" >&2
+        echo "ltm: 下載 ${name} v${DESIRED_VERSION}" >&2
         if ! curl --fail --location --silent --show-error --max-time "$DOWNLOAD_TIMEOUT" \
                 -o "$tmp" "${base}/${asset}"; then
-            echo "claude-ltm: 下載 ${name} 失敗（${base}/${asset}）" >&2
+            echo "ltm: 下載 ${name} 失敗（${base}/${asset}）" >&2
             rm -f "$tmp"
             return 1
         fi
@@ -79,19 +82,19 @@ ensure_binary() {
             actual=$(shasum -a 256 "$tmp" | awk '{print $1}')
             rm -f "$sum_tmp"
             if [[ "$expected" != "$actual" ]]; then
-                echo "claude-ltm: ${name} 雜湊不符（下載可能不完整），未安裝" >&2
+                echo "ltm: ${name} 雜湊不符（下載可能不完整），未安裝" >&2
                 rm -f "$tmp"
                 return 1
             fi
         else
             rm -f "$sum_tmp"
-            echo "claude-ltm: 取不到 ${asset}.sha256，跳過完整性比對" >&2
+            echo "ltm: 取不到 ${asset}.sha256，跳過完整性比對" >&2
         fi
         chmod +x "$tmp"
         mv "$tmp" "$installed"
         printf '%s' "$DESIRED_VERSION" > "$version_file"
         found="$installed"
-        echo "claude-ltm: 已安裝 ${installed}" >&2
+        echo "ltm: 已安裝 ${installed}" >&2
     fi
 
     printf '%s' "$found"
@@ -101,7 +104,7 @@ ensure_binary() {
 # `Sources/ltm/MCPCommand.swift`——出貨 pipeline 是單 binary 假設。
 # 同一個 binary 也是使用者跑 `ltm build` 建索引用的那個。
 LTM=$(ensure_binary "ltm") || {
-    echo "claude-ltm: ltm 無法就緒，MCP server 不啟動" >&2
+    echo "ltm: ltm 無法就緒，MCP server 不啟動" >&2
     exit 1
 }
 exec "$LTM" mcp "$@"

@@ -27,7 +27,7 @@ claude-LTM 在它之上建可拋棄的索引與可插拔的記憶策略，讓 Cl
 
 ```bash
 # 1. 拿 binary。Developer ID 簽章 + notarized，Gatekeeper 直接放行
-curl -fL https://github.com/PsychQuant/claude-LTM/releases/download/v0.1.0/ltm -o ~/bin/ltm
+curl -fL https://github.com/PsychQuant/claude-code-ltm/releases/download/v0.3.0/ltm -o ~/bin/ltm
 chmod +x ~/bin/ltm
 
 # 2. 建索引。**這一步不能省**——沒有索引時 MCP server 會啟動、會回應、但查不到
@@ -41,7 +41,7 @@ claude mcp add --scope user --transport stdio claude-ltm -- ~/bin/ltm mcp
 要核對下載完整性（擋的是截斷，不是竄改——雜湊與 binary 走同一條 TLS）：
 
 ```bash
-curl -fsL https://github.com/PsychQuant/claude-LTM/releases/download/v0.1.0/ltm.sha256
+curl -fsL https://github.com/PsychQuant/claude-code-ltm/releases/download/v0.3.0/ltm.sha256
 shasum -a 256 ~/bin/ltm
 ```
 
@@ -50,8 +50,8 @@ marketplace catalog 都在這裡）。`ltm` 由 wrapper 在第一次啟動 MCP s
 GitHub Release 下載到 `~/bin/`：
 
 ```bash
-claude plugin marketplace add PsychQuant/claude-LTM
-claude plugin install claude-ltm@claude-ltm
+claude plugin marketplace add PsychQuant/claude-code-ltm
+claude plugin install ltm@claude-code-ltm
 ```
 
 **binary 自動下載，索引不自動建。** 後者是數十分鐘的本機運算，所以它由
@@ -64,7 +64,7 @@ Claude Desktop 走 release 頁的 `claude-ltm-0.1.0.mcpb`，雙擊安裝；裝�
 ### 從原始碼裝（開發、或不想等 release）
 
 ```bash
-git clone https://github.com/PsychQuant/claude-LTM.git
+git clone https://github.com/PsychQuant/claude-code-ltm.git
 cd claude-LTM
 swift build -c release                # 產出 .build/release/ltm
 ./.build/release/ltm build            # 建索引

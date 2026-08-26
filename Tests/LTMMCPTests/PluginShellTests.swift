@@ -33,7 +33,11 @@ func pluginAndWorkspaceDeclareTheSameServerName() throws {
     // 兩處不一致時，使用者會在兩種安裝方式下看到不同的工具前綴，而沒有任何
     // 錯誤訊息說明為什麼。
     #expect(Set(pluginServers.keys) == Set(workspaceServers.keys))
-    #expect(pluginServers.keys.contains("claude-ltm"))
+    // server key 也必須等於 plugin 名。三者同名不是美觀問題——client 的工具前綴是
+    // `mcp__plugin_<plugin>_<server>__<tool>`，不同名會產出讀不出所以然的前綴，
+    // 而那個前綴會出現在每一次工具呼叫裡。
+    let pluginName = try #require(plugin["name"] as? String)
+    #expect(pluginServers.keys.contains(pluginName), "server key 應與 plugin 名一致（\(pluginName)）")
 }
 
 @Test("每個 MCP 宣告最終都落到 Package.swift 真的產出的那個 executable 的真子命令上")
@@ -57,7 +61,7 @@ func declaredEntryPointsResolveToARealSubcommandOfARealExecutable() throws {
     //  · `.mcp.json`（開發用，直接指 binary）→ command 指 `ltm`，args 帶子命令
     //  · `plugin.json`（出貨用，指 wrapper）→ wrapper 存在、可執行、且 exec `ltm mcp`
     let workspace = try #require(
-        (try json(at: ".mcp.json")["mcpServers"] as? [String: Any])?["claude-ltm"]
+        (try json(at: ".mcp.json")["mcpServers"] as? [String: Any])?.values.first
             as? [String: Any])
     let workspaceCommand = try #require(workspace["command"] as? String)
     #expect(workspaceCommand.hasSuffix("/ltm"), ".mcp.json 應直接指向 ltm binary")
@@ -66,8 +70,8 @@ func declaredEntryPointsResolveToARealSubcommandOfARealExecutable() throws {
         ".mcp.json 少了 `mcp` 子命令——沒有它 server 不會啟動，而 client 只會看到它退出")
 
     let plugin = try #require(
-        (try json(at: "plugin/.claude-plugin/plugin.json")["mcpServers"] as? [String: Any])?[
-            "claude-ltm"] as? [String: Any])
+        (try json(at: "plugin/.claude-plugin/plugin.json")["mcpServers"] as? [String: Any])?
+            .values.first as? [String: Any])
     let pluginCommand = try #require(plugin["command"] as? String)
     let wrapperName = try #require(pluginCommand.split(separator: "/").last).description
     let wrapper = root.appendingPathComponent("plugin/bin/\(wrapperName)")

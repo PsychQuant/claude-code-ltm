@@ -1,13 +1,13 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "claude-ltm",
-  "description": "Claude Code 的長期記憶。索引這台機器上既有的 ~/.claude/projects 逐字記錄，讓模型能回頭查自己的過去——檢索負責導航（每筆命中帶 project/sessions/uuid/timestamp 指標），不負責當答案。全本機：on-device 向量 + SQLite FTS5，零對外連線。Self-contained marketplace：這個 repo 同時是 binary 原始碼、plugin shell 與 marketplace catalog。",
+  "name": "claude-code-ltm",
+  "description": "Claude Code 的長期記憶。索引這台機器上既有的 ~/.claude/projects 逐字記錄，讓模型能回頭查自己的過去——檢索負責導航（每筆命中帶 project/sessions/uuid/timestamp 指標），不負責當答案。全本機：on-device 向量 + SQLite FTS5，零對外連線。自成 marketplace：這個 repo 同時是 binary 原始碼、plugin shell 與 marketplace catalog。",
   "owner": {
     "name": "Che Cheng"
   },
   "plugins": [
     {
-      "name": "claude-ltm",
+      "name": "ltm",
       "source": "./plugin",
       "description": "查詢這台機器上過去的 Claude Code 對話。ltm_query（MCP tool）回傳帶指標的命中；ltm-recall（skill）告訴模型什麼時候該查、以及怎麼讀回傳值。預設只搜當前工作目錄對應的 project，跨 project 要明示。Wrapper 從 GitHub Release 自動下載 Developer ID 簽章 + notarized 的 ltm binary。首次使用要跑一次 ltm build 建索引。",
       "category": "productivity"

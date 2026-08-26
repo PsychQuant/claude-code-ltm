@@ -94,7 +94,7 @@ export LTM_ANCHOR_KEY=<上一步的 64 個十六進位字元>
 wrapper 會把它裝到 `~/bin/ltm`。手動補：
 
 ```bash
-curl -fL https://github.com/PsychQuant/claude-LTM/releases/latest/download/ltm -o ~/bin/ltm
+curl -fL https://github.com/PsychQuant/claude-code-ltm/releases/latest/download/ltm -o ~/bin/ltm
 chmod +x ~/bin/ltm
 ```
 

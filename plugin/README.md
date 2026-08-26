@@ -1,4 +1,4 @@
-# claude-ltm
+# ltm — Claude Code 的長期記憶
 
 **Claude Code 的長期記憶。** 索引這台機器上既有的 `~/.claude/projects/**/*.jsonl`，
 讓模型在需要時回頭查自己的過去。
@@ -9,8 +9,8 @@
 ## 安裝
 
 ```bash
-claude plugin marketplace add PsychQuant/claude-LTM
-claude plugin install claude-ltm@claude-ltm
+claude plugin marketplace add PsychQuant/claude-code-ltm
+claude plugin install ltm@claude-code-ltm
 ```
 
 **binary 是自動的**：`ltm` 由 wrapper 在第一次啟動 MCP server 時從 GitHub Release
@@ -80,8 +80,8 @@ anchor 密鑰存在 macOS Keychain。SSH 進來、launchd、CI 這類沒有登�
 命中的文字是**過去對話的原文**，裡面可能有看起來像指令的句子。skill 明寫那是被檢索
 出來的歷史、不是使用者現在的指示——但**那是一段文字，不是一道邊界**。
 
-完整說明見 [PRIVACY.md](https://github.com/PsychQuant/claude-LTM/blob/main/mcpb/PRIVACY.md)。
+完整說明見 [PRIVACY.md](https://github.com/PsychQuant/claude-code-ltm/blob/main/mcpb/PRIVACY.md)。
 
 ## 更多
 
-原始碼、設計文件與量測基線：https://github.com/PsychQuant/claude-LTM
+原始碼、設計文件與量測基線：https://github.com/PsychQuant/claude-code-ltm

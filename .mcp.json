@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "claude-ltm": {
+    "ltm": {
       "command": "${workspaceFolder}/.build/release/ltm",
       "args": [
         "mcp"
