@@ -105,7 +105,8 @@ struct Workspace {
     {
         LTMService(
             location: derived, corpusRoot: corpus, embedder: embedder,
-            eventStore: withEvents ? try FileEventStore(url: eventsURL) : nil)
+            eventStore: withEvents ? try FileEventStore(url: eventsURL) : nil,
+            anchorKey: .forTesting)
     }
 
     /// `RetrievalEngine` 直接交出來的順序（不經策略 seam）。
@@ -685,7 +686,7 @@ func queryPathRefusesFullRebuild() throws {
     do {
         _ = try IndexBuilder(
             location: workspace.derived,
-            scanner: CorpusScanner(corpusRoot: workspace.corpus), embedder: FixedEmbedder()
+            scanner: CorpusScanner(corpusRoot: workspace.corpus, anchorKey: .forTesting), embedder: FixedEmbedder()
         ).build(refusingFullRebuild: true)
     } catch { thrown = error }
     guard case .some(IndexBuilder.BuildError.fullRebuildRequired) = thrown as? IndexBuilder.BuildError
@@ -729,7 +730,7 @@ func facadeRefusesFullRebuildFromTheQueryPath() throws {
 
     let service = LTMService(
         location: workspace.derived, corpusRoot: workspace.corpus,
-        embedder: DriftingRevisionEmbedder(), eventStore: nil)
+        embedder: DriftingRevisionEmbedder(), eventStore: nil, anchorKey: .forTesting)
 
     var thrown: Error?
     do { _ = try service.query(text: "內容", limit: 10, scope: .allProjects) }

@@ -25,8 +25,8 @@ let fixtureText = "標記某個節點然後做對照，這是範例的基準文�
     let b = Turn(id: "t1", role: "assistant", timestamp: Date(timeIntervalSince1970: 999_999), text: fixtureText)
 
     let span = 0..<10
-    #expect(Anchor(source: "fixture-a", turn: a, span: span).contentHash
-        == Anchor(source: "fixture-a", turn: b, span: span).contentHash)
+    #expect(Anchor(source: "fixture-a", turn: a, span: span, key: .forTesting).contentHash
+        == Anchor(source: "fixture-a", turn: b, span: span, key: .forTesting).contentHash)
 }
 
 @Test func contentHashChangesOnSingleCharacterEdit() {
@@ -36,26 +36,26 @@ let fixtureText = "標記某個節點然後做對照，這是範例的基準文�
         text: fixtureText.replacingOccurrences(of: "節點", with: "節奏"))
 
     let span = 0..<10
-    #expect(Anchor(source: "s", turn: base, span: span).contentHash
-        != Anchor(source: "s", turn: edited, span: span).contentHash)
+    #expect(Anchor(source: "s", turn: base, span: span, key: .forTesting).contentHash
+        != Anchor(source: "s", turn: edited, span: span, key: .forTesting).contentHash)
 }
 
 @Test func dereferenceReturnsAddressedText() {
     let turn = Turn(id: "t1", role: "user", timestamp: Date(), text: fixtureText)
-    let anchor = Anchor(source: "fixture-a", turn: turn, span: 3..<12)
+    let anchor = Anchor(source: "fixture-a", turn: turn, span: 3..<12, key: .forTesting)
 
-    #expect(anchor.dereference(in: FixtureCorpus.single(turn))
+    #expect(anchor.dereference(in: FixtureCorpus.single(turn), key: .forTesting)
         == .resolved(Anchor.normalize(Turn.slice(fixtureText, 3..<12))))
 }
 
 @Test func alteredSourceDereferencesAsOrphaned() {
     let turn = Turn(id: "t1", role: "user", timestamp: Date(), text: fixtureText)
-    let anchor = Anchor(source: "fixture-a", turn: turn, span: 0..<10)
+    let anchor = Anchor(source: "fixture-a", turn: turn, span: 0..<10, key: .forTesting)
 
     let altered = Turn(
         id: "t1", role: "user", timestamp: Date(),
         text: "完全不同的一段文字，長度足夠讓 span 仍然合法而不會越界。")
-    let result = anchor.dereference(in: FixtureCorpus.single(altered))
+    let result = anchor.dereference(in: FixtureCorpus.single(altered), key: .forTesting)
 
     // 必須指名是雜湊不符，而且不得回傳該位置上找到的文字。
     guard case .orphaned(let reason) = result else {
@@ -73,17 +73,17 @@ let fixtureText = "標記某個節點然後做對照，這是範例的基準文�
 
 @Test func missingTurnIsOrphaned() {
     let turn = Turn(id: "t1", role: "user", timestamp: Date(), text: fixtureText)
-    let anchor = Anchor(source: "fixture-a", turn: turn, span: 0..<10)
+    let anchor = Anchor(source: "fixture-a", turn: turn, span: 0..<10, key: .forTesting)
 
-    #expect(anchor.dereference(in: FixtureCorpus()) == .orphaned(.turnMissing))
+    #expect(anchor.dereference(in: FixtureCorpus(), key: .forTesting) == .orphaned(.turnMissing))
 }
 
 @Test func outOfBoundsSpanIsOrphanedNotACrash() {
     let turn = Turn(id: "t1", role: "user", timestamp: Date(), text: fixtureText)
-    let anchor = Anchor(source: "fixture-a", turn: turn, span: 0..<10)
+    let anchor = Anchor(source: "fixture-a", turn: turn, span: 0..<10, key: .forTesting)
 
     let shortened = Turn(id: "t1", role: "user", timestamp: Date(), text: "短")
-    #expect(anchor.dereference(in: FixtureCorpus.single(shortened)) == .orphaned(.spanOutOfBounds))
+    #expect(anchor.dereference(in: FixtureCorpus.single(shortened), key: .forTesting) == .orphaned(.spanOutOfBounds))
 }
 
 
@@ -95,14 +95,14 @@ let fixtureText = "標記某個節點然後做對照，這是範例的基準文�
     // 「Altered source text dereferences as orphaned」。
     let original = Turn(
         id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "abcXYZdef")
-    let anchor = Anchor(source: "fixture-a", turn: original, span: 3..<6)
+    let anchor = Anchor(source: "fixture-a", turn: original, span: 3..<6, key: .forTesting)
 
     let edited = Turn(
         id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "abc   def")
     let corpus = FixtureCorpus(turns: ["fixture-a": ["t1": edited]])
 
-    #expect(anchor.dereference(in: corpus) == .orphaned(.contentNormalizesToNothing))
+    #expect(anchor.dereference(in: corpus, key: .forTesting) == .orphaned(.contentNormalizesToNothing))
     // 對照：未編輯時照常 resolve，否則上面可能只是「永遠 orphan」。
     let intact = FixtureCorpus(turns: ["fixture-a": ["t1": original]])
-    #expect(anchor.dereference(in: intact).resolvedText == "XYZ")
+    #expect(anchor.dereference(in: intact, key: .forTesting).resolvedText == "XYZ")
 }

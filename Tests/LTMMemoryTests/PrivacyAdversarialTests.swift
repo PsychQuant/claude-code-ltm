@@ -209,7 +209,7 @@ private func mutating(_ value: Any, at path: [JSONStep], _ mutate: (Any) -> Any)
     let anchor = Anchor(
         source: "fixture-a",
         turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
-        span: 0..<4)
+        span: 0..<4, key: .forTesting)
     let event = Event.pin(
         anchor: anchor, at: Date(timeIntervalSince1970: 12_345),
         generation: GenerationID("build-1"), policy: RankingPolicyID("human-like"),
@@ -238,7 +238,7 @@ private func mutating(_ value: Any, at path: [JSONStep], _ mutate: (Any) -> Any)
     let anchor = Anchor(
         source: "fixture-a",
         turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字內容"),
-        span: 0..<4)
+        span: 0..<4, key: .forTesting)
     let original = Event.pin(
         anchor: anchor, at: Date(timeIntervalSince1970: 12_345),
         generation: GenerationID("build-1"), policy: RankingPolicyID("human-like"),
@@ -283,7 +283,7 @@ private func mutating(_ value: Any, at path: [JSONStep], _ mutate: (Any) -> Any)
     let anchor = Anchor(
         source: "fixture-a",
         turn: Turn(id: "t1", role: "user", timestamp: Date(), text: 原文),
-        span: 0..<8)
+        span: 0..<8, key: .forTesting)
     try store.append(
         .interaction(
             .cited, anchor: anchor, at: Date(),
@@ -308,7 +308,7 @@ private func canonicalLine() throws -> Data {
         // 的東西，而依賴它的每一條測試都改成在證明別的事。
         source: ProjectFingerprint.of("fixture-a"),
         turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
-        span: 0..<4)
+        span: 0..<4, key: .forTesting)
     let event = Event.interaction(
         .shown, anchor: anchor, at: Date(timeIntervalSince1970: 12_345),
         generation: GenerationID("build-1"), policy: RankingPolicyID("archival"))
@@ -575,7 +575,7 @@ private func replacingHexValue(in line: String, with replacement: String) -> Str
         let turn = Turn(
             id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1),
             text: "abc   def")
-        _ = Anchor(source: "s", turn: turn, span: 3..<6)  // 只涵蓋三個空白
+        _ = Anchor(source: "s", turn: turn, span: 3..<6, key: .forTesting)  // 只涵蓋三個空白
     }
 }
 
@@ -596,7 +596,7 @@ private func replacingHexValue(in line: String, with replacement: String) -> Str
         performing: {
             let turn = Turn(
                 id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "abc")
-            _ = Anchor(source: "s", turn: turn, span: 0..<99)  // 越界
+            _ = Anchor(source: "s", turn: turn, span: 0..<99, key: .forTesting)  // 越界
         })
     let stderr = String(decoding: result?.standardErrorContent ?? [], as: UTF8.self)
     #expect(stderr.contains("越界"), "訊息必須指名越界，而不是報成空摘要")

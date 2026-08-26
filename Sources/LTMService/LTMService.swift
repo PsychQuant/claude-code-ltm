@@ -198,6 +198,9 @@ public struct LTMService {
     public let corpusRoot: URL
     private let embedder: any EmbeddingProvider
     private let eventStore: (any EventStore)?
+    /// Anchor 內容摘要的密鑰（#12）。facade 持有它，因為「密鑰在哪」是 facade
+    /// 的知識——索引層與記憶層都只宣告需要它。
+    private let anchorKey: AnchorKey
 
     public enum ServiceError: Error, Sendable, Equatable {
         /// 索引不存在。訊息一律指名 `ltm build`。
@@ -256,12 +259,14 @@ public struct LTMService {
         corpusRoot: URL = CorpusLocation.readOnlyRoot,
         embedder: any EmbeddingProvider,
         eventStore: (any EventStore)? = nil,
+        anchorKey: AnchorKey,
         recordStore: (any PresentationRecordStore)? = nil
     ) {
         self.location = location
         self.corpusRoot = corpusRoot
         self.embedder = embedder
         self.eventStore = eventStore
+        self.anchorKey = anchorKey
         self.recordStore = recordStore
     }
 
@@ -275,6 +280,7 @@ public struct LTMService {
         derivedRoot: URL,
         embedder: any EmbeddingProvider,
         eventStore: (any EventStore)? = nil,
+        anchorKey: AnchorKey,
         recordStore: (any PresentationRecordStore)? = nil,
         memoryRoot: URL? = nil
     ) throws -> LTMService {
@@ -287,7 +293,7 @@ public struct LTMService {
         return LTMService(
             location: try DerivedLocation(root: derivedRoot, policy: policy),
             corpusRoot: corpusRoot, embedder: embedder, eventStore: eventStore,
-            recordStore: recordStore)
+            anchorKey: anchorKey, recordStore: recordStore)
     }
 
     // MARK: - 建置
@@ -295,7 +301,7 @@ public struct LTMService {
     @discardableResult
     public func build(full: Bool = false) throws -> BuildReport {
         try IndexBuilder(
-            location: location, scanner: CorpusScanner(corpusRoot: corpusRoot), embedder: embedder
+            location: location, scanner: CorpusScanner(corpusRoot: corpusRoot, anchorKey: anchorKey), embedder: embedder
         ).build(full: full)
     }
 
@@ -692,7 +698,7 @@ public struct LTMService {
     ///   `build()` 內的 `stampsMismatch` 分支在這條路徑上到不了。
     private func refreshIncrementally() throws -> RefreshReport {
         let builder = IndexBuilder(
-            location: location, scanner: CorpusScanner(corpusRoot: corpusRoot), embedder: embedder)
+            location: location, scanner: CorpusScanner(corpusRoot: corpusRoot, anchorKey: anchorKey), embedder: embedder)
         do {
             // `refusingFullRebuild`：這條路徑上「整份重建」永遠是錯的答案——它會
             // 在查詢持有連線時刪掉 DB 與側車。先前這是註解裡的推理，現在是前置條件。
@@ -730,7 +736,7 @@ public struct LTMService {
         guard readsHistory, let eventStore else {
             // 不消費任何事件的策略（archival）連讀都不讀——省下的不只是時間，
             // 更是「它真的沒看使用歷史」這件事在程式碼上看得見。
-            return project([], at: now, resolvedBy: PreloadedCorpusReader(turns: [:]))
+            return project([], at: now, resolvedBy: PreloadedCorpusReader(turns: [:]), key: anchorKey)
         }
         let events = try eventStore.events(from: .distantPast, to: now)
         let reader = try PreloadedCorpusReader.load(anchors: events.map(\.anchor), from: database)
@@ -743,7 +749,7 @@ public struct LTMService {
             spreading
             ? ProjectionParameters.default
             : ProjectionParameters(spreadingActivationFactor: 0)
-        return project(events, at: now, resolvedBy: reader, parameters: parameters)
+        return project(events, at: now, resolvedBy: reader, key: anchorKey, parameters: parameters)
     }
 
     /// 寫入一批事件。

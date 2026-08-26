@@ -21,6 +21,16 @@ private func runCLI(_ arguments: [String], environment extra: [String: String]) 
     process.executableURL = binary
     process.arguments = arguments
     var environment = ProcessInfo.processInfo.environment
+    // **測試 harness 自己注入 anchor 密鑰**（#12）。
+    //
+    // 沒有這一行，每個 `swift test` 都會讓 `ltm` 去碰 Keychain，而 swift-testing
+    // 的 exit test 會 re-exec 測試 binary——那個 subprocess 沒有登入鑰匙圈
+    // session，macOS 因此彈出「找不到鑰匙圈」對話框並把測試卡住（實測一條等了
+    // 116 秒）。放在這裡而不是要求操作者設環境變數：一個「你得先設某個變數才
+    // 跑得動」的測試套件，遲早會有人在沒設的情況下看到那個對話框。
+    //
+    // 這**不是** opt-out：注入的是一把真的密鑰，只是來源不同。
+    environment["LTM_ANCHOR_KEY"] = String(repeating: "2a", count: 32)
     for (key, value) in extra { environment[key] = value }
     process.environment = environment
     let outPipe = Pipe()

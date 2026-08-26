@@ -146,7 +146,7 @@ func anAlternateAbsolutePathToTheSameDirectoryIsRecognised() throws {
     // R4 CRITICAL：R3 抓到空 span 之後，我補了 decode 與 turn-based 兩個入口，
     // **漏掉 memberwise**——萬用 anchor 仍造得出來：
     //
-    //     Anchor(source: "s", turnID: "t", contentHash: Anchor.hash(""), span: 3..<3)
+    //     Anchor(source: "s", turnID: "t", contentHash: Anchor.hash("", key: .forTesting), span: 3..<3)
     //
     // 它對任何 scalar 數 ≥ 3 的 turn 都 `.resolved("")`，即使來源整段被換掉。
     //
@@ -177,7 +177,7 @@ func anAlternateAbsolutePathToTheSameDirectoryIsRecognised() throws {
     await #expect(processExitsWith: .failure) {
         _ = Anchor(
             source: "s", turnID: "t",
-            contentHash: Anchor.hash("任意合成文字"), span: 3..<3)
+            contentHash: Anchor.hash("任意合成文字", key: .forTesting), span: 3..<3)
     }
 }
 
@@ -187,13 +187,13 @@ func anAlternateAbsolutePathToTheSameDirectoryIsRecognised() throws {
     await #expect(processExitsWith: .failure) {
         let turn = Turn(
             id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "短")
-        _ = Anchor(source: "s", turn: turn, span: 50..<60)
+        _ = Anchor(source: "s", turn: turn, span: 50..<60, key: .forTesting)
     }
 }
 
 @Test func theMemberwiseInitialiserAcceptsAValidSpan() {
     // 反向對照：exit test 只證明「會死」，不證明它死得有道理。沒有這條，
     // 一個無條件 trap 的建構子也能讓上面兩條變綠。
-    let anchor = Anchor(source: "s", turnID: "t", contentHash: Anchor.hash("abc"), span: 0..<3)
+    let anchor = Anchor(source: "s", turnID: "t", contentHash: Anchor.hash("abc", key: .forTesting), span: 0..<3)
     #expect(anchor.span == 0..<3)
 }

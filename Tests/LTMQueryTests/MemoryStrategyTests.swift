@@ -22,7 +22,7 @@ func testAnchor(_ id: String) -> Anchor {
     Anchor(
         source: "fixture-a",
         turn: Turn(id: id, role: "user", timestamp: Date(), text: "合成候選文字 \(id)，長度足夠切出 span。"),
-        span: 0..<8)
+        span: 0..<8, key: .forTesting)
 }
 
 func candidates(_ ids: [String], band: Int = 0) -> [Candidate] {

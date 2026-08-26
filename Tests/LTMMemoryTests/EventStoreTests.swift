@@ -18,7 +18,7 @@ private func anchor(_ text: String, id: String = "t1") -> Anchor {
     Anchor(
         source: ProjectFingerprint.of("fixture-a"),
         turn: Turn(id: id, role: "user", timestamp: Date(), text: text),
-        span: 0..<min(10, text.unicodeScalars.count))
+        span: 0..<min(10, text.unicodeScalars.count), key: .forTesting)
 }
 
 private let gen = GenerationID("build-1")
@@ -179,7 +179,7 @@ private func canonicalLineForLineNumberTest() throws -> Data {
     let a = Anchor(
         source: ProjectFingerprint.of("fixture-a"),
         turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
-        span: 0..<4)
+        span: 0..<4, key: .forTesting)
     let e = Event.interaction(
         .shown, anchor: a, at: Date(timeIntervalSince1970: 12_345),
         generation: GenerationID("build-1"), policy: RankingPolicyID("archival"))
@@ -227,5 +227,5 @@ private func anchorForLockTest() -> Anchor {
     Anchor(
         source: ProjectFingerprint.of("fixture-a"),
         turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
-        span: 0..<4)
+        span: 0..<4, key: .forTesting)
 }

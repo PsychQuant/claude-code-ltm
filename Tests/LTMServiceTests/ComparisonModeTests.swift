@@ -43,7 +43,7 @@ extension Workspace {
         LTMService(
             location: derived, corpusRoot: corpus, embedder: embedder,
             eventStore: try FileEventStore(url: eventsURL),
-            recordStore: try FilePresentationRecordStore(url: recordsURL))
+            anchorKey: .forTesting, recordStore: try FilePresentationRecordStore(url: recordsURL))
     }
 }
 
@@ -89,7 +89,7 @@ func comparisonWithoutStoresFailsBeforePresentingAnything() throws {
     // 只有事件存放、沒有紀錄存放——同樣不足以記錄一次比較。
     let halfEquipped = LTMService(
         location: workspace.derived, corpusRoot: workspace.corpus, embedder: FixedEmbedder(),
-        eventStore: try FileEventStore(url: workspace.eventsURL), recordStore: nil)
+        eventStore: try FileEventStore(url: workspace.eventsURL), anchorKey: .forTesting, recordStore: nil)
     #expect(throws: LTMService.ServiceError.comparisonRequiresStores) {
         _ = try halfEquipped.compare(
             text: "內容", limit: 20, scope: .allProjects,

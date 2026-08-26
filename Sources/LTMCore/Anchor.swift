@@ -264,7 +264,7 @@ public struct Anchor: Sendable, Hashable, Codable {
     /// 把它們算進去的話，上游改一次 metadata 就會讓所有既有紀錄變成 orphan，
     /// 而那並不是「這段文字變了」。兩段一模一樣的短文字會雜湊相同，靠
     /// `turnID` 與 `span` 區辨。
-    public init(source: String, turn: Turn, span: Range<Int>) {
+    public init(source: String, turn: Turn, span: Range<Int>, key: AnchorKey) {
         // 越界或空 span 是**呼叫端的錯**，不是語料的狀態，所以 trap 而不是
         // 靜默產生一筆紀錄。先前寫的是 `Turn.slice(...) ?? ""`，兩個後果都很糟
         // （#1 verify R3 實測）：
@@ -283,10 +283,24 @@ public struct Anchor: Sendable, Hashable, Codable {
                 "anchor 的 span \(span) 對長度 \(turn.text.unicodeScalars.count) 的 turn 越界"
                     + "——越界 span 綁的是不存在的內容")
         }
+        // **正規化後為空要在雜湊之前擋**（#12）。
+        //
+        // 先前這條靠 `ContentHash.validate` 比對 `sha256("")` 這個常數——而摘要
+        // 加密鑰之後那個值不再出現，守衛整條靜默失效（實測：加了密鑰之後
+        // `aWhitespaceOnlySpanCannotProduceAnAnchor` 立刻變綠，也就是萬用 anchor
+        // 又造得出來了）。
+        //
+        // 綁常數是把「這個內容是空的」這個**性質**編碼成一個特定的**值**，而值
+        // 會隨雜湊方式改變。改成直接驗那個性質，換雜湊就不會再打到它。
+        let normalized = Anchor.normalize(sliced)
+        guard !normalized.isEmpty else {
+            preconditionFailure(
+                "anchor 的 span \(span) 正規化後是空字串——空內容的雜湊對任何文字都 resolve 成功")
+        }
         self.init(
             source: source,
             turnID: turn.id,
-            contentHash: Anchor.hash(Anchor.normalize(sliced)),
+            contentHash: Anchor.hash(normalized, key: key),
             span: span)
     }
 
@@ -302,13 +316,17 @@ public struct Anchor: Sendable, Hashable, Codable {
         return parts.joined(separator: " ")
     }
 
-    public static func hash(_ normalized: String) -> ContentHash {
-        let digest = SHA256.hash(data: Data(normalized.utf8))
-        return ContentHash(hex: digest.map { String(format: "%02x", $0) }.joined())
+    /// 內容摘要。**加密鑰**（#12）。
+    ///
+    /// 密鑰是必填參數而不是全域，理由見 `AnchorKey`：忘了設定不該退化成未加
+    /// 密鑰，而應該編不過。
+    public static func hash(_ normalized: String, key: AnchorKey) -> ContentHash {
+        let code = key.authenticationCode(for: Data(normalized.utf8))
+        return ContentHash(hex: code.map { String(format: "%02x", $0) }.joined())
     }
 
     /// 解析這個 anchor。雜湊不符時回 `.orphaned`，**不**回傳該位置上找到的文字。
-    public func dereference(in corpus: some CorpusReader) -> Dereference {
+    public func dereference(in corpus: some CorpusReader, key: AnchorKey) -> Dereference {
         guard let turn = corpus.turn(id: turnID, inSource: source) else {
             return .orphaned(.turnMissing)
         }
@@ -321,7 +339,7 @@ public struct Anchor: Sendable, Hashable, Codable {
         guard !normalized.isEmpty else {
             return .orphaned(.contentNormalizesToNothing)
         }
-        let found = Anchor.hash(normalized)
+        let found = Anchor.hash(normalized, key: key)
         guard found == contentHash else {
             return .orphaned(.contentHashMismatch(expected: contentHash, found: found))
         }

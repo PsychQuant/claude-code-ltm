@@ -85,7 +85,7 @@ func vectorCountMatchesChunkCount() throws {
     try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容", "第三段內容"])
 
     let builder = IndexBuilder(
-        location: derived, scanner: CorpusScanner(corpusRoot: corpus),
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
         embedder: StubEmbedder(revision: "rev-A"))
     let report = try builder.build()
 
@@ -111,7 +111,7 @@ func chunkWithoutVectorStaysIndexed() throws {
     try writeTurns(in: corpus, texts: ["有向量的內容", "沒有向量的內容"])
 
     let builder = IndexBuilder(
-        location: derived, scanner: CorpusScanner(corpusRoot: corpus),
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
         embedder: StubEmbedder(revision: "rev-A", refusing: ["沒有向量的內容"]))
     let report = try builder.build()
 
@@ -134,7 +134,7 @@ func revisionChangeForcesFullRebuild() throws {
         try? FileManager.default.removeItem(at: derived.root)
     }
     try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
-    let scanner = CorpusScanner(corpusRoot: corpus)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
 
     let first = try IndexBuilder(
         location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")
@@ -181,7 +181,7 @@ func concurrentBuildIsRefused() throws {
     defer { held.release() }
 
     let builder = IndexBuilder(
-        location: derived, scanner: CorpusScanner(corpusRoot: corpus),
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
         embedder: StubEmbedder(revision: "rev-A"))
     #expect(throws: IndexBuilder.BuildError.self) {
         _ = try builder.build()
@@ -196,7 +196,7 @@ func lockIsReleasedAfterBuild() throws {
         try? FileManager.default.removeItem(at: derived.root)
     }
     try writeTurns(in: corpus, texts: ["內容"])
-    let scanner = CorpusScanner(corpusRoot: corpus)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
 
     _ = try IndexBuilder(
         location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")
@@ -216,7 +216,7 @@ func staleSidecarBytesAreTruncated() throws {
         try? FileManager.default.removeItem(at: derived.root)
     }
     try writeTurns(in: corpus, texts: ["第一段內容"])
-    let scanner = CorpusScanner(corpusRoot: corpus)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
     _ = try IndexBuilder(
         location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")
     ).build()
@@ -248,7 +248,7 @@ func missingStateWithExistingIndexIsRefused() throws {
         try? FileManager.default.removeItem(at: derived.root)
     }
     try writeTurns(in: corpus, texts: ["第一段內容"])
-    let scanner = CorpusScanner(corpusRoot: corpus)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
     _ = try IndexBuilder(location: derived, scanner: scanner,
                          embedder: StubEmbedder(revision: "rev-A")).build()
 
@@ -295,7 +295,7 @@ func deletingOneResumeCopyKeepsTheTurn() throws {
     func builder() -> IndexBuilder {
         IndexBuilder(
             location: workspace.derived,
-            scanner: CorpusScanner(corpusRoot: workspace.corpus), embedder: embedder)
+            scanner: CorpusScanner(corpusRoot: workspace.corpus, anchorKey: .forTesting), embedder: embedder)
     }
     #expect(try builder().build().totalChunks == 1, "去重之後只該有一列")
 
@@ -324,7 +324,7 @@ func unreadableSourcesAreReportedNotSilentlyKept() throws {
     func builder() -> IndexBuilder {
         IndexBuilder(
             location: workspace.derived,
-            scanner: CorpusScanner(corpusRoot: workspace.corpus), embedder: embedder)
+            scanner: CorpusScanner(corpusRoot: workspace.corpus, anchorKey: .forTesting), embedder: embedder)
     }
     #expect(try builder().build().totalChunks == 1)
 
@@ -351,7 +351,7 @@ func missingSidecarIsRefusedNotSilentlyRebuilt() throws {
     func builder() -> IndexBuilder {
         IndexBuilder(
             location: workspace.derived,
-            scanner: CorpusScanner(corpusRoot: workspace.corpus), embedder: embedder)
+            scanner: CorpusScanner(corpusRoot: workspace.corpus, anchorKey: .forTesting), embedder: embedder)
     }
     #expect(try builder().build().totalChunks == 1)
 
@@ -391,7 +391,7 @@ func absentSidecarIsFineWhenNoVectorsAreDeclared() throws {
     try writeTurns(in: workspace.corpus, texts: ["第一段內容"])
     let embedder = StubEmbedder(revision: "r1", refusing: ["第一段內容"])
     let report = try IndexBuilder(
-        location: workspace.derived, scanner: CorpusScanner(corpusRoot: workspace.corpus),
+        location: workspace.derived, scanner: CorpusScanner(corpusRoot: workspace.corpus, anchorKey: .forTesting),
         embedder: embedder
     ).build()
     #expect(report.totalChunks == 1, "沒有向量不影響 lexical 通道")
@@ -426,7 +426,7 @@ func identicalTimestampsKeepEverySourceAfterBuild() throws {
                              timestamp: stamp)])
     }
     _ = try IndexBuilder(
-        location: workspace.derived, scanner: CorpusScanner(corpusRoot: workspace.corpus),
+        location: workspace.derived, scanner: CorpusScanner(corpusRoot: workspace.corpus, anchorKey: .forTesting),
         embedder: StubEmbedder(revision: "r1")
     ).build()
 

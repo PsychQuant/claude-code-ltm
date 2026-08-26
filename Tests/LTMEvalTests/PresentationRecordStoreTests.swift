@@ -19,7 +19,7 @@ private func currentRuleAnchor(_ n: Int) -> Anchor {
             id: String(format: "%08x-aaaa-bbbb-cccc-dddddddddddd", n),
             role: "user", timestamp: Date(timeIntervalSince1970: 1_755_400_000),
             text: "合成候選 \(n)，長度足夠切 span。"),
-        span: 0..<8)
+        span: 0..<8, key: .forTesting)
 }
 
 /// 帶**舊規則** source（sessionId）的 anchor。
@@ -30,7 +30,7 @@ private func supersededAnchor(_ n: Int) -> Anchor {
             id: String(format: "%08x-aaaa-bbbb-cccc-dddddddddddd", n),
             role: "user", timestamp: Date(timeIntervalSince1970: 1_755_400_000),
             text: "合成候選 \(n)，長度足夠切 span。"),
-        span: 0..<8)
+        span: 0..<8, key: .forTesting)
 }
 
 /// 確定性的 `PresentationID`——不是 `random()`。

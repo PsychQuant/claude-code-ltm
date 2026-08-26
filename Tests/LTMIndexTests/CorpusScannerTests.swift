@@ -58,7 +58,7 @@ func fullScanProducesPointeredChunks() throws {
                 role: "assistant", text: "第一則回覆"),
         ])
 
-    let result = try CorpusScanner(corpusRoot: root).scan()
+    let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
 
     #expect(result.chunks.count == 2)
     for chunk in result.chunks {
@@ -80,7 +80,7 @@ func incrementalScanReadsOnlyTheTail() throws {
                 uuid: "aaaaaaaa-0000-0000-0000-000000000001", session: sessionA,
                 role: "user", text: "第一則提問")
         ])
-    let scanner = CorpusScanner(corpusRoot: root)
+    let scanner = CorpusScanner(corpusRoot: root, anchorKey: .forTesting)
     let first = try scanner.scan()
     #expect(first.chunks.count == 1)
 
@@ -112,7 +112,7 @@ func rewrittenSourceIsFullyReparsed() throws {
                 uuid: "aaaaaaaa-0000-0000-0000-000000000001", session: sessionA,
                 role: "user", text: "原始內容")
         ])
-    let scanner = CorpusScanner(corpusRoot: root)
+    let scanner = CorpusScanner(corpusRoot: root, anchorKey: .forTesting)
     let first = try scanner.scan()
 
     // 改寫既有 bytes（不是附加）——長度刻意變長，避免測試只靠「變短」通過。
@@ -151,7 +151,7 @@ func malformedRecordsAreSkippedAndTallied() throws {
                 role: "user", text: "唯一一則合法內容"),
         ])
 
-    let result = try CorpusScanner(corpusRoot: root).scan()
+    let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
 
     #expect(result.chunks.count == 1)
     #expect(result.skipped.notATurn == 1)
@@ -173,7 +173,7 @@ func toolOnlyTurnIsSkipped() throws {
     _ = try writeSession(
         in: root, project: "proj-one", file: "session.jsonl", lines: [toolOnly])
 
-    let result = try CorpusScanner(corpusRoot: root).scan()
+    let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
 
     #expect(result.chunks.isEmpty)
     #expect(result.skipped.noIndexableText == 1)
@@ -235,7 +235,7 @@ func scanLeavesCorpusUntouched() throws {
     let beforeAttributes = try FileManager.default.attributesOfItem(atPath: url.path)
     let beforeModified = beforeAttributes[.modificationDate] as? Date
 
-    _ = try CorpusScanner(corpusRoot: root).scan()
+    _ = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
 
     #expect(try Data(contentsOf: url) == before)
     let afterAttributes = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -265,7 +265,7 @@ func fixtureCorpusYieldsOneChunkPerTurn() throws {
         _ = try writeSession(in: root, project: project, file: "session.jsonl", lines: lines)
     }
 
-    let result = try CorpusScanner(corpusRoot: root).scan()
+    let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
 
     #expect(result.chunks.count == 50)
     #expect(Set(result.chunks.map(\.uuid)) == expectedUUIDs)
@@ -310,7 +310,7 @@ func anchorSurvivesSessionResume() throws {
                      role: "assistant", text: "resume 之後才有的新內容"),
         ])
 
-    let result = try CorpusScanner(corpusRoot: root).scan()
+    let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
     let shared = result.chunks.filter { $0.uuid == sharedTurn }
 
     #expect(shared.count == 2, "掃描階段兩個檔各產生一筆；去重是索引層的職責（task 2.2）")
@@ -329,7 +329,7 @@ func deletedSourceIsInvalidated() throws {
     _ = try writeSession(in: root, project: "proj-one", file: "b.jsonl",
         lines: [turnLine(uuid: "aaaaaaaa-0000-0000-0000-000000000002", session: sessionA,
                          role: "user", text: "乙檔的內容")])
-    let scanner = CorpusScanner(corpusRoot: root)
+    let scanner = CorpusScanner(corpusRoot: root, anchorKey: .forTesting)
     let first = try scanner.scan()
     #expect(first.chunks.count == 2)
 
@@ -357,7 +357,7 @@ func incompleteTrailingRecordIsRereadNextScan() throws {
     try (complete + "\n" + String(full.prefix(full.count / 2))).write(
         to: url, atomically: true, encoding: .utf8)
 
-    let scanner = CorpusScanner(corpusRoot: root)
+    let scanner = CorpusScanner(corpusRoot: root, anchorKey: .forTesting)
     let first = try scanner.scan()
     #expect(first.chunks.count == 1, "只有完整的那一則被索引")
     #expect(first.skipped.incompleteTrailingRecord == 1, "半行要單獨記帳，不可混進 malformed")
@@ -390,7 +390,7 @@ func anUnlistableCorpusRootThrows() throws {
     // 拿掉讀取權限 → contentsOfDirectory 失敗。
     try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: corpus.path)
 
-    let scanner = CorpusScanner(corpusRoot: corpus)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
     // 先前這裡是 `(try? …) ?? []`——失敗變成「零個 project」，而零個 project 會讓
     // `scan` 把**整份索引**作廢並回報成功。
     #expect(throws: CorpusScanner.ScanError.corpusRootUnreadable(path: corpus.path)) {
@@ -412,7 +412,7 @@ func anUnlistableProjectProtectsItsPriorSources() throws {
     let line = #"{"uuid":"00000000-aaaa-bbbb-cccc-dddddddddddd","sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-08-17T06:00:00Z","type":"user","message":{"role":"user","content":"記憶策略的內容夠長可以切"}}"#
     try Data((line + "\n").utf8).write(to: proj.appendingPathComponent("s.jsonl"))
 
-    let scanner = CorpusScanner(corpusRoot: corpus)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
     let first = try scanner.scan(previous: ScanState())
     #expect(!first.chunks.isEmpty, "前提：第一輪要真的讀到東西")
     let knownKeys = Set(first.state.files.keys)

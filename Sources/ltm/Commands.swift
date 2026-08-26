@@ -42,7 +42,8 @@ enum CommandSupport {
         // 先驗 root（不建立任何東西），通過後才開事件存放。
         let probe = try LTMService.make(
             corpusRoot: corpusRoot, derivedRoot: derivedRoot,
-            embedder: embedder, eventStore: nil, memoryRoot: memoryRoot)
+            embedder: embedder, eventStore: nil, anchorKey: try anchorKey(),
+            memoryRoot: memoryRoot)
         guard needsEventStore else { return probe }
         let store = try FileEventStore(
             url: memoryEventsURL(validatedRoot: memoryRoot), policy: corpusPolicy())
@@ -53,7 +54,8 @@ enum CommandSupport {
             : nil
         return try LTMService.make(
             corpusRoot: corpusRoot, derivedRoot: derivedRoot,
-            embedder: embedder, eventStore: store, recordStore: records,
+            embedder: embedder, eventStore: store, anchorKey: try anchorKey(),
+            recordStore: records,
             memoryRoot: memoryRoot)
     }
 
@@ -70,6 +72,14 @@ enum CommandSupport {
     ///
     /// 一處而不是三處（#27）：先前 `LTM_CORPUS_ROOT` 的解析散在三個地方，而
     /// `FileEventStore` 一個都沒收到——它用的是固定預設根。
+    /// Anchor 內容摘要的密鑰（#12）。
+    ///
+    /// 由 facade 層取得並注入，索引層與記憶層都只宣告需要它。**沒有「讀不到就
+    /// 不加密鑰」的退路**：那個分支會讓這件事的價值取決於沒有人踩到它。
+    static func anchorKey() throws -> AnchorKey {
+        try AnchorKeyStore.loadOrCreate()
+    }
+
     static func corpusPolicy() -> CorpusPolicy {
         CorpusPolicy(corpusRoots: [
             ProcessInfo.processInfo.environment["LTM_CORPUS_ROOT"].map {

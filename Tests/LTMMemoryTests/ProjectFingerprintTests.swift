@@ -51,7 +51,7 @@ func fingerprintWorksAsAnchorSource() {
         id: "aaaaaaaa-0000-0000-0000-000000000001", role: "user",
         timestamp: Date(timeIntervalSince1970: 1), text: "合成的內容，長度足夠切出 span。")
     let anchor = Anchor(
-        source: ProjectFingerprint.of("-Users-a-proj"), turn: turn, span: 0..<6)
+        source: ProjectFingerprint.of("-Users-a-proj"), turn: turn, span: 0..<6, key: .forTesting)
     #expect(anchor.source.count == 32)
 }
 
@@ -82,7 +82,7 @@ func eventStoreRefusesSupersededAnchorRule() throws {
     let turn = Turn(id: "aaaaaaaa-0000-0000-0000-000000000001", role: "user",
                     timestamp: Date(timeIntervalSince1970: 1), text: text)
     // 用舊規則寫一筆：source 是 sessionId，不是指紋。
-    let legacy = Anchor(source: "11111111-2222-3333-4444-555555555555", turn: turn, span: 0..<6)
+    let legacy = Anchor(source: "11111111-2222-3333-4444-555555555555", turn: turn, span: 0..<6, key: .forTesting)
     try store.append(Event(kind: .shown, anchor: legacy, timestamp: Date(timeIntervalSince1970: 10),
                            generation: GenerationID("g-1"), policy: RankingPolicyID("archival"),
                            noteRef: nil, presentation: nil))
@@ -109,7 +109,7 @@ func eventStoreAcceptsCurrentRuleAnchors() throws {
     let text = "當前規則 anchor 指向的內容"
     let turn = Turn(id: "aaaaaaaa-0000-0000-0000-000000000002", role: "user",
                     timestamp: Date(timeIntervalSince1970: 1), text: text)
-    let current = Anchor(source: ProjectFingerprint.of("proj-one"), turn: turn, span: 0..<6)
+    let current = Anchor(source: ProjectFingerprint.of("proj-one"), turn: turn, span: 0..<6, key: .forTesting)
     try store.append(Event(kind: .shown, anchor: current, timestamp: Date(timeIntervalSince1970: 10),
                            generation: GenerationID("g-1"), policy: RankingPolicyID("archival"),
                            noteRef: nil, presentation: nil))
@@ -131,7 +131,7 @@ private func event(source: String, id: String) throws -> Event {
     let text = "被 anchor 指向的內容"
     let turn = Turn(id: id, role: "user", timestamp: Date(timeIntervalSince1970: 1), text: text)
     return try Event(
-        kind: .shown, anchor: Anchor(source: source, turn: turn, span: 0..<6),
+        kind: .shown, anchor: Anchor(source: source, turn: turn, span: 0..<6, key: .forTesting),
         timestamp: Date(timeIntervalSince1970: 10), generation: GenerationID("g-1"),
         policy: RankingPolicyID("archival"), noteRef: nil, presentation: nil)
 }

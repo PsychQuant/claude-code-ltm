@@ -7,7 +7,7 @@ private func sampleAnchor() -> Anchor {
     Anchor(
         source: "fixture-a",
         turn: Turn(id: "t1", role: "user", timestamp: Date(), text: fixtureText),
-        span: 0..<10)
+        span: 0..<10, key: .forTesting)
 }
 
 private let gen = GenerationID("build-2026-08-10")

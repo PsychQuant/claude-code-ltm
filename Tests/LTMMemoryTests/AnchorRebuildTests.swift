@@ -59,7 +59,7 @@ private let longFixture = String(
     let chunkID = 1
     let spanBefore = tableBefore[chunkID]!
     let textAtRecordingTime = Anchor.normalize(Turn.slice(longFixture, spanBefore))
-    let anchor = Anchor(source: "fixture-a", turn: turn, span: spanBefore)
+    let anchor = Anchor(source: "fixture-a", turn: turn, span: spanBefore, key: .forTesting)
 
     // ── 重建 ──（換一組 chunk 設定，chunk 表整個被替換）
 
@@ -72,7 +72,7 @@ private let longFixture = String(
     #expect(textThatChunkIDNowAddresses != textAtRecordingTime)
 
     // (b) 用 anchor：仍然定址到當初那一段。
-    #expect(anchor.dereference(in: corpus) == .resolved(textAtRecordingTime))
+    #expect(anchor.dereference(in: corpus, key: .forTesting) == .resolved(textAtRecordingTime))
 }
 
 @Test func everyAnchorRecordedUnderOneChunkingStillResolvesAfterAnother() {
@@ -88,7 +88,7 @@ private let longFixture = String(
     #expect(spansBefore != spansAfter)
 
     let recorded = spansBefore.map { span -> (Anchor, String) in
-        (Anchor(source: "fixture-a", turn: turn, span: span),
+        (Anchor(source: "fixture-a", turn: turn, span: span, key: .forTesting),
          Anchor.normalize(Turn.slice(longFixture, span)))
     }
 
@@ -96,7 +96,7 @@ private let longFixture = String(
     // 都仍解析到當初那段文字。
     #expect(!spansAfter.isEmpty)
     for (anchor, textAtRecordingTime) in recorded {
-        #expect(anchor.dereference(in: corpus) == .resolved(textAtRecordingTime))
+        #expect(anchor.dereference(in: corpus, key: .forTesting) == .resolved(textAtRecordingTime))
     }
 }
 
@@ -117,13 +117,13 @@ private let longFixture = String(
     #expect(第一次出現 != 第二次出現)  // 位置確實不同
     #expect(Turn.slice(longFixture, 第一次出現) == Turn.slice(longFixture, 第二次出現))  // 文字確實相同
 
-    let a = Anchor(source: "fixture-a", turn: turn, span: 第一次出現)
-    let b = Anchor(source: "fixture-a", turn: turn, span: 第二次出現)
+    let a = Anchor(source: "fixture-a", turn: turn, span: 第一次出現, key: .forTesting)
+    let b = Anchor(source: "fixture-a", turn: turn, span: 第二次出現, key: .forTesting)
     #expect(a.contentHash == b.contentHash)  // 位置不同、文字相同 → 雜湊相同
     #expect(a != b)  // 但 anchor 本身不同（span 是 anchor 的一部分）
 
     // 反向：文字不同就必須不同雜湊。跨句邊界取一段，內容與整句不同。
     let 跨邊界 = (L / 2)..<(L / 2 + L)
-    let c = Anchor(source: "fixture-a", turn: turn, span: 跨邊界)
+    let c = Anchor(source: "fixture-a", turn: turn, span: 跨邊界, key: .forTesting)
     #expect(c.contentHash != a.contentHash)
 }

@@ -9,7 +9,7 @@ import Testing
 // 「A recent citation outranks an older one」**沒有測試**。
 //
 // 為什麼它落在 `LTMEvalTests` 而不是 `LTMQueryTests`：衰減的實作**不在
-// `human-like` 裡**，在共用的 `project(_:at:resolvedBy:)`。`LTMQueryTests` 的
+// `human-like` 裡**，在共用的 `project(_:at:resolvedBy:, key: .forTesting)`。`LTMQueryTests` 的
 // `projection(_:)` helper 直接造 `AnchorStatistics`，所以它繞過了衰減——用它寫
 // 這條測試會得到一條**驗不到衰減**的測試。而 `LTMQueryTests` 看不到 `LTMMemory`。
 //
@@ -30,8 +30,8 @@ func aRecentCitationOutranksAnOlderOne() throws {
         id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 0), text: decayText)
     let corpus = DecayFixtureCorpus(turns: ["fixture-a": [turn.id: turn]])
 
-    let recentAnchor = Anchor(source: "fixture-a", turn: turn, span: 0..<3)
-    let oldAnchor = Anchor(source: "fixture-a", turn: turn, span: 5..<8)
+    let recentAnchor = Anchor(source: "fixture-a", turn: turn, span: 0..<3, key: .forTesting)
+    let oldAnchor = Anchor(source: "fixture-a", turn: turn, span: 5..<8, key: .forTesting)
 
     let now = Date(timeIntervalSince1970: 100 * 86_400)
     let events = [
@@ -45,7 +45,7 @@ func aRecentCitationOutranksAnOlderOne() throws {
             generation: GenerationID("g1"), policy: RankingPolicyID("human-like"),
             presentation: nil),
     ]
-    let projection = project(events, at: now, resolvedBy: corpus)
+    let projection = project(events, at: now, resolvedBy: corpus, key: .forTesting)
 
     // 前提：兩者的淨強度確實因為時間而不同。不先驗這個，下面的順序斷言可能
     // 因為別的原因成立。

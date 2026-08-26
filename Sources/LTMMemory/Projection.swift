@@ -118,6 +118,7 @@ public func project(
     _ events: [Event],
     at instant: Date,
     resolvedBy corpus: some CorpusReader,
+    key: AnchorKey,
     parameters: ProjectionParameters = .default
 ) -> Projection {
     var reinforcement: [Anchor: Double] = [:]
@@ -129,7 +130,7 @@ public func project(
 
     func isLive(_ anchor: Anchor) -> Bool {
         if let cached = orphanCache[anchor] { return cached }
-        let live = anchor.dereference(in: corpus).resolvedText != nil
+        let live = anchor.dereference(in: corpus, key: key).resolvedText != nil
         orphanCache[anchor] = live
         return live
     }

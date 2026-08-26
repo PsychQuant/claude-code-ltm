@@ -23,7 +23,7 @@ private func makeChunk(
         timestamp: when, role: "user", text: text,
         // source 是 project 指紋，不是 session——與 CorpusScanner 的實際行為一致。
         anchor: Anchor(source: ProjectFingerprint.of(project), turn: turn,
-                       span: 0..<text.unicodeScalars.count))
+                       span: 0..<text.unicodeScalars.count, key: .forTesting))
 }
 
 @Test("首次建置就建好 schema，chunk 數從零開始")

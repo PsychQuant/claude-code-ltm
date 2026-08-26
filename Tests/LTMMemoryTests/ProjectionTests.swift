@@ -17,7 +17,7 @@ private func turn(_ id: String, _ text: String) -> Turn {
 }
 
 private func anchor(_ id: String, _ text: String) -> Anchor {
-    Anchor(source: ProjectFingerprint.of("fixture-a"), turn: turn(id, text), span: 0..<8)
+    Anchor(source: ProjectFingerprint.of("fixture-a"), turn: turn(id, text), span: 0..<8, key: .forTesting)
 }
 
 private func corpus(_ turns: [Turn]) -> FixtureCorpus {
@@ -40,8 +40,8 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     ]
     let c = corpus([turn("t1", 訊息A)])
 
-    let first = project(events, at: instant, resolvedBy: c)
-    let second = project(events, at: instant, resolvedBy: c)
+    let first = project(events, at: instant, resolvedBy: c, key: .forTesting)
+    let second = project(events, at: instant, resolvedBy: c, key: .forTesting)
     #expect(first == second)
 }
 
@@ -56,7 +56,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     try store.append(event(.cited, a, minutesAgo: 1))
 
     let before = try store.allEvents().count
-    _ = project(try store.allEvents(), at: instant, resolvedBy: corpus([turn("t1", 訊息A)]))
+    _ = project(try store.allEvents(), at: instant, resolvedBy: corpus([turn("t1", 訊息A)]), key: .forTesting)
     #expect(try store.allEvents().count == before)
 }
 
@@ -65,7 +65,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     let neverSeen = anchor("t1", 訊息A)
 
     let events = (0..<20).map { event(.shown, seenOnly, minutesAgo: Double($0)) }
-    let p = project(events, at: instant, resolvedBy: corpus([turn("t2", 訊息B), turn("t1", 訊息A)]))
+    let p = project(events, at: instant, resolvedBy: corpus([turn("t2", 訊息B), turn("t1", 訊息A)]), key: .forTesting)
 
     // 「被看見二十次」與「從未出現」在增強量上必須完全相同。否則就形成
     // 「出現過就更容易再出現」的迴圈，與是否有用無關。
@@ -81,9 +81,9 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     let a = anchor("t1", 訊息A)
     let c = corpus([turn("t1", 訊息A)])
 
-    let opened = project([event(.opened, a, minutesAgo: 1)], at: instant, resolvedBy: c)
-    let cited = project([event(.cited, a, minutesAgo: 1)], at: instant, resolvedBy: c)
-    let dismissed = project([event(.dismissed, a, minutesAgo: 1)], at: instant, resolvedBy: c)
+    let opened = project([event(.opened, a, minutesAgo: 1)], at: instant, resolvedBy: c, key: .forTesting)
+    let cited = project([event(.cited, a, minutesAgo: 1)], at: instant, resolvedBy: c, key: .forTesting)
+    let dismissed = project([event(.dismissed, a, minutesAgo: 1)], at: instant, resolvedBy: c, key: .forTesting)
 
     #expect(opened.reinforcement(for: a) > 0)
     #expect(cited.reinforcement(for: a) > opened.reinforcement(for: a))
@@ -96,8 +96,8 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     let c = corpus([turn("t1", 訊息A)])
     let pinned = project(
         [.pin(anchor: a, at: instant.addingTimeInterval(-60), generation: gen, policy: policy)],
-        at: instant, resolvedBy: c)
-    let cited = project([event(.cited, a, minutesAgo: 1)], at: instant, resolvedBy: c)
+        at: instant, resolvedBy: c, key: .forTesting)
+    let cited = project([event(.cited, a, minutesAgo: 1)], at: instant, resolvedBy: c, key: .forTesting)
 
     #expect(pinned.reinforcement(for: a) > cited.reinforcement(for: a))
 }
@@ -105,8 +105,8 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
 @Test func olderInteractionsCountLessThanRecentOnes() {
     let a = anchor("t1", 訊息A)
     let c = corpus([turn("t1", 訊息A)])
-    let recent = project([event(.cited, a, minutesAgo: 1)], at: instant, resolvedBy: c)
-    let old = project([event(.cited, a, minutesAgo: 60 * 24 * 90)], at: instant, resolvedBy: c)
+    let recent = project([event(.cited, a, minutesAgo: 1)], at: instant, resolvedBy: c, key: .forTesting)
+    let old = project([event(.cited, a, minutesAgo: 60 * 24 * 90)], at: instant, resolvedBy: c, key: .forTesting)
 
     #expect(recent.reinforcement(for: a) > old.reinforcement(for: a))
     #expect(old.reinforcement(for: a) > 0)  // 衰減，不是歸零
@@ -123,7 +123,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
         (0..<10).map { event(.cited, orphaned, minutesAgo: Double($0)) }
         + [event(.opened, live, minutesAgo: 1)]
 
-    let p = project(events, at: instant, resolvedBy: c)
+    let p = project(events, at: instant, resolvedBy: c, key: .forTesting)
 
     #expect(p[orphaned] == nil)
     #expect(p.reinforcement(for: orphaned) == 0)
@@ -142,7 +142,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
 
     let p = project(
         [event(.cited, orphaned, minutesAgo: 1), event(.opened, live, minutesAgo: 1)],
-        at: instant, resolvedBy: c)
+        at: instant, resolvedBy: c, key: .forTesting)
 
     #expect(p.orphanedAnchors == [orphaned])
     #expect(p.isOrphaned(orphaned))
@@ -160,13 +160,13 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     let future = Event.interaction(
         .cited, anchor: a, at: instant.addingTimeInterval(86_400 * 365),
         generation: gen, policy: policy)
-    let p = project([future], at: instant, resolvedBy: c)
+    let p = project([future], at: instant, resolvedBy: c, key: .forTesting)
 
     #expect(p.reinforcement(for: a) == 0)
     #expect(p[a] == nil)
 
     // 對照：同一筆事件放在過去就正常計入，證明差別確實來自時間方向。
-    let past = project([event(.cited, a, minutesAgo: 1)], at: instant, resolvedBy: c)
+    let past = project([event(.cited, a, minutesAgo: 1)], at: instant, resolvedBy: c, key: .forTesting)
     #expect(past.reinforcement(for: a) > 0)
 }
 
@@ -176,7 +176,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     let neverSeen = anchor("t2", 訊息B)
     let c = corpus([turn("t1", 訊息A), turn("t2", 訊息B)])
 
-    let p = project([event(.opened, live, minutesAgo: 1)], at: instant, resolvedBy: c)
+    let p = project([event(.opened, live, minutesAgo: 1)], at: instant, resolvedBy: c, key: .forTesting)
     #expect(p.orphanedAnchors.isEmpty)
     #expect(!p.isOrphaned(neverSeen))
 }
@@ -226,7 +226,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
         .cited, anchor: a, at: instant.addingTimeInterval(3600),
         generation: GenerationID("g1"), policy: RankingPolicyID("archival"))
 
-    let p = project([future], at: instant, resolvedBy: c)
+    let p = project([future], at: instant, resolvedBy: c, key: .forTesting)
     #expect(p.futureDatedEventsIgnored == 1)
     #expect(p[a] == nil, "它仍然不得計入強度")
 
@@ -234,7 +234,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     let past = Event.interaction(
         .cited, anchor: a, at: instant.addingTimeInterval(-3600),
         generation: GenerationID("g1"), policy: RankingPolicyID("archival"))
-    let ok = project([past], at: instant, resolvedBy: c)
+    let ok = project([past], at: instant, resolvedBy: c, key: .forTesting)
     #expect(ok.futureDatedEventsIgnored == 0)
     #expect(ok[a] != nil)
 }
@@ -251,8 +251,8 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
         .cited, anchor: a, at: instant.addingTimeInterval(-86_400),
         generation: gen, policy: policy)
 
-    let now = project([e], at: instant, resolvedBy: c)
-    let later = project([e], at: instant.addingTimeInterval(86_400 * 30), resolvedBy: c)
+    let now = project([e], at: instant, resolvedBy: c, key: .forTesting)
+    let later = project([e], at: instant.addingTimeInterval(86_400 * 30), resolvedBy: c, key: .forTesting)
 
     #expect(now.reinforcement(for: a) > 0)
     #expect(later.reinforcement(for: a) < now.reinforcement(for: a), "同一筆事件必須隨時間衰減")
@@ -266,8 +266,8 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
     let e = Event.interaction(.cited, anchor: a, at: instant.addingTimeInterval(-60),
                               generation: gen, policy: policy)
 
-    let intact = project([e], at: instant, resolvedBy: corpus([turn("t1", text)]))
-    let edited = project([e], at: instant, resolvedBy: corpus([turn("t1", "完全不同的內容")]))
+    let intact = project([e], at: instant, resolvedBy: corpus([turn("t1", text)]), key: .forTesting)
+    let edited = project([e], at: instant, resolvedBy: corpus([turn("t1", "完全不同的內容")]), key: .forTesting)
 
     #expect(intact.reinforcement(for: a) > 0)
     #expect(edited.orphanedAnchors.contains(a))
@@ -314,7 +314,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
         .interaction(.opened, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
     ]
     let params = ProjectionParameters(spreadingActivationFactor: 0.3)
-    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+    let result = project(events, at: instant, resolvedBy: corpusReader, key: .forTesting, parameters: params)
 
     let aReinforcement = result.reinforcement(for: a)
     #expect(aReinforcement > 0, "A 自己被開，應該有直接增強")
@@ -339,7 +339,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
         .interaction(.shown, anchor: d, at: instant, generation: gen, policy: policy, presentation: otherGroup),
     ]
     let params = ProjectionParameters(spreadingActivationFactor: 0.3)
-    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+    let result = project(events, at: instant, resolvedBy: corpusReader, key: .forTesting, parameters: params)
 
     #expect(result.reinforcement(for: d) == 0, "不同呈現群組的 anchor 不應獲得擴散")
 }
@@ -364,7 +364,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
         .interaction(.shown, anchor: c, at: instant, generation: gen, policy: policy, presentation: g2),
     ]
     let params = ProjectionParameters(spreadingActivationFactor: 0.3)
-    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+    let result = project(events, at: instant, resolvedBy: corpusReader, key: .forTesting, parameters: params)
 
     #expect(result.reinforcement(for: b) > 0, "前提：B 因為跟 A 同框而獲得擴散")
     #expect(result.reinforcement(for: c) == 0, "C 不該因為 B 收到的擴散再借到任何增強——只做一跳")
@@ -382,7 +382,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
         .interaction(.dismissed, anchor: a, at: instant, generation: gen, policy: policy, presentation: group),
     ]
     let params = ProjectionParameters(spreadingActivationFactor: 0.3)
-    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+    let result = project(events, at: instant, resolvedBy: corpusReader, key: .forTesting, parameters: params)
 
     #expect((result[b]?.suppression ?? 0) == 0, "dismissed 不得把抑制擴散給同框但未互動的 anchor")
 }
@@ -405,7 +405,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
         .interaction(.dismissed, anchor: b, at: instant, generation: gen, policy: policy, presentation: group),
     ]
     let params = ProjectionParameters(spreadingActivationFactor: 0.3)
-    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+    let result = project(events, at: instant, resolvedBy: corpusReader, key: .forTesting, parameters: params)
 
     #expect(result.reinforcement(for: a) > 0, "前提：A 自己被開，應該有直接增強")
     #expect(
@@ -432,7 +432,7 @@ private func event(_ kind: NonPinKind, _ a: Anchor, minutesAgo: Double) -> Event
         .interaction(.dismissed, anchor: b, at: instant, generation: gen, policy: policy, presentation: group),
     ]
     let params = ProjectionParameters(dismissedWeight: 0, spreadingActivationFactor: 0.3)
-    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+    let result = project(events, at: instant, resolvedBy: corpusReader, key: .forTesting, parameters: params)
 
     #expect(result.reinforcement(for: a) > 0, "前提：A 自己被開，應該有直接增強")
     #expect(
@@ -485,7 +485,7 @@ private func makeOversizedGroupFixture(memberCount: Int, groupTag: String) -> (
     let fixture = makeOversizedGroupFixture(memberCount: 1999, groupTag: "atcap")
     let params = ProjectionParameters(spreadingActivationFactor: 0.3)
     let result = project(
-        fixture.events, at: instant, resolvedBy: fixture.corpus, parameters: params)
+        fixture.events, at: instant, resolvedBy: fixture.corpus, key: .forTesting, parameters: params)
 
     for a in fixture.shownOnlyAnchors {
         #expect(
@@ -500,7 +500,7 @@ private func makeOversizedGroupFixture(memberCount: Int, groupTag: String) -> (
     let fixture = makeOversizedGroupFixture(memberCount: 2000, groupTag: "onecap")
     let params = ProjectionParameters(spreadingActivationFactor: 0.3)
     let result = project(
-        fixture.events, at: instant, resolvedBy: fixture.corpus, parameters: params)
+        fixture.events, at: instant, resolvedBy: fixture.corpus, key: .forTesting, parameters: params)
 
     for a in fixture.shownOnlyAnchors {
         #expect(
@@ -517,7 +517,7 @@ private func makeOversizedGroupFixture(memberCount: Int, groupTag: String) -> (
     let fixture = makeOversizedGroupFixture(memberCount: 2001, groupTag: "over")
     let params = ProjectionParameters(spreadingActivationFactor: 0.3)
     let result = project(
-        fixture.events, at: instant, resolvedBy: fixture.corpus, parameters: params)
+        fixture.events, at: instant, resolvedBy: fixture.corpus, key: .forTesting, parameters: params)
 
     for a in fixture.shownOnlyAnchors {
         #expect(
@@ -540,7 +540,7 @@ private func makeOversizedGroupFixture(memberCount: Int, groupTag: String) -> (
         .interaction(.shown, anchor: b, at: instant, generation: gen, policy: policy, presentation: group),
     ]
     let params = ProjectionParameters(spreadingActivationFactor: 0.3)
-    let result = project(events, at: instant, resolvedBy: corpusReader, parameters: params)
+    let result = project(events, at: instant, resolvedBy: corpusReader, key: .forTesting, parameters: params)
 
     #expect(result.reinforcement(for: a) == 0)
     #expect(result.reinforcement(for: b) == 0)

@@ -113,7 +113,7 @@ private func buildSearchableIndex(
     _ = try writeSession(in: corpus, project: project, file: "session.jsonl", lines: lines)
 
     _ = try IndexBuilder(
-        location: derived, scanner: CorpusScanner(corpusRoot: corpus), embedder: embedder
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting), embedder: embedder
     ).build()
 
     let database = try IndexDatabase(path: derived.databaseURL.path)
@@ -179,7 +179,7 @@ func projectScopeExcludesOtherProjects() throws {
 
     let embedder = StubEmbedder(revision: "rev-A")
     _ = try IndexBuilder(
-        location: derived, scanner: CorpusScanner(corpusRoot: corpus), embedder: embedder
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting), embedder: embedder
     ).build()
     let database = try IndexDatabase(path: derived.databaseURL.path)
     defer { database.close() }

@@ -30,7 +30,7 @@ func evalAnchor(_ id: String) -> Anchor {
     Anchor(
         source: "fixture-a",
         turn: Turn(id: id, role: "user", timestamp: Date(), text: "合成候選 \(id)，長度足夠切 span。"),
-        span: 0..<8)
+        span: 0..<8, key: .forTesting)
 }
 
 func evalCandidates(_ ids: [String]) -> [Candidate] {

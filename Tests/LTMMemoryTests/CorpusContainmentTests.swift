@@ -147,7 +147,7 @@ import Testing
             anchor: Anchor(
                 source: ProjectFingerprint.of("fixture-a"),
                 turn: Turn(id: "t1", role: "user", timestamp: Date(), text: "合成文字內容"),
-                span: 0..<4),
+                span: 0..<4, key: .forTesting),
             at: Date(), generation: GenerationID("build-1"), policy: RankingPolicyID("archival")))
 
     let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -211,7 +211,7 @@ private func anchorForFifoTest() -> Anchor {
     Anchor(
         source: ProjectFingerprint.of("fixture-a"),
         turn: Turn(id: "t1", role: "user", timestamp: Date(timeIntervalSince1970: 1), text: "合成文字"),
-        span: 0..<4)
+        span: 0..<4, key: .forTesting)
 }
 
 
@@ -228,7 +228,7 @@ private func anchorForFifoTest() -> Anchor {
             anchor: Anchor(
                 source: ProjectFingerprint.of("fixture-a"),
                 turn: Turn(id: "t1", role: "user", timestamp: Date(), text: "合成文字內容"),
-                span: 0..<4),
+                span: 0..<4, key: .forTesting),
             at: Date(), generation: GenerationID("build-1"),
             policy: RankingPolicyID("archival")))
 

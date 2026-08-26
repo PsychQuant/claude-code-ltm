@@ -428,7 +428,7 @@ private func runIncremental(
 
     func build() throws {
         _ = try IndexBuilder(
-            location: derived, scanner: CorpusScanner(corpusRoot: corpus), embedder: embedder
+            location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting), embedder: embedder
         ).build()
     }
 
@@ -535,7 +535,7 @@ func incrementalMatchesFullRebuild(seed: UInt64) throws {
         policy: EquivalencePolicy())
     defer { try? FileManager.default.removeItem(at: fullRoot.root) }
     let fullReport = try IndexBuilder(
-        location: fullRoot, scanner: CorpusScanner(corpusRoot: run.corpus), embedder: embedder
+        location: fullRoot, scanner: CorpusScanner(corpusRoot: run.corpus, anchorKey: .forTesting), embedder: embedder
     ).build()
 
     // **跳過的分類也要相同**（#29 缺口 3）。生成語料現在每個檔都混入一行會被跳過

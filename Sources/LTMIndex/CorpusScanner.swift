@@ -131,14 +131,18 @@ public struct SkipTally: Sendable, Equatable {
 /// 呼叫端先清掉那個來源的舊 chunk。
 public struct CorpusScanner: Sendable {
     public let corpusRoot: URL
+    /// Anchor 內容摘要的密鑰（#12）。與語料根同一個理由：**索引層不自己產生它**
+    /// ——密鑰是機器的性質，由 facade 注入。
+    public let anchorKey: AnchorKey
 
     /// 語料根是**必填**的，沒有預設值。
     ///
     /// 索引層不自己假設語料在哪：那個知識屬於 facade（它同時看得到 LTMMemory 的
     /// `CorpusLocation`）。兩個地方各寫一次 `~/.claude/projects` 的話，日後改動
     /// 只會改到其中一個，而不一致的那一邊會安靜地掃描空目錄。
-    public init(corpusRoot: URL) {
+    public init(corpusRoot: URL, anchorKey: AnchorKey) {
         self.corpusRoot = corpusRoot
+        self.anchorKey = anchorKey
     }
 
     public enum ScanError: Error, Sendable, Equatable {
@@ -364,7 +368,8 @@ public struct CorpusScanner: Sendable {
                 continue
             }
             if let chunk = Self.chunk(
-                from: object, project: project, sourceKey: sourceKey, tally: &tally)
+                from: object, project: project, sourceKey: sourceKey, key: anchorKey,
+                tally: &tally)
             {
                 chunks.append(chunk)
             }
@@ -375,7 +380,8 @@ public struct CorpusScanner: Sendable {
     /// 一筆 jsonl 紀錄 → chunk。任何不合語料預期的紀錄一律**跳過並記帳**，
     /// 絕不中止行程：語料是外來資料，而 `Anchor` 的建構子對非法識別碼是 trap。
     static func chunk(
-        from object: [String: Any], project: String, sourceKey: String, tally: inout SkipTally
+        from object: [String: Any], project: String, sourceKey: String, key: AnchorKey,
+        tally: inout SkipTally
     ) -> CorpusChunk? {
         guard let type = object["type"] as? String, type == "user" || type == "assistant" else {
             tally.notATurn += 1
@@ -415,7 +421,7 @@ public struct CorpusScanner: Sendable {
         // sessionID 仍然保留在 chunk 上——它是導航資訊，不是身分。
         let anchor = Anchor(
             source: ProjectFingerprint.of(project), turn: turn,
-            span: 0..<text.unicodeScalars.count)
+            span: 0..<text.unicodeScalars.count, key: key)
         return CorpusChunk(
             sourceKey: sourceKey, project: project, sessionID: sessionID, uuid: uuid,
             timestamp: timestamp, role: role, text: text, anchor: anchor)
