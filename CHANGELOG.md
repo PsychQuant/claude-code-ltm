@@ -4,6 +4,87 @@
 
 ## Unreleased
 
+## [0.3.0] - 2026-08-26
+
+### Changed
+
+- **改名**：repo `claude-LTM` → **`claude-code-ltm`**，marketplace → `claude-code-ltm`，
+  plugin → **`ltm`**。理由是準確性：這個工具讀的是 `~/.claude/projects/**/*.jsonl`，
+  而**只有 Claude Code 會寫那個東西**。**on-disk 路徑 `~/.claude-ltm/` 刻意不動**
+  （`memory/` 是唯一不可重建的資料）。
+
+- **wrapper 一律用 GitHub Release 的 binary**，不再撿本機建置或 `/usr/local/bin`。
+  先前的搜尋順序讓「我跑的是哪一版」失去單一答案：版本檢查只套用在 `~/bin` 那份，
+  撿到別處的就整個跳過檢查。
+
+### Fixed
+
+- **`ltm build` 分批提交**（#44）。先前整個嵌入迴圈在單一 `database.transaction`
+  內——而這個檔案的註解逐字寫著「第一階段（**交易外**）：算向量」。code 與它
+  自己的設計說明分岔了。
+
+  實測代價：一次 1 小時 20 分的全量 build 被中斷後，`index.sqlite3` 停在 4 KB、
+  WAL 751 MB、`chunks` 為 0——全部 rollback。而中斷不需要當機，**關掉 session
+  就夠了**。
+
+  現在每批四段：交易外算向量 → 交易外側車 fsync → 單一交易（刪失效來源 +
+  insert + 寫指標）→ 寫 state。中斷代價從「全部」變成「最後一批」。
+
+- **並發寫入是具名拒絕**（#44 ②，先前未實測）。第二個 build 撞上 `build.lock`
+  拋 `BuildError.lockHeld(path:)`，不是逾時也不是誤報索引損壞——後者會讓使用者
+  去跑 `--full`，丟掉正確的索引。
+
+### Added
+
+- **`ltm build` 的進度輸出**（#45）。每批完成印一行到 **stderr**，`--quiet` 可關。
+  先前它在完成前一個字都不印，而全量建索引是數十分鐘等級的工作——**一個跑數十
+  分鐘、完成前完全沉默的命令，跟卡死在外觀上是同一個樣子**。
+
+- **`docs/measurements/2026-08-26-build-peak-memory.md`**。結果**推翻了 #46 的
+  前提**：向量累積已被分批封在 4 MB，線性成長來自 `CorpusScanner.scan()` 一次
+  回傳全部 chunk 連同完整文字。紀錄也寫明不可外推並附實證。
+
+## [0.2.1] - 2026-08-26
+
+### Fixed
+
+- **沒有登入鑰匙圈時回訊息，不要回一個等人點的視窗**（#45 之前的 keychain 修正）。
+  舊版檔案式 keychain 在該環境不回 status code，而是彈 modal 並停住；`SecItemAdd`
+  最終回的 `-60006` 逐字是 "The authorization was canceled by the user"。
+
+  改用 data-protection keychain 實測不可行（要 `keychain-access-groups` entitlement
+  → 需嵌 provisioning profile，Developer ID 的 CLI 發布做不到；帶 entitlement 而無
+  profile 會被 SIGKILL）。改成在碰 Keychain 之前判斷，拋 `noLoginKeychain` 並指名
+  補救（`ltm memory --export-key` → `LTM_ANCHOR_KEY`）。
+
+  第一版讀錯東西：`NSHomeDirectory()` 不跟隨 `$HOME`，而 keychain 層看的是 `$HOME`。
+  **檢查的東西必須與被檢查的那一層看同一個。**
+
+- `save` 的註解把「不進 iCloud 同步」掛在 `kSecAttrAccessible` 上，而該屬性在 macOS
+  要生效需要 `kSecUseDataProtectionKeychain`。結果成立而理由不同（舊版 keychain
+  預設就不同步），註解已更正。
+
+## [0.2.0] - 2026-08-26
+
+### Added
+
+- **`ltm-setup` skill**。分清楚兩件成本差三個數量級的事：binary 下載是自動的
+  （幾秒），建索引不是（數十分鐘的本機運算）。先報使用者自己的語料規模與預估
+  成本，經同意才跑。
+
+  **不做成 SessionStart hook**：那個機制適合幾秒的下載＋版本檢查，塞不下數十分鐘
+  的工作。
+
+### Fixed
+
+- **`ServiceError` 的訊息只在 CLI 路徑上存在**。每則補救說明都寫在
+  `QueryCommand.report` 裡，而 MCP 路徑構不到它——它走 `"✗ \(error)"`，拿到的是
+  enum 的預設描述（`indexMissing(path: "…")`），**而那個 case 的 doc 逐字寫著
+  「訊息一律指名 `ltm build`」**。
+
+  同一條規則兩個寫者，而沒照做的那個正是模型會讀到的。修法是刪掉一份：訊息移進
+  `ServiceError: CustomStringConvertible`，CLI 只留結束碼對應。
+
 ## [0.1.0] - 2026-08-26
 
 **首次發布。** 這一版之前的所有條目都列在下面——本檔從 repo 開始就在記，所以
