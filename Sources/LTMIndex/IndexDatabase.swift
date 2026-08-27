@@ -271,8 +271,13 @@ public final class IndexDatabase {
         }
         if !rejected.isEmpty {
             // 沉默的丟棄等於索引少了東西而沒人會發現（CLAUDE.md）。
-            FileHandle.standardError.write(
-                Data(
+            //
+            // **`try?` + `write(contentsOf:)`，不是 legacy 的 `write(_:)`。**
+            // 後者在 EPIPE 時丟 ObjC exception，而 `main.swift` 忽略 SIGPIPE 之後
+            // 那個 exception 會讓行程以 SIGABRT 死掉——一個診斷訊息不該有能力
+            // 殺掉建置。（repo 裡還有六個 legacy 站點，追蹤於 #50。）
+            try? FileHandle.standardError.write(
+                contentsOf: Data(
                     ("⚠ scan_state 有 \(rejected.count) 列的 processed_bytes 是負值，已丟棄"
                         + "（那些來源將從頭重掃）：\(rejected.sorted().prefix(5).joined(separator: "、"))\n")
                         .utf8))
