@@ -533,7 +533,10 @@ func anEmptyIndexNeverAdoptsAStaleMirror() throws {
     do {
         let database = try IndexDatabase(path: derived.databaseURL.path)
         defer { database.close() }
+        // 真實的 WAL 回滾是原子的：內容與它的來源連結一起消失。只刪 `chunks`
+        // 會留下懸空的 `chunk_sources` 列，那是資料庫層的不一致、不是回滾。
         try database.execute("DELETE FROM chunks")
+        try database.execute("DELETE FROM chunk_sources")
         try database.execute("DELETE FROM scan_state")
     }
 
@@ -1207,3 +1210,109 @@ func releasingTheLockTwiceIsANoOp() throws {
 }
 
 
+
+/// **derived 目錄底下的檔案不得跟著 symlink 走。**
+///
+/// R3 說加固是「點狀的」，R4 量出另外兩處確實還開著，而 `vectors.bin` 那條
+/// 比鎖更糟：`truncateSidecar` 在**每一次查詢之前**被呼叫（`refreshIncrementally`
+/// → `build()`），所以它在 `ltm query` 與長駐 `ltm mcp` 的路徑上。
+///
+/// 這條測試對三個 derived 檔案各驗一次——**因為漏掉一個就是下一個 CRITICAL**。
+@Test("derived 檔案是 symlink 時具名失敗，目標檔不被截斷或覆寫")
+func derivedFilesDoNotFollowSymlinks() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try derived.createRootIfNeeded()
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+
+    // **先建一份真的索引。** 第一次 build 走全量路徑，而 `discardDerivedArtifacts`
+    // 會 `removeItem` 掉那個 symlink——那正是 security lens 指出的不對稱：
+    // `--full` 是安全的，**危險的是增量與查詢路徑**。要驗的是後者。
+    _ = try IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A")).build()
+
+    // 兩個受害者，**而且大小刻意不同**。
+    //
+    // 非空的那個給側車：`truncate` 對它就是歸零。
+    // **零長度的那個給資料庫**：非空目標倖存只是因為 sqlite 拒絕解析非資料庫檔案
+    // ——那是意外、不是有人選的緩解，而它對任何空檔案都不成立（實測：0 → 8,192
+    // bytes 的 SQLite 檔，旁邊還多出 `-wal` / `-shm`）。用非空目標驗這條會讓測試
+    // **靠那個意外通過**，於是拿掉 `lstat` 檢查它也不會紅——變異量到過。
+    let payload = Data("IMPORTANT DATA THAT MUST SURVIVE".utf8)
+    let fatVictim = corpus.appendingPathComponent("victim-fat.jsonl")
+    try payload.write(to: fatVictim)
+    let emptyVictim = corpus.appendingPathComponent("victim-empty.jsonl")
+    try Data().write(to: emptyVictim)
+
+    for (label, target, victim) in [
+        ("vectors", derived.vectorsURL, fatVictim),
+        ("database", derived.databaseURL, emptyVictim),
+    ] {
+        try? FileManager.default.removeItem(at: target)
+        try FileManager.default.createSymbolicLink(at: target, withDestinationURL: victim)
+
+        // 具名失敗——不是靜默寫穿。
+        #expect(throws: (any Error).self, "\(label) 沒有拒絕 symlink") {
+            _ = try IndexBuilder(
+                location: derived,
+                scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                embedder: StubEmbedder(revision: "rev-A")
+            ).build()
+        }
+        let after = try Data(contentsOf: victim)
+        #expect(after.count == (victim == fatVictim ? payload.count : 0),
+                "\(label) 跟著 symlink 寫穿了（\(after.count) bytes）——這條路徑到得了唯讀語料")
+        // sqlite 會在旁邊留 `-wal` / `-shm`，那也是寫進語料樹。
+        for suffix in ["-wal", "-shm"] {
+            let sibling = URL(fileURLWithPath: victim.path + suffix)
+            #expect(!FileManager.default.fileExists(atPath: sibling.path),
+                    "\(label) 在語料樹裡留下了 \(suffix)")
+        }
+        try? FileManager.default.removeItem(at: target)
+    }
+}
+
+/// **游標涵蓋不住索引時要拒絕——不論 `scan_state` 是不是空的。**
+///
+/// 上一版的判準是 `previousState.files.isEmpty`，那是一個代理；而它在同一輪的
+/// 另一個修法下失效了（負游標從「丟掉整列」改成「修成必然對不上的游標」之後，
+/// `files` 不再是空的）。於是「表裡只有壞游標」這個先前被擋下的狀態改為靜靜走
+/// 增量路徑，已從語料刪除的來源永不作廢——**違反不變式 2，而且是那一輪引入的**
+/// （#44 R4 verify，codex lens）。
+@Test("部分游標缺失時同樣拒絕——判準是涵蓋率，不是表空不空")
+func aPartiallyCoveredIndexIsRefused() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    for file in 0..<2 {
+        _ = try writeSession(
+            in: corpus, project: "proj-one", file: "s\(file).jsonl",
+            lines: [turnLine(
+                uuid: String(format: "%08x-aaaa-bbbb-cccc-dddddddddddd", file),
+                session: "1111111\(file)-2222-3333-4444-555555555555",
+                role: "user", text: "來源 \(file) 的內容")])
+    }
+    _ = try IndexBuilder(location: derived, scanner: scanner,
+                         embedder: StubEmbedder(revision: "rev-A")).build()
+
+    // 只刪掉**其中一個**來源的游標——`scan_state` 仍非空，所以舊的代理判準會放行。
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("DELETE FROM scan_state WHERE source_key LIKE '%s0.jsonl'")
+        #expect(try !database.scanState().files.isEmpty, "前提：表不是空的，代理判準會放行")
+        #expect(try database.sourcesWithoutCursor().count == 1)
+    }
+
+    #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner,
+                             embedder: StubEmbedder(revision: "rev-A")).build()
+    }
+}

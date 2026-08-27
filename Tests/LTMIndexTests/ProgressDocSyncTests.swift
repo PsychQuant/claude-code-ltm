@@ -32,9 +32,34 @@ func theSetupSkillEnumeratesEveryProgressCase() throws {
         progressBlock.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { $0.hasPrefix("case ") }
-            .compactMap { line -> String? in
-                let body = line.dropFirst("case ".count)
-                return String(body.prefix(while: { $0.isLetter || $0.isNumber }))
+            // **一行可以宣告多個 case**（`case a, b`）。上一版只取第一個，於是
+            // 一個以那種形式加進來的 case 會讓這條檢查靜默漏掉它——一份宣稱自己
+            // 完整的列舉，用一個看不出漏洞的 parser 支撐（#44 R4 verify，codex）。
+            //
+            // **逗號只在括號深度 0 才算分隔。** associated value 的參數列裡也有逗號
+            // （`case scanCompleted(files: Int, chunks: Int, …)`），天真的 `split`
+            // 會把 `files`、`chunks` 也當成 case 名字——第一版就是這樣，而它讓
+            // 這條檢查改成噪音而不是漏洞。
+            .flatMap { line -> [String] in
+                var names: [String] = []
+                var depth = 0
+                var current = ""
+                for character in line.dropFirst("case ".count) {
+                    switch character {
+                    case "(", "[", "<": depth += 1
+                    case ")", "]", ">": depth -= 1
+                    case "," where depth == 0:
+                        names.append(current)
+                        current = ""
+                        continue
+                    default: break
+                    }
+                    if depth == 0 { current.append(character) }
+                }
+                names.append(current)
+                return names
+                    .map { String($0.trimmingCharacters(in: .whitespaces).prefix(while: { $0.isLetter || $0.isNumber })) }
+                    .filter { !$0.isEmpty }
             })
     #expect(!caseNames.isEmpty, "抓不到 case 名字——這條檢查失去意義，比失敗更糟")
 

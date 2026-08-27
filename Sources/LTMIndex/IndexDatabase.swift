@@ -59,6 +59,28 @@ public final class IndexDatabase {
 
     public init(path: String) throws {
         self.path = path
+        // **SQLite 沒有 `O_NOFOLLOW`**，所以只能在開檔前用 `lstat` 擋。
+        //
+        // 實測（#44 R4 verify，security lens）：`ln -s <零長度語料檔> index.sqlite3`
+        // 之後，那個語料檔會被寫成 8,192 bytes 的 SQLite 資料庫，而且旁邊多出
+        // `-wal` / `-shm`。非空目標倖存**只是因為 sqlite 拒絕解析非資料庫檔案**
+        // ——那是意外，不是有人選的緩解，而且它對任何空檔案都不成立。
+        //
+        // **威脅模型是 #40 已決的那一份**（見 `LTMMemory/EventStore.swift`）：
+        // 這道檢查防的是這個程式自己的 bug 與使用者自己的路徑擺法，不是對抗者。
+        // 所以它**擋不住** TOCTOU（`lstat` 與 `sqlite3_open_v2` 之間路徑可被換掉）
+        // 也擋不住 hardlink——兩者與 #40 逐字同一組被接受的限度。
+        //
+        // 這裡不能用 `openDerivedFileNoFollow`：sqlite 要自己開檔（它還要開
+        // `-wal` / `-shm`），拿不到我們的 fd。所以形式不同，判準相同。
+        var info = stat()
+        if lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK {
+            throw DatabaseError.openFailed(
+                path: path,
+                message: "它是一個符號連結。索引資料庫會被就地建立與覆寫，所以這裡不"
+                    + "跟著它走——那會寫到連結指向的地方去。請把它換成真正的檔案，"
+                    + "或改設 LTM_DERIVED_ROOT。")
+        }
         var db: OpaquePointer?
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX
         guard sqlite3_open_v2(path, &db, flags, nil) == SQLITE_OK, let opened = db else {
@@ -296,6 +318,32 @@ public final class IndexDatabase {
                         .utf8))
         }
         return ScanState(files: files)
+    }
+
+    /// 索引裡有 chunk、但 `scan_state` 沒有游標的那些來源鍵。
+    ///
+    /// **這是「這份游標涵蓋得住索引嗎」的直接答案，不是代理。**
+    ///
+    /// 上一版用 `previousState.files.isEmpty` 當那個問題的代理，而代理在本輪自己
+    /// 的修法下失效了：負游標從「丟掉整列」改成「修成必然對不上的游標」之後，
+    /// `files` 從空變成非空，於是「表裡只有壞游標」這個先前會撞上 `stateUnreadable`
+    /// 的狀態改為靜靜走增量路徑。若某來源已從語料刪除且不在 `previous.files` 裡，
+    /// 它的舊 chunk 永不作廢——**增量 ≠ 全量，違反不變式 2**，而且是那一輪引入的
+    /// （#44 R4 verify，codex lens）。
+    ///
+    /// 判準因此從代理換成本體：問資料庫。
+    public func sourcesWithoutCursor() throws -> [String] {
+        var missing: [String] = []
+        try query(
+            """
+            SELECT DISTINCT s.source_key FROM chunk_sources s
+            LEFT JOIN scan_state c ON c.source_key = s.source_key
+            WHERE c.source_key IS NULL
+            """
+        ) { statement in
+            missing.append(columnText(statement, 0))
+        }
+        return missing.sorted()
     }
 
     public func meta(_ key: String) throws -> String? {

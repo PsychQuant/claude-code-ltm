@@ -176,20 +176,15 @@ public struct IndexBuilder: Sendable {
         /// 這個該去看 `code`／`detail` 說的那件事。第一版把兩者混成一個，
         /// 於是磁碟滿的使用者會去等一個不存在的建置。
         case lockUnavailable(path: String, code: Int32, detail: String)
-        /// 分批迴圈算出的最大批次超過 `batchChunkUpperBound` 宣告的上界。
-        ///
-        /// 這是**內部不一致**，不是使用者輸入的問題：公式與迴圈分岔了。記憶體
-        /// 預算的估計與 `openspec/specs/ltm-cli/spec.md` 的 SHALL 文字都建立在
-        /// 那個上界上，所以它不成立時那兩者都在說謊——安靜地繼續比失敗糟。
-        case batchBoundViolated(
-            largestBatch: Int, declaredBound: Int, target: Int, largestSource: Int)
         /// 鎖檔開得起來，但它**不安全**：不只一個名字指向那個 inode（hard link），
         /// 或它不屬於當前使用者。
         ///
         /// 與 `lockUnavailable` 分開的理由同上——補救動作完全不同。這個不是
-        /// 「等一下再試」也不是「去看 errno」，是**有人在那個路徑上放了一個
-        /// 指向別的檔案的名字**，而 `ftruncate` 會照著它把那個檔案毀掉。
-        /// 唯一正確的處置是不要動它，並讓使用者自己去看那是什麼。
+        /// 「等一下再試」也不是「去看 errno」，是**那個名字指的不是我們的鎖檔**，
+        /// 而 `ftruncate` 會照著它把別的東西截短。唯一正確的處置是不要動它。
+        ///
+        /// **框架是 #40 的**（防這個程式自己的 bug 與使用者自己的路徑擺法），
+        /// 不是對抗性的——見 `FileLock.acquire` 的註解。
         case lockUnsafe(path: String, detail: String)
         /// 側車檔比索引宣稱的短。
         ///
@@ -308,13 +303,24 @@ public struct IndexBuilder: Sendable {
         var previousState = ScanState()
         if !rebuildFromScratch {
             previousState = try database.scanState()
-            if previousState.files.isEmpty, try database.chunkCount() > 0 {
-                // 索引裡有內容但沒有可信的續讀點。**不可**當成空 state 繼續：
-                // 那會在既有索引上重掃全語料 upsert，而使用者不會知道發生過什麼。
+            // **判準是「這份游標涵蓋得住索引嗎」，不是「表是不是空的」。**
+            //
+            // 上一版用 `previousState.files.isEmpty` 當代理，而代理在同一輪的另一個
+            // 修法下失效了：負游標改成「修成必然對不上的游標」之後 `files` 不再是空的
+            // ——於是「表裡只有壞游標」這個先前會被擋下的狀態改為靜靜走增量，而
+            // 已從語料刪除的來源永不作廢（違反不變式 2，#44 R4 verify）。
+            //
+            // 現在直接問資料庫：有 chunk 卻沒有游標的來源。空集合才放行。
+            let orphaned = try database.sourcesWithoutCursor()
+            if !orphaned.isEmpty {
+                // **不可**當成空 state 繼續：那會在既有索引上重掃全語料 upsert，
+                // 而使用者不會知道發生過什麼。
                 throw BuildError.stateUnreadable(
-                    detail: "索引裡有內容，但 DB 的續讀游標是空的（舊版本建立的索引、"
-                        + "或一次回滾之後）。續讀點與索引內容是否一致無法從磁碟上驗證，"
-                        + "所以這裡不猜：請跑 `ltm build --full` 從零重建")
+                    detail: "索引裡有 \(orphaned.count) 個來源沒有續讀游標"
+                        + "（舊版本建立的索引、或一次回滾之後）"
+                        + "——例如 \(orphaned.prefix(3).joined(separator: "、"))。"
+                        + "續讀點與索引內容是否一致無法從磁碟上驗證，所以這裡不猜："
+                        + "請跑 `ltm build --full` 從零重建")
             }
         }
         let scan = try scanner.scan(previous: previousState)
@@ -430,42 +436,28 @@ public struct IndexBuilder: Sendable {
             batch.reduce(0) { $0 + (grouped[$1]?.count ?? 0) }
         }.max() ?? 0
 
-        // **公式在這裡被實際呼叫，對照的是這個迴圈剛剛算出來的東西。**
+        // **公式與迴圈的對應由 `productionBatchingHonoursTheDeclaredBound` 扛，
+        // 這裡不加守衛。**
         //
-        // 上一版沒有這一段：`batchChunkUpperBound` 在整個出貨程式碼裡零呼叫，
-        // 而它的測試自己重寫了一份 `current += size; if current >= target` 的迴圈
-        // ——所以「公式與迴圈的分歧會在測試變紅」是假的：改壞這個迴圈、helper
-        // 不動，測試照樣綠（#44 R3 verify，四個 lens 各自命中）。
+        // 上一版在這裡加了一道 `guard largestBatchChunks <= declaredBound`，並用
+        // 一段註解論證它與 CLAUDE.md 的「驅動不了的守衛要拆掉」不同類。**那三個
+        // 論點逐一被可執行證據推翻**（#46 R4 verify，devil's advocate）：
         //
-        // 一個沒有生產呼叫端的「權威」不是權威。現在它有了，而且對照的方向是
-        // 對的：**受約束的是這個迴圈，執行點在迴圈之外**（CLAUDE.md：約束的執行點
-        // 必須在不受約束的那一方）。
+        // 1. 它不是語料相依的性質。迴圈在 `currentCount >= target` 時歸零，所以
+        //    append 前 `<= target − 1`、append 後 `<= (target − 1) + largestSource`
+        //    = 宣告上界。**對所有輸入恆成立**——唯一能違反它的是有人改那個迴圈，
+        //    而那是一次程式碼變更，正是測試的職責。
+        // 2. 交叉變異證明測試自己扛得住：把切點改成 `>= target * 10` **並且同時
+        //    刪掉守衛**，那條測試 `failed with 2 issues`。我當時只量了兩個單一
+        //    變異，而決定「由誰扛」的是交叉——CLAUDE.md 對 #40 寫的正是
+        //    「**逐一退掉**每個新增的機制」。
+        // 3. 它宣稱的兩個賭注都是假的：記憶體預算用的是 `largestBatchChunks`
+        //    （實際最大批次）而不是宣告上界，對分歧結構上免疫；而
+        //    `openspec/specs/ltm-cli/spec.md` 自己指名的執行點就是那條測試。
         //
-        // **這道守衛由誰扛，要說清楚——變異測試量過。**
-        // 拿掉這個 `guard`，`productionBatchingHonoursTheDeclaredBound` **仍然綠**：
-        // 扛住那條測試的是它自己的斷言（`observed.largest <= 宣告上界`），不是守衛。
-        // 所以按 CLAUDE.md 的字面，它是一道「驅動不了」的守衛。
-        //
-        // 它仍然留著，理由是它與 #40 那個形狀**不同類**：#40 的守衛是一個 bug 的
-        // 修法，那種東西必須有測試驅動、否則它防的事沒有人在看。這一道是**生產
-        // 路徑上對內部不變式的執行點**——它買的不是「測試會變紅」，是「使用者的
-        // build 會停下來」。測試跑不到使用者的語料，而記憶體預算的估計與
-        // `openspec/specs/ltm-cli/spec.md` 的 SHALL 都建立在這個上界上。
-        //
-        // 兩件事各自被量過：改壞下面那個迴圈（切點移到越線之後），守衛丟出
-        // `batchBoundViolated(largestBatch: 24, declaredBound: 6, …)`；而只拿掉守衛、
-        // 迴圈不動，什麼都不會變紅。**兩句都是實測，不是推理。**
-        let largestSourceChunks = grouped.values.map(\.count).max() ?? 0
-        let declaredBound = Self.batchChunkUpperBound(
-            target: batchChunkTarget, largestSource: largestSourceChunks)
-        guard largestBatchChunks <= declaredBound else {
-            // 具名錯誤而不是 `precondition`：這是內部不一致，但 `build()` 是
-            // 語料驅動的，不得 trap。而它也不能只是記個 log——記憶體預算與
-            // spec 的 SHALL 都建立在這個上界上，它不成立時那兩者都在說謊。
-            throw BuildError.batchBoundViolated(
-                largestBatch: largestBatchChunks, declaredBound: declaredBound,
-                target: batchChunkTarget, largestSource: largestSourceChunks)
-        }
+        // 而同一次改動在 40 行外對同一條規則做了**相反**決定（`CorpusScanner`
+        // 那處刻意不加守衛），且那一處的賭注遠高於這裡——政策被以風險的反序套用。
+
         // ×2：`appendVectors` 呼叫 `VectorSidecar.encode`，產生的 `Data` 與
         // `batchVectors` 同時存活。少算這個 2 會讓守衛在最需要的時候放行。
         let estimatedVectorBytes = largestBatchChunks * embedder.dimension * 4 * 2
@@ -679,7 +671,7 @@ public struct IndexBuilder: Sendable {
             return
         }
         let target = UInt64(rows * rowBytes)
-        let handle = try FileHandle(forUpdating: location.vectorsURL)
+        let handle = try openDerivedFileNoFollow(location.vectorsURL, flags: O_RDWR)
         defer { try? handle.close() }
         let current = try handle.seekToEnd()
         guard current >= target else {
@@ -693,7 +685,7 @@ public struct IndexBuilder: Sendable {
         guard !vectors.isEmpty else { return }
         let data = VectorSidecar.encode(vectors)
         if FileManager.default.fileExists(atPath: location.vectorsURL.path) {
-            let handle = try FileHandle(forWritingTo: location.vectorsURL)
+            let handle = try openDerivedFileNoFollow(location.vectorsURL, flags: O_WRONLY)
             defer { try? handle.close() }
             try handle.seekToEnd()
             try handle.write(contentsOf: data)
@@ -715,7 +707,7 @@ public struct IndexBuilder: Sendable {
             // ——側車檔整個消失，而 `vector_count` 宣稱它有 N 筆。
             // 註解先前逐字寫著「再 fsync 一次目錄項次」，而程式碼 fsync 的是檔案。
             // （由跨模型盲驗指出。）
-            let handle = try FileHandle(forWritingTo: location.vectorsURL)
+            let handle = try openDerivedFileNoFollow(location.vectorsURL, flags: O_WRONLY)
             try handle.synchronize()
             try handle.close()
             try Self.synchronizeDirectory(location.vectorsURL.deletingLastPathComponent())
@@ -750,6 +742,49 @@ public struct IndexBuilder: Sendable {
         }
     }
 
+}
+
+
+/// 開一個 derived 目錄底下的檔案，**且拒絕跟隨符號連結**。
+///
+/// ## 為什麼需要它，以及它的威脅模型
+///
+/// `FileHandle(forUpdating:)` / `forWritingTo:` 一律跟隨 symlink。所以
+/// `ln -s <語料>.jsonl vectors.bin` 之後，`truncateSidecar` 會把那個語料檔截成
+/// 零長度——**違反不變式 1**。實測（#45 R4 verify，security lens）：40 bytes → 0。
+///
+/// 比 `build.lock` 那條更糟的是**可達性**：`build()` 無條件呼叫 `truncateSidecar`，
+/// 而 `LTMService.refreshIncrementally()` 在**每一次查詢之前**呼叫 `build()`。
+/// 所以破壞性的呼叫在 `ltm query` 與長駐 `ltm mcp` 的路徑上，不需要跑 `ltm build`。
+/// （一個反直覺的不對稱：`--full` 反而是安全的——`removeItem` 只 unlink 那個名字。）
+///
+/// **威脅模型是 #40 已決的那一份**（見 `LTMMemory/EventStore.swift`）：這道守衛
+/// 防的是**這個程式自己的 bug 與使用者自己的路徑擺法**——例如用 symlink 把數 GB
+/// 的側車搬到別的磁碟，之後又把它重指到別處。它**不是**對抗邊界，所以
+/// hardlink 與 TOCTOU 同樣是**被接受的限度**，理由與 #40 逐字相同。
+///
+/// ## 為什麼是一個 helper 而不是三處各自加旗標
+///
+/// R3 指出加固是「點狀的」，R4 量出另外兩處確實還開著。逐處加旗標會讓**下一個
+/// 新增的 derived 檔案成為第四個漏網的**——「點狀」這個詞指的就是這件事。
+/// 所以入口收斂成這一個。
+func openDerivedFileNoFollow(_ url: URL, flags: Int32) throws -> FileHandle {
+    let descriptor = open(url.path, flags | O_NOFOLLOW)
+    guard descriptor >= 0 else {
+        let code = errno
+        // `ELOOP` 就是「它是一個 symlink」。其餘照原樣往上報。
+        throw CocoaError(
+            code == ELOOP ? .fileWriteUnknown : .fileReadUnknown,
+            userInfo: [
+                NSFilePathErrorKey: url.path,
+                NSLocalizedDescriptionKey: code == ELOOP
+                    ? "\(url.lastPathComponent) 是一個符號連結。derived 目錄底下的檔案"
+                        + "會被就地截短與覆寫，所以這裡不跟著它走——那會寫到連結指向的"
+                        + "地方去。請把它換成真正的檔案，或改設 LTM_DERIVED_ROOT。"
+                    : String(cString: strerror(code)),
+            ])
+    }
+    return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
 }
 
 /// 單寫者鎖。**所有權由 `flock(2)` 表示，不是由鎖檔存在表示。**
@@ -831,6 +866,20 @@ public final class FileLock: @unchecked Sendable {
         // 就是一條任意檔案截斷的路徑。**而語料根也可以被指到同一棵樹下**——
         // 那會讓它變成一條寫進唯讀語料的路徑（不變式 1）。
         //
+        // **威脅模型：#40 已決的那一個，不是對抗邊界。**
+        //
+        // 上一版的註解與 CLI 訊息採用了對抗性框架（「有人在那個路徑上放了一個
+        // 指向別的檔案的名字」、叫使用者去跑 `find ~ -inum`）。而
+        // `LTMMemory/EventStore.swift` 對**同一個攻擊類別**早就寫下一份蓋了
+        // 「已決」章的規格：守衛的職責是執行不變式 1，而它防的是**這個程式自己的
+        // bug**——一條算錯的路徑、一個沒想到的 symlink 擺法；hardlink 與 TOCTOU
+        // 是**被接受的限度**，因為一個已經能寫進使用者家目錄的攻擊者有直接得多的
+        // 手段。同一個 process 裡有兩份相反的規格，讀者依先讀到哪個檔案得到相反
+        // 答案（#45 R4 verify，security lens）。**這裡改採 #40 的那一份。**
+        //
+        // 所以下面的檢查要這樣讀：它問的不是「有沒有人在攻擊我」，是
+        // **「這個名字指的是不是我們自己的鎖檔」**。答案是否的話就不要動它。
+        //
         // **一個旗標關不掉整條——這句話上一版就是這樣寫的，而它是錯的。**
         // `O_NOFOLLOW` 只拒絕「路徑最後一段是符號連結」。**hard link 不是符號連結**：
         // 它是一個指向受害者 inode 的普通目錄項，`open` 會成功。所以
@@ -871,6 +920,12 @@ public final class FileLock: @unchecked Sendable {
         // 對的是**已經拿到的 fd**、不是路徑——所以中間沒有 TOCTOU 窗口。
         //
         // 注意順序：這道檢查必須在 `ftruncate` 之前。放在之後就只是事後通知。
+        //
+        // **誠實邊界**：這消除的是「路徑在檢查與開檔之間被換掉」那一類（fd 已經
+        // 綁定 inode）。它**不**消除「inode 的 link count 在 `fstat` 之後改變」
+        // ——`st_nlink` 是 inode 上的可變狀態，而這裡沒有任何機制凍結它。
+        // 上一版寫「所以中間沒有 TOCTOU 窗口」，**那句絕對句是假的**（#45 R4
+        // verify，codex）。TOCTOU 在 #40 的模型下是被接受的限度，理由同上。
         var info = stat()
         guard fstat(descriptor, &info) == 0 else {
             let code = errno

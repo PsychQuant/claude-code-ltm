@@ -344,32 +344,18 @@ enum BuildCommand {
                 // 留著那句會把使用者導向一個不需要、而且有 race 的手動 `rm`。
                 Output.error("✗ 另一個建置正在進行（鎖：\(path)）。等它結束再試。")
                 return LTMCommandLine.ExitCode.lockHeld.rawValue
-            case .batchBoundViolated(let largestBatch, let declaredBound, let target, let largestSource):
-                Output.error(
-                    """
-                    ✗ 內部不一致：分批迴圈算出最大批次 \(largestBatch) chunk，超過宣告的上界 \(declaredBound)
-                    （--batch-chunks \(target)，最大單一來源 \(largestSource) chunk）
-
-                    這是 bug，不是你的輸入問題：批次上界的公式
-                    （IndexBuilder.batchChunkUpperBound）與實際的分批迴圈分岔了。
-                    記憶體預算的估計與 spec 的 SHALL 都建立在那個上界上，所以繼續
-                    跑等於讓兩者說謊。請開 issue 並附上這三個數字。
-                    """)
-                return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .lockUnsafe(let path, let detail):
                 Output.error(
                     """
-                    ✗ 建置鎖的路徑不安全，已中止（**沒有寫入任何東西**）：\(detail)
+                    ✗ 這個路徑上的東西不是我們的鎖檔，已中止（**沒有寫入任何東西**）：\(detail)
                     路徑：\(path)
 
-                    鎖檔會被截短再寫入 pid。如果那個名字指向的其實是別的檔案
-                    （hard link），截短就會把那個檔案毀掉——包含唯讀的語料。
-                    所以這裡不動它，請自己去看那是什麼：
+                    鎖檔會被截短再寫入 pid，所以如果那個名字指的是別的檔案，
+                    截短就會把它毀掉。這裡不動它。
 
-                      ls -li \(path)          # 看 inode 與連結數
-                      find ~ -inum <inode>    # 看還有誰指向同一個 inode
+                      ls -li \(path)   # 看它是什麼、有幾個名字指向它
 
-                    確認無誤後刪掉它再重跑。
+                    確認那不是你要留的東西之後刪掉它再重跑。
                     """)
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .lockUnavailable(let path, let code, let detail):
@@ -639,23 +625,18 @@ enum QueryCommand {
                     """
                     ✗ 增量併入時向量累積估計 \(BuildCommand.megabytes(estimated)) 超過預算 \
                     \(BuildCommand.megabytes(budget))
-                    索引還在，查詢仍以既有內容回答，但這一輪沒有併入新語料。
+                    索引還在，但這一輪沒有併入新內容，**而且這次查詢沒有回答**
+                    （併入失敗會讓整個查詢失敗——上一版這裡寫「查詢仍以既有內容
+                    回答」，那句話不成立：印完這行就離開，一筆結果都不印）。
                     LTM_BUILD_MEMORY_BUDGET_MB 對 `ltm query` / `ltm mcp` 同樣生效
-                    （它們每次查詢前都會併入）。要讓併入繼續，提高或移除該預算。
-                    """)
-            case .batchBoundViolated(let largestBatch, let declaredBound, _, _):
-                Output.error(
-                    """
-                    ✗ 內部不一致：最大批次 \(largestBatch) chunk 超過宣告上界 \(declaredBound)。
-                    索引還在，查詢仍以既有內容回答，但這一輪沒有併入新語料。
-                    這是 bug——詳情見 `ltm build` 的同一則錯誤。
+                    （它們每次查詢前都會併入）。要拿到答案，提高或移除該預算。
                     """)
             case .lockUnsafe(let path, let detail):
                 Output.error(
                     """
-                    ✗ 建置鎖的路徑不安全，這一輪沒有併入新內容：\(detail)
+                    ✗ 建置鎖的路徑不是我們的鎖檔，這次查詢沒有回答：\(detail)
                     路徑：\(path)
-                    索引還在，查詢仍以既有內容回答。詳情與處置見 `ltm build` 的同一則錯誤。
+                    索引還在，但併入失敗會讓整個查詢失敗。詳情與處置見 `ltm build` 的同一則錯誤。
                     """)
             case .lockUnavailable(let path, let code, let detail):
                 // 這個**不**被 facade 吞掉，而且不該吞：它不是「有人正在建置」，
