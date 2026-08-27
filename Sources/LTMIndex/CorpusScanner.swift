@@ -129,20 +129,24 @@ public struct SkipTally: Sendable, Equatable {
 /// 增量策略沿用 CLAUDE.md 的那一句：**不假設 jsonl 是 append-only，但利用它**。
 /// 已處理段落的雜湊對得上就從 `processedBytes` 續讀；對不上就整份重解，並要求
 /// 呼叫端先清掉那個來源的舊 chunk。
-/// 掃描期間實際讀了多少 bytes。**只給測試用**。
+
+/// 掃描期間實際讀了多少 bytes。**只給測試用，所以是 internal。**
 ///
 /// 存在的理由是「重複讀取」這個性質無法從 `scan()` 的回傳值觀察——兩次讀取與一次
 /// 讀取產出的 `ScanState` 逐字相同。要把它釘住就得看**做了多少 I/O**，而那是
 /// 實作細節，只有計數器看得到。
 ///
 /// 用 reference type 是因為 `CorpusScanner` 是 `struct` 且 `scan()` 不是 `mutating`。
-public final class ReadTally: @unchecked Sendable {
+/// **不是 public。** `LTMIndex` 是 `Package.swift` 匯出的 `.library`，把它公開等於
+/// 把一個測試計數器寫進出貨的 API 契約——而且外部消費者拿得到型別卻接不上
+/// scanner（唯一的建構子是 internal），只會拿到一個 inert 的可變物件。
+/// 測試用 `@testable import LTMIndex` 就看得到，不需要 public。
+final class ReadTally: @unchecked Sendable {
     private let lock = NSLock()
     private var total = 0
-    public init() {}
-    public var bytesRead: Int { lock.lock(); defer { lock.unlock() }; return total }
+    init() {}
+    var bytesRead: Int { lock.lock(); defer { lock.unlock() }; return total }
     func add(_ n: Int) { lock.lock(); total += n; lock.unlock() }
-    public func reset() { lock.lock(); total = 0; lock.unlock() }
 }
 
 public struct CorpusScanner: Sendable {
@@ -156,7 +160,8 @@ public struct CorpusScanner: Sendable {
     /// 索引層不自己假設語料在哪：那個知識屬於 facade（它同時看得到 LTMMemory 的
     /// `CorpusLocation`）。兩個地方各寫一次 `~/.claude/projects` 的話，日後改動
     /// 只會改到其中一個，而不一致的那一邊會安靜地掃描空目錄。
-    /// 讀取量計數器。**只有測試會設它**；生產路徑一律 `nil`，零額外成本。
+
+    /// 讀取量計數器。**只有測試會設它**；生產路徑一律 `nil`。
     let readTally: ReadTally?
 
     public init(corpusRoot: URL, anchorKey: AnchorKey) {
@@ -165,7 +170,8 @@ public struct CorpusScanner: Sendable {
         self.readTally = nil
     }
 
-    /// 測試用：帶計數器建構。internal——不擴大公開介面（`scan()` 簽名不變）。
+    /// 測試用：帶計數器建構。internal，且 `ReadTally` 本身也是 internal——
+    /// 公開介面完全不變。
     init(corpusRoot: URL, anchorKey: AnchorKey, readTally: ReadTally?) {
         self.corpusRoot = corpusRoot
         self.anchorKey = anchorKey
@@ -269,18 +275,30 @@ public struct CorpusScanner: Sendable {
     /// 掃描語料，只讀出上次之後的新內容。
     ///
     /// `previous` 給空狀態即為全量掃描。
-    /// ## `nextState.files[key]` 的四個寫入點（動它之前先讀這段）
+    /// ## `nextState.files[key]` 的五個賦值點、四類情境（動它之前先讀這段）
     ///
-    /// | 位置 | 情境 | 雜湊 |
-    /// |---|---|---|
-    /// | 開檔失敗 | 讀不到 → 沿用 `prior` | 不算 |
-    /// | 讀 tail 失敗 | 讀不到 → 沿用 `prior` | 不算 |
-    /// | 主路徑 | 有新內容 or 比對失敗 → 重算；否則沿用 `prior` | **唯一會算的地方** |
-    /// | 列目錄失敗的 project | 讀不到 → 沿用 `prior` | 不算 |
+    /// 查法：`grep -n 'nextState.files\[key\] =' Sources/LTMIndex/CorpusScanner.swift`
+    /// —— 應該回**五**行。主路徑是一個 `if`／`else`，兩個賦值點屬於同一類。
     ///
-    /// **只有主路徑會計算新的 `prefixHash`**，另外三個都原樣沿用上一輪的值。
-    /// 新增寫入點的人必須決定自己屬於哪一類——沿用 `prior` 是安全的（那份 state
-    /// 已經被上一輪驗證過），重算則必須確保讀的是**當下**的內容。
+    /// | 情境 | 賦值點 | 寫入什麼 | 前提 |
+    /// |---|---|---|---|
+    /// | 開檔失敗 | 1 | `prior` | **僅在 `previous` 有該鍵時**——首次見到就讀不到的檔案一個 entry 都不寫 |
+    /// | 讀 tail 失敗 | 1 | `prior` | 同上 |
+    /// | 主路徑 | **2** | 重用 `prior` ／ 重算 | 見下方 `#49` 的兩個條件 |
+    /// | 列目錄失敗的 project | 1 | `prior` | 同上（`previous.files` 迭代而來，必有）|
+    ///
+    /// ## 沿用 `prior` 的兩個理由（封閉列舉，不得依性質相似類推第三個）
+    ///
+    /// 1. **讀不到**（開檔／讀 tail／列目錄失敗）。此時不可能重算，沿用是唯一不
+    ///    製造「假消失」的選擇。**代價要說清楚**：那份 state 的新鮮度等於**最後
+    ///    一次讀得到的那一輪**，不是上一輪——一個連續 N 輪讀不到的來源會把 N 輪
+    ///    前的 state 一路搬下去。`unreadable` 分支本來就是為這件事存在的。
+    /// 2. **本輪剛驗證過、且沒有消化新 byte**（僅限主路徑）。理由與第 1 條完全
+    ///    不同：它靠的是**這一輪**的雜湊比對。
+    ///
+    /// **讀得到檔案卻沿用 `prior`，一律是 bug。** 一個未來的寫入點若已經讀過檔案、
+    /// 發現內容變了，卻援引「沿用是安全的」搬運舊 hash，結果就是索引少掉那段內容
+    /// 而沒有任何訊號——正是這張表要防的東西。
     ///
     /// 這則表格是刻意寫的：git 2018 年的 split-index bug 就是「某條路徑沒把 entry
     /// 交給守衛常式」而安靜失去保護，成因看起來完全無辜。
@@ -368,7 +386,34 @@ public struct CorpusScanner: Sendable {
             // `consumedBytes == 0` 但檔案變長是合法且安全的情況：新增的是**半行**
             // （不完整紀錄），`processed` 不變，而雜湊涵蓋的 `0..<processed` 確實
             // 沒變。半行留給下一輪，語意與重算完全相同。
+            //
+            // **順帶關掉了一個既有的 TOCTOU 窗口**（審查時才被指出，不是本次的目標）。
+            // 舊碼的時序是：T1 驗證前綴 → T2 讀 tail 並解析 → T3 **再讀一次**
+            // `0..<processed` 並存下它的雜湊。若檔案在 T1–T3 之間被改寫
+            // （`~/.claude/projects/` 正是被活著的 session 持續寫入的目錄，所以這
+            // 不是假想），T3 會存下**新內容**的雜湊配上**舊解析**的 offset ——
+            // 下一輪比對成功、從 `processed` 續讀，那段改寫**永遠不會被重解**。
+            //
+            // 新碼在重用分支存的是 T1 驗證過的 `prior`。若前綴真的被改過，下一輪
+            // 比對必然失敗 → invalidate → 整份重解 → 收斂。最壞是一次不必要的
+            // 重解（貴，但正確），不會安靜錯。
+            //
+            // **誠實邊界**：只收窄、沒有消除 —— `consumedBytes > 0` 時仍走下面的
+            // 重算路徑，同一個窗口還在。
             if resumedFromVerifiedPrefix, parsed.consumedBytes == 0, let prior = priorState {
+                // 這裡寫回 `prior` 而不是重造 `SourceFileState`，靠的是上面
+                // `resumedFromVerifiedPrefix` 為真時 `startOffset == prior.processedBytes`
+                // （那個賦值就在同一個 `if` 裡，約 60 行之上）。兩者一旦分岔，
+                // 寫回的 `processedBytes` 就會與 `processed` 不符。
+                //
+                // **這裡刻意不放 `assert`。** 試過，然後拿掉了：`scan()` 是語料
+                // 解析路徑，而 CLAUDE.md 的規則是「語料是外來資料，解析路徑一律
+                // 不得 trap」——debug build 下一筆被手改的 `scan_state`（正是
+                // `aSelfInconsistentCursorIsRecomputedNotReused` 構造的那種）會把
+                // 整個 `ltm` 行程打掉。實測它也讓 `swift test` 收到 signal 5，
+                // 後面的測試整批沒跑到：把一個可診斷的失敗變成了行程中止。
+                //
+                // 扛這條不變式的是測試，不是斷言——見上面那兩條守衛測試。
                 nextState.files[key] = prior
             } else {
                 let whole = (try? readBytes(handle, from: 0, count: processed)) ?? Data()

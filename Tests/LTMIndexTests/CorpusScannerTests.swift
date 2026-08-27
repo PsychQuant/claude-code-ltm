@@ -594,13 +594,36 @@ func aMidFileRewriteThatPreservesSizeIsStillDetected() throws {
     let scanner = CorpusScanner(corpusRoot: root, anchorKey: .forTesting)
     let first = try scanner.scan()
     let before = try #require(first.state.files.values.first)
-    let sizeBefore = try #require(
-        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int)
+    let attrsBefore = try FileManager.default.attributesOfItem(atPath: url.path)
+    let sizeBefore = try #require(attrsBefore[.size] as? Int)
+    let inodeBefore = try #require(attrsBefore[.systemFileNumber] as? Int)
 
-    // 就地改寫中段：同樣的字數，不同的字。位元組數必須完全相同。
-    let original = try String(contentsOf: url, encoding: .utf8)
-    let rewritten = original.replacingOccurrences(of: "原本的內容", with: "換掉的內容")
-    try rewritten.write(to: url, atomically: true, encoding: .utf8)
+    // **就地覆寫，不換 inode。**
+    //
+    // 第一版用 `write(to:atomically:true)`——那是 temp + rename，**inode 會換掉**
+    // （reviewer 實測 ino 前後不同）。而本測試註解援引的 racy-git 情境是**就地
+    // 覆寫**：inode 不變、size 不變、mtime 落在同一秒。
+    //
+    // 為什麼這個差別會咬人：diagnosis 把 stat-gate + 有界重算列為 out-of-scope
+    // 延到日後。那個 gate 一旦落地並比對 `st_ino`（git 的 `ce_match_stat` 就比對
+    // dev/ino/mode/uid/gid/size/mtime），換過 inode 的檔案會被判為「變了」→ 測試
+    // 照樣綠；而真正的就地覆寫（inode 相同）會被判為未變 → 前綴不重算 → 索引
+    // 安靜少掉那段內容。**這條測試會在它最需要發揮作用的那天失去作用，而失效
+    // 方式是綠燈。**
+    let original = try Data(contentsOf: url)
+    let needle = Data("原本的內容".utf8)
+    let replacement = Data("換掉的內容".utf8)
+    #expect(needle.count == replacement.count, "前提：替換必須等長，否則 size 會變")
+    let offset = try #require(original.range(of: needle)?.lowerBound)
+    do {
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(offset))
+        try handle.write(contentsOf: replacement)   // 就地，不 truncate、不 rename
+    }
+    let inodeAfter = try #require(
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.systemFileNumber]) as? Int)
+    #expect(inodeAfter == inodeBefore, "前提：inode 必須不變，否則測的不是就地覆寫")
     let sizeAfter = try #require(
         (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int)
     #expect(sizeAfter == sizeBefore, "前提：改寫後位元組數必須不變，否則這條測試證明不了任何事")
