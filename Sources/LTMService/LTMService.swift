@@ -383,13 +383,20 @@ public struct LTMService {
     /// 呈現紀錄的存放。比較模式以外的路徑不碰它。
     private let recordStore: (any PresentationRecordStore)?
 
+    /// 增量併入用的調校參數。
+    ///
+    /// **注入而不是每次讀 `ProcessInfo`**：測試要能餵值，而讓測試改行程環境會讓
+    /// 平行測試互相污染。預設值仍然是環境變數，所以出貨行為不變。
+    private let buildTuning: BuildTuning
+
     public init(
         location: DerivedLocation,
         corpusRoot: URL = CorpusLocation.readOnlyRoot,
         embedder: any EmbeddingProvider,
         eventStore: (any EventStore)? = nil,
         anchorKey: AnchorKey,
-        recordStore: (any PresentationRecordStore)? = nil
+        recordStore: (any PresentationRecordStore)? = nil,
+        buildTuning: BuildTuning = BuildTuning.fromEnvironment().tuning
     ) {
         self.location = location
         self.corpusRoot = corpusRoot
@@ -397,6 +404,7 @@ public struct LTMService {
         self.eventStore = eventStore
         self.anchorKey = anchorKey
         self.recordStore = recordStore
+        self.buildTuning = buildTuning
     }
 
     /// 由 roots 參數化組出 facade。**CLI 與測試共用這一條路徑。**
@@ -840,8 +848,18 @@ public struct LTMService {
     ///   embedding revision 與 anchor 定址規則，三者不符都已拒答。所以
     ///   `build()` 內的 `stampsMismatch` 分支在這條路徑上到不了。
     private func refreshIncrementally() throws -> RefreshReport {
+        // **調校參數必須到得了這條路。** 先前這裡兩個參數都沒傳，而這條路正是
+        // 增量併入實際發生的地方（每一次查詢前跑一次，含長駐的 `ltm mcp`）——
+        // 所以 `--memory-budget-mb` 的環境變數形式從來沒在它最需要生效的地方
+        // 生效過。#46 R2 verify（codex lens）。
+        //
+        // 壞值在這裡**忽略並繼續**，不拒答：一個環境變數的 typo 可能是好幾天前
+        // 設的，拿它讓查詢失敗是過度反應。`ltm build` 的處置相反（具名拒絕），
+        // 而那個差異寫在 `BuildTuning.Rejection` 的註解裡。
         let builder = IndexBuilder(
-            location: location, scanner: CorpusScanner(corpusRoot: corpusRoot, anchorKey: anchorKey), embedder: embedder)
+            location: location, scanner: CorpusScanner(corpusRoot: corpusRoot, anchorKey: anchorKey),
+            embedder: embedder, batchChunkTarget: buildTuning.batchChunkTarget,
+            memoryBudgetBytes: buildTuning.memoryBudgetBytes)
         do {
             // `refusingFullRebuild`：這條路徑上「整份重建」永遠是錯的答案——它會
             // 在查詢持有連線時刪掉 DB 與側車。先前這是註解裡的推理，現在是前置條件。

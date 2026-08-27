@@ -224,8 +224,9 @@ enum BuildCommand {
           --full                捨棄既有索引，從零重建
           --quiet               不印進度（進度預設寫 stderr；CI／腳本可關掉）
           --batch-chunks N      批次切點的下限（預設 2000）。**不是上界**：批次以
-                                整個來源檔為單位組裝，所以實際上界是
-                                max(N, 最大來源檔的 chunk 數)。見 issue #47。
+                                整個來源檔為單位組裝，所以實際上界比 N 大、且隨
+                                最大來源檔成長。見 issue #47。（要看實際數字就設
+                                --memory-budget-mb，拒絕訊息會印出實算的最大批次。）
                                 環境變數：LTM_BUILD_BATCH_CHUNKS
           --memory-budget-mb N  向量累積超過 N MB 就具名拒絕，不跑。
                                 **預設不設限**——本 repo 沒有量測支撐得起一個門檻，
@@ -263,26 +264,38 @@ enum BuildCommand {
             // **不設限是預設，而且是刻意的**（#46）：本 repo 沒有任何量測支撐得起
             // 一個門檻，憑感覺挑一個只是把「OS 決定後果」換成「一個編出來的數字
             // 決定後果」。使用者設了它，就代表他知道自己在限制什麼。
-            let budgetMB = arguments.value("memory-budget-mb")
-                ?? ProcessInfo.processInfo.environment["LTM_BUILD_MEMORY_BUDGET_MB"]
+            // 解析規則只有一份（`BuildTuning`）——查詢路徑走的是同一份。
+            // 這裡與那裡的差別只在**壞值怎麼辦**：`ltm build` 具名拒絕（使用者
+            // 剛剛打了旗標），查詢路徑忽略並繼續。
+            //
+            // 溢位也是壞值：`MB × 1_048_576` 對足夠大的值會 **trap**，而一個打錯
+            // 的旗標不該讓行程死掉（#46 R2 verify，security lens）。
             var memoryBudgetBytes: Int?
-            if let budgetMB {
-                guard let value = Int(budgetMB), value > 0 else {
-                    Output.error("✗ --memory-budget-mb 需要正整數（MB），實際收到：\(budgetMB)")
+            if let budgetMB = arguments.value("memory-budget-mb")
+                ?? ProcessInfo.processInfo.environment["LTM_BUILD_MEMORY_BUDGET_MB"]
+            {
+                switch BuildTuning.parseMegabytes(budgetMB, variable: "--memory-budget-mb") {
+                case .success(let bytes): memoryBudgetBytes = bytes
+                case .failure(.notAPositiveInteger(_, let value)):
+                    Output.error("✗ --memory-budget-mb 需要正整數（MB），實際收到：\(value)")
+                    return LTMCommandLine.ExitCode.usageError.rawValue
+                case .failure(.megabytesOverflow(_, let value)):
+                    Output.error(
+                        "✗ --memory-budget-mb 換算成 bytes 會溢位，實際收到：\(value)")
                     return LTMCommandLine.ExitCode.usageError.rawValue
                 }
-                memoryBudgetBytes = value * 1_048_576
             }
 
-            let batchChunksRaw = arguments.value("batch-chunks")
+            var batchChunkTarget = BuildTuning.defaultBatchChunkTarget
+            if let batchChunksRaw = arguments.value("batch-chunks")
                 ?? ProcessInfo.processInfo.environment["LTM_BUILD_BATCH_CHUNKS"]
-            var batchChunkTarget = 2_000
-            if let batchChunksRaw {
-                guard let value = Int(batchChunksRaw), value > 0 else {
+            {
+                switch BuildTuning.parsePositive(batchChunksRaw, variable: "--batch-chunks") {
+                case .success(let value): batchChunkTarget = value
+                case .failure:
                     Output.error("✗ --batch-chunks 需要正整數，實際收到：\(batchChunksRaw)")
                     return LTMCommandLine.ExitCode.usageError.rawValue
                 }
-                batchChunkTarget = value
             }
 
             let report = try service.build(
@@ -348,13 +361,16 @@ enum BuildCommand {
                       最大的一批有 \(largestBatch) 個 chunk，其中最大的單一來源檔佔 \
                     \(largestSource) 個。
 
-                    補救（依有效程度排序）：
-                      1. 分次索引：用 LTM_CORPUS_ROOT 指向較少的 project，分幾次跑。
-                         這是唯一對「單一超大 session 檔」有效的做法。
-                      2. 提高預算：--memory-budget-mb <N>，或不設它（預設無上限）。
-                      3. 縮小批次：--batch-chunks <N>。**只在最大來源本身小於 N 時有效**
+                    補救：
+                      1. 提高預算：--memory-budget-mb <N>，或不設它（預設無上限）。
+                      2. 縮小批次：--batch-chunks <N>。**只在最大來源本身小於 N 時有效**
                          ——批次以整個來源為單位組裝（見 issue #47），所以它壓不下
                          一個 \(largestSource) chunk 的檔案。
+
+                    ⚠ **不要用 LTM_CORPUS_ROOT 分次索引。** 這裡先前把它列為首要補救，
+                    那是錯的、而且是破壞性的：本輪沒掃到的來源會被標成 invalidated
+                    並從索引刪除，所以分次**不會累積**——第二次會刪掉第一次的成果。
+                    （#46 R2 verify，codex 與 devil's advocate 各自實測命中。）
 
                     誠實邊界：這個預算擋的是**向量累積**，不是整個 build 的峰值記憶體。
                     後者隨 chunk 數線性成長而成長來源尚未定位，見

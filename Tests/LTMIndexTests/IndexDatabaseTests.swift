@@ -299,3 +299,52 @@ func embeddedNulSurvivesRoundTrip() throws {
     #expect(stored == text,
             "bind_text(-1) 與 String(cString:) 會在 NUL 處截斷，使 DB 內容與 anchor 的 contentHash 不一致")
 }
+
+// MARK: - 負的續讀游標：DB 層的兩道（#49 R2 verify，security lens）
+//
+// 掃描器把負游標丟棄成「沒有游標」是第三道。前兩道在這裡，各自擋不同的來源：
+// `CHECK` 擋新寫入，`scanState()` 的丟棄擋**已經在表裡**的列（舊索引的列早於
+// 這個 CHECK，而 `sqlite3` 一條 UPDATE 也到得了）。
+
+@Test("寫入負的 processed_bytes 被 CHECK 拒絕")
+func aNegativeCursorCannotBeWritten() throws {
+    let path = makeTempDatabasePath()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    let db = try IndexDatabase(path: path)
+    defer { db.close() }
+    try db.createSchema()
+
+    #expect(throws: (any Error).self) {
+        try db.transaction {
+            try db.execute(
+                "INSERT INTO scan_state(source_key, prefix_hash, processed_bytes) "
+                    + "VALUES('proj/s.jsonl', 'deadbeef', -1)")
+        }
+    }
+    #expect(try db.scanState().files.isEmpty)
+}
+
+@Test("表裡已經有的負游標被丟棄並回報，不交給掃描器")
+func aPreExistingNegativeCursorIsDropped() throws {
+    let path = makeTempDatabasePath()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    let db = try IndexDatabase(path: path)
+    defer { db.close() }
+    try db.createSchema()
+
+    // 造出「CHECK 之前就存在的列」——重建一張沒有 CHECK 的表，正是舊索引的形狀。
+    try db.transaction {
+        try db.execute("DROP TABLE scan_state")
+        try db.execute(
+            "CREATE TABLE scan_state (source_key TEXT PRIMARY KEY NOT NULL, "
+                + "prefix_hash TEXT NOT NULL, processed_bytes INTEGER NOT NULL)")
+        try db.execute(
+            "INSERT INTO scan_state VALUES('proj/bad.jsonl', 'deadbeef', -1)")
+        try db.execute(
+            "INSERT INTO scan_state VALUES('proj/good.jsonl', 'cafebabe', 128)")
+    }
+
+    let state = try db.scanState()
+    #expect(state.files["proj/bad.jsonl"] == nil, "負游標交到掃描器手上就是那條 trap 的入口")
+    #expect(state.files["proj/good.jsonl"]?.processedBytes == 128, "只丟壞的那列，不是整張表")
+}

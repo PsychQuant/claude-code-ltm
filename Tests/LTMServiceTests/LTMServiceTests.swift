@@ -762,9 +762,13 @@ func facadeRefusesFullRebuildFromTheQueryPath() throws {
         return
     }
     // 拒絕的意思是衍生檔還在——`refusingFullRebuild: false` 會走
-    // `discardDerivedArtifacts()`，從查詢路徑刪掉 DB、側車與 state。
+    // `discardDerivedArtifacts()`，從查詢路徑刪掉 DB 與側車。
+    //
+    // 這裡不再檢查 `state.json`：`build()` 不寫它了（那份鏡像是第三份真相來源，
+    // 見 `IndexBuilder.build()` 的註解）。改檢查側車——它與 DB 同為必須存活的
+    // 衍生產物，而且**不會**因為別的原因消失，所以它扛得住這條斷言。
     #expect(FileManager.default.fileExists(atPath: workspace.derived.databaseURL.path))
-    #expect(FileManager.default.fileExists(atPath: workspace.derived.stateURL.path))
+    #expect(FileManager.default.fileExists(atPath: workspace.derived.vectorsURL.path))
 }
 
 // MARK: - 呈現識別碼（Task 1.2/1.3，#15）
@@ -944,3 +948,46 @@ func aNormalQueryAttributesEveryResult() throws {
 //
 // **缺口具名，不假裝有守衛**（同 `PlacementConstraint` 的確定性迭代）：要驅動它，
 // 得先有一條繞過 seam 的注入路徑，而那條路徑不存在**正是**設計要的。
+
+/// **記憶體預算必須到得了查詢路徑。**
+///
+/// 增量併入主要不發生在 `ltm build`，而是在每一次查詢之前
+/// （`.claude/rules/ltm-analogy.md`：「併入發生在查詢路徑上」），包括長駐的
+/// `ltm mcp`。先前 `refreshIncrementally()` 建構 `IndexBuilder` 時兩個調校參數
+/// **都沒傳**，所以預算在它最需要生效的地方從來沒生效過（#46 R2 verify，codex
+/// lens）。
+///
+/// 這條測試釘的是「參數確實走到了那條路」——用一個小到必然被超過的預算，
+/// 查詢就必須看見那個具名拒絕。
+@Test("查詢路徑的增量併入受記憶體預算約束——不是只有 ltm build")
+func theQueryPathHonoursTheMemoryBudget() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["第一段內容"])
+    // 先有一份索引，否則查詢在到達增量併入之前就先拒答「索引不存在」。
+    _ = try workspace.service().build()
+
+    // 新內容 → 這一次查詢的增量併入真的有事要做。
+    try workspace.writeSession(file: "s2.jsonl", texts: ["第二段內容"])
+
+    // 1 byte 的預算：任何一個向量都超過它。注入而不是設環境變數——後者會污染
+    // 平行跑的其他測試。
+    let constrained = LTMService(
+        location: workspace.derived, corpusRoot: workspace.corpus,
+        embedder: FixedEmbedder(), anchorKey: .forTesting,
+        buildTuning: BuildTuning(memoryBudgetBytes: 1))
+
+    #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try constrained.query(text: "第二段", scope: RetrievalEngine.Scope.allProjects)
+    }
+
+    // 對照組：同一個工作區、同一份新內容，沒有預算時查詢照常成功。
+    // 少了這一半，上面那條對「查詢本來就會失敗」是瞎的。
+    let unconstrained = LTMService(
+        location: workspace.derived, corpusRoot: workspace.corpus,
+        embedder: FixedEmbedder(), anchorKey: .forTesting,
+        buildTuning: BuildTuning())
+    #expect(throws: Never.self) {
+        _ = try unconstrained.query(text: "第二段", scope: RetrievalEngine.Scope.allProjects)
+    }
+}

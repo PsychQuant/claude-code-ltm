@@ -330,27 +330,116 @@ func aRolledBackBatchLeavesNoCursorAheadOfTheContent() throws {
     try database.createSchema()
 
     struct Boom: Error {}
-    // 一個「寫了內容也寫了游標，然後崩掉」的批次。
+    // **內容也要寫。** 先前這裡只呼叫 `upsertScanState`，於是它證明的是「一個
+    // 只寫游標的交易會回滾游標」——那是 SQLite 的性質，不是本次改動的性質。
+    // 要釘的是**兩者一起**回滾，所以交易裡必須同時有 chunk 與游標。
+    // （#45 R2 verify，codex lens：「rollback 測試釘的是別的東西」。）
+    let chunk = makeRollbackChunk(
+        uuid: "11111111-1111-1111-1111-111111111111", text: "批次 3 的內容",
+        sourceKey: "proj/s.jsonl")
     #expect(throws: Boom.self) {
         try database.transaction {
+            _ = try database.insert(chunks: [chunk], sourceKey: "proj/s.jsonl")
             try database.upsertScanState(
                 sourceKey: "proj/s.jsonl", prefixHash: "deadbeef", processedBytes: 4_096)
             throw Boom()
         }
     }
 
-    // 游標必須跟著回滾。舊形狀下它寫在交易外的檔案裡，這裡會是 4,096。
+    // 兩個斷言缺一不可：只斷言游標，測試對「內容其實沒回滾」是瞎的；
+    // 只斷言內容，對「游標超前」是瞎的。而超前正是那個安靜漏語料的窗口。
+    #expect(try database.chunkCount() == 0, "內容沒有跟著回滾")
     #expect(try database.scanState().files["proj/s.jsonl"] == nil,
             "游標超前於內容，就是那個安靜漏語料的窗口")
 }
 
-/// 續讀游標搬進 DB 之後，**刪掉 `state.json` 已經無害**——它是鏡像，不是真相。
+/// `upsertScanState` / `deleteScanState` 在交易外被呼叫必須丟出來。
 ///
-/// 這條測試取代了先前那條「刪掉 state.json 應該丟 stateUnreadable」。舊測試釘的
-/// 不是那條性質本身，是它當時的**載體**；載體換了，測試該跟著換，而不是把載體
-/// 留下來只為了讓測試維持綠色。
-@Test("刪掉 state.json 不影響續讀——游標在 DB 裡")
-func deletingTheStateMirrorIsHarmless() throws {
+/// **這條測試存在，是因為那兩個守衛先前沒有任何測試在扛**——跨模型盲驗的
+/// devil's advocate 自己跑變異：把 `IndexDatabase` 的兩個
+/// `guard sqlite3_get_autocommit(handle) == 0` 整段刪掉，481 條測試全綠
+/// （#45 R2 verify）。CLAUDE.md 對這個形狀的處置是「驅動不了的守衛要拆掉，
+/// 不是留著加註解」，所以要嘛拆、要嘛給它一條會紅的測試。這裡選後者，因為
+/// 那個守衛擋的是一類真實的呼叫端錯誤。
+///
+/// **它保證的比它的名字聽起來小，這一點要寫清楚**：`sqlite3_get_autocommit`
+/// 只回答「在**某個**交易裡嗎」，不回答「與內容在**同一個**交易裡嗎」。上面那條
+/// 回滾測試扛的才是後者。兩條一起才涵蓋 `scan_state` 註解論證的那件事。
+@Test("游標寫入在交易外被拒絕——具名，不是靜默寫進去")
+func aCursorWriteOutsideATransactionIsRefused() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try derived.createRootIfNeeded()
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    try database.createSchema()
+
+    #expect(throws: IndexDatabase.DatabaseError.self) {
+        try database.upsertScanState(
+            sourceKey: "proj/s.jsonl", prefixHash: "deadbeef", processedBytes: 4_096)
+    }
+    #expect(throws: IndexDatabase.DatabaseError.self) {
+        try database.deleteScanState(sourceKey: "proj/s.jsonl")
+    }
+    // 被拒絕就是**沒有寫進去**——不是「寫了但也丟了錯」。
+    #expect(try database.scanState().files.isEmpty)
+}
+
+/// 批次上界的公式只有一份，而這條測試釘住它**取得到**。
+///
+/// 先前公式是 `max(target, largestSource)`，錯的，而且被複製到六處散文——含
+/// spec 的 SHALL 文字（#46 R2 verify，codex lens）。所以現在它是一個可執行的
+/// 函式，散文只指名不複述，而漂移由這條測試變紅。
+@Test("批次上界等於宣告的公式，而且那個上界取得到")
+func batchUpperBoundMatchesTheDeclaredFormula() throws {
+    // 舊公式在這組值上報 4,322；真值是 2_000 − 1 + 4_322 = 6,321，低估 46%。
+    #expect(IndexBuilder.batchChunkUpperBound(target: 2_000, largestSource: 4_322) == 6_321)
+    // target = 1：每個來源自成一批，上界就是最大來源本身。
+    #expect(IndexBuilder.batchChunkUpperBound(target: 1, largestSource: 4_322) == 4_322)
+    // 最大來源比 target 小的一般情形——上界仍然嚴格大於 target。
+    #expect(IndexBuilder.batchChunkUpperBound(target: 2_000, largestSource: 10) == 2_009)
+
+    // **可達性**：切點在 append 之後判斷，所以「累積到 target − 1、再吃進最大來源」
+    // 是真的走得到的路徑。這幾行重演 `makeBatches` 的迴圈，讓公式與迴圈的分歧
+    // 會在這裡變紅，而不是等到某次量測對不上。
+    let target = 5
+    let sizes = [4, 7]  // 4 < 5 不切；加 7 之後 11 ≥ 5 才切 → 這一批 11 個
+    var largest = 0
+    var current = 0
+    for size in sizes {
+        current += size
+        largest = max(largest, current)
+        if current >= target { current = 0 }
+    }
+    #expect(largest == 11)
+    #expect(largest <= IndexBuilder.batchChunkUpperBound(target: target, largestSource: 7))
+    #expect(IndexBuilder.batchChunkUpperBound(target: target, largestSource: 7) == 11,
+            "上界必須是可達的——不可達的上界只是一個比較大的數字")
+}
+
+/// 回滾測試要在交易裡寫真的內容——只寫游標的交易證明不了「兩者一起回滾」。
+private func makeRollbackChunk(uuid: String, text: String, sourceKey: String) -> CorpusChunk {
+    let when = Date(timeIntervalSince1970: 1_760_000_000)
+    let turn = Turn(id: uuid, role: "user", timestamp: when, text: text)
+    return CorpusChunk(
+        sourceKey: sourceKey, project: "proj", sessionID: "11111111-2222-3333-4444-555555555555",
+        uuid: uuid, timestamp: when, role: "user", text: text,
+        anchor: Anchor(source: ProjectFingerprint.of("proj"), turn: turn,
+                       span: 0..<text.unicodeScalars.count, key: .forTesting))
+}
+
+/// `build()` **不再寫 `state.json`**——它曾經是「人類可讀鏡像」，而那讓它成為
+/// 第三份真相來源：WAL 回滾同時帶走內容與游標之後，下一次 build 會回頭採信那份
+/// 超前的鏡像，印 `✓ 索引完成（增量）` 而索引是空的、語料永遠不再被解析
+/// （#44 R2 verify，devil's advocate 實測重現）。
+///
+/// 這條測試釘的是**不存在**，因為那才是修法。先前它釘的是「刪掉鏡像無害」——
+/// 而「無害」不足以擋住上面那條路徑：那條路徑不需要有人刪它。
+@Test("build 不寫 state.json——鏡像不存在，就不會被回頭採信")
+func buildWritesNoStateMirror() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
         try? FileManager.default.removeItem(at: corpus)
@@ -361,13 +450,56 @@ func deletingTheStateMirrorIsHarmless() throws {
     _ = try IndexBuilder(location: derived, scanner: scanner,
                          embedder: StubEmbedder(revision: "rev-A")).build()
 
-    try FileManager.default.removeItem(at: derived.stateURL)
+    #expect(!FileManager.default.fileExists(atPath: derived.stateURL.path),
+            "鏡像存在就是第三份真相來源——它會在 scan_state 空的時候被採信")
 
-    // 增量：沒有新內容，所以不該有任何 chunk 被重新索引。
+    // 續讀仍然有效：游標在 DB 裡。
     let again = try IndexBuilder(location: derived, scanner: scanner,
                                  embedder: StubEmbedder(revision: "rev-A")).build()
     #expect(!again.wasFullRebuild)
-    #expect(again.chunksIndexed == 0, "游標還在 DB 裡，不該重掃")
+    #expect(again.chunksIndexed == 0, "游標在 DB 裡，不該重掃")
+}
+
+/// **回滾之後一次「成功」的 build 不得產出空索引。**
+///
+/// 這條是 D 的直接回歸鎖，逐字重演 devil's advocate 的實測：內容與游標一起被
+/// 清掉（模擬 WAL 回滾），而一份超前的 `state.json` 留在磁碟上。舊行為：
+/// `chunkCount() == 0` → 守衛不 fire → 採信鏡像 → 印 ✓、索引是空的。
+@Test("內容為空時不採信 state.json——不得產出「宣稱成功的空索引」")
+func anEmptyIndexNeverAdoptsAStaleMirror() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    let first = try IndexBuilder(location: derived, scanner: scanner,
+                                 embedder: StubEmbedder(revision: "rev-A")).build()
+    #expect(first.chunksIndexed > 0, "前提：第一次確實索引到東西")
+
+    // 手工造出一份「超前的鏡像」——舊版本的 build 每次成功都會寫出這種東西。
+    let cursors = try {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        return try database.scanState()
+    }()
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    try encoder.encode(cursors).write(to: derived.stateURL, options: [.atomic])
+
+    // 模擬 WAL 回滾：內容與游標**一起**消失（那正是它們同在一個交易的後果）。
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("DELETE FROM chunks")
+        try database.execute("DELETE FROM scan_state")
+    }
+
+    let after = try IndexBuilder(location: derived, scanner: scanner,
+                                 embedder: StubEmbedder(revision: "rev-A")).build()
+    #expect(after.chunksIndexed > 0,
+            "採信了超前的鏡像——這一次 build 會印 ✓ 而索引是空的，語料永遠不再被解析")
 }
 
 /// 而「不在舊索引上安靜疊加」這條性質仍然要守，只是它的條件變了：**兩邊都沒有
@@ -384,7 +516,8 @@ func anIndexWithContentButNoCursorAnywhereIsRefused() throws {
     _ = try IndexBuilder(location: derived, scanner: scanner,
                          embedder: StubEmbedder(revision: "rev-A")).build()
 
-    try FileManager.default.removeItem(at: derived.stateURL)
+    // 鏡像本來就不存在了（`build` 不寫它），所以只要清掉表就到得了那個狀態。
+    #expect(!FileManager.default.fileExists(atPath: derived.stateURL.path))
     do {
         let database = try IndexDatabase(path: derived.databaseURL.path)
         defer { database.close() }
@@ -416,13 +549,23 @@ func aLegacyStateFileIsMigratedIntoTheDatabase() throws {
     _ = try IndexBuilder(location: derived, scanner: scanner,
                          embedder: StubEmbedder(revision: "rev-A")).build()
 
-    // 構造「舊版本留下的索引」：DB 有內容、表是空的、鏡像檔還在。
+    // 構造「舊版本留下的索引」：DB 有內容、表是空的、游標在 `state.json` 裡。
+    // 現在的 `build()` 不再寫鏡像，所以這一步要手工造——而那正是它該長的樣子：
+    // 這條測試驗的是**升級路徑**，不是當前版本自己的產物。
+    let cursors = try {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        return try database.scanState()
+    }()
+    #expect(!cursors.files.isEmpty, "前提：第一次 build 確實留下了游標")
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    try encoder.encode(cursors).write(to: derived.stateURL, options: [.atomic])
     do {
         let database = try IndexDatabase(path: derived.databaseURL.path)
         defer { database.close() }
         try database.execute("DELETE FROM scan_state")
     }
-    #expect(FileManager.default.fileExists(atPath: derived.stateURL.path))
 
     let migrated = try IndexBuilder(location: derived, scanner: scanner,
                                     embedder: StubEmbedder(revision: "rev-A")).build()
@@ -433,6 +576,10 @@ func aLegacyStateFileIsMigratedIntoTheDatabase() throws {
     let database = try IndexDatabase(path: derived.databaseURL.path)
     defer { database.close() }
     #expect(!(try database.scanState().files.isEmpty))
+    // **來源檔要被移除。** 留著它就等於留著第三份真相來源——而遷移是一次性的，
+    // 沒有任何理由讓它活到第二次。
+    #expect(!FileManager.default.fileExists(atPath: derived.stateURL.path),
+            "遷移完成後 state.json 必須消失，否則它會在下一次 scan_state 空的時候復活")
 }
 
 // MARK: - 刪檔作廢 × 去重的交互作用（round-2 verify HIGH）
@@ -907,4 +1054,116 @@ func aSecondWriterMeetsANamedFailureNotASilentHang() throws {
         }
         #expect(path.hasSuffix("build.lock"), "錯誤要指名是哪個鎖：\(path)")
     }
+}
+
+// MARK: - R2 verify 修法的回歸鎖
+//
+// 這一段的每一條都對應一個「先前沒有任何測試在扛」的機制。CLAUDE.md：驅動不了
+// 的守衛要拆掉，不是留著加註解——所以要嘛這裡有一條會紅的測試，要嘛那個守衛
+// 不該存在。
+
+/// 鎖檔是 symlink 時必須具名失敗，**不得跟著寫穿到目標檔**。
+///
+/// 舊的 `O_CREAT | O_EXCL` 對這件事是結構上免疫的（POSIX 要求 symlink → `EEXIST`）。
+/// 為了 flock 重設計拿掉 `O_EXCL` 時那個性質被一起換掉了，而沒有任何註解提到。
+/// 實測（#45 R2 verify，security lens）：45 bytes 的目標檔變成 6 bytes 的 pid，
+/// 而 `ltm build` exit 0。
+@Test("鎖檔是 symlink 時具名失敗，目標檔不被截斷")
+func aSymlinkedLockFileDoesNotTruncateItsTarget() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-locktest-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let victim = root.appendingPathComponent("victim")
+    let payload = Data("IMPORTANT DATA THAT MUST SURVIVE".utf8)
+    try payload.write(to: victim)
+
+    let lockPath = root.appendingPathComponent("build.lock")
+    try FileManager.default.createSymbolicLink(at: lockPath, withDestinationURL: victim)
+
+    #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try FileLock.acquire(at: lockPath)
+    }
+    #expect(try Data(contentsOf: victim) == payload,
+            "鎖跟著 symlink 走了——這是一條任意檔案截斷的路徑")
+}
+
+/// `release()` 重複呼叫是 no-op，不是「關掉一個已經被重新配給別人的 fd」。
+@Test("重複 release 不關到別人的檔案描述子")
+func releasingTheLockTwiceIsHarmless() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-locktest-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let lock = try FileLock.acquire(at: root.appendingPathComponent("build.lock"))
+    lock.release()
+
+    // 第一次 release 之後開一個新檔——它很可能拿到剛剛被關掉的那個號碼。
+    let canary = root.appendingPathComponent("canary")
+    try Data("canary".utf8).write(to: canary)
+    let handle = try FileHandle(forReadingFrom: canary)
+    defer { try? handle.close() }
+
+    lock.release()  // 舊行為：close() 同一個號碼 → 關掉 canary 的 fd
+
+    #expect(try handle.read(upToCount: 6) == Data("canary".utf8),
+            "第二次 release 關到了無關的 fd")
+}
+
+/// **遷移是原子的：全部寫進去，或一筆都沒有。**
+///
+/// 先前它不是。游標隨著各批次陸續寫進 `scan_state`，而中斷一次之後
+/// `scan_state` 非空 → 下一次 build 再也不讀 `state.json` → 未遷移的來源
+/// **全部從頭重掃重算**。那正是 #44 要避免的事，而且它讓增量與全量不等價
+/// （不變式 2）。regression lens 實測證實過（#44 R2 verify）。
+///
+/// 驅動方式：讓 `state.json` 裡混一筆 `CHECK(processed_bytes >= 0)` 擋得下的值。
+/// 交易因此中途失敗——原子的話一筆都不會留下，非原子的話前面幾筆會活著。
+@Test("遷移中途失敗時一筆游標都不留，來源檔也原封不動")
+func aFailedMigrationLeavesNothingBehind() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner,
+                         embedder: StubEmbedder(revision: "rev-A")).build()
+
+    let good = try {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        return try database.scanState()
+    }()
+    #expect(good.files.count == 1, "前提：只有一個來源，所以壞的那筆一定排在它前後之一")
+
+    // 壞的那筆的鍵**必須排在好的後面**，否則非原子的實作會在寫任何東西之前就
+    // 失敗，這條測試就對它是瞎的。遷移的迴圈已經改成排序過的順序（見該處註解），
+    // 所以 `zz-` 前綴讓這件事確定，而不是靠 Dictionary 的隨機順序碰運氣。
+    var mixed = good.files
+    #expect(good.files.keys.allSatisfy { $0 < "zz-poisoned.jsonl" })
+    mixed["zz-poisoned.jsonl"] = SourceFileState(prefixHash: "deadbeef", processedBytes: -1)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    try encoder.encode(ScanState(files: mixed)).write(to: derived.stateURL, options: [.atomic])
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("DELETE FROM scan_state")
+    }
+
+    #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner,
+                             embedder: StubEmbedder(revision: "rev-A")).build()
+    }
+
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.scanState().files.isEmpty,
+            "半遷移：非空的 scan_state 會讓下一次 build 再也不讀 state.json")
+    #expect(FileManager.default.fileExists(atPath: derived.stateURL.path),
+            "來源檔被移除了——那讓這次失敗變成不可重試")
 }

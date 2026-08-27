@@ -6,6 +6,37 @@
 
 ### Fixed
 
+- **`ltm query` 每次固定付的掃描成本降低（#49）：`build --quiet` 的中位數
+  6.58 → 3.56 s、`query` 6.19 → 3.79 s**（同機同語料，各 7 次，
+  `docs/measurements/2026-08-27-query-latency-decomposition.md`）。`CorpusScanner`
+  對每個來源檔把已處理前綴讀取並 SHA-256 **兩次**——續讀比對一次、寫回 state 再
+  一次；沒有新內容時第二次的輸入與輸出都與第一次相同。移除的是可證明的冗餘，
+  **行為不變**。這一條先前完全不在 CHANGELOG 裡，而它是本輪最大的使用者可見改變。
+- **`state.json` 不再被寫出。** 它曾是「人類可讀鏡像」，而那讓它成為**第三份
+  真相來源**：WAL 回滾同時帶走內容與游標之後，`chunkCount() == 0` 讓守衛不 fire，
+  於是下一次 build 回頭採信那份**超前的**鏡像——印 `✓ 索引完成（增量）`、索引是
+  空的、語料永遠不再被解析（實測重現）。診斷改讀 `scan_state` 表。舊索引的
+  一次性遷移保留，且改成**原子的**：先前它逐批寫入，中斷一次之後未遷移的來源
+  全部從頭重掃重算（增量 ≠ 全量，違反不變式 2）。
+- **建置鎖不再跟著 symlink 走。** 為了改掛 `flock` 而拿掉 `O_EXCL` 時，順帶拿掉了
+  POSIX 對 symlink 的結構性保護——`ln -s <任意檔> build.lock` 之後 `ltm build` 會
+  把目標檔截斷成一行 pid，exit 0（實測）。補回 `O_NOFOLLOW`。同時 `FileLock` 從
+  可複製的 `struct` 改成 `final class`：它獨佔一個 fd，而值語意的複製 + 兩次
+  `release()` 會 `close()` 一個可能已被重新配給別的檔案的號碼。
+- **負的續讀游標不再讓行程 trap。** 一列 `processed_bytes = -1` 配上空資料的
+  `prefix_hash` 會讓 `UInt64(offset)` 崩掉，`ltm build` 與 `ltm query` 同時 exit 133、
+  零輸出，唯一逃生是以小時計的 `--full`。三道縱深：`CHECK(processed_bytes >= 0)`、
+  `scanState()` 丟棄並回報讀不回來的列、掃描器把負游標當成「沒有游標」而重掃。
+- **`--memory-budget-mb` 的溢位不再 trap。** `MB × 1_048_576` 對足夠大的值會崩，
+  而先前那條宣稱「壞值不該 crash」的測試沒涵蓋這一類。
+- **記憶體預算與批次大小現在到得了查詢路徑。** `refreshIncrementally()` 建構
+  `IndexBuilder` 時兩個參數都沒傳，而增量併入**主要發生在查詢之前**（含長駐的
+  `ltm mcp`）——所以預算在它最需要生效的地方從來沒生效過。解析規則收斂成
+  `BuildTuning` 一份，兩條路徑共用。
+- **`ltm build` 的記憶體預算拒絕訊息不再教使用者做破壞性的事。** 它把「用
+  `LTM_CORPUS_ROOT` 分次索引」列為首要且唯一有效的補救，而分次**不會累積**：
+  本輪沒掃到的來源會被標成 invalidated 並從索引刪除，第二次會刪掉第一次的成果。
+
 - **建置鎖改掛 `flock`**，讓核心在行程死亡時釋放它。先前用 `O_CREAT|O_EXCL` 的建檔
   當所有權、`release()` 刪檔——而 `release()` 只在 Swift 正常 unwind 的 `defer` 裡跑。
   SIGKILL／未處理的 SIGINT／kernel panic／OOM 之後 `build.lock` 永久留下，已完成的
@@ -17,6 +48,12 @@
   續讀只讀游標、從不回頭問 DB。硬重啟可以把 WAL 回滾到批次 2 而游標存活在批次 5，
   那幾批的 chunk **永遠不再被產出**，且 `build` 照樣印「✓ 索引完成」。放進同一個交易
   之後，回滾對兩者是同一件事。`upsertScanState` 會拒絕在交易外被呼叫——把規則變成機制。
+- **批次上界的公式先前是錯的，而它被複製到六處**（含 `openspec/specs/ltm-cli/spec.md`
+  的 SHALL 文字）。`max(target, largestSource)` 應為 `target − 1 + largestSource`
+  ——實測 `target = 2_000`、`largestSource = 4_322` 時真值 6,321，舊式報 4,322，
+  低估 46%。修法不是把正確公式再抄六遍（那正是它出錯的方式），是把它變成一個
+  可執行的 `IndexBuilder.batchChunkUpperBound(target:largestSource:)`，散文一律
+  只指名、不複述，漂移由測試變紅。
 - **查詢撞上建置鎖時說出來**，不再靜默降級。查詢仍以既有索引回答（拒答更糟），但
   「這一輪沒有併入新內容」現在會印出來，與「來源讀不到」同一條原則。
 - **側車檔 rename 之後 fsync 父目錄**。註解逐字寫著「再 fsync 一次目錄項次」而程式碼
@@ -38,7 +75,8 @@
 ### Changed
 
 - **收回兩個宣稱。** (a)「批次以 chunk 數為單位、避免上界由最大來源決定」——實作做的
-  正是它說要避免的事，實際上界是 `max(batchChunkTarget, 最大來源 chunk 數)`（見 #47）。
+  正是它說要避免的事，實際上界隨最大來源成長（公式的唯一一份在
+  `IndexBuilder.batchChunkUpperBound(target:largestSource:)`，見 #47）。
   (b) 量測紀錄的「查證後的實際來源：scanner 持有完整文字」——合成文字 630 B/chunk
   解釋不了擬合出的 142 KB/chunk，差約 225 倍；改成只保留相關性並列出七組能區分機制的
   對照量測。「這個結果推翻了 #46 的前提」整段收回。

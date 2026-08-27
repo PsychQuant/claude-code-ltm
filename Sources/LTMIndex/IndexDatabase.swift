@@ -172,7 +172,7 @@ public final class IndexDatabase {
             CREATE TABLE IF NOT EXISTS scan_state (
                 source_key TEXT PRIMARY KEY NOT NULL,
                 prefix_hash TEXT NOT NULL,
-                processed_bytes INTEGER NOT NULL
+                processed_bytes INTEGER NOT NULL CHECK (processed_bytes >= 0)
             )
             """)
         // 唯一鍵與 anchor 的 (source, turnID) 對齊，所以一個 anchor 恰好對應一個 chunk。
@@ -256,11 +256,26 @@ public final class IndexDatabase {
     /// 「表不存在」，後者在 `createSchema()` 之後不可能發生。
     public func scanState() throws -> ScanState {
         var files: [String: SourceFileState] = [:]
+        var rejected: [String] = []
         try query("SELECT source_key, prefix_hash, processed_bytes FROM scan_state") { statement in
             let key = columnText(statement, 0)
             let hash = columnText(statement, 1)
-            files[key] = SourceFileState(
-                prefixHash: hash, processedBytes: Int(sqlite3_column_int64(statement, 2)))
+            let bytes = Int(sqlite3_column_int64(statement, 2))
+            // `CHECK` 只約束**這個 schema 建立之後**寫進去的列。舊索引裡的列、
+            // 以及任何一條外部 `UPDATE`，都到得了這裡。讀不回來的列**丟棄並回報**
+            // ——交給掃描器會讓它從一個不可能的位置續讀。
+            //
+            // 丟棄的後果是那個來源從頭重掃（正確但慢），不是索引少東西。
+            guard bytes >= 0 else { rejected.append(key); return }
+            files[key] = SourceFileState(prefixHash: hash, processedBytes: bytes)
+        }
+        if !rejected.isEmpty {
+            // 沉默的丟棄等於索引少了東西而沒人會發現（CLAUDE.md）。
+            FileHandle.standardError.write(
+                Data(
+                    ("⚠ scan_state 有 \(rejected.count) 列的 processed_bytes 是負值，已丟棄"
+                        + "（那些來源將從頭重掃）：\(rejected.sorted().prefix(5).joined(separator: "、"))\n")
+                        .utf8))
         }
         return ScanState(files: files)
     }

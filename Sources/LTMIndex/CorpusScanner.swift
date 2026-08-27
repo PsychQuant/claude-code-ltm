@@ -323,7 +323,21 @@ public struct CorpusScanner: Sendable {
             defer { try? handle.close() }
 
             let size = (try? handle.seekToEnd()).map(Int.init) ?? 0
-            let priorState = previous.files[key]
+            // **負的游標當成「沒有游標」，不是當成一個位置。**
+            //
+            // 它到得了這裡：`scan_state` 是外部可 UPDATE 的，而舊索引的列早於
+            // `CHECK(processed_bytes >= 0)`。舊行為是讓它一路走到
+            // `seek(toOffset: UInt64(-1))` 而 **trap**（#49 R2 verify，security
+            // lens，端到端重現：`ltm build` 與 `ltm query` 同時 exit 133、零輸出）。
+            //
+            // 處置是**丟棄並重掃**，不是丟錯：丟錯會讓這個來源被記成 unreadable
+            // 並**永遠保留那個壞游標**——一個修不好的卡住狀態。重掃是慢，但正確。
+            // 這是縱深的第三層（前兩層在 `IndexDatabase`）。
+            var priorState = previous.files[key]
+            if let prior = priorState, prior.processedBytes < 0 {
+                priorState = nil
+                invalidated.insert(key)
+            }
             // 續讀的三個條件缺一不可：有舊狀態、檔案沒有變短、且已處理段落的
             // 雜湊對得上。檔案變短代表它被改寫過，即使前綴雜湊碰巧相符。
             //
@@ -374,9 +388,15 @@ public struct CorpusScanner: Sendable {
             //   (b) 這一輪沒有消化任何新 byte——於是 `processed == startOffset`。
             //
             // 兩者同時成立時，`0..<processed` 就是剛剛驗證過的那一段，重讀它並
-            // 重算 SHA-256 的輸出**必然**是 `prior.prefixHash`。實測那次冗餘佔
-            // 掃描的一半（單次 2.27 s、兩次 4.51 s，掃描總量 6.50 s——
-            // `docs/measurements/2026-08-27-query-latency-decomposition.md`）。
+            // 重算 SHA-256 的輸出**必然**是 `prior.prefixHash`。移除那次冗餘的
+            // 代價被直接量到：`build --quiet` 的中位數 6.58 → 3.56 s（**實測差
+            // −3.02 s**，`docs/measurements/2026-08-27-query-latency-decomposition.md`）。
+            //
+            // 這裡刻意不寫「佔掃描的一半」那種分數，也不寫 `2.27` / `4.51`——
+            // 那兩個數字曾經寫在這裡並被稱為「實測」，而它們是**模型值**（唯一
+            // 量到的是 Python 單次全讀+雜湊的 2.39 s）。#49 R2 verify，
+            // devil's advocate。誠實邊界：出貨表面上的數字要能指回一份涵蓋它的
+            // 紀錄，而那份紀錄現在只宣稱這個實測差。
             //
             // 條件寫寬的後果是**安靜的**：檔案被改寫時沿用舊 hash，索引少掉那段
             // 內容而沒有任何訊號，症狀只有「以前找得到的東西現在找不到」。這正是
@@ -452,6 +472,17 @@ public struct CorpusScanner: Sendable {
     }
 
     private func readBytes(_ handle: FileHandle, from offset: Int, count: Int) throws -> Data {
+        // **`offset` 為負會 trap**（`UInt64(offset)`），而語料解析路徑一律不得 trap。
+        //
+        // 這裡刻意**不加守衛**：加了也沒有任何測試驅動得了它，而驅動不了的守衛
+        // 要拆掉、不是留著加註解（CLAUDE.md，#40 形狀）。執行點在**上游**——
+        // `scan()` 把負的 `prior.processedBytes` 丟棄成「沒有游標」，所以到得了
+        // 這裡的 `offset` 只有兩種：0，或一個已驗證過的非負 `processedBytes`。
+        //
+        // 那條實測（#49 R2 verify，security lens）是：一列 `processed_bytes = -1`
+        // 配上 `prefix_hash = sha256("")` 讓 `ltm build` 與 `ltm query` 同時
+        // exit 133、零輸出，唯一逃生是以小時計的 `--full`。回歸鎖在
+        // `aNegativeCursorIsDiscardedRatherThanTrapping`。
         guard count > 0 else { return Data() }
         try handle.seek(toOffset: UInt64(offset))
         let data = try handle.read(upToCount: count) ?? Data()

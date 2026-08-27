@@ -305,6 +305,11 @@ func badNumericFlagsGiveUsageErrorsNotCrashes() throws {
     for (flag, value) in [
         ("--batch-chunks", "0"), ("--batch-chunks", "-3"), ("--batch-chunks", "abc"),
         ("--memory-budget-mb", "0"), ("--memory-budget-mb", "x"),
+        // **溢位也是壞值。** `MB × 1_048_576` 對足夠大的值會 trap，而先前這份
+        // 清單沒有涵蓋它——所以一個宣稱「壞值不該 crash」的測試，對真正會
+        // crash 的那一類是瞎的（#46 R2 verify，security lens）。
+        ("--memory-budget-mb", "\(Int.max)"),
+        ("--memory-budget-mb", "\(Int.max / 1_048_576 + 1)"),
     ] {
         let result = try runCLI(["build", flag, value], environment: workspace.environment)
         #expect(

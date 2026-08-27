@@ -693,3 +693,36 @@ func aSelfInconsistentCursorIsRecomputedNotReused() throws {
         "比對失敗卻沿用了那個對不上的雜湊——下一輪會再失敗一次，而且永遠不會自癒")
     #expect(after.processedBytes == 0)
 }
+
+/// 負的續讀游標必須**丟出來**，不得 trap。
+///
+/// 實測（#49 R2 verify，security lens，端到端重現）：一列 `processed_bytes = -1`
+/// 配上 `prefix_hash = sha256("")` 會讓 `ltm build` 與 `ltm query` 同時以 exit 133
+/// 死掉、stdout/stderr 皆 0 bytes，唯一逃生是以小時計的 `--full`。
+///
+/// 語料是外來資料，解析路徑一律不得 trap（CLAUDE.md）——而這條路徑正是
+/// `scan()` 裡拿掉 `assert` 時援引的那一條。
+@Test("負的續讀游標被丟棄並重掃，不 trap、也不卡在 unreadable")
+func aNegativeCursorIsDiscardedRatherThanTrapping() throws {
+    let corpus = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: corpus) }
+    _ = try writeSession(
+        in: corpus, project: "proj", file: "\(sessionA).jsonl",
+        lines: [turnLine(uuid: "t1", session: sessionA, role: "user", text: "內容")])
+
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    let first = try scanner.scan(previous: ScanState())
+    let key = try #require(first.state.files.keys.first)
+
+    // 空資料的 SHA-256 —— 它讓前綴比對「通過」，於是 startOffset 被設成 −1。
+    let emptyDigest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    let poisoned = ScanState(files: [key: SourceFileState(prefixHash: emptyDigest, processedBytes: -1)])
+
+    // 不 trap，而且**不是**記成 unreadable：那會讓這個來源永遠保留那個壞游標，
+    // 一個修不好的卡住狀態。正確處置是丟棄游標、從頭重掃。
+    let second = try scanner.scan(previous: poisoned)
+    #expect(second.unreadableSources.isEmpty, "壞游標讓來源卡在 unreadable，永遠修不好")
+    #expect(second.invalidatedSources.contains(key), "重掃必須先作廢舊 chunk")
+    #expect(second.chunks.count == first.chunks.count, "應該從頭重掃出同樣的內容")
+    #expect(second.state.files[key]?.processedBytes == first.state.files[key]?.processedBytes)
+}
