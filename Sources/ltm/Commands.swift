@@ -344,16 +344,21 @@ enum BuildCommand {
                 // 留著那句會把使用者導向一個不需要、而且有 race 的手動 `rm`。
                 Output.error("✗ 另一個建置正在進行（鎖：\(path)）。等它結束再試。")
                 return LTMCommandLine.ExitCode.lockHeld.rawValue
-            case .lockUnsafe(let path, let detail):
+            case .derivedPathUnsafe(let path, let detail):
                 Output.error(
                     """
-                    ✗ 這個路徑上的東西不是我們的鎖檔，已中止（**沒有寫入任何東西**）：\(detail)
+                    ✗ 這個路徑上的東西不是我們的檔案，已中止：\(detail)
                     路徑：\(path)
 
-                    鎖檔會被截短再寫入 pid，所以如果那個名字指的是別的檔案，
-                    截短就會把它毀掉。這裡不動它。
+                    derived 目錄底下的檔案會被就地截短與覆寫，所以如果那個名字
+                    指的是別的東西，就會把它毀掉。這裡不動它。
 
                       ls -li \(path)   # 看它是什麼、有幾個名字指向它
+
+                    **如果你是用 `cp -al` / `rsync --link-dest` / Time Machine
+                    還原整個 derived 目錄**，那每個檔案都會有兩個名字，而這是
+                    誤判——derived 是純衍生物，直接刪掉整個目錄再 `ltm build --full`
+                    比想辦法保留它便宜。
 
                     確認那不是你要留的東西之後刪掉它再重跑。
                     """)
@@ -631,7 +636,7 @@ enum QueryCommand {
                     LTM_BUILD_MEMORY_BUDGET_MB 對 `ltm query` / `ltm mcp` 同樣生效
                     （它們每次查詢前都會併入）。要拿到答案，提高或移除該預算。
                     """)
-            case .lockUnsafe(let path, let detail):
+            case .derivedPathUnsafe(let path, let detail):
                 Output.error(
                     """
                     ✗ 建置鎖的路徑不是我們的鎖檔，這次查詢沒有回答：\(detail)

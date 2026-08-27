@@ -176,8 +176,12 @@ public struct IndexBuilder: Sendable {
         /// 這個該去看 `code`／`detail` 說的那件事。第一版把兩者混成一個，
         /// 於是磁碟滿的使用者會去等一個不存在的建置。
         case lockUnavailable(path: String, code: Int32, detail: String)
-        /// 鎖檔開得起來，但它**不安全**：不只一個名字指向那個 inode（hard link），
-        /// 或它不屬於當前使用者。
+        /// derived 目錄底下的某個路徑**不是我們的檔案**：它不是一般檔案、不只一個
+        /// 名字指向那個 inode（hard link），或它不屬於當前使用者。
+        ///
+        /// **先前叫 `lockUnsafe`**，而共用的檢查搬進來之後它也管 `vectors.bin` 與
+        /// 資料庫——於是 CLI 對每一個 derived 檔案都說「這不是我們的**鎖檔**」
+        /// （#45 R6 verify，codex + regression）。名字跟著職責走。
         ///
         /// 與 `lockUnavailable` 分開的理由同上——補救動作完全不同。這個不是
         /// 「等一下再試」也不是「去看 errno」，是**那個名字指的不是我們的鎖檔**，
@@ -185,7 +189,7 @@ public struct IndexBuilder: Sendable {
         ///
         /// **框架是 #40 的**（防這個程式自己的 bug 與使用者自己的路徑擺法），
         /// 不是對抗性的——見 `FileLock.acquire` 的註解。
-        case lockUnsafe(path: String, detail: String)
+        case derivedPathUnsafe(path: String, detail: String)
         /// 側車檔比索引宣稱的短。
         ///
         /// 這**不能**靠 `ftruncate` 修：對較短的檔案指定較大的 offset 是
@@ -242,6 +246,23 @@ public struct IndexBuilder: Sendable {
         // 沒有現在就補進去，是因為補了會讓「同一件事有兩個真相來源」——
         // 正確的修法是讓規則換代**必然**帶動 layout 升版，而那需要一個
         // 目前不存在的機制。留這則註解，是為了讓下一個改定址規則的人看見。
+        // **`--full` 不需要「先清再開 DB」，`try?` 已經涵蓋了。**
+        //
+        // R6 的 regression lens 報「`cp -al` 備份過的 derived 目錄連 `--full` 都救
+        // 不回來」，我照著加了一段「full 先 discard 再開 DB」。**變異證明它買的是
+        // 零**：`currentStamps()` 用的是 `try?`，開檔失敗被吞成 `nil`，於是
+        // `rebuildFromScratch` 仍為 true、discard 照跑、`--full` 本來就通
+        // （回歸鎖：`aHardLinkedDatabaseIsRecoverableWithFull`，退掉那段程式碼
+        // 它照樣綠）。
+        //
+        // 那條 finding 的**前提**因此要修正：`--full` 救不回來的不是資料庫，是
+        // **鎖檔**——鎖必須在 discard 之前取得，而讓 `--full` 去 unlink 一個不安全
+        // 的鎖檔會打開 `FileLock` 型別註解記載的 race。那一種的復原路徑是刪掉整個
+        // derived 目錄（CLI 訊息逐字這樣說，回歸鎖在
+        // `aHardLinkedDerivedTreeIsRecoverableWithFull`）。
+        //
+        // 加一段驅動不了的程式碼去修一個誤述的前提，是這個 cluster 五輪來的同一個
+        // 形狀。這裡選擇不加。
         let existingStamps = try? currentStamps()
         let stampsMismatch =
             existingStamps.map {
@@ -633,7 +654,14 @@ public struct IndexBuilder: Sendable {
         let fm = FileManager.default
         // **刪除失敗必須終止**：`--full` 的契約是「從零開始」，而 `try?` 會讓一個
         // 刪不掉的舊產物安靜地留下來，之後的建置疊在它上面。
-        for url in [location.databaseURL, location.vectorsURL, location.stateURL] {
+        // **`.tmp` 與 `-journal` 也要清。** 先前沒清 `.tmp`，於是預先擺好的連結
+        // 會活過 `--full`——而 `--full` 之後 `vectors.bin` 不存在，`appendVectors`
+        // 必走那條分支，所以 `--full` 反而是最可靠的觸發路徑（#45 R6 verify）。
+        for url in [
+            location.databaseURL, location.vectorsURL, location.stateURL,
+            location.vectorsURL.appendingPathExtension("tmp"),
+            URL(fileURLWithPath: location.databaseURL.path + "-journal"),
+        ] {
             guard fm.fileExists(atPath: url.path) else { continue }
             try fm.removeItem(at: url)
         }
@@ -693,17 +721,39 @@ public struct IndexBuilder: Sendable {
         } else {
             // 全新的側車檔走 temp + rename：rename 在同一個檔案系統上是原子的，
             // 所以讀者要嘛看到完整的檔案、要嘛看不到檔案，不會看到半份。
-            // **`.tmp` 也是 derived 目錄底下的檔案。** 上一版把它漏在
-            // 「入口收斂成一個」之外——而它就在同一個函式裡（#45 R5 verify，
-            // security lens）。`Data.write` 會跟隨 symlink，所以先自己開。
+            // **這裡刻意用 `.atomic`，不走 `openDerivedFileNoFollow`。**
+            //
+            // 上一版把它改成自己開檔，理由寫的是「`Data.write` 會跟隨 symlink」
+            // ——**那句話是假的**，而那個「修法」造出一條原本不存在的毀資料路徑
+            // （#45 R6 verify，六個 lens 全部獨立命中，devil's advocate 判為純退步）。
+            //
+            // 兩件事，各自量過：
+            //
+            // 1. `.atomic` 對 symlink 與 hard link **都不寫穿**（它自己寫進同目錄的
+            //    暫存檔再 rename，從不對目標路徑開檔）：
+            //
+            //        symlink : victim 320 → 320 bytes
+            //        hardlink: victim 320 → 320 bytes
+            //
+            // 2. 換成 `O_WRONLY | O_CREAT | O_TRUNC` 之後，**截斷發生在 `open(2)`
+            //    裡面**，所以 `verifyExclusivelyOurs` 跑到時受害者已經是 0 bytes。
+            //    端到端實測（一般的 `ltm build`，不需要 `--full`）：
+            //
+            //        before: 242 bytes
+            //        ✗ …已中止（**沒有寫入任何東西**）：有 2 個名字指向同一個檔案
+            //        after : 0 bytes
+            //
+            //    ——守衛具名丟了錯，而語料檔已經歸零，訊息還逐字宣稱相反的事。
+            //
+            // 這正是同一次改動在 280 行之外為 `FileLock` 寫下的那條紀律：
+            // **順序不可調換，放在截斷之後就只是事後通知**。我在那裡寫下它，
+            // 又在這裡違反它。
+            //
+            // 判準因此不是「所有入口都要走同一個 helper」，是**破壞性動作不得
+            // 先於檢查**。`.atomic` 滿足它的方式更強：它根本不對目標路徑做
+            // 破壞性動作。
             let temporary = location.vectorsURL.appendingPathExtension("tmp")
-            do {
-                let handle = try openDerivedFileNoFollow(
-                    temporary, flags: O_WRONLY | O_CREAT | O_TRUNC)
-                defer { try? handle.close() }
-                try handle.write(contentsOf: data)
-                try handle.synchronize()
-            }
+            try data.write(to: temporary, options: [.atomic])
             _ = try FileManager.default.replaceItemAt(location.vectorsURL, withItemAt: temporary)
 
             // `.atomic` 保證的是「讀者不會看到半份」，**不保證 bytes 已經到磁碟**。
@@ -791,14 +841,14 @@ func verifyExclusivelyOurs(descriptor: Int32, path: String) throws {
     //   st_nlink   —— 沒有第二個名字指向同一個 inode（hard link）
     //   st_uid     —— 是我們建的
     guard (info.st_mode & S_IFMT) == S_IFREG else {
-        throw IndexBuilder.BuildError.lockUnsafe(path: path, detail: "它不是一般檔案")
+        throw IndexBuilder.BuildError.derivedPathUnsafe(path: path, detail: "它不是一般檔案")
     }
     guard info.st_nlink == 1 else {
-        throw IndexBuilder.BuildError.lockUnsafe(
+        throw IndexBuilder.BuildError.derivedPathUnsafe(
             path: path, detail: "有 \(info.st_nlink) 個名字指向同一個檔案（hard link）")
     }
     guard info.st_uid == getuid() else {
-        throw IndexBuilder.BuildError.lockUnsafe(
+        throw IndexBuilder.BuildError.derivedPathUnsafe(
             path: path, detail: "擁有者是 uid \(info.st_uid)，不是你（uid \(getuid())）")
     }
 }
@@ -831,9 +881,20 @@ func verifyExclusivelyOurs(descriptor: Int32, path: String) throws {
 ///   `open(2)` 的 `O_CREAT` 需要第三個引數，少給的話 mode 取自堆疊上的垃圾——
 ///   先前漏了它，於是 `.tmp` 被建成 0 權限，下一次開它 `EACCES`。
 func openDerivedFileNoFollow(_ url: URL, flags: Int32, mode: mode_t = 0o644) throws -> FileHandle {
+    // **`O_NONBLOCK` 不是選用的。** `open(O_WRONLY)` 對一個 FIFO 會**永久阻塞**
+    // 直到有讀者出現——阻塞在 `open(2)` 裡面，所以 `verifyExclusivelyOurs` 的
+    // `S_IFREG` 檢查永遠跑不到。實測：把 `vectors.bin.tmp` 換成 FIFO，`build()`
+    // 無限期掛住而且抱著 build.lock，stderr 零輸出（#45 R6 verify，三個 lens）。
+    //
+    // 那條檢查的註解原本就寫著它擋的是「對 FIFO 的 open 會永久阻塞」——**而它
+    // 在結構上到不了**。這是同一個形狀的又一次：一句寫在守衛旁邊、守衛自己
+    // 不滿足的說明。
+    //
+    // 加上 `O_NONBLOCK` 之後 FIFO 的 open 立刻回 `ENXIO`（無讀者）或成功，兩者
+    // 都讓控制流回到我們手上；一般檔案不受這個旗標影響。
     let descriptor = (flags & O_CREAT) != 0
-        ? open(url.path, flags | O_NOFOLLOW, mode)
-        : open(url.path, flags | O_NOFOLLOW)
+        ? open(url.path, flags | O_NOFOLLOW | O_NONBLOCK, mode)
+        : open(url.path, flags | O_NOFOLLOW | O_NONBLOCK)
     guard descriptor >= 0 else {
         let code = errno
         // `ELOOP` 就是「它是一個 symlink」。其餘照原樣往上報。

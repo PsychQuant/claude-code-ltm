@@ -93,14 +93,21 @@ public final class IndexDatabase {
         //     under /var/folders  NOFOLLOW=off → rc=0
         //     under /private/var  NOFOLLOW=on  → rc=0        （libversion 3.54.0）
         //
-        // 所以用法是**先把父目錄解析掉、再帶旗標**：最後一段仍由 kernel 檢查，
-        // 中間的 symlink 不誤傷。父目錄用 `resolvingSymlinksInPath()`，最後一段
-        // **不能**一起解析——那正好會把要擋的東西解析掉。
-        // **主檔也要在這個迴圈裡**：`SQLITE_OPEN_NOFOLLOW` 只擋符號連結，
-        // 對 hard link 完全不作用（實測：把零長度語料檔 hard link 成
-        // `index.sqlite3`，它被寫成 77,824 bytes 的 SQLite 檔）。symlink 那半由
-        // kernel 擋，hard link 這半只能在這裡擋。
-        for suffix in ["", "-wal", "-shm"] {
+        // **主檔也在這個迴圈裡**：symlink 與 hard link 兩半都靠它擋（實測：把零
+        // 長度語料檔 hard link 成 `index.sqlite3`，它被寫成 77,824 bytes 的
+        // SQLite 檔）。
+        // **`-journal` 是第六個。** 預設 journal mode 是 rollback journal，而
+        // `PRAGMA journal_mode=WAL` 是**開檔之後**才設的——所以第一次 build 會先
+        // 建 `<path>-journal`。實測：把零長度語料檔設為它的 symlink，第一次 build
+        // 把 512 bytes 寫進語料檔，**而 build 回報成功**（#44 R6 verify，
+        // devil's advocate）。
+        //
+        // 這份清單前後漏了三次（`-wal`/`-shm` 一次、`.tmp` 一次、`-journal` 一次），
+        // 每次的修法都是再列舉一次。**列舉會漏。** 這裡改成以 SQLite 實際會開的
+        // 前綴為準並寫下查法：`sqlite3_open_v2` 的 VFS 只會在同目錄建
+        // `<path>` 加上這四個後綴之一（`sqlite3.c` 的 `unixOpen`／`walIndexPage`），
+        // 查法是 `ls <derived>` 在一次 build 前後的差集。
+        for suffix in ["", "-wal", "-shm", "-journal"] {
             var probe = stat()
             let candidate = path + suffix
             guard lstat(candidate, &probe) == 0 else { continue }  // 不存在 = 沒問題
@@ -124,40 +131,25 @@ public final class IndexDatabase {
                         + "真正的檔案，或改設 LTM_DERIVED_ROOT。")
             }
         }
-        // **這個旗標沒有測試驅動得了它，而它仍然留著——理由要寫準。**
+        // **`SQLITE_OPEN_NOFOLLOW` 已移除。** 上一版留著它，理由寫的是「它買的是
+        // `lstat` 結構上給不了的東西——kernel 在開檔那一刻檢查，沒有 TOCTOU 窗口」。
         //
-        // 變異量過：拿掉 `SQLITE_OPEN_NOFOLLOW`，上面那條 symlink 測試**仍然綠**，
-        // 因為開檔前的 `lstat` 迴圈已經抓到同一個情形（`S_IFREG` 那一條就擋掉了）。
-        // 按 CLAUDE.md 的字面，「驅動不了的守衛要拆掉」。
+        // **那句話是假的**：實測顯示 `SQLITE_OPEN_NOFOLLOW` 是 SQLite **自己在
+        // `open(2)` 之前**做的使用者態檢查，不是 kernel 在開檔那一刻做的
+        // （#44 R6 verify，devil's advocate）。所以它與上面那個 `lstat` 迴圈
+        // **同類**，而且它的窗口一樣大。
         //
-        // 它與被我拆掉的那個（`readBytes` 的 `offset >= 0`）**不同類**，而差別是
-        // 可以說清楚的：那一個買的是**零**——上游的消毒已經讓它到不了，兩者防的是
-        // 同一件事的同一個面向。這一個買的是 `lstat` **結構上給不了**的東西：
-        // `lstat` 與 `sqlite3_open_v2` 之間有一個 TOCTOU 窗口，而旗標是 kernel 在
-        // 開檔那一刻自己檢查的，沒有窗口。
+        // 加上「拿掉它沒有任何測試會變紅」（我自己量的），它就完全落在 CLAUDE.md
+        // 那條規則裡：**驅動不了的守衛要拆掉，不是留著加註解**。上一版我寫了一段
+        // 論證說它是例外——而那正是我在 R4 對 `batchBoundViolated` 做過、並被
+        // 交叉變異推翻的同一個動作。同一個錯誤做第二次。
         //
-        // 換句話說：拿掉它不會讓任何測試變紅，但會把主檔的 symlink 防護從
-        // 「kernel 執行」降級成「使用者態檢查 + 一個窗口」。這句話本身可以被查證
-        // ——上面那三行量測就是查法。
-        //
-        // 父目錄解析掉，最後一段留著讓 kernel 檢查（見上方那段量測）。
-        //
-        // **用 `realpath(3)`，不是 `resolvingSymlinksInPath()`。** 後者在
-        // `/var/folders/…` 上**不解析** `/var`（CLAUDE.md 早記過這條：
-        // `temporaryDirectory` 與 `resolvingSymlinksInPath()` 都給 `/var/folders/…`，
-        // 而 `contentsOfDirectory` 給 `/private/var/folders/…`）。先用它寫了一版，
-        // 整套測試照樣 `SQLITE_CANTOPEN`——因為根本沒解析。
-        let url = URL(fileURLWithPath: path)
-        let parent = url.deletingLastPathComponent().path
-        let resolvedParent = realpath(parent, nil).map { pointer -> String in
-            defer { free(pointer) }
-            return String(cString: pointer)
-        } ?? parent   // 父目錄還不存在時照原樣走，讓 sqlite 自己報錯
-        let resolved = resolvedParent + "/" + url.lastPathComponent
+        // 它還有一個實務代價：那個旗標拒絕**路徑中任何一段**是符號連結，而 macOS
+        // 的 `/var → /private/var` 就是一段——為了繞開它，上一版又加了一層
+        // `realpath(3)` 的父目錄解析。拆掉旗標，那一層也跟著不必要。
         var db: OpaquePointer?
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX
-            | SQLITE_OPEN_NOFOLLOW
-        guard sqlite3_open_v2(resolved, &db, flags, nil) == SQLITE_OK, let opened = db else {
+        guard sqlite3_open_v2(path, &db, flags, nil) == SQLITE_OK, let opened = db else {
             let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open_v2 失敗"
             sqlite3_close_v2(db)
             throw DatabaseError.openFailed(path: path, message: message)

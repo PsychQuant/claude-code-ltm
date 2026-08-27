@@ -1240,6 +1240,7 @@ func releasingTheLockTwiceIsANoOp() throws {
         ("index.sqlite3", true), ("index.sqlite3", false),
         ("index.sqlite3-wal", true), ("index.sqlite3-wal", false),
         ("index.sqlite3-shm", true), ("index.sqlite3-shm", false),
+        ("index.sqlite3-journal", true), ("index.sqlite3-journal", false),
         ("build.lock", true), ("build.lock", false),
     ])
 func derivedFilesDoNotFollowLinks(entry: (name: String, symbolic: Bool)) throws {
@@ -1281,19 +1282,22 @@ func derivedFilesDoNotFollowLinks(entry: (name: String, symbolic: Bool)) throws 
     case "index.sqlite3": target = derived.databaseURL
     case "index.sqlite3-wal": target = URL(fileURLWithPath: dbPath + "-wal")
     case "index.sqlite3-shm": target = URL(fileURLWithPath: dbPath + "-shm")
+    case "index.sqlite3-journal": target = URL(fileURLWithPath: dbPath + "-journal")
     default: target = derived.lockURL
     }
-    // 側車與鎖會被 `ftruncate`，所以受害者必須**嚴格大於** target 才驗得到截短。
-    // 資料庫那幾個要**零長度**：非空目標倖存只是因為 sqlite 拒絕解析非資料庫檔案
-    // ——那是意外、不是有人選的緩解，而它對任何空檔案都不成立。
-    let wantsFatVictim = entry.name == "vectors.bin" || entry.name == "build.lock"
+    // **受害者一律非空。** 上一版給資料庫那幾個用零長度檔，理由是「非空目標
+    // 倖存只是因為 sqlite 拒絕解析非資料庫檔案」——那個理由對**當時**的實作成立，
+    // 但它讓位元組斷言變成 `Data() == Data()`：拿掉守衛它們照樣通過
+    // （#44 R6 verify，regression lens 指出 `-wal` / `-shm` 的 symlink 兩個是假綠）。
+    //
+    // 非空受害者對每一種破壞都是可觀察的：截短會變 0，覆寫會變別的內容。
+    // 而「零長度目標才會被 sqlite 寫穿」這件事由守衛本身涵蓋，不需要測試去
+    // 重現它——測試要驗的是**受害者沒變**，不是某條特定的破壞方式。
     victim = corpus.appendingPathComponent("victim.jsonl")
-    let payload = wantsFatVictim ? Data(repeating: 0x41, count: sidecarTarget + 1) : Data()
+    let payload = Data(repeating: 0x41, count: max(sidecarTarget + 1, 64))
     try payload.write(to: victim)
-    if wantsFatVictim {
-        #expect(payload.count > sidecarTarget,
-                "受害者必須嚴格大於側車 target（\(sidecarTarget)），否則 truncate 是 no-op 而測試綠得沒有意義")
-    }
+    #expect(payload.count > sidecarTarget,
+            "受害者必須嚴格大於側車 target（\(sidecarTarget)），否則 truncate 是 no-op 而測試綠得沒有意義")
 
     try? FileManager.default.removeItem(at: target)
     if entry.symbolic {
@@ -1392,4 +1396,170 @@ func anIndexWithChunksButNoSourceMappingIsRefused() throws {
         _ = try IndexBuilder(location: derived, scanner: scanner,
                              embedder: StubEmbedder(revision: "rev-A")).build()
     }
+}
+
+/// `vectors.bin.tmp` 是連結時，**受害者一個 byte 都不得變**。
+///
+/// 這條在 R5 曾經是紅的、而且是我自己造出來的：那一輪把 `.atomic` 換成
+/// `O_WRONLY | O_CREAT | O_TRUNC`，於是截斷發生在 `open(2)` **裡面**，守衛跑到時
+/// 語料已經歸零，而 CLI 印「沒有寫入任何東西」（#45 R6 verify，六個 lens 全部
+/// 獨立命中）。`.atomic` 對兩種連結都不寫穿——它從不對目標路徑開檔。
+///
+/// `discardDerivedArtifacts` **不刪 `.tmp`**，所以預先擺好的連結會活過 `--full`
+/// ——而 `--full` 之後 `vectors.bin` 不存在，`appendVectors` 必走這條分支。
+@Test(
+    "vectors.bin.tmp 是連結時不得寫穿語料",
+    arguments: [true, false])
+func theSidecarTempFileDoesNotWriteThroughLinks(symbolic: Bool) throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try derived.createRootIfNeeded()
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+
+    let victim = corpus.appendingPathComponent("victim.jsonl")
+    let payload = Data(repeating: 0x41, count: 4_096)
+    try payload.write(to: victim)
+
+    let temporary = derived.vectorsURL.appendingPathExtension("tmp")
+    if symbolic {
+        try FileManager.default.createSymbolicLink(at: temporary, withDestinationURL: victim)
+    } else {
+        #expect(link(victim.path, temporary.path) == 0, "前提：hard link 要建得起來")
+    }
+
+    // build 成功或失敗都可以——**唯一不可接受的是語料變了**。
+    _ = try? IndexBuilder(
+        location: derived,
+        scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A")
+    ).build()
+
+    #expect(try Data(contentsOf: victim) == payload,
+            "\(symbolic ? "symlink" : "hardlink") 版的 .tmp 寫穿了語料")
+}
+
+/// derived 路徑是 FIFO 時要**立刻**具名失敗，不得阻塞。
+///
+/// `open(O_WRONLY)` 對 FIFO 會永久阻塞直到有讀者出現——阻塞在 `open(2)` 裡面，
+/// 所以 `verifyExclusivelyOurs` 的 `S_IFREG` 檢查**在結構上跑不到**。那條檢查的
+/// 註解原本就寫著它擋的是這件事（#45 R6 verify，三個 lens 指出它到不了）。
+///
+/// 實測那條路徑的症狀：`build()` 無限期掛住、抱著 build.lock、stderr 零輸出。
+/// 所以這條測試用 helper 而不是整個 build——一個會掛住的測試會擋住整個 suite，
+/// 而 helper 這一層足以驅動那個旗標。
+@Test("derived 路徑是 FIFO 時立刻具名失敗，不阻塞")
+func aFifoDerivedPathFailsPromptly() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-fifo-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let fifo = root.appendingPathComponent("vectors.bin.tmp")
+    #expect(mkfifo(fifo.path, 0o644) == 0, "前提：FIFO 要建得起來")
+
+    // 沒有 `O_NONBLOCK` 的話這一行永遠不回來。
+    #expect(throws: (any Error).self) {
+        _ = try openDerivedFileNoFollow(fifo, flags: O_WRONLY)
+    }
+}
+
+/// 只有資料庫被 hard link（鎖是好的）時，**`--full` 必須救得回來**。
+///
+/// `currentStamps()` 會開資料庫，而開資料庫現在會做安全檢查——所以 discard 必須
+/// 跑在它**之前**，否則 `--full` 被自己要清掉的那個檔案擋住（#44 R6 verify）。
+///
+/// 這條與下面那條 `cp -al` 的差別就是鎖：那裡連鎖都被 hard link，而鎖必須在
+/// discard 之前取得，所以那一種只能刪目錄。這裡的鎖是好的，`--full` 就該通。
+@Test("只有資料庫被 hard link 時，--full 救得回來")
+func aHardLinkedDatabaseIsRecoverableWithFull() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner,
+                         embedder: StubEmbedder(revision: "rev-A")).build()
+
+    let shadow = derived.root.appendingPathComponent("db-shadow")
+    #expect(link(derived.databaseURL.path, shadow.path) == 0, "前提：hard link 要建得起來")
+
+    // 增量被擋——那是刻意的。
+    #expect(throws: (any Error).self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner,
+                             embedder: StubEmbedder(revision: "rev-A")).build()
+    }
+    // **`--full` 必須通**：discard 用 `removeItem`（unlink 一個名字，不動另一個），
+    // 而它跑在開資料庫之前。
+    let recovered = try IndexBuilder(location: derived, scanner: scanner,
+                                     embedder: StubEmbedder(revision: "rev-A")).build(full: true)
+    #expect(recovered.wasFullRebuild)
+    #expect(recovered.chunksIndexed > 0)
+    // 影子還在——我們只 unlink 了自己的那個名字。
+    #expect(FileManager.default.fileExists(atPath: shadow.path))
+}
+
+/// 用 `cp -al` 備份過 derived 目錄之後，**`ltm build --full` 仍然救得回來**。
+///
+/// 加固的偽陽性面：那些工具讓每個 derived 檔案 `st_nlink == 2`，而檢查在
+/// `--full` 的 discard **之前**就跑（`currentStamps()` 會開資料庫）——於是使用者
+/// 連 `--full` 都被擋住（#44 R6 verify，regression lens）。
+///
+/// diff 正是拿 `cp -al` / `rsync --link-dest` 當加固的理由，卻只講了它們製造
+/// hard link 的那一面。
+///
+/// **這條測試釘的是取捨本身**：`--full` 也被擋，而復原路徑是刪掉整個 derived
+/// 目錄。理由見測試內的註解——不是「還沒做到」。
+@Test("cp -al 備份過的 derived 目錄：build 與 --full 都具名拒絕，刪掉目錄後可復原")
+func aHardLinkedDerivedTreeIsRecoverableWithFull() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner,
+                         embedder: StubEmbedder(revision: "rev-A")).build()
+
+    // 模擬 `cp -al <derived> <backup>`：每個檔案多一個名字。
+    let backup = derived.root.deletingLastPathComponent()
+        .appendingPathComponent("backup-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: backup) }
+    for name in try FileManager.default.contentsOfDirectory(atPath: derived.root.path) {
+        _ = link(derived.root.appendingPathComponent(name).path,
+                 backup.appendingPathComponent(name).path)
+    }
+
+    // 增量會被擋（那是刻意的——我們分不出它是備份還是攻擊）。
+    #expect(throws: (any Error).self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner,
+                             embedder: StubEmbedder(revision: "rev-A")).build()
+    }
+
+    // **`--full` 也會被擋，而且被擋在 `build.lock` 上。** 這是刻意的取捨，寫清楚：
+    //
+    // 鎖必須在 discard **之前**取得（否則兩個 builder 會同時清同一個目錄），
+    // 而讓 `--full` 去 unlink 一個不安全的鎖檔會打開 `FileLock` 型別註解記載的
+    // 那個 race：A 持鎖、B unlink、C 對新 inode 取鎖 → 兩個寫者。
+    //
+    // 用一個真實存在的並發風險去換一個「使用者刪掉目錄就好」的情境，方向不對。
+    // 所以契約是：**derived 是純衍生物，刪掉整個目錄再 build。** CLI 的訊息逐字
+    // 這樣說。
+    #expect(throws: (any Error).self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner,
+                             embedder: StubEmbedder(revision: "rev-A")).build(full: true)
+    }
+
+    // 而那條路必須真的通——一條指向死路的訊息比沒有訊息糟。
+    try FileManager.default.removeItem(at: derived.root)
+    let recovered = try IndexBuilder(location: derived, scanner: scanner,
+                                     embedder: StubEmbedder(revision: "rev-A")).build(full: true)
+    #expect(recovered.wasFullRebuild)
+    #expect(recovered.chunksIndexed > 0)
 }

@@ -22,7 +22,27 @@
   超前的游標（R3 實測：那則 turn 永遠不會再被索引，build 不報錯）。根本問題是
   **「游標涵蓋的內容是否真的在索引裡」這個事實不在磁碟上**，所以不猜：舊索引
   升上來時具名拒絕並要求 `ltm build --full`。
-- **derived 目錄底下的檔案不再跟著 symlink 或 hard link 走，五個入口全部涵蓋。**
+- **`.tmp` 改回 `.atomic`——上一輪那個「修法」是純退步，而且會毀語料。** 我把它
+  改成 `O_WRONLY | O_CREAT | O_TRUNC`，理由寫的是「`Data.write` 會跟隨 symlink」
+  ——**那句話是假的**（實測：`.atomic` 對 symlink 與 hard link 都不寫穿，因為它
+  寫進同目錄的暫存檔再 rename，從不對目標路徑開檔）。而 `O_TRUNC` 的截斷發生在
+  `open(2)` **裡面**，所以守衛跑到時語料已經歸零，訊息還印「沒有寫入任何東西」。
+  端到端實測 242 → 0 bytes，一般的 `ltm build` 就會觸發。**R6 的六個 lens 全部
+  獨立命中這一條。**
+- **`index.sqlite3-journal` 是第六個入口**（預設 journal mode 是 rollback journal，
+  而 `journal_mode=WAL` 是開檔之後才設的）。實測：第一次 build 把 512 bytes 寫進
+  語料檔而回報成功。這份清單前後漏了三次，所以現在它以「SQLite 實際會開的後綴」
+  為準並寫下查法。
+- **`openDerivedFileNoFollow` 加 `O_NONBLOCK`。** `open(O_WRONLY)` 對 FIFO 會永久
+  阻塞在 `open(2)` 裡面，所以 `S_IFREG` 那條檢查**在結構上跑不到**——而它的註解
+  正好寫著它擋的是這件事。實測：build 無限期掛住並抱著 build.lock。
+- **`SQLITE_OPEN_NOFOLLOW` 移除。** 上一版留著它並論證它「是 kernel 檢查、沒有
+  窗口」——實測顯示它是 SQLite **自己在 `open(2)` 之前**做的使用者態檢查，與
+  `lstat` 同類、窗口一樣大。加上沒有測試驅動得了它，它完全落在「驅動不了的守衛
+  要拆掉」裡。**那正是我在 R4 對另一道守衛做過、並被交叉變異推翻的同一個動作。**
+- **`lockUnsafe` 改名 `derivedPathUnsafe`。** 共用檢查搬進來之後它也管 `vectors.bin`
+  與資料庫，而 CLI 對每一個 derived 檔案都說「這不是我們的**鎖檔**」。
+- **derived 目錄底下的檔案不再跟著 symlink 或 hard link 走，六個入口全部涵蓋。**
   上一版只做了 symlink 那一半，並用一段註解把 hard link 宣告成 #40 的既決限度
   ——**那個引用不成立**：#40 接受 hardlink 的理由是成本（它手上沒有 fd），而
   這裡已經拿到 fd；而且 hard link 正是 `cp -al` / `rsync --link-dest` /
@@ -43,7 +63,7 @@
   `ln -s <語料>.jsonl vectors.bin` 之後，`ltm query`（含長駐的 `ltm mcp`）就會把
   那個語料檔截成零長度（實測 40 → 0 bytes）。入口收斂成一個
   `openDerivedFileNoFollow`，而不是逐處加旗標——後者會讓下一個新增的 derived
-  檔案成為第四個漏網的。sqlite 沒有 `O_NOFOLLOW`，改用開檔前的 `lstat`。
+  檔案成為第四個漏網的。sqlite 的入口改用開檔前的 `lstat`（`SQLITE_OPEN_NOFOLLOW` 試過又移除，理由見下）。
 - **威脅模型與 #40 對齊。** 上一版的鎖守衛採用對抗性框架，而
   `LTMMemory/EventStore.swift` 對同一個攻擊類別早有一份蓋了「已決」章的規格：
   守衛防的是**這個程式自己的 bug 與使用者自己的路徑擺法**，hardlink 與 TOCTOU 是
