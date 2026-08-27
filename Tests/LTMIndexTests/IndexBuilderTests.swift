@@ -413,9 +413,13 @@ func batchUpperBoundMatchesTheDeclaredFormula() throws {
 /// （#46 R3 verify，四個 lens 各自命中）。而 `batchChunkUpperBound` 在整個出貨
 /// 程式碼裡**零呼叫**，所以「公式只有一份」買到的只是一個沒人用的函式。
 ///
-/// 現在 `build()` 自己拿分批結果對照公式，違反就丟 `batchBoundViolated`。這條
-/// 測試跑真的 build，斷言的是**生產路徑上那道對照通過**。
-@Test("生產分批的最大批次不超過宣告的上界——由 build() 自己對照")
+/// **扛住這條性質的是這條測試自己，不是生產路徑。** 中間有一版讓 `build()` 對照
+/// 並丟 `batchBoundViolated`；交叉變異（改壞迴圈 ＋ 同時刪守衛）顯示這條測試
+/// 直接接手，所以那道守衛沒有扛任何東西，已移除。
+///
+/// 這條測試跑**真的 build**，斷言的是生產迴圈算出的最大批次不超過公式——公式與
+/// 迴圈分岔時它會紅。
+@Test("生產分批的最大批次不超過宣告的上界——由這條測試扛，不是由生產守衛")
 func productionBatchingHonoursTheDeclaredBound() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
@@ -455,8 +459,8 @@ func productionBatchingHonoursTheDeclaredBound() throws {
 
     let observed = try #require(plan.current, "沒有收到 batchPlan——這條測試就沒有在驗任何東西")
     #expect(observed.batches > 1, "前提：target 要小到真的切成多批，否則上界無從被違反")
-    // 上界對照本身在 `build()` 裡（違反會丟 `batchBoundViolated`），所以走到這裡
-    // 就代表它通過了。這一行是把那件事寫出來，讓讀者不必回去讀 build()。
+    // **這一行就是那道對照。** 生產路徑不再自己檢查（那道守衛驅動不了，已移除），
+    // 所以公式與迴圈的分歧只會在這裡變紅。
     #expect(observed.largest
         <= IndexBuilder.batchChunkUpperBound(target: 3, largestSource: 4))
 }
@@ -1211,15 +1215,37 @@ func releasingTheLockTwiceIsANoOp() throws {
 
 
 
-/// **derived 目錄底下的檔案不得跟著 symlink 走。**
+/// **derived 目錄底下的檔案不得跟著任何連結走——symlink 與 hard link 都要驗。**
 ///
-/// R3 說加固是「點狀的」，R4 量出另外兩處確實還開著，而 `vectors.bin` 那條
-/// 比鎖更糟：`truncateSidecar` 在**每一次查詢之前**被呼叫（`refreshIncrementally`
-/// → `build()`），所以它在 `ltm query` 與長駐 `ltm mcp` 的路徑上。
+/// 上一版只驗 symlink，而 hard link 版**完全沒關**：實測把一個語料 turn 檔
+/// hard link 成 `vectors.bin`，`ltm query` 把它從 1,391 bytes 截成 32，而 build
+/// 回報「✓ 索引完成」（#44 R5 verify，devil's advocate）。
 ///
-/// 這條測試對三個 derived 檔案各驗一次——**因為漏掉一個就是下一個 CRITICAL**。
-@Test("derived 檔案是 symlink 時具名失敗，目標檔不被截斷或覆寫")
-func derivedFilesDoNotFollowSymlinks() throws {
+/// 上一版還有一個沒寫下來的前提，讓它**在三分之二的 fixture 上是假綠**：
+/// `truncateSidecar` 的 target = `vector_count × dimension × 4`，而
+/// `StubEmbedder.dimension == 4`，所以 target = `rows × 16`；受害者 32 bytes 時
+/// 只有 `rows == 1`（target 16 < 32）會真的截短。`rows == 2` 時 truncate 是 no-op，
+/// `rows == 3` 時先丟 `sidecarShorterThanDeclared`——**兩種都綠，而 symlink 照樣
+/// 被跟隨**。那兩個數字沒有任何一個被寫在測試裡。
+///
+/// 所以這一版把它**寫成斷言**：受害者必須嚴格大於側車的 target，否則測試自己
+/// 報前提不成立。語料多一行、或 `StubEmbedder.dimension` 改個值，會讓這條前提
+/// 變紅，而不是讓回歸鎖靜默消失。
+@Test(
+    "derived 檔案是 symlink 或 hard link 時具名失敗，目標檔不被截斷或覆寫",
+    arguments: [
+        // 五個入口 × 兩種連結。`-wal` / `-shm` 是**既有的**第四、第五個，而上一版
+        // 的註解正好寫著「下一個新增的 derived 檔案會是第四個漏網的」。
+        ("vectors.bin", true), ("vectors.bin", false),
+        ("index.sqlite3", true), ("index.sqlite3", false),
+        ("index.sqlite3-wal", true), ("index.sqlite3-wal", false),
+        ("index.sqlite3-shm", true), ("index.sqlite3-shm", false),
+        ("build.lock", true), ("build.lock", false),
+    ])
+func derivedFilesDoNotFollowLinks(entry: (name: String, symbolic: Bool)) throws {
+    // **每個 case 一個全新的 workspace。** 先前是一個迴圈共用一份，於是前一輪把
+    // 受害者寫成 77,824 bytes 的 SQLite 檔之後，後面幾輪的斷言就在一個被污染的
+    // 前提上跑——同一條測試裡的跨迭代狀態污染，正是這一輪要消滅的那類問題。
     let (corpus, derived) = try makeWorkspace()
     defer {
         try? FileManager.default.removeItem(at: corpus)
@@ -1228,51 +1254,68 @@ func derivedFilesDoNotFollowSymlinks() throws {
     try derived.createRootIfNeeded()
     try writeTurns(in: corpus, texts: ["第一段內容"])
 
-    // **先建一份真的索引。** 第一次 build 走全量路徑，而 `discardDerivedArtifacts`
-    // 會 `removeItem` 掉那個 symlink——那正是 security lens 指出的不對稱：
-    // `--full` 是安全的，**危險的是增量與查詢路徑**。要驗的是後者。
-    _ = try IndexBuilder(
-        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
-        embedder: StubEmbedder(revision: "rev-A")).build()
+    // 先建一份真的索引：第一次 build 走全量路徑，而 `discardDerivedArtifacts`
+    // 會 `removeItem` 掉連結——`--full` 是安全的，危險的是增量與查詢路徑。
+    let stub = StubEmbedder(revision: "rev-A")
+    _ = try IndexBuilder(location: derived,
+                         scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                         embedder: stub).build()
 
-    // 兩個受害者，**而且大小刻意不同**。
-    //
-    // 非空的那個給側車：`truncate` 對它就是歸零。
-    // **零長度的那個給資料庫**：非空目標倖存只是因為 sqlite 拒絕解析非資料庫檔案
-    // ——那是意外、不是有人選的緩解，而它對任何空檔案都不成立（實測：0 → 8,192
-    // bytes 的 SQLite 檔，旁邊還多出 `-wal` / `-shm`）。用非空目標驗這條會讓測試
-    // **靠那個意外通過**，於是拿掉 `lstat` 檢查它也不會紅——變異量到過。
-    let payload = Data("IMPORTANT DATA THAT MUST SURVIVE".utf8)
-    let fatVictim = corpus.appendingPathComponent("victim-fat.jsonl")
-    try payload.write(to: fatVictim)
-    let emptyVictim = corpus.appendingPathComponent("victim-empty.jsonl")
-    try Data().write(to: emptyVictim)
+    // **把那個沒寫下來的算式寫出來。** 上一版有一個沒被斷言的前提，讓它在
+    // 三分之二的 fixture 上是假綠：`truncateSidecar` 的 target =
+    // `vector_count × dimension × 4`，受害者不夠大時 truncate 就是 no-op，或
+    // 在截短前先丟別的 error 而被 `#expect(throws:)` 錯誤地滿足。
+    let rows = try {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        return try database.meta("vector_count").flatMap(Int.init) ?? 0
+    }()
+    let sidecarTarget = rows * stub.dimension * MemoryLayout<Float>.size
+    #expect(sidecarTarget > 0, "前提：索引要真的有向量，否則側車 target 是 0、truncate 無事可做")
 
-    for (label, target, victim) in [
-        ("vectors", derived.vectorsURL, fatVictim),
-        ("database", derived.databaseURL, emptyVictim),
-    ] {
-        try? FileManager.default.removeItem(at: target)
+    let dbPath = derived.databaseURL.path
+    let target: URL
+    let victim: URL
+    switch entry.name {
+    case "vectors.bin": target = derived.vectorsURL
+    case "index.sqlite3": target = derived.databaseURL
+    case "index.sqlite3-wal": target = URL(fileURLWithPath: dbPath + "-wal")
+    case "index.sqlite3-shm": target = URL(fileURLWithPath: dbPath + "-shm")
+    default: target = derived.lockURL
+    }
+    // 側車與鎖會被 `ftruncate`，所以受害者必須**嚴格大於** target 才驗得到截短。
+    // 資料庫那幾個要**零長度**：非空目標倖存只是因為 sqlite 拒絕解析非資料庫檔案
+    // ——那是意外、不是有人選的緩解，而它對任何空檔案都不成立。
+    let wantsFatVictim = entry.name == "vectors.bin" || entry.name == "build.lock"
+    victim = corpus.appendingPathComponent("victim.jsonl")
+    let payload = wantsFatVictim ? Data(repeating: 0x41, count: sidecarTarget + 1) : Data()
+    try payload.write(to: victim)
+    if wantsFatVictim {
+        #expect(payload.count > sidecarTarget,
+                "受害者必須嚴格大於側車 target（\(sidecarTarget)），否則 truncate 是 no-op 而測試綠得沒有意義")
+    }
+
+    try? FileManager.default.removeItem(at: target)
+    if entry.symbolic {
         try FileManager.default.createSymbolicLink(at: target, withDestinationURL: victim)
+    } else {
+        #expect(link(victim.path, target.path) == 0, "前提：hard link 要建得起來")
+    }
 
-        // 具名失敗——不是靜默寫穿。
-        #expect(throws: (any Error).self, "\(label) 沒有拒絕 symlink") {
-            _ = try IndexBuilder(
-                location: derived,
-                scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
-                embedder: StubEmbedder(revision: "rev-A")
-            ).build()
-        }
-        let after = try Data(contentsOf: victim)
-        #expect(after.count == (victim == fatVictim ? payload.count : 0),
-                "\(label) 跟著 symlink 寫穿了（\(after.count) bytes）——這條路徑到得了唯讀語料")
-        // sqlite 會在旁邊留 `-wal` / `-shm`，那也是寫進語料樹。
-        for suffix in ["-wal", "-shm"] {
-            let sibling = URL(fileURLWithPath: victim.path + suffix)
-            #expect(!FileManager.default.fileExists(atPath: sibling.path),
-                    "\(label) 在語料樹裡留下了 \(suffix)")
-        }
-        try? FileManager.default.removeItem(at: target)
+    let kind = entry.symbolic ? "symlink" : "hardlink"
+    #expect(throws: (any Error).self, "\(entry.name) 沒有拒絕 \(kind)") {
+        _ = try IndexBuilder(
+            location: derived,
+            scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+            embedder: stub
+        ).build()
+    }
+    let after = try Data(contentsOf: victim)
+    #expect(after == payload,
+            "\(entry.name)/\(kind) 寫穿了語料（\(payload.count) → \(after.count) bytes）")
+    for suffix in ["-wal", "-shm"] {
+        #expect(!FileManager.default.fileExists(atPath: victim.path + suffix),
+                "\(entry.name)/\(kind) 在語料樹裡留下了 \(suffix)")
     }
 }
 
@@ -1308,6 +1351,40 @@ func aPartiallyCoveredIndexIsRefused() throws {
         defer { database.close() }
         try database.execute("DELETE FROM scan_state WHERE source_key LIKE '%s0.jsonl'")
         #expect(try !database.scanState().files.isEmpty, "前提：表不是空的，代理判準會放行")
+        #expect(try database.sourcesWithoutCursor().count == 1)
+    }
+
+    #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner,
+                             embedder: StubEmbedder(revision: "rev-A")).build()
+    }
+}
+
+/// 有 chunk 但**零 source mapping** 的舊索引也要被拒絕。
+///
+/// `createSchema()` 全用 `CREATE TABLE IF NOT EXISTS`，所以早於 `chunk_sources`
+/// 的索引升上來時那張表是空的而 `chunks` 有內容。上一版的 `sourcesWithoutCursor()`
+/// 只查「有 mapping 卻無游標」，於是它在這一類輸入上**比它取代的代理更弱**
+/// （#44 R5 verify）——而同一次改動還把會暴露這個洞的狀態從另一條測試裡挪開了。
+@Test("有 chunk 但零 source mapping 的索引被拒絕")
+func anIndexWithChunksButNoSourceMappingIsRefused() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner,
+                         embedder: StubEmbedder(revision: "rev-A")).build()
+
+    // 構造「早於 chunk_sources 的索引」：chunks 有內容、mapping 表空、游標也空。
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("DELETE FROM chunk_sources")
+        try database.execute("DELETE FROM scan_state")
+        #expect(try database.chunkCount() > 0, "前提：chunks 仍有內容")
         #expect(try database.sourcesWithoutCursor().count == 1)
     }
 

@@ -59,31 +59,105 @@ public final class IndexDatabase {
 
     public init(path: String) throws {
         self.path = path
-        // **SQLite 沒有 `O_NOFOLLOW`**，所以只能在開檔前用 `lstat` 擋。
+        // **`SQLITE_OPEN_NOFOLLOW` 存在，用它。**
         //
-        // 實測（#44 R4 verify，security lens）：`ln -s <零長度語料檔> index.sqlite3`
-        // 之後，那個語料檔會被寫成 8,192 bytes 的 SQLite 資料庫，而且旁邊多出
-        // `-wal` / `-shm`。非空目標倖存**只是因為 sqlite 拒絕解析非資料庫檔案**
-        // ——那是意外，不是有人選的緩解，而且它對任何空檔案都不成立。
+        // 上一版這裡逐字寫著「SQLite 沒有 `O_NOFOLLOW`，所以只能在開檔前用 `lstat`
+        // 擋」，而那句話是**假的**——`sqlite3.h` 自 3.31.0 起就有
+        // `SQLITE_OPEN_NOFOLLOW`（本機 SDK 的 `sqlite3.h:622`，libversion 3.54.0）。
+        // 實測（#44 R5 verify，security lens）：帶旗標開一個 symlink 回
+        // `SQLITE_CANTOPEN`、受害者不變；拿掉則被寫成 8,192 bytes 的 SQLite 檔。
         //
-        // **威脅模型是 #40 已決的那一份**（見 `LTMMemory/EventStore.swift`）：
-        // 這道檢查防的是這個程式自己的 bug 與使用者自己的路徑擺法，不是對抗者。
-        // 所以它**擋不住** TOCTOU（`lstat` 與 `sqlite3_open_v2` 之間路徑可被換掉）
-        // 也擋不住 hardlink——兩者與 #40 逐字同一組被接受的限度。
+        // **那句假話是唯一的論證**，用來把一個 kernel 執行得了的檢查換成一個帶
+        // 已知 TOCTOU 窗口的使用者態檢查，再把那個窗口宣告成 #40 的既決限度。
+        // 而且它被複述到 CHANGELOG 與 issue comment。正解是 flags 加一個常數。
         //
-        // 這裡不能用 `openDerivedFileNoFollow`：sqlite 要自己開檔（它還要開
-        // `-wal` / `-shm`），拿不到我們的 fd。所以形式不同，判準相同。
-        var info = stat()
-        if lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK {
-            throw DatabaseError.openFailed(
-                path: path,
-                message: "它是一個符號連結。索引資料庫會被就地建立與覆寫，所以這裡不"
-                    + "跟著它走——那會寫到連結指向的地方去。請把它換成真正的檔案，"
-                    + "或改設 LTM_DERIVED_ROOT。")
+        // ## `-wal` / `-shm` 要另外擋
+        //
+        // `SQLITE_OPEN_NOFOLLOW` 只約束主資料庫檔。WAL 與 shared-memory 檔由
+        // SQLite 的 VFS 自己用一般 `open()` 開 `<path>-wal` / `<path>-shm`——所以
+        // **它們是第四、第五個入口**，而上一版的註解正好寫著「下一個新增的
+        // derived 檔案會是第四個漏網的」。它們已經在那裡了（#44 R5 verify，codex）。
+        //
+        // 這裡只能在開檔前 `lstat`：拿不到 SQLite 的 fd。**這一道確實帶 TOCTOU
+        // 窗口**，而那在 #40 的模型下是被接受的限度——但它擋掉的是那個模型明文
+        // 保留在範圍內的東西：使用者自己把側車 symlink 到別處。
+        //
+        // ## `SQLITE_OPEN_NOFOLLOW` 的實際語意（量過，不是查文件）
+        //
+        // 它拒絕的是**路徑中任何一段**是符號連結，不只是最後一段。而 macOS 的
+        // `/var → /private/var` 就是一段——所以直接加上這個旗標會讓
+        // `/var/folders/...` 底下的每一個資料庫都開不起來（實測：整套測試從
+        // 500 綠變成大量 `SQLITE_CANTOPEN`）：
+        //
+        //     under /var/folders  NOFOLLOW=on  → rc=14 unable to open database file
+        //     under /var/folders  NOFOLLOW=off → rc=0
+        //     under /private/var  NOFOLLOW=on  → rc=0        （libversion 3.54.0）
+        //
+        // 所以用法是**先把父目錄解析掉、再帶旗標**：最後一段仍由 kernel 檢查，
+        // 中間的 symlink 不誤傷。父目錄用 `resolvingSymlinksInPath()`，最後一段
+        // **不能**一起解析——那正好會把要擋的東西解析掉。
+        // **主檔也要在這個迴圈裡**：`SQLITE_OPEN_NOFOLLOW` 只擋符號連結，
+        // 對 hard link 完全不作用（實測：把零長度語料檔 hard link 成
+        // `index.sqlite3`，它被寫成 77,824 bytes 的 SQLite 檔）。symlink 那半由
+        // kernel 擋，hard link 這半只能在這裡擋。
+        for suffix in ["", "-wal", "-shm"] {
+            var probe = stat()
+            let candidate = path + suffix
+            guard lstat(candidate, &probe) == 0 else { continue }  // 不存在 = 沒問題
+            let reason: String?
+            if (probe.st_mode & S_IFMT) == S_IFLNK {
+                reason = "它是一個符號連結"
+            } else if (probe.st_mode & S_IFMT) != S_IFREG {
+                reason = "它不是一般檔案"
+            } else if probe.st_nlink > 1 {
+                reason = "有 \(probe.st_nlink) 個名字指向同一個檔案（hard link）"
+            } else if probe.st_uid != getuid() {
+                reason = "擁有者是 uid \(probe.st_uid)，不是你（uid \(getuid())）"
+            } else {
+                reason = nil
+            }
+            if let reason {
+                throw DatabaseError.openFailed(
+                    path: candidate,
+                    message: "\(reason)。索引資料庫與它的 -wal / -shm 會被就地建立與"
+                        + "覆寫，所以這裡不動它——那會寫到別的地方去。請把它換成"
+                        + "真正的檔案，或改設 LTM_DERIVED_ROOT。")
+            }
         }
+        // **這個旗標沒有測試驅動得了它，而它仍然留著——理由要寫準。**
+        //
+        // 變異量過：拿掉 `SQLITE_OPEN_NOFOLLOW`，上面那條 symlink 測試**仍然綠**，
+        // 因為開檔前的 `lstat` 迴圈已經抓到同一個情形（`S_IFREG` 那一條就擋掉了）。
+        // 按 CLAUDE.md 的字面，「驅動不了的守衛要拆掉」。
+        //
+        // 它與被我拆掉的那個（`readBytes` 的 `offset >= 0`）**不同類**，而差別是
+        // 可以說清楚的：那一個買的是**零**——上游的消毒已經讓它到不了，兩者防的是
+        // 同一件事的同一個面向。這一個買的是 `lstat` **結構上給不了**的東西：
+        // `lstat` 與 `sqlite3_open_v2` 之間有一個 TOCTOU 窗口，而旗標是 kernel 在
+        // 開檔那一刻自己檢查的，沒有窗口。
+        //
+        // 換句話說：拿掉它不會讓任何測試變紅，但會把主檔的 symlink 防護從
+        // 「kernel 執行」降級成「使用者態檢查 + 一個窗口」。這句話本身可以被查證
+        // ——上面那三行量測就是查法。
+        //
+        // 父目錄解析掉，最後一段留著讓 kernel 檢查（見上方那段量測）。
+        //
+        // **用 `realpath(3)`，不是 `resolvingSymlinksInPath()`。** 後者在
+        // `/var/folders/…` 上**不解析** `/var`（CLAUDE.md 早記過這條：
+        // `temporaryDirectory` 與 `resolvingSymlinksInPath()` 都給 `/var/folders/…`，
+        // 而 `contentsOfDirectory` 給 `/private/var/folders/…`）。先用它寫了一版，
+        // 整套測試照樣 `SQLITE_CANTOPEN`——因為根本沒解析。
+        let url = URL(fileURLWithPath: path)
+        let parent = url.deletingLastPathComponent().path
+        let resolvedParent = realpath(parent, nil).map { pointer -> String in
+            defer { free(pointer) }
+            return String(cString: pointer)
+        } ?? parent   // 父目錄還不存在時照原樣走，讓 sqlite 自己報錯
+        let resolved = resolvedParent + "/" + url.lastPathComponent
         var db: OpaquePointer?
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX
-        guard sqlite3_open_v2(path, &db, flags, nil) == SQLITE_OK, let opened = db else {
+            | SQLITE_OPEN_NOFOLLOW
+        guard sqlite3_open_v2(resolved, &db, flags, nil) == SQLITE_OK, let opened = db else {
             let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open_v2 失敗"
             sqlite3_close_v2(db)
             throw DatabaseError.openFailed(path: path, message: message)
@@ -332,8 +406,28 @@ public final class IndexDatabase {
     /// （#44 R4 verify，codex lens）。
     ///
     /// 判準因此從代理換成本體：問資料庫。
+    ///
+    /// **兩種缺失，不是一種。** 上一版只查了第二種，於是它在一類輸入上比它取代的
+    /// 代理**更弱**：`createSchema()` 全用 `CREATE TABLE IF NOT EXISTS`，所以早於
+    /// `chunk_sources` 的索引升上來時那張表是**空的**而 `chunks` 有內容——舊判準
+    /// （`files.isEmpty && chunkCount() > 0`）會拒絕，新查詢卻回空陣列而放行
+    /// （#44 R5 verify，codex + logic）。
+    ///
+    /// 更難看的是同一次改動把會暴露這個洞的狀態從測試涵蓋範圍裡挪開了
+    /// （給 `anEmptyIndexNeverAdoptsAStaleMirror` 加上 `DELETE FROM chunk_sources`）。
     public func sourcesWithoutCursor() throws -> [String] {
         var missing: [String] = []
+        // 第一種：有 chunk，卻沒有任何 source mapping。那些 chunk 屬於哪個來源
+        // 無從得知，所以任何游標都涵蓋不住它們。
+        var orphanChunks = 0
+        try query(
+            "SELECT COUNT(*) FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_sources)"
+        ) { statement in
+            orphanChunks = Int(sqlite3_column_int64(statement, 0))
+        }
+        if orphanChunks > 0 {
+            missing.append("(\(orphanChunks) 個 chunk 沒有任何 source mapping)")
+        }
         try query(
             """
             SELECT DISTINCT s.source_key FROM chunk_sources s

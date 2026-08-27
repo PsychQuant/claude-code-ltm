@@ -693,8 +693,17 @@ public struct IndexBuilder: Sendable {
         } else {
             // 全新的側車檔走 temp + rename：rename 在同一個檔案系統上是原子的，
             // 所以讀者要嘛看到完整的檔案、要嘛看不到檔案，不會看到半份。
+            // **`.tmp` 也是 derived 目錄底下的檔案。** 上一版把它漏在
+            // 「入口收斂成一個」之外——而它就在同一個函式裡（#45 R5 verify，
+            // security lens）。`Data.write` 會跟隨 symlink，所以先自己開。
             let temporary = location.vectorsURL.appendingPathExtension("tmp")
-            try data.write(to: temporary, options: [.atomic])
+            do {
+                let handle = try openDerivedFileNoFollow(
+                    temporary, flags: O_WRONLY | O_CREAT | O_TRUNC)
+                defer { try? handle.close() }
+                try handle.write(contentsOf: data)
+                try handle.synchronize()
+            }
             _ = try FileManager.default.replaceItemAt(location.vectorsURL, withItemAt: temporary)
 
             // `.atomic` 保證的是「讀者不會看到半份」，**不保證 bytes 已經到磁碟**。
@@ -745,6 +754,55 @@ public struct IndexBuilder: Sendable {
 }
 
 
+
+/// 一個**已經開啟的 fd** 指向的東西，是不是「我們自己的、只有一個名字的一般檔案」。
+///
+/// ## 為什麼是一個函式而不是兩份
+///
+/// `FileLock.acquire` 先有了這段檢查，而 derived 檔案的加固**只抄了 symlink 那一半**
+/// ——`O_NOFOLLOW` 擋 symlink，hard link 從它旁邊走過去。實測（#44 R5 verify，
+/// devil's advocate）：把一個語料 turn 檔 hard link 成 `vectors.bin`，
+/// `ltm query` 把它從 1,391 bytes 截成 32，而 build 回報「✓ 索引完成」。
+///
+/// 上一版用一段註解把缺掉的那半宣告成 #40 的既決限度。**那個引用不成立**：
+/// #40 接受 hardlink 的理由是**成本**（它是純路徑判定，手上沒有 fd，要擋得列舉
+/// 語料樹內所有 inode）；而這裡已經拿到 fd，緩解就是下面這幾行。#40 自己的原文
+/// 最後一段寫著：「接受一條限度之前先確認自己接受的是它本來的形狀。」
+///
+/// 而 hard link 正是**意外**的常態產物——`cp -al`、`rsync --link-dest`、
+/// `git clone --local`、Time Machine / borg / restic 還原——所以它落在 #40 宣稱
+/// 要防的那一類裡，不是它宣稱要放掉的那一類。
+///
+/// ## 誠實邊界
+///
+/// 消除的是「路徑在檢查與開檔之間被換掉」那一類（fd 已綁定 inode）。**不**消除
+/// 「inode 的 link count 在 `fstat` 之後改變」——`st_nlink` 是可變狀態，這裡沒有
+/// 機制凍結它。那一條在 #40 的模型下是被接受的限度（需要並行的本機攻擊者，
+/// 而那樣的攻擊者有直接得多的手段）。
+func verifyExclusivelyOurs(descriptor: Int32, path: String) throws {
+    var info = stat()
+    guard fstat(descriptor, &info) == 0 else {
+        let code = errno
+        throw IndexBuilder.BuildError.lockUnavailable(
+            path: path, code: code, detail: String(cString: strerror(code)))
+    }
+    // 三個條件，各自擋不同的東西：
+    //   S_ISREG    —— 不是 FIFO／device／socket（對 FIFO 的 open 會永久阻塞）
+    //   st_nlink   —— 沒有第二個名字指向同一個 inode（hard link）
+    //   st_uid     —— 是我們建的
+    guard (info.st_mode & S_IFMT) == S_IFREG else {
+        throw IndexBuilder.BuildError.lockUnsafe(path: path, detail: "它不是一般檔案")
+    }
+    guard info.st_nlink == 1 else {
+        throw IndexBuilder.BuildError.lockUnsafe(
+            path: path, detail: "有 \(info.st_nlink) 個名字指向同一個檔案（hard link）")
+    }
+    guard info.st_uid == getuid() else {
+        throw IndexBuilder.BuildError.lockUnsafe(
+            path: path, detail: "擁有者是 uid \(info.st_uid)，不是你（uid \(getuid())）")
+    }
+}
+
 /// 開一個 derived 目錄底下的檔案，**且拒絕跟隨符號連結**。
 ///
 /// ## 為什麼需要它，以及它的威脅模型
@@ -768,8 +826,14 @@ public struct IndexBuilder: Sendable {
 /// R3 指出加固是「點狀的」，R4 量出另外兩處確實還開著。逐處加旗標會讓**下一個
 /// 新增的 derived 檔案成為第四個漏網的**——「點狀」這個詞指的就是這件事。
 /// 所以入口收斂成這一個。
-func openDerivedFileNoFollow(_ url: URL, flags: Int32) throws -> FileHandle {
-    let descriptor = open(url.path, flags | O_NOFOLLOW)
+///
+/// - Parameter mode: 只在 `flags` 含 `O_CREAT` 時有意義。**它不是選用的**：
+///   `open(2)` 的 `O_CREAT` 需要第三個引數，少給的話 mode 取自堆疊上的垃圾——
+///   先前漏了它，於是 `.tmp` 被建成 0 權限，下一次開它 `EACCES`。
+func openDerivedFileNoFollow(_ url: URL, flags: Int32, mode: mode_t = 0o644) throws -> FileHandle {
+    let descriptor = (flags & O_CREAT) != 0
+        ? open(url.path, flags | O_NOFOLLOW, mode)
+        : open(url.path, flags | O_NOFOLLOW)
     guard descriptor >= 0 else {
         let code = errno
         // `ELOOP` 就是「它是一個 symlink」。其餘照原樣往上報。
@@ -783,6 +847,12 @@ func openDerivedFileNoFollow(_ url: URL, flags: Int32) throws -> FileHandle {
                         + "地方去。請把它換成真正的檔案，或改設 LTM_DERIVED_ROOT。"
                     : String(cString: strerror(code)),
             ])
+    }
+    // **symlink 只是兩半當中的一半。** hard link 不是符號連結，`O_NOFOLLOW` 對它
+    // 完全不作用——見 `verifyExclusivelyOurs` 的註解與那次實測。
+    do { try verifyExclusivelyOurs(descriptor: descriptor, path: url.path) } catch {
+        close(descriptor)
+        throw error
     }
     return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
 }
@@ -913,33 +983,18 @@ public final class FileLock: @unchecked Sendable {
                 path: url.path, code: code, detail: String(cString: strerror(code)))
         }
         // **截短之前先確認這個 inode 只有一個名字，而且是我們的。**
+        // 順序不可調換：放在 `ftruncate` 之後就只是事後通知。
         //
-        // `st_nlink > 1` 代表別處還有名字指向同一個 inode——鎖檔沒有任何理由是
-        // 那樣，而 `ftruncate` 對它就是一條任意檔案截斷路徑。`st_uid` 不是自己
-        // 則代表這個名字不是我們建的。兩者都在 `open` **之後**用 `fstat` 查，
-        // 對的是**已經拿到的 fd**、不是路徑——所以中間沒有 TOCTOU 窗口。
+        // 檢查與它的誠實邊界都在 `verifyExclusivelyOurs`——**與 derived 檔案共用
+        // 同一份，不要在這裡再寫一次**。
         //
-        // 注意順序：這道檢查必須在 `ftruncate` 之前。放在之後就只是事後通知。
-        //
-        // **誠實邊界**：這消除的是「路徑在檢查與開檔之間被換掉」那一類（fd 已經
-        // 綁定 inode）。它**不**消除「inode 的 link count 在 `fstat` 之後改變」
-        // ——`st_nlink` 是 inode 上的可變狀態，而這裡沒有任何機制凍結它。
-        // 上一版寫「所以中間沒有 TOCTOU 窗口」，**那句絕對句是假的**（#45 R4
-        // verify，codex）。TOCTOU 在 #40 的模型下是被接受的限度，理由同上。
-        var info = stat()
-        guard fstat(descriptor, &info) == 0 else {
-            let code = errno
+        // （上一版在這裡寫過「所以中間沒有 TOCTOU 窗口」，並在七行之下自己說那句
+        // 是假的，而 CHANGELOG 宣稱它已被收回。**它當時還在原地當作斷言。**
+        // #44 R5 verify，codex + requirements。這次是真的刪掉它，不是在它下面補
+        // 一段說明。）
+        do { try verifyExclusivelyOurs(descriptor: descriptor, path: url.path) } catch {
             close(descriptor)
-            throw IndexBuilder.BuildError.lockUnavailable(
-                path: url.path, code: code, detail: String(cString: strerror(code)))
-        }
-        guard info.st_nlink == 1, info.st_uid == getuid() else {
-            close(descriptor)
-            throw IndexBuilder.BuildError.lockUnsafe(
-                path: url.path,
-                detail: info.st_nlink == 1
-                    ? "擁有者是 uid \(info.st_uid)，不是你（uid \(getuid())）"
-                    : "有 \(info.st_nlink) 個名字指向同一個檔案（hard link）")
+            throw error
         }
 
         // pid 只作診斷用途，不再承載所有權。先截短：舊內容可能比新 pid 長。

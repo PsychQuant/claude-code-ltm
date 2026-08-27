@@ -28,9 +28,21 @@ func theSetupSkillEnumeratesEveryProgressCase() throws {
         builderSource.range(of: "public enum BuildProgress: Sendable, Equatable {").map {
             String(builderSource[$0.upperBound...].prefix(while: { $0 != "}" }))
         })
+    // **跨行的 case list 要先接回一行。** `case a(\n  x: Int)` 的參數在下一行，
+    // 而下一行不以 `case ` 開頭——先前按行過濾會把它整段丟掉，於是同一個宣告裡
+    // 逗號後的第二個 case 名字漏掉（#44 R5 verify，codex）。
+    // 做法：把不以 `case `／`}` 開頭的續行併回前一行。
+    var joined: [String] = []
+    for raw in progressBlock.components(separatedBy: "\n") {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        if line.hasPrefix("case ") || joined.isEmpty {
+            joined.append(line)
+        } else if !line.isEmpty, !line.hasPrefix("///"), !line.hasPrefix("//") {
+            joined[joined.count - 1] += " " + line
+        }
+    }
     let caseNames = Set(
-        progressBlock.components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+        joined
             .filter { $0.hasPrefix("case ") }
             // **一行可以宣告多個 case**（`case a, b`）。上一版只取第一個，於是
             // 一個以那種形式加進來的 case 會讓這條檢查靜默漏掉它——一份宣稱自己
@@ -46,8 +58,11 @@ func theSetupSkillEnumeratesEveryProgressCase() throws {
                 var current = ""
                 for character in line.dropFirst("case ".count) {
                     switch character {
-                    case "(", "[", "<": depth += 1
-                    case ")", "]", ">": depth -= 1
+                    // `<` / `>` **不算深度**：`->` 的箭頭會讓深度變成 −1，之後
+                    // 每個逗號都被當成頂層分隔。泛型在 case 宣告裡罕見，而箭頭
+                    // 在 associated value 的函式型別裡不罕見（#44 R5 verify，codex）。
+                    case "(", "[": depth += 1
+                    case ")", "]": depth -= 1
                     case "," where depth == 0:
                         names.append(current)
                         current = ""

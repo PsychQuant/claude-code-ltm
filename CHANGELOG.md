@@ -22,6 +22,22 @@
   超前的游標（R3 實測：那則 turn 永遠不會再被索引，build 不報錯）。根本問題是
   **「游標涵蓋的內容是否真的在索引裡」這個事實不在磁碟上**，所以不猜：舊索引
   升上來時具名拒絕並要求 `ltm build --full`。
+- **derived 目錄底下的檔案不再跟著 symlink 或 hard link 走，五個入口全部涵蓋。**
+  上一版只做了 symlink 那一半，並用一段註解把 hard link 宣告成 #40 的既決限度
+  ——**那個引用不成立**：#40 接受 hardlink 的理由是成本（它手上沒有 fd），而
+  這裡已經拿到 fd；而且 hard link 正是 `cp -al` / `rsync --link-dest` /
+  Time Machine 還原的常態產物，落在 #40 宣稱要防的「意外」那一類。實測：
+  把語料 turn 檔 hard link 成 `vectors.bin`，`ltm query` 把它從 1,391 截成 32，
+  build 回報成功。檢查收斂成一份 `verifyExclusivelyOurs`（`S_IFREG` +
+  `st_nlink == 1` + `st_uid`），`FileLock` 與 derived 檔案共用。
+- **`index.sqlite3` 的 `-wal` / `-shm` 也涵蓋了**——它們是**既有的**第四、第五個
+  入口，而上一版的註解正好寫著「下一個新增的 derived 檔案會是第四個漏網的」。
+- **「SQLite 沒有 `O_NOFOLLOW`」這句話是錯的，已改正。** `SQLITE_OPEN_NOFOLLOW`
+  自 3.31.0 起存在。它拒絕**路徑中任何一段**是符號連結，而 macOS 的
+  `/var → /private/var` 就是一段——所以用法是先 `realpath(3)` 解析父目錄、
+  再帶旗標（`resolvingSymlinksInPath()` 在 `/var/folders` 上不解析，CLAUDE.md
+  早記過）。那句假話先前撐起了整個 `lstat` 設計，並被複述到三個地方。
+- **`.tmp` 也走同一個入口**——上一版把它漏在「收斂成一個」之外，而它就在同一個函式裡。
 - **derived 目錄底下的檔案不再跟著 symlink 走。** `vectors.bin` 與 `index.sqlite3`
   先前完全沒有加固，而 `truncateSidecar` 在**每一次查詢之前**被呼叫——所以
   `ln -s <語料>.jsonl vectors.bin` 之後，`ltm query`（含長駐的 `ltm mcp`）就會把
@@ -43,9 +59,9 @@
   接著把真正的檔案截成零長度。若那是語料檔就是**違反不變式 1 且不可回復**。
   現在 `open` 之後 `fstat` 檢查 `st_nlink == 1` 與 `st_uid`，不安全就以
   `lockUnsafe` 具名中止、**不寫入任何東西**。
-- **批次上界的公式現在被生產程式碼呼叫。** 上一版把它收斂成一個函式，但整個
-  出貨路徑零呼叫，而它的測試自己重寫了一份分批迴圈——所以「分歧會由測試抓到」
-  是假的。現在 `build()` 拿實際分批結果對照它，違反就丟 `batchBoundViolated`。
+- **批次上界的公式與生產迴圈的對應由測試扛。** 中間有一版讓 `build()` 自己對照
+  並丟 `batchBoundViolated`，那道守衛已在下一輪移除（理由見上一則）——**這兩則
+  先前同時留在本節、相隔十行、互相矛盾**（#46 R5 verify，logic + regression）。
 - **`FileLock.release()` 改成 `NSLock` 保護的取出並清空。** 先前是 guard → close →
   設 −1 三步，兩個 task 可以都通過第一步而 `close()` 同一個號碼。
   **誠實邊界**：這條由**構造**保證，**沒有任何測試涵蓋它**——把實作還原成舊碼，
