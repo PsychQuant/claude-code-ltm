@@ -1331,13 +1331,46 @@ func derivedFilesDoNotFollowLinks(entry: (name: String, symbolic: Bool)) throws 
     }
 
     let kind = entry.symbolic ? "symlink" : "hardlink"
-    #expect(throws: (any Error).self, "\(entry.name) 沒有拒絕 \(kind)") {
+    // **斷言具體的失敗，不是 `any Error`。**
+    //
+    // `any Error` 分不出「我們的守衛拒絕了它」與「SQLite 自己以內容為由拒絕」
+    // ——而後者正是 `-wal` / `-shm` / `-journal` 三格假綠的機制：一個合法的**主
+    // 資料庫**檔案不是合法的 WAL／SHM／journal 檔，所以 SQLite 在寫入之前就丟
+    // `statementFailed`，`#expect(throws:)` 被滿足而守衛可以整段刪掉
+    // （#44 R8 verify，三個 lens 各自量到）。
+    //
+    // 我上一輪把「SQLite 開得起來」當成正解，套用在四個 sqlite 格上——**那個條件
+    // 只對主檔那一格成立**。而 #44 的 R7 report 裡我自己寫下的教訓正是：改 fixture
+    // 修假綠時要問「這個新值對**每一個** case 都仍然可觀察嗎」。這次違反的就是它。
+    //
+    // 判準改成「錯誤是誰丟的」，那對四格一致，而且不依賴受害者的內容形狀。
+    var thrown: (any Error)?
+    do {
         _ = try IndexBuilder(
             location: derived,
             scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
             embedder: stub
         ).build()
+    } catch { thrown = error }
+
+    let rejectedByOurGuard: Bool
+    switch thrown {
+    case let error as IndexDatabase.DatabaseError:
+        if case .openFailed = error { rejectedByOurGuard = true } else { rejectedByOurGuard = false }
+    case let error as IndexBuilder.BuildError:
+        switch error {
+        case .derivedPathUnsafe: rejectedByOurGuard = true
+        // `O_NOFOLLOW` 的 `ELOOP` 走 `lockUnavailable`——那也是我們拒絕的，只是
+        // 由 kernel 在 open 那一刻做的。判準是「誰拒絕」，不是「哪個 case」。
+        case .lockUnavailable(_, let code, _): rejectedByOurGuard = code == ELOOP
+        default: rejectedByOurGuard = false
+        }
+    case is CocoaError: rejectedByOurGuard = true  // openDerivedFileNoFollow 的 ELOOP
+    default: rejectedByOurGuard = false
     }
+    #expect(
+        rejectedByOurGuard,
+        "\(entry.name)/\(kind) 不是被我們的守衛拒絕的，而是 \(String(describing: thrown))")
     let after = try Data(contentsOf: victim)
     #expect(after == payload,
             "\(entry.name)/\(kind) 寫穿了語料（\(payload.count) → \(after.count) bytes）")
@@ -1444,9 +1477,14 @@ func anIndexWithChunksButNoSourceMappingIsRefused() throws {
 /// - **關掉那個洞的是 discard 清 `.tmp`**，而這條測試扛的是它：把 `.tmp` 從
 ///   discard 拿掉**並且**改回 `O_TRUNC`，`symbolic → false` 那一格會紅。
 ///
-/// `symbolic → true` 那一格在任何組態下都驅動不了——`O_NOFOLLOW` 讓 open 在任何
-/// 寫入之前就 `ELOOP`，所以位元組斷言結構上觀察不到差異。留著它是因為它便宜且
-/// 對未來的改動仍是一道網，**但它現在不宣稱自己在扛什麼**。
+/// **我還寫過「`symbolic → true` 那一格在任何組態下都驅動不了」——那句全稱也是
+/// 假的**，一次雙段變異就推翻（#45 R8 verify，logic lens；我在
+/// `theSidecarTempIsSafeOnTheIncrementalPath` 上重跑確認：把 `.atomic` 換成純
+/// `Data.write(to:)`，symlink 那格確實紅）。
+///
+/// 我為什麼會這樣寫：我只試了一種變異（`O_TRUNC`），而 `O_NOFOLLOW` 在那一種下
+/// 確實讓 symlink 那格觀察不到差異，於是我把「這個變異驅動不了它」寫成了「任何
+/// 變異都驅動不了它」。**一個變異的結果不是全稱的證據。**
 @Test(
     "vectors.bin.tmp 是連結時不得寫穿語料",
     arguments: [true, false])
@@ -1630,4 +1668,55 @@ func aDanglingSymlinkDoesNotBlockFullRebuild() throws {
     ).build(full: true)
     #expect(recovered.wasFullRebuild)
     #expect(recovered.chunksIndexed > 0)
+}
+
+/// **`.atomic` 這個選擇的真正回歸鎖：增量路徑。**
+///
+/// R7 我把上一條測試的 docstring 改誠實了（它扛的是「discard 會清 `.tmp`」，
+/// 不是「`.atomic` 比 `O_TRUNC` 安全」）——**但我只收回宣稱，沒補替代的鎖**，
+/// 於是 R6 那個毀語料的回歸一條測試都沒有：改回 `O_TRUNC`，506 條全綠
+/// （#45 R8 verify，requirements lens 量到並建了探針）。
+///
+/// 關鍵在於 `discardDerivedArtifacts` **只在 `rebuildFromScratch` 時跑**，所以
+/// 增量路徑上沒有那道保護。到得了的狀態：先在**空語料**上 build 一次（索引存在，
+/// 但 `vectors.bin` 不會被建出來），之後語料長出內容 → `appendVectors` 走
+/// 「側車不存在」那條分支，而 discard 沒跑過。
+///
+/// 那條探針的實測：`victim 4096 → 0 bytes`，build 丟 `derivedPathUnsafe`——
+/// **R6 那個「守衛具名丟錯、語料已經歸零、訊息還宣稱沒寫入任何東西」的情境
+/// 逐字重演，而且不需要 `--full`。**
+@Test("增量路徑上，.tmp 是連結時不得寫穿語料", arguments: [true, false])
+func theSidecarTempIsSafeOnTheIncrementalPath(symbolic: Bool) throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    let stub = StubEmbedder(revision: "rev-A")
+
+    // 1. 空語料 build：索引建起來，但 `vectors.bin` 不存在。
+    _ = try IndexBuilder(location: derived, scanner: scanner, embedder: stub).build()
+    #expect(!FileManager.default.fileExists(atPath: derived.vectorsURL.path),
+            "前提：側車不能存在，否則 appendVectors 走的是 append 分支而不是 temp 分支")
+
+    // 2. 擺連結。**這一步之後不再有 `--full`**，所以 discard 不會清掉它。
+    let victim = corpus.appendingPathComponent("victim.jsonl")
+    let payload = Data(repeating: 0x41, count: 4_096)
+    try payload.write(to: victim)
+    let temporary = derived.vectorsURL.appendingPathExtension("tmp")
+    if symbolic {
+        try FileManager.default.createSymbolicLink(at: temporary, withDestinationURL: victim)
+    } else {
+        #expect(link(victim.path, temporary.path) == 0, "前提：hard link 要建得起來")
+    }
+
+    // 3. 語料長出內容 → 增量 build → 走 temp 分支。
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+    let report = try? IndexBuilder(location: derived, scanner: scanner, embedder: stub).build()
+    #expect(report == nil || report!.chunksIndexed > 0 || true)  // 成敗不重要
+
+    // **唯一不可接受的是語料變了。**
+    #expect(try Data(contentsOf: victim) == payload,
+            "\(symbolic ? "symlink" : "hardlink") 版的 .tmp 在增量路徑上寫穿了語料")
 }

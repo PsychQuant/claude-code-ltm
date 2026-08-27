@@ -30,6 +30,23 @@
   對 SQLite 不成立**：它會先以 `SQLITE_NOTADB` 拒絕解析，於是拿掉守衛也一樣綠。
   實測：關掉四個 sqlite 入口的 symlink 判定，505 條全綠。**修 A 的動作把 B 從
   真綠變成假綠**（2 個未驅動的 case 變成 4 個）。
+
+  **而那次的修法只買到 1 格，我卻寫成 3 格。** 「重驗：關掉守衛 → 3 紅」裡的
+  「3」數的是 **issue**，而同一段話的前一句數的是 **case**——讀起來像四格恢復了
+  三格，實際是一格恢復了、那一格產生三條斷言失敗（#44 R8 verify，三個 lens 各自
+  量到）。原因同上一層：一個合法的**主資料庫**檔案不是合法的 WAL／SHM／journal
+  檔，所以「SQLite 開得起來」這個條件只對主檔那一格成立。
+
+  判準因此換掉：不再靠受害者的內容形狀，改成**斷言錯誤是誰丟的**（我們的守衛
+  vs SQLite 自己以內容為由拒絕）。那對四格一致。重驗：關掉 symlink 判定 →
+  `index.sqlite3` / `-wal` / `-shm` / `-journal` **四格全紅**。
+- **`.atomic` 的回歸鎖補上了——先前它只被收回宣稱、沒有替代品。** R7 我把那條
+  測試的 docstring 改誠實（它扛的是「discard 會清 `.tmp`」），**但沒補上真正扛
+  `.atomic` 的測試**，於是 R6 那個毀語料的回歸一條測試都沒有：改回 `O_TRUNC`，
+  506 條全綠。關鍵是 `discardDerivedArtifacts` 只在 `rebuildFromScratch` 時跑，
+  所以**增量路徑**上沒有那道保護——空語料先 build 一次（側車不會被建出來），
+  之後語料長出內容就會走 temp 分支而 discard 沒跑過。實測 4,096 → 0 bytes，
+  不需要 `--full`。新測試跑的就是那條路徑。
 - **`.tmp` 改回 `.atomic`——上一輪那個「修法」是純退步，而且會毀語料。** 我把它
   改成 `O_WRONLY | O_CREAT | O_TRUNC`，理由寫的是「`Data.write` 會跟隨 symlink」
   ——**那句話是假的**（實測：`.atomic` 對 symlink 與 hard link 都不寫穿，因為它
