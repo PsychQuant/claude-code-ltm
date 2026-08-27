@@ -894,8 +894,24 @@ func verifyExclusivelyOurs(descriptor: Int32, path: String) throws {
 /// | `IndexDatabase.init` | `lstat` × 4 後綴 + `sqlite3_open_v2` | 主檔與 `-wal`/`-shm`/`-journal` 都擋 symlink／hardlink／非一般檔案／非本人 |
 /// | `FileLock.acquire` | `open(O_NOFOLLOW|O_NONBLOCK)` + `verifyExclusivelyOurs` | ✅ |
 /// | `synchronizeDirectory` | `open(O_RDONLY)` | 唯讀 |
+/// | `EventStore.pruneUnusable` | `open(O_NOFOLLOW)` + `ExclusiveFile.verify` + `ftruncate` | ✅ 檢查在截短之前 |
+/// | `EventStore` 的備份 `removeItem` × 2 | unlink | 只動我們自己剛建的備份檔 |
+/// | `CanonicalStore.appendLine` | `open(O_NOFOLLOW)` + `ExclusiveFile.verify` | ✅ |
 ///
-/// 記憶層（`LTMMemory`）不在這張表裡：它有自己的守衛與自己的威脅模型（#40）。
+/// **記憶層在表裡。** 上一版寫「記憶層不在這張表裡：它有自己的守衛與自己的威脅
+/// 模型（#40）」——**那句話沒有量過，而且是假的**：`ltm memory --prune --force`
+/// 把一個 hard link 成 `events.jsonl` 的語料檔截成 0 並印「✓」，而它寫的備份把
+/// 語料逐字內容複製進 `~/.claude-ltm/memory/`（#44 R9 verify，兩個 lens 各自
+/// 實測）。理由見 `LTMCore.ExclusiveFile`。
+///
+/// **一個沒量過的「安全」判定比一個具名的未知更糟**——上一版同時做了這兩件事。
+///
+/// ## 這張表由什麼守著
+///
+/// `WriteSiteTableSyncTests` 掃 `Sources/LTMIndex` 與 `Sources/LTMMemory` 裡會
+/// 改變檔案系統的呼叫並與這張表的數量比對。**新增一個站點而沒更新這張表，它會紅。**
+/// 它比對數量而非身分（誠實邊界寫在那條測試裡）——建立它的當下就抓到這張表少了
+/// 兩處，那正是它存在的理由。
 ///
 /// ## `replaceItemAt` 那一格：量完了（先前是具名未知）
 ///
