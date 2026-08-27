@@ -325,13 +325,22 @@ private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> S
         }
     }
 
-    var scanState: [String] = []
-    if let data = try? Data(contentsOf: location.stateURL),
-        let decoded = try? JSONDecoder().decode(ScanState.self, from: data)
-    {
-        scanState = decoded.files.map { "\($0.key)|\($0.value.prefixHash)|\($0.value.processedBytes)" }
+    // **游標從 `state.json` 搬進 DB 之後，這裡必須跟著搬。**
+    //
+    // 上一版仍讀 `state.json`，而那個檔已經不再被寫——於是 `scanState` 兩邊
+    // 恆為空陣列，比對永遠相等。**不變式 2 的性質測試就此靜默失去「續讀游標」
+    // 這一軸**，而沒有任何訊號（#44 R3 verify，regression lens）。
+    //
+    // 這是 CLAUDE.md 記過的「不可能失敗的測試比沒有測試更糟」的一個變體：
+    // 測試還在、還算進覆蓋率，只是它比對的東西不存在了。
+    let scanState = try {
+        let database = try IndexDatabase(path: location.databaseURL.path)
+        defer { database.close() }
+        return try database.scanState().files
+            .map { "\($0.key)|\($0.value.prefixHash)|\($0.value.processedBytes)" }
             .sorted()
-    }
+    }()
+    #expect(!scanState.isEmpty, "游標軸是空的——比對會恆為相等，這條性質測試就沒在驗它")
 
     return Snapshot(
         chunks: chunks.sorted(), links: links, ftsAverages: averages, lexicalRanks: ranks,

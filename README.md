@@ -159,7 +159,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | ltm mcp
 ├── derived/          純衍生 · 可隨時刪掉重建
 │   ├── index.sqlite      FTS5 + turns + chunks
 │   ├── vectors.bin       512-d float32, mmap
-│   └── state.json        ingest 進度（size / mtime / processedBytes / prefixHash）
+│   └── （續讀游標在 index.sqlite 的 scan_state 表，不是獨立檔案）
 └── memory/           canonical · 要備份
     ├── events.jsonl        使用歷史（append-only，一行一筆）
     └── presentations.jsonl 交錯比較的呈現紀錄（同上）

@@ -10,7 +10,7 @@ description: Use when claude-code-ltm is not yet usable — the user just instal
 | | 誰做 | 成本 |
 |---|---|---|
 | 下載 `ltm` binary | **自動**（wrapper 在 MCP server 第一次啟動時做）| 幾秒，3 MB |
-| 建索引 `ltm build` | **要人同意才跑** | **首次數十分鐘**，之後自動增量 |
+| 建索引 `ltm build` | **要人同意才跑** | **首次可能數小時**（見下方成本說明），之後自動增量 |
 
 所以「plugin 裝好了卻查不到東西」幾乎一定是第二件事沒做。
 
@@ -31,8 +31,13 @@ ltm query "test" 2>&1 | head -5         # ② 索引在嗎（錯誤訊息會直�
 ## 建索引之前先告訴使用者代價
 
 **不要在沒說清楚的情況下啟動它。** 依語料規模，首次全量建索引可以是**數小時**等級
-的工作——本機實測 **2 小時 6 分**（9,958 檔／5.67 GB → 640,760 chunk，
-`docs/measurements/2026-08-27-query-latency-decomposition.md` 的索引欄）——它要掃過 `~/.claude/projects` 底下每一個 `.jsonl`、切 chunk、逐段算
+的工作——一次在 9,958 檔／5.67 GB 的語料上觀察到約兩小時
+（`docs/measurements/2026-08-26-interrupted-full-build.md`）。
+
+> **這個數字的等級要說清楚**：它是一次觀察，不是一份受控量測——一台機器、一次、
+> 沒有重複。它足以支撐「請預期數小時，不是數十分鐘」這句話，**不足以**支撐任何
+> 「每 GB 幾分鐘」的外推。上一版把它寫成「實測 2 小時 6 分」並引用一份
+> **不包含它**的紀錄（#44 R3 verify，requirements + regression 兩個 lens）——它要掃過 `~/.claude/projects` 底下每一個 `.jsonl`、切 chunk、逐段算
 on-device embedding。量測基線見 repo 的
 `docs/measurements/2026-08-08-baseline.md`。
 
@@ -64,12 +69,17 @@ ltm build 2> ~/.claude-ltm/build.log &
 （先前這裡寫「三種」而實際有四種——一份宣稱自己完整的列舉，#44 R2 verify，
 devil's advocate）：
 
-| 何時 | 長相 |
-|---|---|
-| 掃描一結束（嵌入還沒開始）| `掃描完成：N 個來源檔，M 個新 chunk，其中 K 個要算向量` |
-| 分批定案後（仍在嵌入之前）| `分批：47 批，最大一批 4322 chunk，向量累積上界 17.7 MB` |
-| 嵌入期間，每 200 個 chunk 或每 5 秒 | `… 嵌入 6000/94000 chunk（已用 8 分 12 秒）` |
-| 每批提交後 | `✓ 第 3/47 批已提交，chunk 6000/94000（已用 8 分 12 秒）` |
+| 何時 | `BuildProgress` case | 長相 |
+|---|---|---|
+| 掃描一結束（嵌入還沒開始）| `scanCompleted` | `掃描完成：N 個來源檔，M 個新 chunk，其中 K 個要算向量` |
+| 分批定案後（仍在嵌入之前）| `batchPlan` | `分批：N 批，最大一批 M chunk，向量累積上界 X MB` |
+| 嵌入期間，每 200 個 chunk 或每 5 秒 | `embedding` | `… 嵌入 6000/94000 chunk（已用 8 分 12 秒）` |
+| 每批提交後 | `batchCommitted` | `✓ 第 3/47 批已提交，chunk 6000/94000（已用 8 分 12 秒）` |
+
+> 中間那一欄不是給讀者看的，是給檢查看的：`ProgressDocSyncTests` 比對這一欄與
+> `BuildProgress` 的 case **名字集合**。只比列數的版本擋不住「換掉一列」——
+> 表格仍四列、enum 仍四個 case，而使用者看到的「完整四種」仍漏一種
+> （#44 R3 verify，三個 lens）。
 
 **第一行在嵌入開始之前就會出現**，所以分母不必等第一批做完。零新增的增量也會
 印掃描那一行——「掃完了沒有新東西」與「還在掃」是兩件事。

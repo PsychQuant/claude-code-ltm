@@ -324,7 +324,7 @@ func aNegativeCursorCannotBeWritten() throws {
     #expect(try db.scanState().files.isEmpty)
 }
 
-@Test("表裡已經有的負游標被丟棄並回報，不交給掃描器")
+@Test("表裡已經有的負游標被修成必然對不上的游標——鍵留著，作廢照常發生")
 func aPreExistingNegativeCursorIsDropped() throws {
     let path = makeTempDatabasePath()
     defer { try? FileManager.default.removeItem(atPath: path) }
@@ -345,6 +345,17 @@ func aPreExistingNegativeCursorIsDropped() throws {
     }
 
     let state = try db.scanState()
-    #expect(state.files["proj/bad.jsonl"] == nil, "負游標交到掃描器手上就是那條 trap 的入口")
-    #expect(state.files["proj/good.jsonl"]?.processedBytes == 128, "只丟壞的那列，不是整張表")
+    #expect(state.files["proj/good.jsonl"]?.processedBytes == 128, "只修壞的那列，不是整張表")
+
+    // **鍵必須留著。** 上一版是把整列丟掉，而那有一個安靜的後果：鍵一起消失，
+    // 掃描器的 `invalidated.insert(key)` 就永遠不會 fire（它只在該鍵仍出現在
+    // `previous.files` 時執行）。若那個來源同時已從語料刪除，它的舊 chunk 會留在
+    // 索引裡繼續被命中，而乾淨重建不會有它們——**增量 ≠ 全量，違反不變式 2**。
+    let repaired = try #require(state.files["proj/bad.jsonl"])
+    #expect(repaired.processedBytes == 0)
+    // 空字串雜湊**不可能**對上任何內容（`hexDigest` 一律 64 個 hex 字元），
+    // 所以掃描器的前綴比對必然失敗 → 該來源被標成 invalidated 並從頭重掃。
+    #expect(repaired.prefixHash == "")
+    #expect(repaired.prefixHash != CorpusScanner.hexDigest(Data()),
+            "修復用的雜湊必須連空資料都對不上，否則它會被當成一個有效的續讀點")
 }

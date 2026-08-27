@@ -12,40 +12,54 @@ import Testing
 /// 漂移的規格；收斂之後要補的是**一個會變紅的檢查**。
 ///
 /// 這就是那個檢查：`BuildProgress` 的 case 數是來源，skill 的表格列數必須跟上。
-@Test("ltm-setup skill 的進度行表格涵蓋每一個 BuildProgress case")
+@Test("ltm-setup skill 的進度行表格逐一對應 BuildProgress 的 case 名字")
 func theSetupSkillEnumeratesEveryProgressCase() throws {
     let root = try repositoryRoot()
     let skill = try String(
         contentsOf: root.appendingPathComponent("plugin/skills/ltm-setup/SKILL.md"),
         encoding: .utf8)
-
-    // `BuildProgress` 的 case 數。用 source 而不是反射：enum 沒有 `allCases`
-    // （每個 case 都有 associated value），而加 `CaseIterable` 只為了測試會改
-    // 出貨型別。
     let builderSource = try String(
         contentsOf: root.appendingPathComponent("Sources/LTMIndex/IndexBuilder.swift"),
         encoding: .utf8)
+
+    // `BuildProgress` 的 case **名字**。用 source 而不是反射：enum 沒有 `allCases`
+    // （每個 case 都有 associated value），而加 `CaseIterable` 只為了測試會改出貨型別。
     let progressBlock = try #require(
         builderSource.range(of: "public enum BuildProgress: Sendable, Equatable {").map {
             String(builderSource[$0.upperBound...].prefix(while: { $0 != "}" }))
         })
-    let caseCount = progressBlock.components(separatedBy: "\n")
-        .filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("case ") }.count
-    #expect(caseCount > 0, "抓不到 case——這條檢查失去意義，比失敗更糟")
+    let caseNames = Set(
+        progressBlock.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix("case ") }
+            .compactMap { line -> String? in
+                let body = line.dropFirst("case ".count)
+                return String(body.prefix(while: { $0.isLetter || $0.isNumber }))
+            })
+    #expect(!caseNames.isEmpty, "抓不到 case 名字——這條檢查失去意義，比失敗更糟")
 
-    // skill 的進度表格：抓「何時 | 長相」那張表的資料列。
+    // skill 表格中間那一欄的 `case` 名字。
     let lines = skill.components(separatedBy: "\n")
     let header = try #require(lines.firstIndex { $0.hasPrefix("| 何時 ") })
-    var rows = 0
+    var documented: Set<String> = []
     var index = header + 2  // 跳過表頭與分隔列
     while index < lines.count, lines[index].hasPrefix("|") {
-        rows += 1
+        let columns = lines[index].components(separatedBy: "|")
+        if columns.count > 2 {
+            let cell = columns[2].trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "`"))
+            if !cell.isEmpty { documented.insert(cell) }
+        }
         index += 1
     }
 
+    // **比對名字集合，不是基數。** 只比列數擋不住「換掉一列」：表格仍四列、
+    // enum 仍四個 case，而使用者看到的「完整四種」仍漏一種（#44 R3 verify）。
+    // 測試名宣稱「逐一對應」，所以它必須真的逐一對應——這正是 CLAUDE.md 那條
+    // 「宣稱自己完整的列舉」要防的東西，而上一版的修法用一個較弱的檢查冒充了它。
     #expect(
-        rows == caseCount,
-        "skill 列的進度行數與 BuildProgress 的 case 數不符——一份宣稱自己完整的列舉漏掉了一種，而使用者會據此判斷 build 是不是卡住了")
+        documented == caseNames,
+        "SKILL.md 的進度行與 BuildProgress 的 case 名字對不上——使用者會據此判斷 build 是不是卡住了")
 }
 
 private func repositoryRoot(file: StaticString = #filePath) throws -> URL {

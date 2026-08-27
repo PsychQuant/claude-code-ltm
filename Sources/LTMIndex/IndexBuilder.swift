@@ -176,6 +176,21 @@ public struct IndexBuilder: Sendable {
         /// 這個該去看 `code`／`detail` 說的那件事。第一版把兩者混成一個，
         /// 於是磁碟滿的使用者會去等一個不存在的建置。
         case lockUnavailable(path: String, code: Int32, detail: String)
+        /// 分批迴圈算出的最大批次超過 `batchChunkUpperBound` 宣告的上界。
+        ///
+        /// 這是**內部不一致**，不是使用者輸入的問題：公式與迴圈分岔了。記憶體
+        /// 預算的估計與 `openspec/specs/ltm-cli/spec.md` 的 SHALL 文字都建立在
+        /// 那個上界上，所以它不成立時那兩者都在說謊——安靜地繼續比失敗糟。
+        case batchBoundViolated(
+            largestBatch: Int, declaredBound: Int, target: Int, largestSource: Int)
+        /// 鎖檔開得起來，但它**不安全**：不只一個名字指向那個 inode（hard link），
+        /// 或它不屬於當前使用者。
+        ///
+        /// 與 `lockUnavailable` 分開的理由同上——補救動作完全不同。這個不是
+        /// 「等一下再試」也不是「去看 errno」，是**有人在那個路徑上放了一個
+        /// 指向別的檔案的名字**，而 `ftruncate` 會照著它把那個檔案毀掉。
+        /// 唯一正確的處置是不要動它，並讓使用者自己去看那是什麼。
+        case lockUnsafe(path: String, detail: String)
         /// 側車檔比索引宣稱的短。
         ///
         /// 這**不能**靠 `ftruncate` 修：對較短的檔案指定較大的 offset 是
@@ -259,75 +274,47 @@ public struct IndexBuilder: Sendable {
         // 知道發生過什麼。`stateUnreadable` 先前宣告了卻從未被丟出——那條錯誤路徑
         // 是死的，CLI 的處理分支也因此永遠到不了。
         // 續讀游標的真相來源是 DB 的 `scan_state` 表（見該表在 `createSchema()`
-        // 裡的註解）。`state.json` 只剩**一個**角色：一次性遷移的來源。
+        // 裡的註解）。`state.json` **既不被寫，也不被讀**。
         //
-        // 它先前還有第二個角色（build 結束後寫出的「人類可讀鏡像」），而那個角色
-        // 讓它成為**第三份真相來源**：WAL 回滾同時帶走內容與游標，於是下一次 build
-        // 看到 `scan_state` 空、`chunkCount() == 0`，守衛不 fire，於是回頭採信鏡像
-        // ——一個超前的游標。實測（#44 R2 verify，devil's advocate）：那次 build 印
-        // `✓ 索引完成（增量）`、索引是空的、語料**永遠不會再被解析**。
+        // ## 為什麼沒有遷移路徑
         //
-        // 修法不是加判準去分辨「舊版鏡像」與「回滾後的鏡像」——磁碟上那兩者
-        // 一模一樣。修法是**不再寫它**。診斷改讀表：
+        // 上一版有一條：舊索引升上來時把 `state.json` 的游標搬進 `scan_state`。
+        // 它被 R3 的 devil's advocate 用一個可執行的 probe 推翻，而推翻的方式
+        // 值得完整記下來，因為它同時是「不要加判準」這條的最佳例子。
         //
-        //     sqlite3 <derived>/index.sqlite3 'SELECT * FROM scan_state'
+        // 那條路徑的守衛是 `chunkCount() == 0`，理由寫成「一個沒有內容的索引配上
+        // 一份游標，只可能是上一代索引的殘留或一次回滾」。**但 WAL 回滾不會把索引
+        // 清空——它只丟掉最後那個沒落地的交易。** 所以 `chunkCount() == 0` 是真實
+        // 回滾**最不可能**的結果；典型結果是內容還在、只少了尾巴，而那時守衛不 fire、
+        // 遷移照單全收一份超前的游標。實測（v0.2.0 形狀的索引，刪掉最後一則 turn
+        // 模擬回滾）：
+        //
+        //     PROBE-RESULT chunksIndexed=0 wasFullRebuild=false finalChunkCount=1
+        //
+        // ——那則 turn 永遠不會再被索引，build 不報錯、不重建。
+        //
+        // **根本問題不是判準挑錯，是那個事實不在磁碟上。** 游標說「這個檔我處理到
+        // 第 N 個 byte」，但索引裡是否真的有那 N 個 byte 產出的每一則 turn，沒有
+        // 任何地方記著。要驗證就得重新解析——而重新解析的成本等同 `--full`
+        // （embedding 發生在去重之前）。
+        //
+        // 所以這裡採用掃描器對負游標的同一條原則：**拿不到可信的游標就不要猜**。
+        // 差別只在處置——負游標可以丟棄後重掃單一來源，而這裡是整份索引，所以
+        // 由使用者顯式跑 `--full`（那條路徑順帶會清掉殘留的 `state.json`）。
+        //
+        // 這一刪同時關掉五件事：遷移的原子性、遷移對負值的消毒、遷移失敗後的
+        // 永久卡死、`try? removeItem` 銷毀事證，以及「`ltm query` 會替使用者執行
+        // 一次不可逆的遷移」。**沒有那條路徑，就沒有那五個洞。**
         var previousState = ScanState()
         if !rebuildFromScratch {
             previousState = try database.scanState()
-            if previousState.files.isEmpty {
-                // 表是空的。三種可能，後果完全不同：
-                //   (a) 索引有內容 + state.json 存在 → 舊版索引，一次性遷移。
-                //   (b) 索引有內容 + 沒有 state.json → 不知道該從哪續讀。**不可**
-                //       當成空 state 繼續：那會在既有索引上重掃全語料 upsert，
-                //       而使用者不會知道發生過什麼。
-                //   (c) 索引沒有內容 → 全新建置。**即使 state.json 存在也不採信**
-                //       ——一個沒有內容的索引配上一份游標，只可能是上一代索引的
-                //       殘留或一次回滾，而採信它會產出「宣稱成功的空索引」。
-                let hasContent = try database.chunkCount() > 0
-                let stateExists = FileManager.default.fileExists(atPath: location.stateURL.path)
-                if hasContent, stateExists {
-                    let migrated: ScanState
-                    do { migrated = try readState() } catch {
-                        throw BuildError.stateUnreadable(detail: "\(location.stateURL.path)：\(error)")
-                    }
-                    // **遷移必須是原子的。** 先前它不是：游標隨著各批次陸續寫進
-                    // `scan_state`，而中斷一次之後 `scan_state` 非空 → 下一次 build
-                    // 再也不會讀 `state.json` → 未遷移的來源全部從頭重掃重算。
-                    // 那正是 #44 要避免的事，而且它讓增量與全量不等價（不變式 2）。
-                    //
-                    // 一個交易寫完全部，成功之後才移除來源檔。中斷在交易前：
-                    // `state.json` 還在、`scan_state` 仍空，下次原樣重試。
-                    do {
-                        try database.transaction {
-                            // **排序過的順序，不是 Dictionary 的順序。** 後者每個
-                            // process 隨機（Swift 的 hash 有隨機種子），於是任何
-                            // 「失敗發生在第幾筆」的性質都會變成偶爾成立——而症狀
-                            // 不是偶爾失敗，是**偶爾成功**（CLAUDE.md）。
-                            // 遷移是一次性的，排序的成本可以忽略。
-                            for (sourceKey, entry) in migrated.files.sorted(by: { $0.key < $1.key }) {
-                                try database.upsertScanState(
-                                    sourceKey: sourceKey, prefixHash: entry.prefixHash,
-                                    processedBytes: entry.processedBytes)
-                            }
-                        }
-                    } catch {
-                        // 遷移失敗要**具名**，而且要維持原狀：一筆游標都沒寫進去、
-                        // `state.json` 原封不動。使用者下一次可以原樣重試，或
-                        // `--full`。安靜地半遷移是最糟的結果——它會讓下一次
-                        // build 看到非空的 `scan_state` 而再也不讀來源檔。
-                        throw BuildError.stateUnreadable(
-                            detail: "\(location.stateURL.path) 的內容無法遷移進索引：\(error)")
-                    }
-                    // 移除失敗不讓 build 失敗：游標已經在 DB 裡，而 `state.json`
-                    // 從此不會再被讀（`scan_state` 非空了）。
-                    try? FileManager.default.removeItem(at: location.stateURL)
-                    previousState = migrated
-                } else if hasContent {
-                    throw BuildError.stateUnreadable(
-                        detail: "索引裡有內容，但續讀游標在 DB 與 "
-                            + "\(location.stateURL.lastPathComponent) 都不存在；"
-                            + "用 `ltm build --full` 從零重建")
-                }
+            if previousState.files.isEmpty, try database.chunkCount() > 0 {
+                // 索引裡有內容但沒有可信的續讀點。**不可**當成空 state 繼續：
+                // 那會在既有索引上重掃全語料 upsert，而使用者不會知道發生過什麼。
+                throw BuildError.stateUnreadable(
+                    detail: "索引裡有內容，但 DB 的續讀游標是空的（舊版本建立的索引、"
+                        + "或一次回滾之後）。續讀點與索引內容是否一致無法從磁碟上驗證，"
+                        + "所以這裡不猜：請跑 `ltm build --full` 從零重建")
             }
         }
         let scan = try scanner.scan(previous: previousState)
@@ -442,6 +429,43 @@ public struct IndexBuilder: Sendable {
         let largestBatchChunks = batches.map { batch in
             batch.reduce(0) { $0 + (grouped[$1]?.count ?? 0) }
         }.max() ?? 0
+
+        // **公式在這裡被實際呼叫，對照的是這個迴圈剛剛算出來的東西。**
+        //
+        // 上一版沒有這一段：`batchChunkUpperBound` 在整個出貨程式碼裡零呼叫，
+        // 而它的測試自己重寫了一份 `current += size; if current >= target` 的迴圈
+        // ——所以「公式與迴圈的分歧會在測試變紅」是假的：改壞這個迴圈、helper
+        // 不動，測試照樣綠（#44 R3 verify，四個 lens 各自命中）。
+        //
+        // 一個沒有生產呼叫端的「權威」不是權威。現在它有了，而且對照的方向是
+        // 對的：**受約束的是這個迴圈，執行點在迴圈之外**（CLAUDE.md：約束的執行點
+        // 必須在不受約束的那一方）。
+        //
+        // **這道守衛由誰扛，要說清楚——變異測試量過。**
+        // 拿掉這個 `guard`，`productionBatchingHonoursTheDeclaredBound` **仍然綠**：
+        // 扛住那條測試的是它自己的斷言（`observed.largest <= 宣告上界`），不是守衛。
+        // 所以按 CLAUDE.md 的字面，它是一道「驅動不了」的守衛。
+        //
+        // 它仍然留著，理由是它與 #40 那個形狀**不同類**：#40 的守衛是一個 bug 的
+        // 修法，那種東西必須有測試驅動、否則它防的事沒有人在看。這一道是**生產
+        // 路徑上對內部不變式的執行點**——它買的不是「測試會變紅」，是「使用者的
+        // build 會停下來」。測試跑不到使用者的語料，而記憶體預算的估計與
+        // `openspec/specs/ltm-cli/spec.md` 的 SHALL 都建立在這個上界上。
+        //
+        // 兩件事各自被量過：改壞下面那個迴圈（切點移到越線之後），守衛丟出
+        // `batchBoundViolated(largestBatch: 24, declaredBound: 6, …)`；而只拿掉守衛、
+        // 迴圈不動，什麼都不會變紅。**兩句都是實測，不是推理。**
+        let largestSourceChunks = grouped.values.map(\.count).max() ?? 0
+        let declaredBound = Self.batchChunkUpperBound(
+            target: batchChunkTarget, largestSource: largestSourceChunks)
+        guard largestBatchChunks <= declaredBound else {
+            // 具名錯誤而不是 `precondition`：這是內部不一致，但 `build()` 是
+            // 語料驅動的，不得 trap。而它也不能只是記個 log——記憶體預算與
+            // spec 的 SHALL 都建立在這個上界上，它不成立時那兩者都在說謊。
+            throw BuildError.batchBoundViolated(
+                largestBatch: largestBatchChunks, declaredBound: declaredBound,
+                target: batchChunkTarget, largestSource: largestSourceChunks)
+        }
         // ×2：`appendVectors` 呼叫 `VectorSidecar.encode`，產生的 `Data` 與
         // `batchVectors` 同時存活。少算這個 2 會讓守衛在最需要的時候放行。
         let estimatedVectorBytes = largestBatchChunks * embedder.dimension * 4 * 2
@@ -726,13 +750,6 @@ public struct IndexBuilder: Sendable {
         }
     }
 
-    /// **只給一次性遷移用。** 沒有任何路徑會再寫出這個檔（見 `build()` 裡的註解），
-    /// 所以讀到它就代表這是一個舊版本建立的索引。
-    private func readState() throws -> ScanState {
-        let data = try Data(contentsOf: location.stateURL)
-        return try JSONDecoder().decode(ScanState.self, from: data)
-    }
-
 }
 
 /// 單寫者鎖。**所有權由 `flock(2)` 表示，不是由鎖檔存在表示。**
@@ -768,17 +785,34 @@ public struct IndexBuilder: Sendable {
 /// 的讀寫安靜地作用在錯的檔上。（#45 R2 verify，codex / security / regression
 /// 三個 lens 各自命中。）
 ///
-/// class 讓「這個鎖只有一份」變成型別層的事實，`released` 讓第二次呼叫是 no-op
-/// 而不是災難。
+/// class 讓「這個鎖只有一份」變成型別層的事實。
+///
+/// ## `@unchecked Sendable` 由什麼支撐
+///
+/// 上一版是 `private var descriptor: Int32` 加一句 `guard descriptor >= 0`，
+/// **而那個冪等性只在單執行緒成立**：兩個 task 可以都通過 guard，第一個
+/// `close()` 之後號碼被重新配給別的檔案，第二個關掉無關的 fd——正是型別註解
+/// 聲稱已經消除的後果（#45 R3 verify，codex / logic / security 三個 lens）。
+/// 那條「回歸鎖」測試只做同一執行緒的循序呼叫，驅動不了 race。
+///
+/// 現在 `descriptor` 是 `Mutex`-保護的，`release()` 用**取出並清空**的形式：
+/// 拿到非 −1 值的那一個 task 是唯一會 `close()` 的。這是一個原子交換，不是
+/// check-then-act，所以 `@unchecked` 有東西支撐而不只是一句宣稱。
 public final class FileLock: @unchecked Sendable {
     public let url: URL
     /// 持鎖的檔案描述子。關閉它就是釋放鎖——所以它必須活到 `release()`。
-    /// 釋放後設為 −1，讓重複的 `release()` 有東西可以擋。
-    private var descriptor: Int32
+    ///
+    /// 用鎖保護而不是裸 `var`：見型別註解。
+    ///
+    /// `NSLock` 而不是 `Mutex`：後者要 macOS 15，而本套件的部署目標是 14.0
+    /// （`Package.swift`）。為了一個三行的臨界區把整個套件的最低版本推上去，
+    /// 代價與收穫不成比例。
+    private let mutex = NSLock()
+    private var descriptorStorage: Int32
 
     private init(url: URL, descriptor: Int32) {
         self.url = url
-        self.descriptor = descriptor
+        self.descriptorStorage = descriptor
     }
 
     public static func acquire(at url: URL) throws -> FileLock {
@@ -797,7 +831,21 @@ public final class FileLock: @unchecked Sendable {
         // 就是一條任意檔案截斷的路徑。**而語料根也可以被指到同一棵樹下**——
         // 那會讓它變成一條寫進唯讀語料的路徑（不變式 1）。
         //
-        // 一個旗標關掉整條：symlink → `ELOOP`，走上面具名的 `lockUnavailable`。
+        // **一個旗標關不掉整條——這句話上一版就是這樣寫的，而它是錯的。**
+        // `O_NOFOLLOW` 只拒絕「路徑最後一段是符號連結」。**hard link 不是符號連結**：
+        // 它是一個指向受害者 inode 的普通目錄項，`open` 會成功。所以
+        //
+        //     ln ~/.claude/projects/<project>/<session>.jsonl $LTM_DERIVED_ROOT/build.lock
+        //     ltm build
+        //
+        // 仍然把真正的語料檔截成零長度——**違反不變式 1，且不可回復**
+        // （#44 R3 verify，codex + security 兩個 lens）。macOS/APFS 沒有 Linux
+        // `fs.protected_hardlinks` 的等價物。
+        //
+        // 舊的 `O_CREAT|O_EXCL` 對兩者**都**免疫（任何既存名稱一律 `EEXIST`，
+        // 不管它是不是 link），所以這是 flock 重設計時丟掉、而上一版只補回一半
+        // 的性質。判準因此要從「擋掉 symlink」推廣成**「這個 fd 指向的東西，是不是
+        // 只有我這個名字指得到、而且是我的」**——那要 `fstat`，不是旗標。
         let descriptor = open(url.path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o644)
         guard descriptor >= 0 else {
             // 開不起來的原因不只一種，而把它們全報成「另一個 build 正在進行」
@@ -815,6 +863,30 @@ public final class FileLock: @unchecked Sendable {
             throw IndexBuilder.BuildError.lockUnavailable(
                 path: url.path, code: code, detail: String(cString: strerror(code)))
         }
+        // **截短之前先確認這個 inode 只有一個名字，而且是我們的。**
+        //
+        // `st_nlink > 1` 代表別處還有名字指向同一個 inode——鎖檔沒有任何理由是
+        // 那樣，而 `ftruncate` 對它就是一條任意檔案截斷路徑。`st_uid` 不是自己
+        // 則代表這個名字不是我們建的。兩者都在 `open` **之後**用 `fstat` 查，
+        // 對的是**已經拿到的 fd**、不是路徑——所以中間沒有 TOCTOU 窗口。
+        //
+        // 注意順序：這道檢查必須在 `ftruncate` 之前。放在之後就只是事後通知。
+        var info = stat()
+        guard fstat(descriptor, &info) == 0 else {
+            let code = errno
+            close(descriptor)
+            throw IndexBuilder.BuildError.lockUnavailable(
+                path: url.path, code: code, detail: String(cString: strerror(code)))
+        }
+        guard info.st_nlink == 1, info.st_uid == getuid() else {
+            close(descriptor)
+            throw IndexBuilder.BuildError.lockUnsafe(
+                path: url.path,
+                detail: info.st_nlink == 1
+                    ? "擁有者是 uid \(info.st_uid)，不是你（uid \(getuid())）"
+                    : "有 \(info.st_nlink) 個名字指向同一個檔案（hard link）")
+        }
+
         // pid 只作診斷用途，不再承載所有權。先截短：舊內容可能比新 pid 長。
         //
         // 這三個回傳值刻意忽略：pid 是診斷資訊，寫不進去不影響鎖的正確性（鎖由
@@ -834,10 +906,16 @@ public final class FileLock: @unchecked Sendable {
     ///
     /// 不刪鎖檔——理由見型別註解的 race。
     public func release() {
-        guard descriptor >= 0 else { return }
-        flock(descriptor, LOCK_UN)
-        close(descriptor)
-        descriptor = -1
+        // **取出並清空是一個動作。** 拿到非 −1 的那一個 task 是唯一會 close 的；
+        // 其餘拿到 −1，直接返回。先前是 guard → close → 設 −1 三步，兩個 task
+        // 可以都通過第一步。
+        mutex.lock()
+        let fd = descriptorStorage
+        descriptorStorage = -1
+        mutex.unlock()
+        guard fd >= 0 else { return }
+        flock(fd, LOCK_UN)
+        close(fd)
     }
 
     /// 行程結束前沒有人呼叫 `release()` 時的兜底。
@@ -845,5 +923,10 @@ public final class FileLock: @unchecked Sendable {
     /// **這不是主要路徑**：`flock` 在行程死亡時由核心釋放，所以漏掉 `release()`
     /// 的後果是 fd 洩漏、不是鎖卡住。留著它是為了長駐行程（`ltm mcp`）——那裡
     /// 一個洩漏的 fd 會一直累積。
+    ///
+    /// **它改變了語意，這一點要說清楚**：被丟棄的鎖從「洩漏但仍持有」變成
+    /// 「靜默解鎖」。對本 repo 是對的方向（`build()` 的 `defer` 一定會呼叫
+    /// `release()`，所以走到 `deinit` 就代表那個鎖已經沒有主人），但它不是
+    /// 一個純粹的兜底。#45 R3 verify，devil's advocate。
     deinit { release() }
 }

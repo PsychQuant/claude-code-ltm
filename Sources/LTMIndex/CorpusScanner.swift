@@ -332,7 +332,12 @@ public struct CorpusScanner: Sendable {
             //
             // 處置是**丟棄並重掃**，不是丟錯：丟錯會讓這個來源被記成 unreadable
             // 並**永遠保留那個壞游標**——一個修不好的卡住狀態。重掃是慢，但正確。
-            // 這是縱深的第三層（前兩層在 `IndexDatabase`）。
+            //
+            // **這一層在出貨路徑上到不了**，而那是刻意的：`IndexDatabase.scanState()`
+            // 已經把負值修成一個必然對不上的游標（見該處註解）。留著它是因為
+            // `CorpusScanner` 是 public 且 `previous:` 由呼叫端給——一個直接呼叫端
+            // 仍然遞得進負值，而語料解析路徑一律不得 trap。驅動它的是
+            // `aNegativeCursorIsDiscardedRatherThanTrapping`，那條測試正是直接呼叫端。
             var priorState = previous.files[key]
             if let prior = priorState, prior.processedBytes < 0 {
                 priorState = nil

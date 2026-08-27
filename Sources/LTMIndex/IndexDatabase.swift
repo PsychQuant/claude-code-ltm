@@ -262,11 +262,24 @@ public final class IndexDatabase {
             let hash = columnText(statement, 1)
             let bytes = Int(sqlite3_column_int64(statement, 2))
             // `CHECK` 只約束**這個 schema 建立之後**寫進去的列。舊索引裡的列、
-            // 以及任何一條外部 `UPDATE`，都到得了這裡。讀不回來的列**丟棄並回報**
-            // ——交給掃描器會讓它從一個不可能的位置續讀。
+            // 以及任何一條外部 `UPDATE`，都到得了這裡。
             //
-            // 丟棄的後果是那個來源從頭重掃（正確但慢），不是索引少東西。
-            guard bytes >= 0 else { rejected.append(key); return }
+            // **修復成「一個一定對不上的游標」，而不是把那一列丟掉。**
+            //
+            // 上一版是丟掉整列，那有一個安靜的後果：鍵一起消失，於是掃描器的
+            // `invalidated.insert(key)` 永遠不會執行（它只在該鍵仍出現在
+            // `previous.files` 時 fire）。若那個來源同時已從語料刪除，它的舊 chunk
+            // 就留在索引裡繼續被命中——而乾淨重建不會有它們，**增量與全量不等價
+            // （違反不變式 2）**（#45 R3 verify，codex + logic 兩個 lens）。
+            //
+            // `processedBytes: 0` + 空字串雜湊：`hexDigest` 一律是 64 個 hex 字元，
+            // 所以空字串**不可能**對上任何內容——比對必然失敗，掃描器因此把這個
+            // 來源標成 invalidated 並從頭重掃。鍵留著，作廢照常發生。
+            guard bytes >= 0 else {
+                rejected.append(key)
+                files[key] = SourceFileState(prefixHash: "", processedBytes: 0)
+                return
+            }
             files[key] = SourceFileState(prefixHash: hash, processedBytes: bytes)
         }
         if !rejected.isEmpty {
@@ -279,7 +292,7 @@ public final class IndexDatabase {
             try? FileHandle.standardError.write(
                 contentsOf: Data(
                     ("⚠ scan_state 有 \(rejected.count) 列的 processed_bytes 是負值，已丟棄"
-                        + "（那些來源將從頭重掃）：\(rejected.sorted().prefix(5).joined(separator: "、"))\n")
+                        + "（那些來源將從頭重掃並作廢舊 chunk）：\(rejected.sorted().prefix(5).joined(separator: "、"))\n")
                         .utf8))
         }
         return ScanState(files: files)

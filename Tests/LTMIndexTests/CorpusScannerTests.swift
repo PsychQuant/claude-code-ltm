@@ -507,8 +507,12 @@ func anUnlistableProjectProtectsItsPriorSources() throws {
 // 這個性質**看不到**：兩次讀取與一次讀取產出的 `ScanState` 逐字相同。要釘住它
 // 只能看實際做了多少 I/O，所以測試走 `ReadTally`。
 //
-// 量到的代價：單次讀+雜湊 2.27 s、兩次 4.51 s，對照掃描總量 6.50 s
-// （`docs/measurements/2026-08-27-query-latency-decomposition.md`）。
+// 量到的代價：移除那一次讓 `build --quiet` 的中位數從 6.58 掉到 3.56 s
+// （**實測差 −3.02 s**，`docs/measurements/2026-08-27-query-latency-decomposition.md`）。
+//
+// 這裡刻意不寫 `2.27` / `4.51`——那兩個曾經寫在這裡並被稱為「量到的」，
+// 而它們是**模型值**：唯一量到的是 Python 單次全讀+雜湊的 2.39 s，而那份紀錄
+// 現在自己也否認了它們（#49 R3 verify，requirements lens）。
 
 @Test("沒有新內容時，第二次掃描不重讀前綴")
 func anUnchangedSourceIsNotReadTwicePerScan() throws {

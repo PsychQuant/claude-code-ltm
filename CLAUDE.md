@@ -149,10 +149,18 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
   對 `.traditionalChinese` / `.simplifiedChinese` 回 `nil`——會靜默拿不到向量而不報錯。
 - **向量不可跨 revision 比較**。`NLContextualEmbedding.revision` 變了（通常隨 macOS 更新）
   就必須重建全部向量，否則新舊向量混在同一個空間裡比距離，結果無意義且不會報錯。
-- **不要加 ANN 索引**。28 萬 chunk 的暴力 cosine 用 Accelerate 是毫秒級。理由與重議
-  觸發見 `docs/measurements/2026-08-08-baseline.md`。
-- **jsonl 不假設 append-only，但利用它**。`state.json` 記 `prefixHash`，對得上就從
-  `processedBytes` 續讀，對不上就整份重解。
+- **不要加 ANN 索引**——但那份 baseline 的兩個前提都已被實測推翻，理由要換一份。
+  「28 萬 chunk」實際是 **640,760**（2.29 倍），而「chunk 數逼近百萬再議」這個重議
+  觸發**問錯了維度**：`docs/measurements/2026-08-27-query-latency-decomposition.md`
+  量到向量檢索那一段在 6 秒的查詢裡小到量不出來，成本幾乎全在掃描。
+  **誠實邊界**：那份紀錄只有一個規模點，所以它支持「現在不上 ANN」，**不支持**
+  「答案與規模無關」——要判斷它何時會變成瓶頸，需要第二個規模點。
+- **jsonl 不假設 append-only，但利用它**。`scan_state` 表記 `prefixHash`，對得上就從
+  `processedBytes` 續讀，對不上就整份重解。**游標與內容在同一個交易裡**——先前
+  游標在一個獨立的 `state.json`，而那讓它成為第三份真相來源：WAL 回滾帶走內容
+  卻留下超前的游標，於是那段語料永遠不再被解析而 build 印 ✓。那個檔現在既不寫
+  也不讀；舊索引升上來時**不遷移**（游標與內容是否一致這個事實不在磁碟上），
+  而是具名拒絕並要求 `ltm build --full`。
 - **`FileManager` 的失敗常常不是回 `nil`，是安靜地回「空的」**。實測（#26）：對一個
   權限不足的目錄，`enumerator(at:includingPropertiesForKeys:options:)` **不回 `nil`**
   ——它回一個產出零個項目的 enumerator。所以 `guard let walker = … else { continue }`

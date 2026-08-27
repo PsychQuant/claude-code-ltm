@@ -169,10 +169,20 @@ public struct RefreshReport: Sendable {
     /// 它既沒有被測試釘住，也沒有任何管道告訴使用者。
     public let mergeDeferredForConcurrentBuild: Bool
 
+    /// 調校參數解析時被拒絕的環境變數，人類可讀。
+    ///
+    /// **值到得了、錯誤也要到得了。** `BuildTuning.fromEnvironment()` 回傳
+    /// `(tuning, rejections)`，而上一版只取 `.tuning`——於是使用者設了
+    /// `LTM_BUILD_MEMORY_BUDGET_MB=64x` 之後，預算靜默失效、沒有任何診斷，
+    /// 查詢照常運作（#46 R3 verify，codex + regression）。那是 F 那條修法的反面缺口。
+    public let tuningRejections: [String]
+
     public init(
         sourcesRefreshed: Int, sourcesUnreadable: [String], sourcesInvalidated: Int,
-        skipped: SkipTally, mergeDeferredForConcurrentBuild: Bool = false
+        skipped: SkipTally, mergeDeferredForConcurrentBuild: Bool = false,
+        tuningRejections: [String] = []
     ) {
+        self.tuningRejections = tuningRejections
         self.sourcesRefreshed = sourcesRefreshed
         self.sourcesUnreadable = sourcesUnreadable
         self.sourcesInvalidated = sourcesInvalidated
@@ -388,6 +398,8 @@ public struct LTMService {
     /// **注入而不是每次讀 `ProcessInfo`**：測試要能餵值，而讓測試改行程環境會讓
     /// 平行測試互相污染。預設值仍然是環境變數，所以出貨行為不變。
     private let buildTuning: BuildTuning
+    /// 解析 `buildTuning` 時被拒絕的環境變數。**不吞掉**——見 `RefreshReport.tuningRejections`。
+    private let tuningRejections: [String]
 
     public init(
         location: DerivedLocation,
@@ -396,7 +408,7 @@ public struct LTMService {
         eventStore: (any EventStore)? = nil,
         anchorKey: AnchorKey,
         recordStore: (any PresentationRecordStore)? = nil,
-        buildTuning: BuildTuning = BuildTuning.fromEnvironment().tuning
+        buildTuning: BuildTuning? = nil
     ) {
         self.location = location
         self.corpusRoot = corpusRoot
@@ -404,7 +416,29 @@ public struct LTMService {
         self.eventStore = eventStore
         self.anchorKey = anchorKey
         self.recordStore = recordStore
-        self.buildTuning = buildTuning
+        // 注入時沒有 rejections 可談（呼叫端自己給了值）；沒注入才解析環境。
+        if let buildTuning {
+            self.buildTuning = buildTuning
+            self.tuningRejections = []
+        } else {
+            let resolved = BuildTuning.fromEnvironment()
+            self.buildTuning = resolved.tuning
+            self.tuningRejections = resolved.rejections.map(Self.describe)
+        }
+    }
+
+    /// 把一個 `BuildTuning.Rejection` 變成一句人話。
+    ///
+    /// 放在這裡而不是 `Rejection` 上：訊息是呈現層的事，而 `BuildTuning` 活在
+    /// 索引層。同一個 rejection 在 `ltm build` 是致命的、在查詢路徑是警告，
+    /// 兩邊的措辭本來就不同。
+    private static func describe(_ rejection: BuildTuning.Rejection) -> String {
+        switch rejection {
+        case .notAPositiveInteger(let variable, let value):
+            return "\(variable)=\(value) 不是正整數，已忽略"
+        case .megabytesOverflow(let variable, let value):
+            return "\(variable)=\(value) 換算成 bytes 會溢位，已忽略"
+        }
     }
 
     /// 由 roots 參數化組出 facade。**CLI 與測試共用這一條路徑。**
@@ -868,13 +902,15 @@ public struct LTMService {
                 sourcesRefreshed: report.sourcesRefreshed,
                 sourcesUnreadable: report.sourcesUnreadable,
                 sourcesInvalidated: report.sourcesInvalidated,
-                skipped: report.skipped)
+                skipped: report.skipped,
+                tuningRejections: tuningRejections)
         } catch IndexBuilder.BuildError.lockHeld {
             // 不拒答：既有索引仍然有效，為了「有人在建置」而讓查詢失敗是過度反應。
             // 但也不靜默：把它記進 report，由呈現層說出來。
             return RefreshReport(
                 sourcesRefreshed: 0, sourcesUnreadable: [], sourcesInvalidated: 0,
-                skipped: SkipTally(), mergeDeferredForConcurrentBuild: true)
+                skipped: SkipTally(), mergeDeferredForConcurrentBuild: true,
+                tuningRejections: tuningRejections)
         }
     }
 
