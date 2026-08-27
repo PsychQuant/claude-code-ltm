@@ -420,17 +420,23 @@ public struct FileEventStore: EventStore {
         kept: Int, corruptLines: [Int], supersededLines: [Int], backup: URL?
     ) {
         guard FileManager.default.fileExists(atPath: url.path) else { return (0, [], [], nil) }
-        let fd = open(url.path, O_RDWR | O_NONBLOCK)
+        // `O_NOFOLLOW`：symlink 那一半。`ExclusiveFile.verify`：hard link 那一半。
+        // 先前兩半都沒有，而 `ftruncate(fd, 0)` 就在 100 行之下——實測把一個
+        // hard link 成 `events.jsonl` 的語料檔截成 0 bytes 而印「✓」
+        // （#44 R9 verify）。理由與索引層那份逐字相同，見 `ExclusiveFile`。
+        let fd = open(url.path, O_RDWR | O_NONBLOCK | O_NOFOLLOW)
         guard fd >= 0 else {
             throw EventStoreError.readFailed(
                 path: url.path, underlying: "open 失敗：errno \(errno)")
         }
         defer { close(fd) }
 
-        var info = stat()
-        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+        do { try ExclusiveFile.verify(descriptor: fd, path: url.path) } catch {
+            let rejection = error as? ExclusiveFile.Rejection
             throw EventStoreError.readFailed(
-                path: url.path, underlying: "不是一般檔案——拒絕而不是阻塞")
+                path: url.path,
+                underlying: (rejection?.reason ?? "\(error)")
+                    + "——這個檔案會被就地截短與覆寫，所以這裡不動它")
         }
         // **阻塞式 `LOCK_EX`**：這是使用者手動叫的維護命令，等一個進行中的 append
         // 結束是對的；`append` 用 `LOCK_NB` 是因為它在熱路徑上。

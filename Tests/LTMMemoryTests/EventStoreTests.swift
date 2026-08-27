@@ -266,3 +266,82 @@ private func anchorForLockTest() -> Anchor {
         _ = try store.allEvents()
     }
 }
+
+// MARK: - 記憶層不得寫進語料（#44 R9 verify）
+
+/// **`ltm memory --prune` 把 hard link 成 `events.jsonl` 的語料檔截成 0。**
+///
+/// 實測（R9，security lens 與 devil's advocate 各自重現）：
+///
+/// ```
+/// BEFORE size=12510 nlink=2 ino=610865743
+/// AFTER  size=0     nlink=2 ino=610865743     ← 同一個 inode
+///   ✓ 已備份原檔：events.jsonl.bak-5CADB437
+/// ```
+///
+/// **違反不變式 1，而且印的是「✓」。** 第二個傷害更難看：那份備份把語料的逐字
+/// 內容原封不動寫進 `~/.claude-ltm/memory/`，而 CLAUDE.md 對記憶層的硬約束逐字
+/// 寫著「如此它**即使被備份或同步**也不含第三方逐字內容」。
+///
+/// 這一格先前被我用「記憶層有自己的守衛與自己的威脅模型（#40）」排除在檢查表外
+/// ——**那是一個沒有量過的「安全」判定**，比一個具名的未知更糟。
+@Test("prune 不得截短 hard link 成 events.jsonl 的檔案")
+func pruneRefusesAHardLinkedStore() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-mem-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let outsider = root.appendingPathComponent("outsider.jsonl")
+    let payload = Data(repeating: 0x41, count: 2_048)
+    try payload.write(to: outsider)
+
+    let events = root.appendingPathComponent("events.jsonl")
+    #expect(link(outsider.path, events.path) == 0, "前提：hard link 要建得起來")
+
+    let store = try FileEventStore(url: events)
+    #expect(throws: (any Error).self) { _ = try store.pruneUnusable() }
+    #expect(try Data(contentsOf: outsider) == payload, "prune 截短了另一個名字持有的檔案")
+}
+
+/// symlink 版同理——`O_NOFOLLOW` 那一半。
+@Test("prune 不得跟著 symlink 走")
+func pruneRefusesASymlinkedStore() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-mem-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let outsider = root.appendingPathComponent("outsider.jsonl")
+    let payload = Data(repeating: 0x41, count: 2_048)
+    try payload.write(to: outsider)
+    let events = root.appendingPathComponent("events.jsonl")
+    try FileManager.default.createSymbolicLink(at: events, withDestinationURL: outsider)
+
+    let store = try FileEventStore(url: events)
+    #expect(throws: (any Error).self) { _ = try store.pruneUnusable() }
+    #expect(try Data(contentsOf: outsider) == payload, "prune 跟著 symlink 走了")
+}
+
+/// append 那一半：`O_APPEND` 不截短，但把事件行 append 進語料仍然是寫進語料。
+@Test("append 不得寫進 hard link 成 events.jsonl 的檔案")
+func appendRefusesAHardLinkedStore() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-mem-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let outsider = root.appendingPathComponent("outsider.jsonl")
+    let payload = Data(repeating: 0x41, count: 512)
+    try payload.write(to: outsider)
+    let events = root.appendingPathComponent("events.jsonl")
+    #expect(link(outsider.path, events.path) == 0, "前提：hard link 要建得起來")
+
+    let store = try FileEventStore(url: events)
+    #expect(throws: (any Error).self) {
+        try store.append(
+            .interaction(
+                .shown, anchor: anchor("內容"), at: Date(), generation: gen, policy: policy))
+    }
+    #expect(try Data(contentsOf: outsider) == payload, "append 把事件行寫進了別人的檔案")
+}

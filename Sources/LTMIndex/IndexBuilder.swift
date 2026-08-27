@@ -897,14 +897,29 @@ func verifyExclusivelyOurs(descriptor: Int32, path: String) throws {
 ///
 /// 記憶層（`LTMMemory`）不在這張表裡：它有自己的守衛與自己的威脅模型（#40）。
 ///
-/// ## 我查不出來的那一格
+/// ## `replaceItemAt` 那一格：量完了（先前是具名未知）
 ///
-/// `replaceItemAt` 對一個**是 symlink 的目標**會怎麼做，我沒有隔離量測過。
-/// 現有測試（`derivedFilesDoNotFollowLinks` 的 `vectors.bin` 兩格）在到達它之前
-/// 就被 `truncateSidecar` 的檢查擋下，所以那條路徑**沒有被覆蓋**。
+/// 三種情形，全部隔離量過（探針跑在 repo 之外的 temp 目錄）：
 ///
-/// 我不寫「它應該是安全的」——那正是這個 cluster 八輪來反覆出錯的句型。
-/// **它是一個具名的未知**，查法是一行 `ln -s` 加一次 `appendVectors` 的 else 分支。
+/// | dest | `replaceItemAt` | 受害者 | 之後 dest 是 |
+/// |---|---|---|---|
+/// | hard link → 別的檔案 | **成功** | 320 → 320 | 一般檔案 |
+/// | symlink → 存在的檔案 | 丟錯 | 320 → 320 | 仍是 symlink |
+/// | **dangling** symlink | 丟錯 | 目標**沒有被建出來** | 仍是 symlink |
+///
+/// **三種都不寫穿**，但只有第一種是「因為它做對了事」：rename 換掉的是**目錄項**，
+/// 不對 inode 寫入——所以受害者完好，而 `vectors.bin` 從此是我們自己的一般檔案。
+/// 另外兩種是丟錯，安全但**訊息與事實不符**（它說「檔案不存在」，而檔案存在、
+/// 只是一個連結）。
+///
+/// **dangling 那一格是可達的，而且是唯一可達的**（codex R9 指出）：分支條件是
+/// `FileManager.fileExists`，它**跟隨 symlink**，所以 dangling 時回 `false` →
+/// 必然走 else 分支 → 必然到達 `replaceItemAt`。非 dangling 的兩種會先被
+/// `truncateSidecar` 的檢查擋下。
+///
+/// **殘留的粗糙面**：dangling 之後 `vectors.bin` 仍是那個 symlink，而增量路徑
+/// 每次都會在同一個地方丟同一個誤導的錯——復原只剩 `ltm build --full`
+/// （它用 `lstat`，清得掉）。回歸鎖：`aDanglingSidecarSymlinkDoesNotWriteIntoTheCorpus`。
 ///
 /// 開一個 derived 目錄底下的檔案，**且拒絕跟隨符號連結**。
 ///

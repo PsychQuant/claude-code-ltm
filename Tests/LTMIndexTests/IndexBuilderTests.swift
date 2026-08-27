@@ -1353,10 +1353,18 @@ func derivedFilesDoNotFollowLinks(entry: (name: String, symbolic: Bool)) throws 
         ).build()
     } catch { thrown = error }
 
+    // **判準要比對 path，不只是型別。** `DatabaseError.openFailed` 同時由我們的
+    // 前置守衛與真正的 `sqlite3_open_v2` 失敗丟出，所以型別分不出誰丟的
+    // （#44 R9 verify，codex）。守衛丟的那個帶的是**被動手腳的那個路徑**，
+    // sqlite 自己失敗時帶的是主資料庫路徑——所以比對 path 就分得出來。
     let rejectedByOurGuard: Bool
     switch thrown {
     case let error as IndexDatabase.DatabaseError:
-        if case .openFailed = error { rejectedByOurGuard = true } else { rejectedByOurGuard = false }
+        if case .openFailed(let failedPath, _) = error {
+            rejectedByOurGuard = failedPath == target.path
+        } else {
+            rejectedByOurGuard = false
+        }
     case let error as IndexBuilder.BuildError:
         switch error {
         case .derivedPathUnsafe: rejectedByOurGuard = true
@@ -1365,7 +1373,11 @@ func derivedFilesDoNotFollowLinks(entry: (name: String, symbolic: Bool)) throws 
         case .lockUnavailable(_, let code, _): rejectedByOurGuard = code == ELOOP
         default: rejectedByOurGuard = false
         }
-    case is CocoaError: rejectedByOurGuard = true  // openDerivedFileNoFollow 的 ELOOP
+    case let error as CocoaError:
+        // `openDerivedFileNoFollow` 的 `ELOOP` 走這裡。同樣比對 path——否則
+        // `synchronizeDirectory` / `discardDerivedArtifacts` / `Data.write` 的任何
+        // `CocoaError` 都會被誤認成守衛（同上）。
+        rejectedByOurGuard = (error.userInfo[NSFilePathErrorKey] as? String) == target.path
     default: rejectedByOurGuard = false
     }
     #expect(
@@ -1714,9 +1726,61 @@ func theSidecarTempIsSafeOnTheIncrementalPath(symbolic: Bool) throws {
     // 3. 語料長出內容 → 增量 build → 走 temp 分支。
     try writeTurns(in: corpus, texts: ["第一段內容"])
     let report = try? IndexBuilder(location: derived, scanner: scanner, embedder: stub).build()
-    #expect(report == nil || report!.chunksIndexed > 0 || true)  // 成敗不重要
+
+    // **前提要被斷言，不是被註解。** 上一版這裡是
+    // `#expect(report == nil || report!.chunksIndexed > 0 || true)`——**`|| true`
+    // 讓整條運算式恆為真**，而 `try?` 把錯誤吞掉，於是「有沒有真的走到 temp 分支」
+    // 沒有任何東西在守（#45 R9 verify，codex 判為 CRITICAL）。
+    //
+    // 今天它確實走得到（step 1 與 step 3 的 layoutVersion／revision 相同 →
+    // `rebuildFromScratch == false` → discard 不跑 → `vectors.bin` 不存在 →
+    // else 分支），但一旦重建判定、discard 範圍或分支條件改動，這條回歸鎖會
+    // **安靜退化成一條空測試**。CLAUDE.md：不可能失敗的測試比沒有測試更糟。
+    #expect(report?.wasFullRebuild == false || report == nil,
+            "這一輪必須是增量——走了全量就代表 discard 跑過，那條路徑不是要驗的那條")
 
     // **唯一不可接受的是語料變了。**
     #expect(try Data(contentsOf: victim) == payload,
             "\(symbolic ? "symlink" : "hardlink") 版的 .tmp 在增量路徑上寫穿了語料")
+}
+
+/// dangling `vectors.bin` symlink：**唯一可達到 `replaceItemAt` 的那條路徑**。
+///
+/// 分支條件是 `FileManager.fileExists`，它**跟隨 symlink**——所以 dangling 時
+/// 回 `false`、必然走 `appendVectors` 的 else 分支、必然到達 `replaceItemAt`
+/// （#45 R9 verify，codex）。非 dangling 的兩種會先被 `truncateSidecar` 擋下。
+///
+/// 量測結果：`replaceItemAt` 丟錯，**語料目標沒有被建出來**，symlink 存活。
+/// 安全，但復原只剩 `--full`。這條測試釘的是「語料端什麼都沒發生」。
+@Test("dangling 的 vectors.bin symlink 不得在語料裡建出檔案")
+func aDanglingSidecarSymlinkDoesNotWriteIntoTheCorpus() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try derived.createRootIfNeeded()
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    let stub = StubEmbedder(revision: "rev-A")
+
+    // 空語料 build 一次 → 索引在，側車不在，之後走增量（discard 不跑）。
+    _ = try IndexBuilder(location: derived, scanner: scanner, embedder: stub).build()
+
+    // dangling：目標在語料樹裡而且**不存在**。
+    let wouldBeCreated = corpus.appendingPathComponent("would-be-created.jsonl")
+    try FileManager.default.createSymbolicLink(
+        at: derived.vectorsURL, withDestinationURL: wouldBeCreated)
+    #expect(!FileManager.default.fileExists(atPath: derived.vectorsURL.path),
+            "前提：fileExists 對 dangling symlink 回 false——那正是它走 else 分支的原因")
+
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+    _ = try? IndexBuilder(location: derived, scanner: scanner, embedder: stub).build()
+
+    #expect(!FileManager.default.fileExists(atPath: wouldBeCreated.path),
+            "在語料樹裡建出了檔案——那是寫進唯讀語料")
+    // `--full` 是文件指的復原路徑，它必須真的通。
+    let recovered = try IndexBuilder(location: derived, scanner: scanner, embedder: stub)
+        .build(full: true)
+    #expect(recovered.wasFullRebuild)
+    #expect(recovered.chunksIndexed > 0)
 }

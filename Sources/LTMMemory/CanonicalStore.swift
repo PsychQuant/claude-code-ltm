@@ -125,10 +125,24 @@ public enum CanonicalStore {
         // 一次的 failure class，這是第三次。
         //
         // 對一般檔案 `O_NONBLOCK` 對讀寫語意無影響，所以不必事後清掉。
-        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT | O_NONBLOCK, 0o600)
+        // `O_NOFOLLOW` 與下面的 `ExclusiveFile.verify` 是同一件事的兩半。
+        //
+        // `O_APPEND` 不截短，所以這裡的傷害比 `pruneUnusable` 小——但把事件行
+        // append 進一個 hard link 成語料檔的 `events.jsonl` **仍然是寫進語料**
+        // （不變式 1），而且那些行會混進第三方的逐字內容裡。#44 R9 verify 量到的
+        // 是 prune 那一條，這一條是同族、同一個修法。
+        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT | O_NONBLOCK | O_NOFOLLOW, 0o600)
         guard fd >= 0 else {
             throw EventStoreError.appendFailed(
                 path: url.path, underlying: "open 失敗：errno \(errno)（目錄可寫嗎？）")
+        }
+        do { try ExclusiveFile.verify(descriptor: fd, path: url.path) } catch {
+            close(fd)
+            let rejection = error as? ExclusiveFile.Rejection
+            throw EventStoreError.appendFailed(
+                path: url.path,
+                underlying: (rejection?.reason ?? "\(error)")
+                    + "——記憶層只寫我們自己的檔案")
         }
         // durability：回傳成功必須代表**已落盤**。protocol 的註解寫「無法持久化時
         // 必須拋出——記憶層與索引不同，掉了就回不來」，但先前只涵蓋 `write` 失敗，
