@@ -53,3 +53,8 @@ mcpb/server/*
 !mcpb/server/.gitkeep
 mcpb/*.mcpb
 mcpb/*.sha256
+
+# 外部參考 repo（deep-research 指名的先例：git 的 racy-git 有界重算、
+# watchman 的世代 token）。clone 進來是為了讀**實際出貨的實作**而不是二手摘要——
+# 診斷引用它們的設計，就該對得起原始碼。不進版控：它們有自己的 history。
+repos/

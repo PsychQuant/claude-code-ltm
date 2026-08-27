@@ -129,6 +129,22 @@ public struct SkipTally: Sendable, Equatable {
 /// 增量策略沿用 CLAUDE.md 的那一句：**不假設 jsonl 是 append-only，但利用它**。
 /// 已處理段落的雜湊對得上就從 `processedBytes` 續讀；對不上就整份重解，並要求
 /// 呼叫端先清掉那個來源的舊 chunk。
+/// 掃描期間實際讀了多少 bytes。**只給測試用**。
+///
+/// 存在的理由是「重複讀取」這個性質無法從 `scan()` 的回傳值觀察——兩次讀取與一次
+/// 讀取產出的 `ScanState` 逐字相同。要把它釘住就得看**做了多少 I/O**，而那是
+/// 實作細節，只有計數器看得到。
+///
+/// 用 reference type 是因為 `CorpusScanner` 是 `struct` 且 `scan()` 不是 `mutating`。
+public final class ReadTally: @unchecked Sendable {
+    private let lock = NSLock()
+    private var total = 0
+    public init() {}
+    public var bytesRead: Int { lock.lock(); defer { lock.unlock() }; return total }
+    func add(_ n: Int) { lock.lock(); total += n; lock.unlock() }
+    public func reset() { lock.lock(); total = 0; lock.unlock() }
+}
+
 public struct CorpusScanner: Sendable {
     public let corpusRoot: URL
     /// Anchor 內容摘要的密鑰（#12）。與語料根同一個理由：**索引層不自己產生它**
@@ -140,9 +156,20 @@ public struct CorpusScanner: Sendable {
     /// 索引層不自己假設語料在哪：那個知識屬於 facade（它同時看得到 LTMMemory 的
     /// `CorpusLocation`）。兩個地方各寫一次 `~/.claude/projects` 的話，日後改動
     /// 只會改到其中一個，而不一致的那一邊會安靜地掃描空目錄。
+    /// 讀取量計數器。**只有測試會設它**；生產路徑一律 `nil`，零額外成本。
+    let readTally: ReadTally?
+
     public init(corpusRoot: URL, anchorKey: AnchorKey) {
         self.corpusRoot = corpusRoot
         self.anchorKey = anchorKey
+        self.readTally = nil
+    }
+
+    /// 測試用：帶計數器建構。internal——不擴大公開介面（`scan()` 簽名不變）。
+    init(corpusRoot: URL, anchorKey: AnchorKey, readTally: ReadTally?) {
+        self.corpusRoot = corpusRoot
+        self.anchorKey = anchorKey
+        self.readTally = readTally
     }
 
     public enum ScanError: Error, Sendable, Equatable {
@@ -242,6 +269,21 @@ public struct CorpusScanner: Sendable {
     /// 掃描語料，只讀出上次之後的新內容。
     ///
     /// `previous` 給空狀態即為全量掃描。
+    /// ## `nextState.files[key]` 的四個寫入點（動它之前先讀這段）
+    ///
+    /// | 位置 | 情境 | 雜湊 |
+    /// |---|---|---|
+    /// | 開檔失敗 | 讀不到 → 沿用 `prior` | 不算 |
+    /// | 讀 tail 失敗 | 讀不到 → 沿用 `prior` | 不算 |
+    /// | 主路徑 | 有新內容 or 比對失敗 → 重算；否則沿用 `prior` | **唯一會算的地方** |
+    /// | 列目錄失敗的 project | 讀不到 → 沿用 `prior` | 不算 |
+    ///
+    /// **只有主路徑會計算新的 `prefixHash`**，另外三個都原樣沿用上一輪的值。
+    /// 新增寫入點的人必須決定自己屬於哪一類——沿用 `prior` 是安全的（那份 state
+    /// 已經被上一輪驗證過），重算則必須確保讀的是**當下**的內容。
+    ///
+    /// 這則表格是刻意寫的：git 2018 年的 split-index bug 就是「某條路徑沒把 entry
+    /// 交給守衛常式」而安靜失去保護，成因看起來完全無辜。
     public func scan(previous: ScanState = ScanState()) throws -> ScanResult {
         var chunks: [CorpusChunk] = []
         var invalidated: Set<String> = []
@@ -272,11 +314,23 @@ public struct CorpusScanner: Sendable {
             // 段；成本量在 `docs/measurements/2026-08-26-resume-prefix-hash-cost.md`
             // （當下語料的上界約 4 秒），該紀錄同時寫了改用分塊 Merkle 的重議觸發。
             var startOffset = 0
+            // **顯式旗標，不從 `startOffset` 反推。**
+            //
+            // 看起來 `startOffset == prior.processedBytes` 就代表「比對通過」——
+            // `startOffset` 只在成功分支被賦值。但有一個縫：`prior.processedBytes`
+            // 為 0 而 `prior.prefixHash` 不是空資料的雜湊時（state 被手動編輯、或
+            // 未來某個 bug 寫出不一致組合），比對會**失敗**、`startOffset` 保持 0，
+            // 而 `startOffset == prior.processedBytes` 仍然成立 → 會錯誤地沿用一個
+            // 已知不一致的 hash。
+            //
+            // 判準：**不要從一個值反推另一件事，把那件事記下來。**
+            var resumedFromVerifiedPrefix = false
             if let prior = priorState, prior.processedBytes <= size,
                 let prefix = try? readBytes(handle, from: 0, count: prior.processedBytes),
                 Self.hexDigest(prefix) == prior.prefixHash
             {
                 startOffset = prior.processedBytes
+                resumedFromVerifiedPrefix = true
             } else if priorState != nil {
                 invalidated.insert(key)
             }
@@ -293,9 +347,34 @@ public struct CorpusScanner: Sendable {
             // offset 只推進到**最後一個完整紀錄**之後；雜湊只涵蓋那一段。
             // 半行留給下一輪從它的起點重讀。
             let processed = startOffset + parsed.consumedBytes
-            let whole = (try? readBytes(handle, from: 0, count: processed)) ?? Data()
-            nextState.files[key] = SourceFileState(
-                prefixHash: Self.hexDigest(whole), processedBytes: processed)
+
+            // **沒有新內容時不重算**（#49）。
+            //
+            // 兩個條件缺一不可：
+            //   (a) 續讀比對**通過**——上面那一段已經證明 `0..<startOffset` 的雜湊
+            //       等於 `prior.prefixHash`；
+            //   (b) 這一輪沒有消化任何新 byte——於是 `processed == startOffset`。
+            //
+            // 兩者同時成立時，`0..<processed` 就是剛剛驗證過的那一段，重讀它並
+            // 重算 SHA-256 的輸出**必然**是 `prior.prefixHash`。實測那次冗餘佔
+            // 掃描的一半（單次 2.27 s、兩次 4.51 s，掃描總量 6.50 s——
+            // `docs/measurements/2026-08-27-query-latency-decomposition.md`）。
+            //
+            // 條件寫寬的後果是**安靜的**：檔案被改寫時沿用舊 hash，索引少掉那段
+            // 內容而沒有任何訊號，症狀只有「以前找得到的東西現在找不到」。這正是
+            // `prefixHash` 存在要防的那件事，所以 (a) 不可省成
+            // 「`startOffset == prior.processedBytes`」（見上方旗標的註解）。
+            //
+            // `consumedBytes == 0` 但檔案變長是合法且安全的情況：新增的是**半行**
+            // （不完整紀錄），`processed` 不變，而雜湊涵蓋的 `0..<processed` 確實
+            // 沒變。半行留給下一輪，語意與重算完全相同。
+            if resumedFromVerifiedPrefix, parsed.consumedBytes == 0, let prior = priorState {
+                nextState.files[key] = prior
+            } else {
+                let whole = (try? readBytes(handle, from: 0, count: processed)) ?? Data()
+                nextState.files[key] = SourceFileState(
+                    prefixHash: Self.hexDigest(whole), processedBytes: processed)
+            }
         }
 
         // **列不出內容的 project 底下的既有來源，一律視為讀不到而非消失**（#26）。
@@ -330,7 +409,9 @@ public struct CorpusScanner: Sendable {
     private func readBytes(_ handle: FileHandle, from offset: Int, count: Int) throws -> Data {
         guard count > 0 else { return Data() }
         try handle.seek(toOffset: UInt64(offset))
-        return try handle.read(upToCount: count) ?? Data()
+        let data = try handle.read(upToCount: count) ?? Data()
+        readTally?.add(data.count)
+        return data
     }
 
     static func hexDigest(_ data: Data) -> String {

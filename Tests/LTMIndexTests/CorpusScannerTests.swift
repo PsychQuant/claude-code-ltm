@@ -497,3 +497,176 @@ func anUnlistableProjectProtectsItsPriorSources() throws {
     // 狀態要保留，否則下一輪它們仍會被當成新檔案整份重解。
     #expect(knownKeys.isSubset(of: Set(second.state.files.keys)))
 }
+
+// MARK: - 續讀期間的重複讀取（#49）
+//
+// 掃描對每個來源檔把已處理前綴讀取並 SHA-256 **兩次**：一次在續讀比對、一次在
+// 寫回 state。沒有新內容時第二次的輸入與輸出都與第一次相同——第一次已經比對
+// 通過，所以第二次算出的必然是 `prior.prefixHash`。
+//
+// 這個性質**看不到**：兩次讀取與一次讀取產出的 `ScanState` 逐字相同。要釘住它
+// 只能看實際做了多少 I/O，所以測試走 `ReadTally`。
+//
+// 量到的代價：單次讀+雜湊 2.27 s、兩次 4.51 s，對照掃描總量 6.50 s
+// （`docs/measurements/2026-08-27-query-latency-decomposition.md`）。
+
+@Test("沒有新內容時，第二次掃描不重讀前綴")
+func anUnchangedSourceIsNotReadTwicePerScan() throws {
+    let root = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: root) }
+    _ = try writeSession(
+        in: root, project: "proj", file: "s.jsonl",
+        lines: (0..<20).map {
+            turnLine(uuid: "\($0)0000000-aaaa-bbbb-cccc-dddddddddddd", session: sessionA,
+                     role: $0 % 2 == 0 ? "user" : "assistant", text: "內容 \($0) 需要足夠長度")
+        })
+
+    let first = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
+    let processed = try #require(first.state.files.values.first?.processedBytes)
+    #expect(processed > 0)
+
+    // 第二次：語料一個 byte 都沒動。
+    let tally = ReadTally()
+    let scanner = CorpusScanner(corpusRoot: root, anchorKey: .forTesting, readTally: tally)
+    let second = try scanner.scan(previous: first.state)
+
+    #expect(second.chunks.isEmpty, "前提：這一輪沒有新內容")
+    #expect(second.state == first.state, "前提：state 逐字不變")
+
+    // 續讀比對必須讀一次前綴（那是 prefixHash 機制的本體，不省）。
+    // 但**寫回 state 時不該再讀一次**——那一段的輸入與輸出都與第一次相同。
+    let read = tally.bytesRead
+    #expect(
+        read <= processed,
+        "前綴被讀了 \(read) bytes，而已處理段只有 \(processed) bytes——第二次讀取是冗餘的")
+}
+
+@Test("有新內容時仍然重算前綴雜湊，不得沿用舊值")
+func appendingNewContentStillRecomputesTheHash() throws {
+    let root = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = try writeSession(
+        in: root, project: "proj", file: "s.jsonl",
+        lines: [turnLine(uuid: "aaaaaaaa-aaaa-bbbb-cccc-dddddddddddd", session: sessionA,
+                         role: "user", text: "第一則")])
+
+    let scanner = CorpusScanner(corpusRoot: root, anchorKey: .forTesting)
+    let first = try scanner.scan()
+    let before = try #require(first.state.files.values.first)
+
+    // 追加一則完整 turn。
+    let handle = try FileHandle(forWritingTo: url)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data(
+        (turnLine(uuid: "bbbbbbbb-aaaa-bbbb-cccc-dddddddddddd", session: sessionA,
+                  role: "assistant", text: "第二則") + "\n").utf8))
+    try handle.close()
+
+    let second = try scanner.scan(previous: first.state)
+    let after = try #require(second.state.files.values.first)
+
+    #expect(second.chunks.count == 1, "只該讀到新增的那一則")
+    #expect(after.processedBytes > before.processedBytes)
+    #expect(after.prefixHash != before.prefixHash, "內容變了，雜湊必須跟著變")
+}
+
+/// **本組最重要的一條。** 它守的是 `prefixHash` 存在的唯一理由。
+///
+/// 用「檔案有沒有變長」判斷是不夠的：中段被改寫而位元組數不變時，size 與 mtime
+/// 都可能對得上。跨模型盲驗蒐集到的外部證據把這一整類命名為「racy git」——Git
+/// 比對七個 stat 欄位**仍然不夠**，而失效方式是**安靜的錯誤答案**。
+///
+/// 所以任何「省掉一次雜湊」的最佳化，都必須讓這條測試維持綠色。變異驗證的標的
+/// 就是它：把重用條件放寬成無條件，這條必須變紅。
+@Test("中段被改寫而位元組數不變時，來源仍被判定為需要作廢")
+func aMidFileRewriteThatPreservesSizeIsStillDetected() throws {
+    let root = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = try writeSession(
+        in: root, project: "proj", file: "s.jsonl",
+        lines: [
+            turnLine(uuid: "aaaaaaaa-aaaa-bbbb-cccc-dddddddddddd", session: sessionA,
+                     role: "user", text: "原本的內容"),
+            turnLine(uuid: "bbbbbbbb-aaaa-bbbb-cccc-dddddddddddd", session: sessionA,
+                     role: "assistant", text: "第二則內容"),
+        ])
+
+    let scanner = CorpusScanner(corpusRoot: root, anchorKey: .forTesting)
+    let first = try scanner.scan()
+    let before = try #require(first.state.files.values.first)
+    let sizeBefore = try #require(
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int)
+
+    // 就地改寫中段：同樣的字數，不同的字。位元組數必須完全相同。
+    let original = try String(contentsOf: url, encoding: .utf8)
+    let rewritten = original.replacingOccurrences(of: "原本的內容", with: "換掉的內容")
+    try rewritten.write(to: url, atomically: true, encoding: .utf8)
+    let sizeAfter = try #require(
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int)
+    #expect(sizeAfter == sizeBefore, "前提：改寫後位元組數必須不變，否則這條測試證明不了任何事")
+
+    let second = try scanner.scan(previous: first.state)
+    let after = try #require(second.state.files.values.first)
+
+    #expect(second.invalidatedSources.contains("proj/s.jsonl"), "中段改寫必須被偵測為作廢")
+    #expect(after.prefixHash != before.prefixHash, "雜湊必須反映改寫後的內容")
+}
+
+/// 這兩條是上面那條最佳化的**守衛**，而它們的存在是變異驗證逼出來的：
+/// 第一版只寫了「中段改寫」那條回歸鎖，結果把重用條件放寬成無條件、以及換成
+/// 從 `startOffset` 反推，**兩個變異都全綠**——守衛沒有任何測試在扛。
+///
+/// （CLAUDE.md 記過同一個形狀：#40 的第一版修法加了守衛、測試也綠，退掉守衛
+/// 零測試變紅。驅動不了的守衛要拆掉，不是留著加註解。）
+
+@Test("來源被清空時，續讀狀態必須跟著歸零，不得沿用上一輪的位移")
+func truncatingASourceToEmptyResetsItsCursor() throws {
+    let root = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let url = try writeSession(
+        in: root, project: "proj", file: "s.jsonl",
+        lines: [turnLine(uuid: "aaaaaaaa-aaaa-bbbb-cccc-dddddddddddd", session: sessionA,
+                         role: "user", text: "原本有內容")])
+
+    let scanner = CorpusScanner(corpusRoot: root, anchorKey: .forTesting)
+    let first = try scanner.scan()
+    #expect(try #require(first.state.files.values.first).processedBytes > 0)
+
+    // 清空檔案：size 0，但 state 仍宣稱處理過 N bytes。
+    try Data().write(to: url)
+
+    let second = try scanner.scan(previous: first.state)
+    let after = try #require(second.state.files["proj/s.jsonl"])
+
+    #expect(second.invalidatedSources.contains("proj/s.jsonl"))
+    #expect(
+        after.processedBytes == 0,
+        "檔案已清空而 state 仍宣稱處理過 \(after.processedBytes) bytes——那個位移會永遠對不上")
+}
+
+@Test("續讀狀態自相矛盾時（位移 0 但雜湊不是空資料的），必須重算而非沿用")
+func aSelfInconsistentCursorIsRecomputedNotReused() throws {
+    let root = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: root) }
+    // 真的空檔（`writeSession(lines: [])` 會寫出一個 "\n"，那不是空的）。
+    let dir = root.appendingPathComponent("proj")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try Data().write(to: dir.appendingPathComponent("s.jsonl"))
+
+    // 手工造一個不可能由 `scan()` 產生的 state：位移 0，但雜湊不是空資料的雜湊。
+    // `scan_state` 現在住在 SQLite 裡（#44），任何一個 UPDATE 或未來的 migration
+    // bug 都到得了這個狀態，所以它不是純理論。
+    let corrupt = ScanState(files: [
+        "proj/s.jsonl": SourceFileState(prefixHash: String(repeating: "de", count: 32),
+                                        processedBytes: 0)
+    ])
+
+    let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting)
+        .scan(previous: corrupt)
+    let after = try #require(result.state.files["proj/s.jsonl"])
+
+    #expect(
+        after.prefixHash != String(repeating: "de", count: 32),
+        "比對失敗卻沿用了那個對不上的雜湊——下一輪會再失敗一次，而且永遠不會自癒")
+    #expect(after.processedBytes == 0)
+}
