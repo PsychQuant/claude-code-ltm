@@ -874,6 +874,38 @@ func verifyExclusivelyOurs(descriptor: Int32, path: String) throws {
     }
 }
 
+/// # derived root 底下每一個會改變檔案系統的站點，逐一列出
+///
+/// R6 起有一條 finding 掛著：security lens 數出「約 14 個站點，只有 5 個走共用
+/// 開檔器」，而我連續兩輪沒有處理它。實際數過之後，**那個數字是高估的**——但
+/// 「只有 5 個走共用開檔器」是對的，而正確的答案不是「把全部改成走它」，是
+/// **逐站點說清楚它為什麼安全或不安全**。
+///
+/// | 站點 | 動作 | 判定 |
+/// |---|---|---|
+/// | `DerivedLocation.createRootIfNeeded` | `createDirectory` | 建目錄，不寫穿任何既有檔案 |
+/// | `discardDerivedArtifacts` 的 5 個項目 | `lstat` + `removeItem` | **unlink 一個名字**，不動連結的目標；`lstat` 版見該處註解 |
+/// | 同上的 `-wal` / `-shm` | `try? removeItem` | 同上 |
+/// | `truncateSidecar` | `openDerivedFileNoFollow(O_RDWR)` + `truncate` | ✅ 走共用檢查，且檢查在截短之前 |
+/// | `appendVectors` 的 append 分支 | `openDerivedFileNoFollow(O_WRONLY)` | ✅ |
+/// | `appendVectors` 的 fsync | `openDerivedFileNoFollow(O_WRONLY)` | ✅ |
+/// | `appendVectors` 的 `.tmp` 寫入 | `Data.write(.atomic)` | **不對目標路徑開檔**（實測對兩種連結都不寫穿）——比走共用檢查更強 |
+/// | `appendVectors` 的 `replaceItemAt` | rename | **見下方「我查不出來的那一格」** |
+/// | `IndexDatabase.init` | `lstat` × 4 後綴 + `sqlite3_open_v2` | 主檔與 `-wal`/`-shm`/`-journal` 都擋 symlink／hardlink／非一般檔案／非本人 |
+/// | `FileLock.acquire` | `open(O_NOFOLLOW|O_NONBLOCK)` + `verifyExclusivelyOurs` | ✅ |
+/// | `synchronizeDirectory` | `open(O_RDONLY)` | 唯讀 |
+///
+/// 記憶層（`LTMMemory`）不在這張表裡：它有自己的守衛與自己的威脅模型（#40）。
+///
+/// ## 我查不出來的那一格
+///
+/// `replaceItemAt` 對一個**是 symlink 的目標**會怎麼做，我沒有隔離量測過。
+/// 現有測試（`derivedFilesDoNotFollowLinks` 的 `vectors.bin` 兩格）在到達它之前
+/// 就被 `truncateSidecar` 的檢查擋下，所以那條路徑**沒有被覆蓋**。
+///
+/// 我不寫「它應該是安全的」——那正是這個 cluster 八輪來反覆出錯的句型。
+/// **它是一個具名的未知**，查法是一行 `ln -s` 加一次 `appendVectors` 的 else 分支。
+///
 /// 開一個 derived 目錄底下的檔案，**且拒絕跟隨符號連結**。
 ///
 /// ## 為什麼需要它，以及它的威脅模型
