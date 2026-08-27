@@ -22,6 +22,14 @@
   超前的游標（R3 實測：那則 turn 永遠不會再被索引，build 不報錯）。根本問題是
   **「游標涵蓋的內容是否真的在索引裡」這個事實不在磁碟上**，所以不猜：舊索引
   升上來時具名拒絕並要求 `ltm build --full`。
+- **`discardDerivedArtifacts` 改用 `lstat`。** `fileExists` 跟隨 symlink，所以
+  dangling symlink 會被跳過——目錄項還在卻沒被清掉，而 `IndexDatabase` 的檢查
+  接著拒絕開啟：**純衍生物變成 `--full` 也清不掉的垃圾**。
+- **link 測試矩陣的資料庫受害者改成有效的 SQLite 檔。** 上一輪把零長度改成
+  64 bytes 的 `0x41`，理由是「非空受害者對每一種破壞都是可觀察的」——**那個前提
+  對 SQLite 不成立**：它會先以 `SQLITE_NOTADB` 拒絕解析，於是拿掉守衛也一樣綠。
+  實測：關掉四個 sqlite 入口的 symlink 判定，505 條全綠。**修 A 的動作把 B 從
+  真綠變成假綠**（2 個未驅動的 case 變成 4 個）。
 - **`.tmp` 改回 `.atomic`——上一輪那個「修法」是純退步，而且會毀語料。** 我把它
   改成 `O_WRONLY | O_CREAT | O_TRUNC`，理由寫的是「`Data.write` 會跟隨 symlink」
   ——**那句話是假的**（實測：`.atomic` 對 symlink 與 hard link 都不寫穿，因為它

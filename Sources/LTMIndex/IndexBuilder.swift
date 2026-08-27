@@ -662,7 +662,28 @@ public struct IndexBuilder: Sendable {
             location.vectorsURL.appendingPathExtension("tmp"),
             URL(fileURLWithPath: location.databaseURL.path + "-journal"),
         ] {
-            guard fm.fileExists(atPath: url.path) else { continue }
+            // **`lstat` 而不是 `fileExists`。** 後者**跟隨 symlink**，所以一個目的地
+            // 不存在的 dangling symlink 會回 `false`——目錄項還在，卻被跳過。
+            // 後果：`IndexDatabase` 的檢查看見那個 symlink 並拒絕開啟，而 `--full`
+            // 清不掉它，**純衍生物變成清不掉的垃圾**（違反不變式 2 的 `--full`
+            // 契約，#44 R7 verify，codex）。
+            //
+            // 反諷的對照：緊接在下面的 `-wal` / `-shm` 迴圈**沒有**這個前置判斷，
+            // 直接 `try? removeItem`，所以它反而不受影響——同一個函式裡兩種寫法，
+            // 被保護到的是那個次要的分支。
+            var probe = stat()
+            guard lstat(url.path, &probe) == 0 else {
+                // `ENOENT` = 真的不存在，跳過。其餘（權限等）要說出來，
+                // 因為 `--full` 的契約是「從零開始」。
+                if errno == ENOENT { continue }
+                throw CocoaError(
+                    .fileWriteUnknown,
+                    userInfo: [
+                        NSFilePathErrorKey: url.path,
+                        NSLocalizedDescriptionKey:
+                            "無法判斷它是否存在：\(String(cString: strerror(errno)))",
+                    ])
+            }
             try fm.removeItem(at: url)
         }
         // SQLite 的 WAL 與 shared-memory 檔要一起清，否則新開的資料庫會接上

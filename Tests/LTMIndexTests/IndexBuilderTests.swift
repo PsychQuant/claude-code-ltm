@@ -1294,7 +1294,31 @@ func derivedFilesDoNotFollowLinks(entry: (name: String, symbolic: Bool)) throws 
     // 而「零長度目標才會被 sqlite 寫穿」這件事由守衛本身涵蓋，不需要測試去
     // 重現它——測試要驗的是**受害者沒變**，不是某條特定的破壞方式。
     victim = corpus.appendingPathComponent("victim.jsonl")
-    let payload = Data(repeating: 0x41, count: max(sidecarTarget + 1, 64))
+    let payload: Data
+    if entry.name.hasPrefix("index.sqlite3") {
+        // **資料庫那幾格的受害者必須是一個「SQLite 願意開」的檔案。**
+        //
+        // 上一版給它們 64 bytes 的 `0x41`，理由寫「非空受害者對每一種破壞都是
+        // 可觀察的」——**那個前提對 SQLite 不成立**：它會先以 `SQLITE_NOTADB`
+        // 拒絕解析，於是 `#expect(throws:)` 被滿足、位元組沒變，**拿掉守衛也一樣
+        // 綠**。實測：把四個 sqlite 入口的 symlink 判定關掉，505 條全綠
+        // （#44 R7 verify，requirements + codex）。
+        //
+        // 上一版的動機是對的（零長度讓位元組斷言退化成 `Data() == Data()`），
+        // 但那個修法把 2 個未驅動的 case 變成 4 個——**修 A 的動作把 B 從真綠
+        // 變成假綠**。正解是兩個條件同時滿足：非空，而且 SQLite 開得起來。
+        let seed = corpus.appendingPathComponent("seed.sqlite3")
+        do {
+            let database = try IndexDatabase(path: seed.path)
+            defer { database.close() }
+            try database.createSchema()
+        }
+        payload = try Data(contentsOf: seed)
+        try FileManager.default.removeItem(at: seed)
+        #expect(payload.count > 0, "前提：種子資料庫要真的有內容")
+    } else {
+        payload = Data(repeating: 0x41, count: max(sidecarTarget + 1, 64))
+    }
     try payload.write(to: victim)
     #expect(payload.count > sidecarTarget,
             "受害者必須嚴格大於側車 target（\(sidecarTarget)），否則 truncate 是 no-op 而測試綠得沒有意義")
@@ -1400,13 +1424,29 @@ func anIndexWithChunksButNoSourceMappingIsRefused() throws {
 
 /// `vectors.bin.tmp` 是連結時，**受害者一個 byte 都不得變**。
 ///
-/// 這條在 R5 曾經是紅的、而且是我自己造出來的：那一輪把 `.atomic` 換成
-/// `O_WRONLY | O_CREAT | O_TRUNC`，於是截斷發生在 `open(2)` **裡面**，守衛跑到時
-/// 語料已經歸零，而 CLI 印「沒有寫入任何東西」（#45 R6 verify，六個 lens 全部
-/// 獨立命中）。`.atomic` 對兩種連結都不寫穿——它從不對目標路徑開檔。
+/// **這條測試扛的是「discard 會清掉 `.tmp`」，不是「`.atomic` 比 `O_TRUNC` 安全」。
+/// 我在 commit message 裡把它寫反了，而那句話是假的。**
 ///
-/// `discardDerivedArtifacts` **不刪 `.tmp`**，所以預先擺好的連結會活過 `--full`
-/// ——而 `--full` 之後 `vectors.bin` 不存在，`appendVectors` 必走這條分支。
+/// 實測（#44 R7 verify，devil's advocate + codex，我重跑確認）：把 `.atomic` 換回
+/// R5 那份 `O_WRONLY | O_CREAT | O_TRUNC`，這條測試**照樣綠**。原因是同一次
+/// commit 的另一半——`discardDerivedArtifacts` 現在會刪 `.tmp`，而這條測試跑的是
+/// 第一次 build（`rebuildFromScratch` 為 true），所以預先擺好的連結在
+/// `appendVectors` 執行**之前**就被 unlink 掉了。
+///
+/// 我怎麼會寫錯：我**先**驗了那個變異（當時 discard 還不清 `.tmp`，確實紅），
+/// **再**加上 discard 的改動，然後把先前的驗證結果寫進 commit message，中間沒有
+/// 重跑。這與 CLAUDE.md 記過的「SwiftPM 增量建置會給假綠」是同一個形狀，只是
+/// 發生在驗證層：**我以為驗過的東西，在我改完之後就沒被重跑過。**
+///
+/// 兩件事都仍然成立，只是分屬不同機制：
+/// - `.atomic` 對兩種連結都不寫穿（實測 320 → 320），所以它是正確的選擇；
+///   而 R5 的 `O_TRUNC` 在 `open(2)` 內部截斷，守衛跑到時已經太遲。
+/// - **關掉那個洞的是 discard 清 `.tmp`**，而這條測試扛的是它：把 `.tmp` 從
+///   discard 拿掉**並且**改回 `O_TRUNC`，`symbolic → false` 那一格會紅。
+///
+/// `symbolic → true` 那一格在任何組態下都驅動不了——`O_NOFOLLOW` 讓 open 在任何
+/// 寫入之前就 `ELOOP`，所以位元組斷言結構上觀察不到差異。留著它是因為它便宜且
+/// 對未來的改動仍是一道網，**但它現在不宣稱自己在扛什麼**。
 @Test(
     "vectors.bin.tmp 是連結時不得寫穿語料",
     arguments: [true, false])
@@ -1560,6 +1600,34 @@ func aHardLinkedDerivedTreeIsRecoverableWithFull() throws {
     try FileManager.default.removeItem(at: derived.root)
     let recovered = try IndexBuilder(location: derived, scanner: scanner,
                                      embedder: StubEmbedder(revision: "rev-A")).build(full: true)
+    #expect(recovered.wasFullRebuild)
+    #expect(recovered.chunksIndexed > 0)
+}
+
+/// dangling symlink 不得讓 `--full` 卡住。
+///
+/// `FileManager.fileExists(atPath:)` **跟隨 symlink**，所以目的地不存在時它回
+/// `false`——目錄項還在卻被 discard 跳過，而 `IndexDatabase` 的檢查看見那個
+/// symlink 並拒絕開啟。**純衍生物變成清不掉的垃圾**（#44 R7 verify，codex）。
+@Test("dangling symlink 不擋 --full")
+func aDanglingSymlinkDoesNotBlockFullRebuild() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try derived.createRootIfNeeded()
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+
+    let nowhere = derived.root.appendingPathComponent("does-not-exist")
+    try FileManager.default.createSymbolicLink(at: derived.databaseURL, withDestinationURL: nowhere)
+    #expect(!FileManager.default.fileExists(atPath: derived.databaseURL.path),
+            "前提：fileExists 對 dangling symlink 回 false——這正是那個 bug 的成因")
+
+    let recovered = try IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A")
+    ).build(full: true)
     #expect(recovered.wasFullRebuild)
     #expect(recovered.chunksIndexed > 0)
 }
