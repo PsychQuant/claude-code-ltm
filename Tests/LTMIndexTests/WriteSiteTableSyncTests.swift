@@ -129,6 +129,7 @@ func everyWritePrimitiveCarriesAMarker() throws {
         "moveItem(", "createFile(", "createSymbolicLink(",
     ]
     var unmarked: [String] = []
+    var claimedMarkers: Set<String> = []
     for file in try swiftSourcesUnderSources(root) {
         do {
             let name = file.lastPathComponent
@@ -152,12 +153,29 @@ func everyWritePrimitiveCarriesAMarker() throws {
                 if trimmed.contains("FileHandle.standard") { continue }
                 // 4. 函式**宣告**不是呼叫站點（`public static func open(url:…)`）。
                 if trimmed.hasPrefix("func ") || trimmed.contains(" func ") { continue }
-                // 窗口 3 行而不是 2：一個呼叫可以跨行（三元運算子的第二個分支
-                // 距離標記三行）。**這是一個會漏的常數**——把呼叫拆得更開就逃得掉，
-                // 而那條與下方誠實邊界的「單行連續文字比對」是同一個限制的兩面。
+                // **每個標記只背書一個呼叫。** 三行視窗讓相鄰的第二個站點借用前一個
+                // 站點的標記——實測形狀：
+                //
+                //     // WRITE-SITE: existing-open
+                //     open(existingPath, O_WRONLY)
+                //     open(newPath, O_WRONLY | O_CREAT, 0o600)   ← 借用上面那個標記
+                //
+                // 兩條檢查都綠：`marked` 沒有新名字，所以集合比對也不動
+                // （#44 R14 verify，codex）。這不是「primitive 清單不完整」那條
+                // 已承認的邊界——是連清單內、單行可見的 `open(` 都逃得掉。
+                //
+                // 改法：標記必須在呼叫的**正上方三行內**，而且**同一個標記不得
+                // 背書兩個呼叫**——用過就從可用集合裡拿掉。
                 let window = lines[max(0, index - 3)..<index]
                     .map { $0.trimmingCharacters(in: .whitespaces) }
-                guard !window.contains(where: { $0.hasPrefix("// WRITE-SITE:") }) else { continue }
+                let nearby = window.enumerated().compactMap { offset, line -> Int? in
+                    line.hasPrefix("// WRITE-SITE:") ? max(0, index - 3) + offset : nil
+                }
+                // 找一個**還沒被用掉**的標記。
+                if let claimable = nearby.first(where: { !claimedMarkers.contains("\(name):\($0)") }) {
+                    claimedMarkers.insert("\(name):\(claimable)")
+                    continue
+                }
                 unmarked.append("\(name):\(index + 1) \(trimmed.prefix(60))")
             }
         }

@@ -893,7 +893,7 @@ public struct IndexBuilder: Sendable {
 /// | `memory-prune-write` | `write(2)` | ✅ 在 `memory-prune-open` 的檢查之後 |
 /// | `memory-append-write` | `write(2)` | ✅ 在 `memory-append-open` 的檢查之後 |
 /// | `memory-append-seal` | `write(2)` | 同上（殘行封口）|
-/// | `cli-memory-root-mkdir-a` | `createDirectory` | **由上游 containment 擋**（兩層：`LTMService.make` 與 `CanonicalStore.validatedPath`）；`validatedRoot:` 只是標籤 |
+/// | `cli-memory-root-mkdir-a` | `createDirectory` | **只有一層**：`LTMService.make` 的 containment。`CanonicalStore.validatedPath` 跑在這個 mkdir **之後**，擋不住它 |
 /// | `cli-memory-root-mkdir-b` | 同上 | 同上 |
 ///
 /// **記憶層在表裡。** 上一版寫「記憶層不在這張表裡：它有自己的守衛與自己的威脅
@@ -980,10 +980,16 @@ func openDerivedFileNoFollow(_ url: URL, flags: Int32, mode: mode_t = 0o644) thr
     //
     // 加上 `O_NONBLOCK` 之後 FIFO 的 open 立刻回 `ENXIO`（無讀者）或成功，兩者
     // 都讓控制流回到我們手上；一般檔案不受這個旗標影響。
+    // 三元的兩個分支曾經是**兩個** `open(` 呼叫，而第二個借用了第一個的
+    // `WRITE-SITE` 標記——那正是「一個標記背書兩個呼叫」那個假綠的實例，
+    // 由收緊後的檢查抓到（#44 R14 verify，codex）。
+    //
+    // 改成一個呼叫，就沒有借用的餘地。`open(2)` 的第三個引數在沒有 `O_CREAT`
+    // 時被忽略，所以無條件傳 `mode` 是安全的——**這一句是可查的**：
+    // `man 2 open`「The mode argument … is used only when a new file is created」。
+    let effective = flags | O_NOFOLLOW | O_NONBLOCK
     // WRITE-SITE: derived-open-helper
-    let descriptor = (flags & O_CREAT) != 0
-        ? open(url.path, flags | O_NOFOLLOW | O_NONBLOCK, mode)
-        : open(url.path, flags | O_NOFOLLOW | O_NONBLOCK)
+    let descriptor = open(url.path, effective, mode)
     guard descriptor >= 0 else {
         let code = errno
         // `ELOOP` 就是「它是一個 symlink」。其餘照原樣往上報。

@@ -491,8 +491,12 @@ public struct FileEventStore: EventStore {
         // 不是「各擋一半」**（#44 R13 verify，codex）。加上它之後成功／失敗的邊界
         // 一格都沒有改變。
         //
-        // 它留著，因為它讓意圖在讀碼時是顯式的（不必先想通 `O_EXCL` 的 symlink
-        // 語意），但**它不是這一格安全的原因**，而下面那條測試也驅動不到它。
+        // **已刪除。** 上一版留著它「讓意圖顯式」——而那正是本 repo 那條規則
+        // （驅動不了的守衛要拆掉，不是留著加註解）明文禁止的處置，**而我在同一輪
+        // 用同一條規則刪掉了 `refuseSymlinkedMemoryRoot`**。同一條規則、同一輪、
+        // 相反的兩個處置（#44 R14 verify，codex）。
+        //
+        // 擋住最後一段的是 `O_CREAT|O_EXCL`，那是 POSIX 保證的，寫在下面。
         //
         // ## 兩次更正，兩次都錯在不同的地方——這一段是紀錄
         //
@@ -505,7 +509,7 @@ public struct FileEventStore: EventStore {
         // 真正未涵蓋的仍然只有一件事：**中間路徑元件**。那是 TOCTOU 類、#40 的
         // 既決限度，需要並行的本機攻擊者。
         // WRITE-SITE: memory-backup-create
-        let backupFD = open(backup.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        let backupFD = open(backup.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
         guard backupFD >= 0 else {
             throw EventStoreError.appendFailed(
                 path: backup.path, underlying: "無法建立備份：errno \(errno)（未修剪）")

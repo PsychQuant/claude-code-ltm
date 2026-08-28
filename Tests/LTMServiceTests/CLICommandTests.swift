@@ -1018,17 +1018,37 @@ private func presentationID(in output: String) -> String? {
 ///
 /// 這條測試釘的是真正在擋的那個東西——先前沒有任何測試釘它。
 ///
-/// **而變異揭露了一件比我預期更好的事**：拿掉 `LTMService.make` 那道
-/// `isInsideReadOnlyCorpus`，語料**仍然沒有被寫入**——第二層
-/// （`CanonicalStore.validatedPath` 的 `pathInsideReadOnlyCorpus`）接住了它，
-/// 只是訊息退化成 enum 原文。所以：
+/// ## 上一輪我在這裡寫了一句假話，而反例不需要 symlink
 ///
-/// - **不變式 1 在這一側是縱深防禦的**，不是單點。
-/// - 這條測試扛的是**上游那一層還在**（訊息可讀、`唯讀語料` 字樣），
-///   **不是**「不變式沒被違反」——後者由兩層共同保證，而拿掉任一層都不足以
-///   讓語料被寫入。
+/// 我寫過「不變式 1 在這一側是**縱深防禦**的……拿掉任一層都不足以讓語料被
+/// 寫入」。**假的。** 拿掉 `LTMService.make` 那道 containment，跑最平凡的一種
+/// 誤設（`LTM_MEMORY_ROOT` 直接指向語料樹裡一條**尚不存在**的路徑）：
 ///
-/// 這個區分要寫出來：說它「扛住不變式 1」會是又一個範圍寫太大的宣稱。
+/// ```
+/// $ LTM_MEMORY_ROOT=<corpus>/ltm-store  ltm mark <uuid> 1 --opened
+/// ✗ pathInsideReadOnlyCorpus(…/corpus/ltm-store/memory/events.jsonl)
+/// $ find <corpus>
+///   corpus/ltm-store          ← 新建
+///   corpus/ltm-store/memory   ← 新建
+/// ```
+///
+/// **兩個目錄被寫進唯讀語料，然後第二層才拒絕。**
+///
+/// 機制：`makeService` 把 `memoryEventsURL(validatedRoot:)` 當成
+/// `FileEventStore(url:policy:)` 的**引數**求值——而那個函式裡就是
+/// `createDirectory`。**mkdir 先發生，`validatedPath` 後發生**，所以第二層對
+/// 這個站點結構上不可能是守衛。
+///
+/// **而 `LTMService.swift` 那段程式碼上方三行的註解已經這樣寫了**：
+/// 「`FileEventStore` 事後會拒絕語料內的路徑，**但目錄那時已經建好了**——
+/// 違反不變式 1 的是那個 mkdir，不是 append。」我的新宣稱與它矛盾。
+///
+/// 我為什麼會寫錯：我只量了**一種**佈局（連到語料裡**已存在**的目錄），而
+/// `mkdir -p` 對既存目錄是靜默 no-op，所以看不到寫入。三種佈局三種結果——
+/// **這裡沒有可寫成全稱的性質，而我恰好只量到唯一支持我結論的那一格。**
+///
+/// 所以這條測試扛的是：**上游那一層還在**（訊息可讀、含「唯讀語料」字樣）。
+/// 就這樣，不多。
 @Test("記憶層根目錄指進語料樹時被上游 containment 拒絕")
 func aMemoryRootPointingIntoTheCorpusIsRefusedUpstream() throws {
     let workspace = try CLIWorkspace.make(texts: ["內容"])
