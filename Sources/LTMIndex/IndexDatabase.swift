@@ -149,6 +149,7 @@ public final class IndexDatabase {
         // `realpath(3)` 的父目錄解析。拆掉旗標，那一層也跟著不必要。
         var db: OpaquePointer?
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX
+        // WRITE-SITE: sqlite-open
         guard sqlite3_open_v2(path, &db, flags, nil) == SQLITE_OK, let opened = db else {
             let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open_v2 失敗"
             sqlite3_close_v2(db)

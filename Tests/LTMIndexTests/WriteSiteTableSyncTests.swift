@@ -3,38 +3,42 @@ import Testing
 
 @testable import LTMIndex
 
-/// `openDerivedFileNoFollow` 上方那張「derived root 底下每一個會改變檔案系統的
-/// 站點」的表，宣稱自己完整——**而本 repo 的規則是：宣稱完整的列舉要附上證明它
-/// 完整的檢查**（CLAUDE.md，這個 cluster 已經因為它出過七次錯）。
+/// 那張「derived root 底下每一個會改變檔案系統的站點」的表，宣稱自己完整——
+/// **而本 repo 的規則是：宣稱完整的列舉要附上證明它完整的檢查。**
 ///
-/// R9 的 codex 指出那張表沒有附查法，而同一輪的 security lens 與 DA 找到的
-/// CRITICAL 正是**表底下那一行排除**（記憶層）——一個沒量過的「安全」判定。
-/// 兩件事同源：一張沒有機制守著的表，它的邊界會安靜地錯。
+/// ## 上一版是假的，而且假在兩個方向
 ///
-/// 這條檢查是那個機制。它不聰明：掃 `Sources/LTMIndex` 與 `Sources/LTMMemory`
-/// 裡會改變檔案系統的呼叫，數出來，與表宣告的數字比對。**新增一個寫入站點而
-/// 沒更新表，它會紅。**
+/// 上一版掃 grep pattern 數出一個數字，與**測試檔裡的一個常數**比對。它從來
+/// 沒有打開過那張表（#44 R10 verify，requirements lens 實測）：
 ///
-/// ## 誠實邊界
+/// - 把表裡兩列刪掉 → **綠**（刪列是隱形的）
+/// - 用記憶層實際使用的 primitive（`open(` / `write(`）加一個新站點 → **綠**
+///   （那兩個字串不在 pattern 清單裡）
 ///
-/// 它比對的是**數量**，不是身分——所以「換掉一個站點」它抓不到（那正是
-/// `ProgressDocSyncTests` 早期版本的缺陷，而那條後來改成比對名字集合）。
-/// 這裡沒有跟著做，理由是站點沒有像 enum case 那樣的穩定名字可比；**這是一個
-/// 已知的較弱形式，不是疏漏**。它擋得住的是「加了一個沒進表的站點」，那是
-/// R6→R9 每一輪都實際發生過的那一種。
-@Test("derived 寫入站點的數量與表宣告的一致")
-func theWriteSiteTableCountsEverySite() throws {
+/// 而我為它寫的「誠實邊界」說它比對數量不比對身分——**那句話本身就是這個
+/// cluster 那條規律的第十輪實例**：一句把某個東西劃到檢查之外的話，而真正的
+/// 界線比我承認的還大一層。
+///
+/// 我當時的 commit message 還寫「它一建立就紅（14 vs 我宣稱的 12），而那兩處
+/// 正是我沒列的記憶層站點」——**重跑不重現**（同一個算法在 `37a5bc4` 上是 13）。
+/// 那 14 裡有一個是 helper 自己的宣告行，是 grep 的偽陽性，不是漏掉的表列。
+/// **我調 `declared` 調到綠，然後編了一個解釋。**
+///
+/// ## 現在的機制：身分，不是數量
+///
+/// 每個站點在原始碼裡掛一個 `// WRITE-SITE: <name>` 標記，表的第一欄就是那些
+/// 名字。這條檢查比對**兩個集合**：
+///
+/// - 表裡有、原始碼沒有 → 站點被刪掉而表沒改
+/// - 原始碼有、表裡沒有 → 新增站點而表沒改
+///
+/// 兩個方向都會紅，而且訊息會指名是哪一個。
+@Test("每個 WRITE-SITE 標記都在表裡，表裡每一列都有對應的標記")
+func everyWriteSiteAppearsInTheTable() throws {
     let root = try repositoryRootForWriteSites()
-    // 表裡宣告的數字。**改表就要改這裡，改這裡就要改表**——那正是這條檢查要
-    // 強迫的那個動作。
-    let declared = 13
 
-    let patterns = [
-        "openDerivedFileNoFollow(", "FileHandle(forWritingTo:", "FileHandle(forUpdating:",
-        ".write(to:", "removeItem(", "replaceItemAt(", "createDirectory(",
-        "sqlite3_open_v2(", "ftruncate(", "mkfifo(",
-    ]
-    var found = 0
+    // 1. 原始碼裡的標記。
+    var marked: Set<String> = []
     for module in ["LTMIndex", "LTMMemory"] {
         let dir = root.appendingPathComponent("Sources/\(module)")
         for name in try FileManager.default.contentsOfDirectory(atPath: dir.path)
@@ -42,18 +46,89 @@ func theWriteSiteTableCountsEverySite() throws {
             let text = try String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8)
             for line in text.components(separatedBy: "\n") {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                // 註解不算——這張表自己就寫在註解裡，數它會自我指涉。
-                guard !trimmed.hasPrefix("//"), !trimmed.hasPrefix("///") else { continue }
-                // helper 自身的宣告行不是站點——它是**所有走它的站點的實作**。
-                guard !trimmed.hasPrefix("func openDerivedFileNoFollow") else { continue }
-                if patterns.contains(where: { trimmed.contains($0) }) { found += 1 }
+                guard trimmed.hasPrefix("// WRITE-SITE:") else { continue }
+                marked.insert(
+                    trimmed.dropFirst("// WRITE-SITE:".count).trimmingCharacters(in: .whitespaces))
             }
         }
     }
+    #expect(!marked.isEmpty, "一個標記都沒抓到——這條檢查就失去意義，比失敗更糟")
+
+    // 2. 表的第一欄。表活在 `IndexBuilder.swift` 的 doc comment 裡。
+    let source = try String(
+        contentsOf: root.appendingPathComponent("Sources/LTMIndex/IndexBuilder.swift"),
+        encoding: .utf8)
+    var tabled: Set<String> = []
+    var inTable = false
+    for line in source.components(separatedBy: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("/// | `WRITE-SITE` 標記") { inTable = true; continue }
+        guard inTable else { continue }
+        // **表結束就停。** 先前這裡對非表格的 `///` 行 `continue`，於是它一路
+        // 讀進了下方 `replaceItemAt` 那張量測表，把「dest」「hard link → 別的檔案」
+        // 當成站點名字。一條會把別的表當成自己的檢查，比沒有檢查更難看。
+        guard trimmed.hasPrefix("/// |") else { break }
+        let columns = trimmed.dropFirst("/// |".count).components(separatedBy: "|")
+        guard let first = columns.first else { continue }
+        let cell = first.trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "`"))
+        if !cell.isEmpty, !cell.hasPrefix("-") { tabled.insert(cell) }
+    }
 
     #expect(
-        found == declared,
-        "會改變檔案系統的呼叫有 \(found) 處，而表宣告 \(declared) 處——新增或移除站點時，那張表必須跟著改")
+        marked.subtracting(tabled).isEmpty,
+        "原始碼有標記但表裡沒有：\(marked.subtracting(tabled).sorted())——新增站點時表必須跟著改")
+    #expect(
+        tabled.subtracting(marked).isEmpty,
+        "表裡有但原始碼找不到標記：\(tabled.subtracting(marked).sorted())——站點被移除時表必須跟著改")
+}
+
+/// **標記是自願的，所以還需要第二半。** 上一條比對的是「標記 ↔ 表」——它擋得住
+/// 表漂移，擋不住「加了一個站點而**沒掛標記**」。那正是 R10 用記憶層真正的
+/// primitive（`open(` / `write(`）示範的那個洞。
+///
+/// 這一條掃會改變檔案系統的呼叫，要求每一個上方兩行內有 `// WRITE-SITE:`。
+///
+/// ## 誠實邊界（這次要寫準——上一次我把它寫小了一級）
+///
+/// 它的涵蓋範圍**等於下面那份 primitive 清單**，不多也不少。一個用清單外的手段
+/// 寫檔的新站點仍然隱形（例如 `FileManager.copyItem`、`link(2)`、`rename(2)`、
+/// 或任何經由 `Process` 呼叫的外部程式）。**這不是「較弱的形式」，是一份會漏的
+/// 列舉**——而本 repo 對會漏的列舉的處置是把判準寫成性質。這裡做不到：
+/// 「會改變檔案系統」在 Swift 的型別層沒有表達方式，沒有 AST 工具就只能列舉。
+///
+/// 所以這條檢查買到的是：**清單內的手段一定要掛標記**。清單外的要靠人。
+@Test("每一個寫入 primitive 的呼叫都掛了 WRITE-SITE 標記")
+func everyWritePrimitiveCarriesAMarker() throws {
+    let root = try repositoryRootForWriteSites()
+    let primitives = [
+        "FileHandle(forWritingTo:", "FileHandle(forUpdating:", ".write(to:",
+        "removeItem(", "replaceItemAt(", "createDirectory(", "sqlite3_open_v2(",
+        "ftruncate(", "mkfifo(", "openDerivedFileNoFollow(",
+    ]
+    var unmarked: [String] = []
+    for module in ["LTMIndex", "LTMMemory"] {
+        let dir = root.appendingPathComponent("Sources/\(module)")
+        for name in try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        where name.hasSuffix(".swift") {
+            let lines = try String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8)
+                .components(separatedBy: "\n")
+            for (index, line) in lines.enumerated() {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.hasPrefix("//") else { continue }
+                // helper 自身的宣告不是站點，它是所有走它的站點的實作。
+                guard !trimmed.hasPrefix("func openDerivedFileNoFollow") else { continue }
+                guard primitives.contains(where: { trimmed.contains($0) }) else { continue }
+                let window = lines[max(0, index - 2)..<index]
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                guard !window.contains(where: { $0.hasPrefix("// WRITE-SITE:") }) else { continue }
+                unmarked.append("\(name):\(index + 1) \(trimmed.prefix(60))")
+            }
+        }
+    }
+    #expect(
+        unmarked.isEmpty,
+        "這些呼叫會改變檔案系統但沒掛 WRITE-SITE 標記：\n\(unmarked.joined(separator: "\n"))")
 }
 
 private func repositoryRootForWriteSites(file: StaticString = #filePath) throws -> URL {

@@ -684,11 +684,13 @@ public struct IndexBuilder: Sendable {
                             "無法判斷它是否存在：\(String(cString: strerror(errno)))",
                     ])
             }
+            // WRITE-SITE: discard-primary
             try fm.removeItem(at: url)
         }
         // SQLite 的 WAL 與 shared-memory 檔要一起清，否則新開的資料庫會接上
         // 舊索引的未完成交易。
         for suffix in ["-wal", "-shm"] {
+            // WRITE-SITE: discard-sqlite-siblings
             try? fm.removeItem(atPath: location.databaseURL.path + suffix)
         }
     }
@@ -720,6 +722,7 @@ public struct IndexBuilder: Sendable {
             return
         }
         let target = UInt64(rows * rowBytes)
+        // WRITE-SITE: sidecar-truncate
         let handle = try openDerivedFileNoFollow(location.vectorsURL, flags: O_RDWR)
         defer { try? handle.close() }
         let current = try handle.seekToEnd()
@@ -734,6 +737,7 @@ public struct IndexBuilder: Sendable {
         guard !vectors.isEmpty else { return }
         let data = VectorSidecar.encode(vectors)
         if FileManager.default.fileExists(atPath: location.vectorsURL.path) {
+            // WRITE-SITE: sidecar-append
             let handle = try openDerivedFileNoFollow(location.vectorsURL, flags: O_WRONLY)
             defer { try? handle.close() }
             try handle.seekToEnd()
@@ -757,7 +761,7 @@ public struct IndexBuilder: Sendable {
             //        hardlink: victim 320 → 320 bytes
             //
             // 2. 換成 `O_WRONLY | O_CREAT | O_TRUNC` 之後，**截斷發生在 `open(2)`
-            //    裡面**，所以 `verifyExclusivelyOurs` 跑到時受害者已經是 0 bytes。
+            //    裡面**，所以 `ExclusiveFile.verify` 跑到時受害者已經是 0 bytes。
             //    端到端實測（一般的 `ltm build`，不需要 `--full`）：
             //
             //        before: 242 bytes
@@ -774,7 +778,9 @@ public struct IndexBuilder: Sendable {
             // 先於檢查**。`.atomic` 滿足它的方式更強：它根本不對目標路徑做
             // 破壞性動作。
             let temporary = location.vectorsURL.appendingPathExtension("tmp")
+            // WRITE-SITE: sidecar-temp-write
             try data.write(to: temporary, options: [.atomic])
+            // WRITE-SITE: sidecar-replace
             _ = try FileManager.default.replaceItemAt(location.vectorsURL, withItemAt: temporary)
 
             // `.atomic` 保證的是「讀者不會看到半份」，**不保證 bytes 已經到磁碟**。
@@ -787,6 +793,7 @@ public struct IndexBuilder: Sendable {
             // ——側車檔整個消失，而 `vector_count` 宣稱它有 N 筆。
             // 註解先前逐字寫著「再 fsync 一次目錄項次」，而程式碼 fsync 的是檔案。
             // （由跨模型盲驗指出。）
+            // WRITE-SITE: sidecar-fsync
             let handle = try openDerivedFileNoFollow(location.vectorsURL, flags: O_WRONLY)
             try handle.synchronize()
             try handle.close()
@@ -826,54 +833,6 @@ public struct IndexBuilder: Sendable {
 
 
 
-/// 一個**已經開啟的 fd** 指向的東西，是不是「我們自己的、只有一個名字的一般檔案」。
-///
-/// ## 為什麼是一個函式而不是兩份
-///
-/// `FileLock.acquire` 先有了這段檢查，而 derived 檔案的加固**只抄了 symlink 那一半**
-/// ——`O_NOFOLLOW` 擋 symlink，hard link 從它旁邊走過去。實測（#44 R5 verify，
-/// devil's advocate）：把一個語料 turn 檔 hard link 成 `vectors.bin`，
-/// `ltm query` 把它從 1,391 bytes 截成 32，而 build 回報「✓ 索引完成」。
-///
-/// 上一版用一段註解把缺掉的那半宣告成 #40 的既決限度。**那個引用不成立**：
-/// #40 接受 hardlink 的理由是**成本**（它是純路徑判定，手上沒有 fd，要擋得列舉
-/// 語料樹內所有 inode）；而這裡已經拿到 fd，緩解就是下面這幾行。#40 自己的原文
-/// 最後一段寫著：「接受一條限度之前先確認自己接受的是它本來的形狀。」
-///
-/// 而 hard link 正是**意外**的常態產物——`cp -al`、`rsync --link-dest`、
-/// `git clone --local`、Time Machine / borg / restic 還原——所以它落在 #40 宣稱
-/// 要防的那一類裡，不是它宣稱要放掉的那一類。
-///
-/// ## 誠實邊界
-///
-/// 消除的是「路徑在檢查與開檔之間被換掉」那一類（fd 已綁定 inode）。**不**消除
-/// 「inode 的 link count 在 `fstat` 之後改變」——`st_nlink` 是可變狀態，這裡沒有
-/// 機制凍結它。那一條在 #40 的模型下是被接受的限度（需要並行的本機攻擊者，
-/// 而那樣的攻擊者有直接得多的手段）。
-func verifyExclusivelyOurs(descriptor: Int32, path: String) throws {
-    var info = stat()
-    guard fstat(descriptor, &info) == 0 else {
-        let code = errno
-        throw IndexBuilder.BuildError.lockUnavailable(
-            path: path, code: code, detail: String(cString: strerror(code)))
-    }
-    // 三個條件，各自擋不同的東西：
-    //   S_ISREG    —— 不是 FIFO／device／socket（對 FIFO 的 open 會永久阻塞）
-    //   st_nlink   —— 沒有第二個名字指向同一個 inode（hard link）
-    //   st_uid     —— 是我們建的
-    guard (info.st_mode & S_IFMT) == S_IFREG else {
-        throw IndexBuilder.BuildError.derivedPathUnsafe(path: path, detail: "它不是一般檔案")
-    }
-    guard info.st_nlink == 1 else {
-        throw IndexBuilder.BuildError.derivedPathUnsafe(
-            path: path, detail: "有 \(info.st_nlink) 個名字指向同一個檔案（hard link）")
-    }
-    guard info.st_uid == getuid() else {
-        throw IndexBuilder.BuildError.derivedPathUnsafe(
-            path: path, detail: "擁有者是 uid \(info.st_uid)，不是你（uid \(getuid())）")
-    }
-}
-
 /// # derived root 底下每一個會改變檔案系統的站點，逐一列出
 ///
 /// R6 起有一條 finding 掛著：security lens 數出「約 14 個站點，只有 5 個走共用
@@ -881,22 +840,25 @@ func verifyExclusivelyOurs(descriptor: Int32, path: String) throws {
 /// 「只有 5 個走共用開檔器」是對的，而正確的答案不是「把全部改成走它」，是
 /// **逐站點說清楚它為什麼安全或不安全**。
 ///
-/// | 站點 | 動作 | 判定 |
+/// | `WRITE-SITE` 標記 | 動作 | 判定 |
 /// |---|---|---|
-/// | `DerivedLocation.createRootIfNeeded` | `createDirectory` | 建目錄，不寫穿任何既有檔案 |
-/// | `discardDerivedArtifacts` 的 5 個項目 | `lstat` + `removeItem` | **unlink 一個名字**，不動連結的目標；`lstat` 版見該處註解 |
-/// | 同上的 `-wal` / `-shm` | `try? removeItem` | 同上 |
-/// | `truncateSidecar` | `openDerivedFileNoFollow(O_RDWR)` + `truncate` | ✅ 走共用檢查，且檢查在截短之前 |
-/// | `appendVectors` 的 append 分支 | `openDerivedFileNoFollow(O_WRONLY)` | ✅ |
-/// | `appendVectors` 的 fsync | `openDerivedFileNoFollow(O_WRONLY)` | ✅ |
-/// | `appendVectors` 的 `.tmp` 寫入 | `Data.write(.atomic)` | **不對目標路徑開檔**（實測對兩種連結都不寫穿）——比走共用檢查更強 |
-/// | `appendVectors` 的 `replaceItemAt` | rename | **見下方「我查不出來的那一格」** |
-/// | `IndexDatabase.init` | `lstat` × 4 後綴 + `sqlite3_open_v2` | 主檔與 `-wal`/`-shm`/`-journal` 都擋 symlink／hardlink／非一般檔案／非本人 |
-/// | `FileLock.acquire` | `open(O_NOFOLLOW|O_NONBLOCK)` + `verifyExclusivelyOurs` | ✅ |
-/// | `synchronizeDirectory` | `open(O_RDONLY)` | 唯讀 |
-/// | `EventStore.pruneUnusable` | `open(O_NOFOLLOW)` + `ExclusiveFile.verify` + `ftruncate` | ✅ 檢查在截短之前 |
-/// | `EventStore` 的備份 `removeItem` × 2 | unlink | 只動我們自己剛建的備份檔 |
-/// | `CanonicalStore.appendLine` | `open(O_NOFOLLOW)` + `ExclusiveFile.verify` | ✅ |
+/// | `derived-root-mkdir` | `createDirectory` | 建目錄，不寫穿任何既有檔案 |
+/// | `discard-primary` | `lstat` + `removeItem` | **unlink 一個名字**，不動連結的目標 |
+/// | `discard-sqlite-siblings` | `try? removeItem` | 同上 |
+/// | `sidecar-truncate` | `openDerivedFileNoFollow(O_RDWR)` + `truncate` | ✅ 檢查在截短之前 |
+/// | `sidecar-append` | `openDerivedFileNoFollow(O_WRONLY)` | ✅ |
+/// | `sidecar-fsync` | `openDerivedFileNoFollow(O_WRONLY)` | ✅ |
+/// | `sidecar-temp-write` | `Data.write(.atomic)` | **不對目標路徑開檔**——比走共用檢查更強 |
+/// | `sidecar-replace` | rename | 三種情形全部量過，見下 |
+/// | `derived-open-helper` | `open(O_NOFOLLOW\|O_NONBLOCK)` + `ExclusiveFile.verify` | ✅ 共用入口本身 |
+/// | `lock-open` | 同上 | ✅ |
+/// | `lock-truncate` | `ftruncate` | ✅ 檢查在它之前 |
+/// | `sqlite-open` | `lstat` × 4 後綴 + `sqlite3_open_v2` | 主檔與 `-wal`/`-shm`/`-journal` |
+/// | `memory-prune-open` | `open(O_NOFOLLOW)` + `ExclusiveFile.verify` | ✅ |
+/// | `memory-prune-truncate` | `ftruncate` | ✅ 檢查在它之前 |
+/// | `memory-append-open` | `open(O_NOFOLLOW)` + `ExclusiveFile.verify` | ✅ |
+/// | `memory-backup-cleanup-a` | `try? removeItem` | 只動我們自己剛建的備份檔 |
+/// | `memory-backup-cleanup-b` | 同上 | 同上 |
 ///
 /// **記憶層在表裡。** 上一版寫「記憶層不在這張表裡：它有自己的守衛與自己的威脅
 /// 模型（#40）」——**那句話沒有量過，而且是假的**：`ltm memory --prune --force`
@@ -966,7 +928,7 @@ func verifyExclusivelyOurs(descriptor: Int32, path: String) throws {
 ///   先前漏了它，於是 `.tmp` 被建成 0 權限，下一次開它 `EACCES`。
 func openDerivedFileNoFollow(_ url: URL, flags: Int32, mode: mode_t = 0o644) throws -> FileHandle {
     // **`O_NONBLOCK` 不是選用的。** `open(O_WRONLY)` 對一個 FIFO 會**永久阻塞**
-    // 直到有讀者出現——阻塞在 `open(2)` 裡面，所以 `verifyExclusivelyOurs` 的
+    // 直到有讀者出現——阻塞在 `open(2)` 裡面，所以 `ExclusiveFile.verify` 的
     // `S_IFREG` 檢查永遠跑不到。實測：把 `vectors.bin.tmp` 換成 FIFO，`build()`
     // 無限期掛住而且抱著 build.lock，stderr 零輸出（#45 R6 verify，三個 lens）。
     //
@@ -976,6 +938,7 @@ func openDerivedFileNoFollow(_ url: URL, flags: Int32, mode: mode_t = 0o644) thr
     //
     // 加上 `O_NONBLOCK` 之後 FIFO 的 open 立刻回 `ENXIO`（無讀者）或成功，兩者
     // 都讓控制流回到我們手上；一般檔案不受這個旗標影響。
+    // WRITE-SITE: derived-open-helper
     let descriptor = (flags & O_CREAT) != 0
         ? open(url.path, flags | O_NOFOLLOW | O_NONBLOCK, mode)
         : open(url.path, flags | O_NOFOLLOW | O_NONBLOCK)
@@ -994,10 +957,11 @@ func openDerivedFileNoFollow(_ url: URL, flags: Int32, mode: mode_t = 0o644) thr
             ])
     }
     // **symlink 只是兩半當中的一半。** hard link 不是符號連結，`O_NOFOLLOW` 對它
-    // 完全不作用——見 `verifyExclusivelyOurs` 的註解與那次實測。
-    do { try verifyExclusivelyOurs(descriptor: descriptor, path: url.path) } catch {
+    // 完全不作用——見 `ExclusiveFile.verify` 的註解與那次實測。
+    do { try ExclusiveFile.verify(descriptor: descriptor, path: url.path) } catch {
         close(descriptor)
-        throw error
+        throw IndexBuilder.BuildError.derivedPathUnsafe(
+            path: url.path, detail: (error as? ExclusiveFile.Rejection)?.reason ?? "\(error)")
     }
     return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
 }
@@ -1110,6 +1074,7 @@ public final class FileLock: @unchecked Sendable {
         // 不管它是不是 link），所以這是 flock 重設計時丟掉、而上一版只補回一半
         // 的性質。判準因此要從「擋掉 symlink」推廣成**「這個 fd 指向的東西，是不是
         // 只有我這個名字指得到、而且是我的」**——那要 `fstat`，不是旗標。
+        // WRITE-SITE: lock-open
         let descriptor = open(url.path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o644)
         guard descriptor >= 0 else {
             // 開不起來的原因不只一種，而把它們全報成「另一個 build 正在進行」
@@ -1130,16 +1095,26 @@ public final class FileLock: @unchecked Sendable {
         // **截短之前先確認這個 inode 只有一個名字，而且是我們的。**
         // 順序不可調換：放在 `ftruncate` 之後就只是事後通知。
         //
-        // 檢查與它的誠實邊界都在 `verifyExclusivelyOurs`——**與 derived 檔案共用
-        // 同一份，不要在這裡再寫一次**。
+        // 檢查與它的誠實邊界都在 `LTMCore.ExclusiveFile`——**索引層與記憶層共用
+        // 同一份，不要在任何一層再寫一次**。
+        //
+        // 上一輪 CHANGELOG 寫「檢查收斂成 `LTMCore.ExclusiveFile`，索引層與記憶層
+        // 共用一份」，而**索引層的呼叫端是零**：`verifyExclusivelyOurs` 原樣留著，
+        // 三個守衛同樣順序同樣註解。於是 CHANGELOG 有兩則條目各自宣稱收斂到
+        // **不同的**單一檢查（#44 R10 verify，requirements lens）。
+        //
+        // CLAUDE.md 對這個形狀寫得很明白：「同一件事有兩個寫者，就是兩份會漂移的
+        // 規格……**修法是刪掉一份，不是把正確順序照抄過去**」——而我上一輪做的
+        // 正是抄一份過去然後宣稱刪掉了。這次是真的刪掉。
         //
         // （上一版在這裡寫過「所以中間沒有 TOCTOU 窗口」，並在七行之下自己說那句
         // 是假的，而 CHANGELOG 宣稱它已被收回。**它當時還在原地當作斷言。**
         // #44 R5 verify，codex + requirements。這次是真的刪掉它，不是在它下面補
         // 一段說明。）
-        do { try verifyExclusivelyOurs(descriptor: descriptor, path: url.path) } catch {
+        do { try ExclusiveFile.verify(descriptor: descriptor, path: url.path) } catch {
             close(descriptor)
-            throw error
+            throw IndexBuilder.BuildError.derivedPathUnsafe(
+                path: url.path, detail: (error as? ExclusiveFile.Rejection)?.reason ?? "\(error)")
         }
 
         // pid 只作診斷用途，不再承載所有權。先截短：舊內容可能比新 pid 長。
@@ -1147,6 +1122,7 @@ public final class FileLock: @unchecked Sendable {
         // 這三個回傳值刻意忽略：pid 是診斷資訊，寫不進去不影響鎖的正確性（鎖由
         // `flock` 持有，不由檔案內容持有）。**但截短失敗會讓舊 pid 的殘尾留在後面**，
         // 所以下面讀鎖檔的人要有心理準備——那也是為什麼它只是診斷。
+        // WRITE-SITE: lock-truncate
         _ = ftruncate(descriptor, 0)
         _ = lseek(descriptor, 0, SEEK_SET)
         let pid = "\(ProcessInfo.processInfo.processIdentifier)\n"

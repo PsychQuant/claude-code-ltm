@@ -55,6 +55,7 @@ public struct DerivedLocation: Sendable {
 
     /// 建立根目錄（若不存在）。建構子已經保證它不在語料裡。
     public func createRootIfNeeded() throws {
+        // WRITE-SITE: derived-root-mkdir
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true)
     }

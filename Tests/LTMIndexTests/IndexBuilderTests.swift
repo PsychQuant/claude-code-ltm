@@ -1738,6 +1738,17 @@ func theSidecarTempIsSafeOnTheIncrementalPath(symbolic: Bool) throws {
     // **安靜退化成一條空測試**。CLAUDE.md：不可能失敗的測試比沒有測試更糟。
     #expect(report?.wasFullRebuild == false || report == nil,
             "這一輪必須是增量——走了全量就代表 discard 跑過，那條路徑不是要驗的那條")
+    // **第二個成因**：上一版的註解點名了 `|| true` **與** `try?` 兩個，卻只修了
+    // 第一個——而 `try?` 讓「temp 分支根本沒跑」與「跑了而且沒寫穿」無法區分。
+    // 實測（#45 R10 verify）：讓 `appendVectors` 在寫 `.tmp` 之前就丟錯，兩個
+    // 參數格照樣全綠。
+    //
+    // 所以要斷言那條分支**真的產出了東西**：側車存在、是一般檔案、只有一個名字。
+    var sidecar = stat()
+    #expect(lstat(derived.vectorsURL.path, &sidecar) == 0,
+            "側車沒有被產出——temp 分支沒跑，這條回歸鎖就沒有在驗任何東西")
+    #expect((sidecar.st_mode & S_IFMT) == S_IFREG)
+    #expect(sidecar.st_nlink == 1, "側車不該與別的名字共用 inode")
 
     // **唯一不可接受的是語料變了。**
     #expect(try Data(contentsOf: victim) == payload,

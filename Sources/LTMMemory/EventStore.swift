@@ -424,6 +424,7 @@ public struct FileEventStore: EventStore {
         // 先前兩半都沒有，而 `ftruncate(fd, 0)` 就在 100 行之下——實測把一個
         // hard link 成 `events.jsonl` 的語料檔截成 0 bytes 而印「✓」
         // （#44 R9 verify）。理由與索引層那份逐字相同，見 `ExclusiveFile`。
+        // WRITE-SITE: memory-prune-open
         let fd = open(url.path, O_RDWR | O_NONBLOCK | O_NOFOLLOW)
         guard fd >= 0 else {
             throw EventStoreError.readFailed(
@@ -502,6 +503,7 @@ public struct FileEventStore: EventStore {
             try CanonicalStore.syncToDevice(fd: backupFD, path: backup.path)
         } catch {
             close(backupFD)
+            // WRITE-SITE: memory-backup-cleanup-a
             try? FileManager.default.removeItem(at: backup)
             throw error
         }
@@ -513,6 +515,7 @@ public struct FileEventStore: EventStore {
         // 而備份是就地覆寫的唯一保險，一份沒被確認過的保險等於沒有保險。
         let readback = try CanonicalStore.readRegularFile(at: backup)
         guard readback == bytes else {
+            // WRITE-SITE: memory-backup-cleanup-b
             try? FileManager.default.removeItem(at: backup)
             throw EventStoreError.appendFailed(
                 path: backup.path,
@@ -524,6 +527,7 @@ public struct FileEventStore: EventStore {
             payload.append(try encoder.encode(event))
             payload.append(Data("\n".utf8))
         }
+        // WRITE-SITE: memory-prune-truncate
         guard ftruncate(fd, 0) == 0, lseek(fd, 0, SEEK_SET) == 0 else {
             throw EventStoreError.appendFailed(
                 path: url.path, underlying: "截斷失敗：errno \(errno)")

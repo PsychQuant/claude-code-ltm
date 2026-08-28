@@ -345,3 +345,29 @@ func appendRefusesAHardLinkedStore() throws {
     }
     #expect(try Data(contentsOf: outsider) == payload, "append 把事件行寫進了別人的檔案")
 }
+
+/// `append` 的 symlink 那一半——`O_NOFOLLOW`。
+///
+/// R10 指出：`pruneUnusable` 的 symlink 版有測試，`appendLine` 的沒有
+/// （拿掉它的 `O_NOFOLLOW`，512 條全綠）。同族的兩半只補了一半，這是這個
+/// cluster 反覆出現的形狀。
+@Test("append 不得跟著 symlink 走")
+func appendRefusesASymlinkedStore() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-mem-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let outsider = root.appendingPathComponent("outsider.jsonl")
+    let payload = Data(repeating: 0x41, count: 512)
+    try payload.write(to: outsider)
+    let events = root.appendingPathComponent("events.jsonl")
+    try FileManager.default.createSymbolicLink(at: events, withDestinationURL: outsider)
+
+    let store = try FileEventStore(url: events)
+    #expect(throws: (any Error).self) {
+        try store.append(
+            .interaction(.shown, anchor: anchor("內容"), at: Date(), generation: gen, policy: policy))
+    }
+    #expect(try Data(contentsOf: outsider) == payload, "append 跟著 symlink 寫進了別人的檔案")
+}

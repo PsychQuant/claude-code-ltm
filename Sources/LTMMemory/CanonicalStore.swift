@@ -131,6 +131,7 @@ public enum CanonicalStore {
         // append 進一個 hard link 成語料檔的 `events.jsonl` **仍然是寫進語料**
         // （不變式 1），而且那些行會混進第三方的逐字內容裡。#44 R9 verify 量到的
         // 是 prune 那一條，這一條是同族、同一個修法。
+        // WRITE-SITE: memory-append-open
         let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT | O_NONBLOCK | O_NOFOLLOW, 0o600)
         guard fd >= 0 else {
             throw EventStoreError.appendFailed(
