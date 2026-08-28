@@ -154,15 +154,37 @@ chunks 與檔案數，且**沒有對照組**）：
 ## 導出的決定
 
 1. **不能**據此宣稱 #46 已解決或前提已被推翻。
-   ~~#46 Expected ②③ 仍未實作。~~ **（2026-08-28 更正：這句在 `4df4e46` 之後
-   就是假的——`--memory-budget-mb` 與具名拒絕都已出貨。查法：
-   `git log --oneline -S memoryBudgetExceeded -- Sources/LTMIndex/IndexBuilder.swift`。
-   這份紀錄在那之後被編輯過好幾次，而這一句沒有跟著改。一句用現在式寫的事實斷言
-   留在一份紀錄裡，讀起來與查過的結果沒有差別——#44 R14 verify。）**
+
+   > **② 與 ③ 的狀態不同，上一版的更正把它們一起抹掉了**（#44 R15 verify，
+   > devil's advocate）。逐項寫：
+   >
+   > - **③（到達上限時具名拒絕）已出貨**：`BuildError.memoryBudgetExceeded`。
+   >   查法：`grep -n memoryBudgetExceeded Sources/LTMIndex/IndexBuilder.swift`
+   >   → 三處（doc、case、throw）；`git log --oneline -S memoryBudgetExceeded --
+   >   Sources/LTMIndex/IndexBuilder.swift` → `4df4e46`。
+   > - **②（超過上限就「分批寫檔而不是繼續累積」）按字面仍未實作。** 出貨的行為
+   >   是**拒絕**，不是降級成分批落地——那是 ③ 的行為。上一版的刪除線同時蓋住 ②，
+   >   而它給的查法（同一條 `git log`）**只證得到 ③**：一條 grep 找到具名拒絕，
+   >   並不能證明「超過就分批寫檔」存在。
+   >
+   > 原句與第一次更正一併留著，因為它們是同一個錯的兩個方向：
+   >
+   > ~~#46 Expected ②③ 仍未實作。~~（2026-08-28 第一次更正：說兩項都已出貨。
+   > **也是錯的**——只有 ③ 出貨。查法：`gh issue view 46 --jq .body | grep -A1 加上限`
+   > 讀 ② 的字面要求，再對照 `:526` 那個 `throw`。）
+   >
+   > **「這份紀錄在那之後被編輯過好幾次」也是假的。** 查法：
+   > `git log --oneline 4df4e46..HEAD -- docs/measurements/2026-08-26-build-peak-memory.md`
+   > → 兩筆，其中一筆就是那次更正本身，所以在它之前是**一筆**。一個沒有查法的
+   > 數量詞，出現在一段譴責「沒查就寫下的事實斷言」的文字裡。
+
 2. **不能**據此重構 scanner——因果尚未定位，重構完記憶體可能照樣線性成長。
    先跑上表最後兩列。
 3. **可以**據此做的是：承認上限不存在，並在超過一個**可設定的**預算時具名拒絕。
    拒絕的門檻**不由這份紀錄決定**（它外推不到真實語料）；由使用者設定，預設關閉。
+   **（這一項已於 `4df4e46` 出貨——上面第 1 項更正時漏了它，而它是同一份清單裡
+   同一類的過期敘述：用「可以據此做的是」的處方語氣寫一件已經做完的事。
+   #44 R15 verify，regression。）**
 
 ## 這份紀錄先前說錯了什麼
 

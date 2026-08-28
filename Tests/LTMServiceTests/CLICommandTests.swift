@@ -1043,12 +1043,25 @@ private func presentationID(in output: String) -> String? {
 /// 「`FileEventStore` 事後會拒絕語料內的路徑，**但目錄那時已經建好了**——
 /// 違反不變式 1 的是那個 mkdir，不是 append。」我的新宣稱與它矛盾。
 ///
-/// 我為什麼會寫錯：我只量了**一種**佈局（連到語料裡**已存在**的目錄），而
-/// `mkdir -p` 對既存目錄是靜默 no-op，所以看不到寫入。三種佈局三種結果——
-/// **這裡沒有可寫成全稱的性質，而我恰好只量到唯一支持我結論的那一格。**
+/// 我為什麼會寫錯：我只量了這一種佈局（連到語料裡**已存在**的目錄），而
+/// `mkdir -p` 對既存目錄是靜默 no-op，所以看不到寫入。**我恰好只量到唯一支持
+/// 我結論的那一格。**
+///
+/// **上一版這裡寫「三種佈局三種結果」——又一份宣稱自己完整的列舉，而它只指名了
+/// 兩種，也沒有可指名的量測**（#44 R15 verify）。實際被量過的是**兩**格，各由
+/// 一條測試扛著；「共有幾種」我沒有查過，所以不寫。
+///
+/// | 佈局 | 拿掉上游那層之後 | 扛它的測試 |
+/// |---|---|---|
+/// | `<base>/memory` 是連到語料裡**既存**目錄的 symlink | `mkdir -p` 是 no-op，語料**不變** | 本條 |
+/// | `LTM_MEMORY_ROOT` 指向語料裡一條**尚不存在**的路徑 | **兩個目錄被建進語料** | 下一條 |
+///
+/// **所以本條的第三個斷言（語料目錄不變）在它自己的佈局下不可能紅**——no-op 的
+/// 那一格無論守衛在不在都相同（#44 R15 verify，devil's advocate 用變異實證）。
+/// 它留著是為了說明這一格**確實**沒有寫入，而**扛「不變式 1 沒被違反」的是下一
+/// 條**：那一格拿掉守衛就會紅。
 ///
 /// 所以這條測試扛的是：**上游那一層還在**（訊息可讀、含「唯讀語料」字樣）。
-/// 就這樣，不多。
 @Test("記憶層根目錄指進語料樹時被上游 containment 拒絕")
 func aMemoryRootPointingIntoTheCorpusIsRefusedUpstream() throws {
     let workspace = try CLIWorkspace.make(texts: ["內容"])
@@ -1074,4 +1087,48 @@ func aMemoryRootPointingIntoTheCorpusIsRefusedUpstream() throws {
     #expect(
         try FileManager.default.contentsOfDirectory(atPath: insideCorpus.path).sorted() == before,
         "語料目錄多出了檔案")
+}
+
+/// 第二格佈局：`LTM_MEMORY_ROOT` 指向語料裡一條**尚不存在**的路徑。
+///
+/// 上一條的佈局在拿掉上游守衛之後語料不變（`mkdir -p` 對既存目錄是 no-op），
+/// 所以它驅動不到「不變式 1 沒被違反」。**這一條可以**：拿掉
+/// `LTMService.make` 那道 containment，`ltm mark` 會在唯讀語料裡建出
+/// `<root>` 與 `<root>/memory` 兩個目錄，然後才被第二層拒絕——退出碼與訊息
+/// 都不變，變的只有磁碟。
+///
+/// 變異驗證（#44 R15）：把 `LTMService.swift:461` 那個 `if` 拿掉，逐條量到的是：
+///
+/// | 測試 | 變紅的斷言 |
+/// |---|---|
+/// | 本條 | `fileExists(target)` 與語料根的 `contentsOfDirectory` ——**兩個都是檔案系統斷言** |
+/// | 上一條 | **只有訊息那個**（第二層報的是 `pathInsideReadOnlyCorpus(path: …)`，不含「唯讀語料」字樣）|
+///
+/// **上一條的檔案系統斷言在變異下仍然是綠的**——這正是它驅動不到不變式 1 的
+/// 可執行證據，不是推論。
+///
+/// （這段話的第一版寫「本條紅、上一條綠」——**沒有逐條量就寫下**，而上一條其實
+/// 也紅，只是紅在別的地方。在一段記錄變異結果的文字裡，再犯一次同樣的事。）
+@Test("記憶層根目錄指向語料內尚不存在的路徑時，語料一個目錄都不會被建出來")
+func aMemoryRootAtANonexistentCorpusPathCreatesNothing() throws {
+    let workspace = try CLIWorkspace.make(texts: ["內容"])
+    defer { workspace.cleanup() }
+
+    // 不建立它——就是要看誰先動手。
+    let target = workspace.corpus.appendingPathComponent("ltm-store")
+    let before = try FileManager.default.contentsOfDirectory(atPath: workspace.corpus.path)
+        .sorted()
+
+    var environment = workspace.environment
+    environment["LTM_MEMORY_ROOT"] = target.path
+    let result = try runCLI(["mark", UUID().uuidString, "1", "--opened"], environment: environment)
+
+    #expect(result.code != 0, "指進語料樹的記憶層根目錄應被拒絕，實際 exit \(result.code)")
+    #expect(
+        !FileManager.default.fileExists(atPath: target.path),
+        "\(target.lastPathComponent) 被建進唯讀語料了——違反不變式 1 的是那個 mkdir")
+    #expect(
+        try FileManager.default.contentsOfDirectory(atPath: workspace.corpus.path).sorted()
+            == before,
+        "語料根目錄多出了項目")
 }

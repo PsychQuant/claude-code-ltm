@@ -234,14 +234,46 @@ public struct IndexBuilder: Sendable {
         // **#44 Expected ② 沒有被實作，而且它與 #44 實際交付的東西相衝突。**
         //
         // 那條要求寫的是「批次邊界上釋放寫鎖，讓查詢路徑的 `refreshIncrementally`
-        // 有機會插進來」。實際上這把 `flock` 在 `build()` 的**第一個動作**取得、
+        // 有機會插進來」。實際上這把 `flock` 在 `build()` **開頭**取得、
         // 全程持有，所以查詢路徑插進來的窗口是 **0%**——分批讓交易變成 per-batch，
         // 但沒有第二個寫者走得到那裡去競爭它（#44 R13 verify，requirements lens）。
         //
-        // **為什麼不現在補上**：`refreshIncrementally` 本身也走 `build()`，所以
-        // 「讓它插進來」等於讓**兩個寫者**在同一個 derived root 上交錯。批次交易
-        // 在 SQLite 層會序列化，但側車 append 與它們不在同一個交易裡——那正是
-        // #44 花整個 change 修掉的耦合。**照字面實作 Expected ② 會把它打開。**
+        // **為什麼不現在補上。** 上一版這裡寫「照字面實作 Expected ② 會把 #44 修掉的
+        // 耦合打開」——**那句寫太寬，而它的更正只改了 CHANGELOG，這一份原樣站了
+        // 一輪**（#44 R15 verify，requirements + regression 兩個 lens 各自抓到，
+        // 並指出這一份才是追 #53 的人會落到的地方）。
+        //
+        // 成立的較窄陳述，以及它的三個障礙（都可以指名）：
+        //
+        // 用具名符號＋查法，不用裸行號——這個檔案每一輪都在動，而上一版用行號
+        // 當「可查的」指標（#44 R15 verify）。
+        //
+        // **下面三條查法都要 `| grep -v '//'`**：把查法寫進註解之後，grep 會數到
+        // 查法自己。第一版沒有這一段，於是三條裡有兩條的預期值當場就是錯的
+        // ——一個宣稱自己可查的指標，跑一次就推翻。
+        //
+        // 1. `scanner.scan(previous:)` 在批次迴圈**之外**算一次（查法：
+        //    `grep -n "scanner.scan(previous:" Sources/LTMIndex/IndexBuilder.swift
+        //    | grep -v "//"` → 一處）。中途放鎖，另一個寫者推進游標之後，第一個寫者拿的是放鎖前
+        //    的快照。
+        // 2. `vectorRow` 從 `vector_count` 起算一次，之後是**本地計數器**；而
+        //    `appendVectors` 用 `seekToEnd()` 定位（查法：
+        //    `grep -n "seekToEnd\|var vectorRow" Sources/LTMIndex/IndexBuilder.swift
+        //    | grep -v "//"` → 三處：`vectorRow` 的宣告與 `appendVectors`／
+        //    `truncateSidecar` 各自的 `seekToEnd`）。
+        //    兩個寫者交錯之後，第一個寫者的指標指向對方寫的向量。**「重讀
+        //    scan_state」擋不住這一項——`vector_count` 不在 `scan_state` 裡。**
+        // 3. `truncateSidecar(toRows:)` **整個 build 只被呼叫一次**（查法：
+        //    `grep -n "try truncateSidecar" Sources/LTMIndex/IndexBuilder.swift
+        //    | grep -vc "//"` → 1）。
+        //    **#44 的 issue body 自己指名過這一項**（「改批次之後這個前提要重新
+        //    確認」），而上一版的「障礙是這兩個值」把它漏掉了——一份宣稱自己完整
+        //    的列舉，漏的那項還是需求自己寫過的。
+        //
+        // 所以「兩個寫者照同一個協定走就沒事」不成立：那個協定要列的不只是
+        // `scan_state`。中斷的情形更明確——A 在批次中途死掉，倖存的 B 早已過了
+        // 它唯一那次截斷，之後的 append 落在孤兒列之後而指標從 `vector_count`
+        // 起算，靜默錯位且印 `✓ 索引完成`。**中斷正是 #44 存在的理由。**
         //
         // 所以這是一個**未滿足的要求**，不是一個已完成的項目。追蹤於 #53。
         // CHANGELOG 先前用「並發寫入是具名拒絕（#44 ②）」回答了它——**那回答的是
@@ -888,7 +920,7 @@ public struct IndexBuilder: Sendable {
 /// | `sidecar-truncate-apply` | `FileHandle.truncate` | ✅ 在 `sidecar-truncate` 的檢查之後 |
 /// | `sidecar-append-write` | `FileHandle.write` | ✅ 在 `sidecar-append` 的檢查之後 |
 /// | `lock-write-pid` | `write(2)` | ✅ 在 `lock-open` 的檢查與 `lock-truncate` 之後 |
-/// | `memory-backup-create` | `open(O_CREAT\|O_EXCL\|O_NOFOLLOW)` | 最後一段擋住；**父目錄不擋**（TOCTOU 類，#40 既決限度）|
+/// | `memory-backup-create` | `open(O_CREAT\|O_EXCL)` | 最後一段擋住（`O_EXCL` 對 symlink 回 `EEXIST`）；**父目錄不擋**（TOCTOU 類，#40 既決限度）|
 /// | `memory-backup-write` | `write(2)` | ✅ 在上一列建立的 fd 上 |
 /// | `memory-prune-write` | `write(2)` | ✅ 在 `memory-prune-open` 的檢查之後 |
 /// | `memory-append-write` | `write(2)` | ✅ 在 `memory-append-open` 的檢查之後 |
@@ -966,8 +998,10 @@ public struct IndexBuilder: Sendable {
 /// 所以入口收斂成這一個。
 ///
 /// - Parameter mode: 只在 `flags` 含 `O_CREAT` 時有意義。**它不是選用的**：
-///   `open(2)` 的 `O_CREAT` 需要第三個引數，少給的話 mode 取自堆疊上的垃圾——
-///   先前漏了它，於是 `.tmp` 被建成 0 權限，下一次開它 `EACCES`。
+///   `open(2)` 的 `O_CREAT` 需要第三個引數。上一版寫「少給的話 mode 取自堆疊上的
+///   垃圾」——**實測不是**：Swift 的兩引數 `open` 確定性地傳 0（同一支程式跑三次
+///   都是 `mode 0`，#44 R15 verify）。症狀（`.tmp` 被建成 0 權限、下一次開它
+///   `EACCES`）與 mode=0 一致，與「垃圾」不一致——**「垃圾」會是不確定的**。
 func openDerivedFileNoFollow(_ url: URL, flags: Int32, mode: mode_t = 0o644) throws -> FileHandle {
     // **`O_NONBLOCK` 不是選用的。** `open(O_WRONLY)` 對一個 FIFO 會**永久阻塞**
     // 直到有讀者出現——阻塞在 `open(2)` 裡面，所以 `ExclusiveFile.verify` 的
@@ -984,9 +1018,22 @@ func openDerivedFileNoFollow(_ url: URL, flags: Int32, mode: mode_t = 0o644) thr
     // `WRITE-SITE` 標記——那正是「一個標記背書兩個呼叫」那個假綠的實例，
     // 由收緊後的檢查抓到（#44 R14 verify，codex）。
     //
-    // 改成一個呼叫，就沒有借用的餘地。`open(2)` 的第三個引數在沒有 `O_CREAT`
-    // 時被忽略，所以無條件傳 `mode` 是安全的——**這一句是可查的**：
-    // `man 2 open`「The mode argument … is used only when a new file is created」。
+    // 改成一個呼叫，就沒有借用的餘地。無條件傳 `mode` 是安全的——`open(2)` 在
+    // 沒有 `O_CREAT` 時不讀第三個引數。
+    //
+    // **這句話的查法，以及上一版把它寫錯的方式**：上一版引了
+    // `man 2 open`「The mode argument … is used only when a new file is created」
+    // ——**Darwin 的 man page 沒有這句**（那是 Linux 的措辭）。Darwin 只寫了反向：
+    // 「In this case, open() and openat() require an additional argument mode_t
+    // mode」——**有** `O_CREAT` 時需要，沒說**沒有**時會怎樣。而那句偽造的引文被
+    // 包在「這一句是可查的」裡面，是最糟的形式：一句宣稱自己被查過的話，沒有被查過。
+    //
+    // 成立的兩個依據：
+    // 1. POSIX `open`：「The mode argument … shall be used only when O_CREAT or
+    //    O_TMPFILE is specified」。
+    // 2. 實測（2026-08-28，macOS 27）：對一個 mode 600 的既存檔
+    //    `open(p, O_RDONLY, 0777)` 回 fd 且 mode 仍是 600；對不存在的路徑同樣呼叫
+    //    回 -1 且**沒有**建出檔案。
     let effective = flags | O_NOFOLLOW | O_NONBLOCK
     // WRITE-SITE: derived-open-helper
     let descriptor = open(url.path, effective, mode)
