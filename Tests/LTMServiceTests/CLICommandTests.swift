@@ -1048,3 +1048,64 @@ func aSymlinkedMemoryRootIsRefused() throws {
         !FileManager.default.fileExists(atPath: real.appendingPathComponent("events.jsonl").path),
         "在連結目標底下建了事件檔")
 }
+
+/// `lstat` 失敗但**不是** `ENOENT` 時要具名拒絕，不得當成「不存在」。
+///
+/// 先前寫的是「任何 `lstat` 失敗都當成不存在」，而 `EACCES` / `ELOOP` /
+/// `ENOTDIR` / `EIO` 全部從那個分支溜過去，註解說的卻是另一件事
+/// （#44 R13 verify，codex）。這是 CLAUDE.md 那條「問『這個 API 失敗時我怎麼
+/// 知道』」的 raw-syscall 版本。
+///
+/// 驅動方式：把父目錄設成 0o000，`lstat` 回 `EACCES`。
+@Test("記憶層根目錄的 lstat 失敗不是 ENOENT 時具名拒絕")
+func anUnreadableMemoryRootParentIsRefusedByName() throws {
+    let workspace = try CLIWorkspace.make(texts: ["內容"])
+    defer { workspace.cleanup() }
+    let built = try runCLI(["build", "--quiet"], environment: workspace.environment)
+    #expect(built.code == 0, "前提：索引要先建起來")
+
+    let base = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-memroot-\(UUID().uuidString)")
+    let blocked = base.appendingPathComponent("blocked")
+    try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+    defer {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blocked.path)
+        try? FileManager.default.removeItem(at: base)
+    }
+    // 0o000：底下的 `lstat` 會回 EACCES，不是 ENOENT。
+    try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: blocked.path)
+
+    var environment = workspace.environment
+    environment["LTM_MEMORY_ROOT"] = blocked.path
+    let result = try runCLI(["query", "內容", "--all-projects", "--record"], environment: environment)
+    #expect(result.code != 0, "不可讀的父目錄應被具名拒絕，實際 exit \(result.code)")
+    #expect(
+        result.err.contains("無法判斷記憶層根目錄是什麼"),
+        "訊息要說出它為什麼拒絕，實際 stderr：\(result.err)")
+}
+
+/// `memoryRecordsURL` 的守衛要**自己**被驅動得到。
+///
+/// 兩個 helper 對同一個 root 跑同一道 guard，而 `memoryEventsURL` 先被呼叫——
+/// 所以單靠上面那條測試，`memoryRecordsURL` 那一行 `try refuseSymlinkedMemoryRoot`
+/// 可以整行刪掉而仍然全綠（#44 R13 verify，codex）。
+///
+/// 這裡直接呼叫它，繞過呼叫順序。
+@Test("memoryRecordsURL 自己也拒絕 symlink 的記憶層根目錄")
+func memoryRecordsURLRefusesASymlinkedRoot() throws {
+    let base = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-memroot-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: base) }
+    let real = base.appendingPathComponent("real")
+    try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+    let root = base.appendingPathComponent("memory")
+    try FileManager.default.createSymbolicLink(at: root, withDestinationURL: real)
+
+    #expect(throws: (any Error).self) {
+        _ = try CommandSupport.memoryRecordsURL(validatedRoot: root)
+    }
+    #expect(
+        !FileManager.default.fileExists(atPath: real.appendingPathComponent("presentations.jsonl").path),
+        "在連結目標底下建了呈現紀錄檔")
+}

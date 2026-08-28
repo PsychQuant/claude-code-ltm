@@ -484,16 +484,26 @@ public struct FileEventStore: EventStore {
         // ── 備份，並且確認它真的在磁碟上，才動原檔 ──
         let backup = url.appendingPathExtension(
             "bak-\(UUID().uuidString.prefix(8))")
-        // `O_NOFOLLOW` 與 `O_EXCL` 各擋一半，而**兩半加起來仍然不涵蓋父目錄**。
+        // **`O_NOFOLLOW` 在這裡是 no-op，而我上一輪把功勞歸給了它。**
         //
-        // `O_EXCL` 只保證「最後一段若已存在就 `EEXIST`」，`O_NOFOLLOW` 只看最後
-        // 一段是不是符號連結——**中間任何一段是 symlink，路徑解析照樣跟著走**。
-        // 所以一個在驗證之後被換成指向語料樹的父目錄，會讓備份落在語料裡
-        // （#44 R12 verify，codex）。
+        // POSIX：`O_CREAT | O_EXCL` 時若最後一段已是符號連結，`open` **必須**失敗
+        // （`EEXIST`）且不跟隨它。`O_NOFOLLOW` 管的也正是最後一段——**兩者重疊，
+        // 不是「各擋一半」**（#44 R13 verify，codex）。加上它之後成功／失敗的邊界
+        // 一格都沒有改變。
         //
-        // 那是 TOCTOU 類，在 #40 的模型下是被接受的限度（需要並行的本機攻擊者）。
-        // **要記的是我上一輪把它寫成「結構上不跟任何連結走」——那句話是假的**，
-        // 表的判定已改。
+        // 它留著，因為它讓意圖在讀碼時是顯式的（不必先想通 `O_EXCL` 的 symlink
+        // 語意），但**它不是這一格安全的原因**，而下面那條測試也驅動不到它。
+        //
+        // ## 兩次更正，兩次都錯在不同的地方——這一段是紀錄
+        //
+        // - 最初寫「`O_EXCL`：既存名稱一律 `EEXIST`，**結構上不跟任何連結走**」。
+        //   R12 判它為假。**而它就最後一段而言其實是對的**——假的是「任何」那個
+        //   範圍，它被讀成涵蓋了中間元件。
+        // - R12 的更正把它改成「各擋一半」，那把一句**範圍寫太大**的話換成一句
+        //   **效果歸錯功勞**的話，而程式碼行為完全沒動。
+        //
+        // 真正未涵蓋的仍然只有一件事：**中間路徑元件**。那是 TOCTOU 類、#40 的
+        // 既決限度，需要並行的本機攻擊者。
         // WRITE-SITE: memory-backup-create
         let backupFD = open(backup.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
         guard backupFD >= 0 else {

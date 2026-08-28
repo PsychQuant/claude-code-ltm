@@ -372,14 +372,21 @@ func appendRefusesASymlinkedStore() throws {
     #expect(try Data(contentsOf: outsider) == payload, "append 跟著 symlink 寫進了別人的檔案")
 }
 
-/// 備份檔不得跟著**最後一段**的 symlink 走。
+/// 備份檔必須**恰好一個**、是一般檔案、只有一個名字。
 ///
-/// R12 指出上一輪把 `O_EXCL` 的效果寫成「結構上不跟任何連結走」——那句話是假的：
-/// `O_EXCL` 只保證最後一段若已存在就 `EEXIST`，而**中間任何一段是 symlink，
-/// 路徑解析照樣跟著走**。父目錄那一半是 TOCTOU 類、#40 的既決限度；最後一段
-/// 這一半靠 `O_NOFOLLOW`，而它先前沒有。
-@Test("備份檔不得跟著最後一段的 symlink 走")
-func theBackupFileDoesNotFollowASymlink() throws {
+/// **上一版是雙重真空**（#44 R13 verify，codex）：
+///
+/// 1. 迴圈是 `for name in entries where name.hasPrefix("events.jsonl.bak-")`，
+///    而 `pruneUnusable()` 被 `try?` 吞掉——**沒有備份時迴圈跑零次，所有
+///    `#expect` 都沒被求值**，測試照樣綠。刪掉整段備份邏輯也綠。
+/// 2. 它的名字宣稱驗「不跟著最後一段的 symlink 走」，而**它從來沒有建那個
+///    symlink**——備份名字帶隨機字尾，測試無法預先在那個確切路徑上擺連結。
+///
+/// 而更根本的一點：`O_NOFOLLOW` 在 `O_CREAT|O_EXCL` 之下是 no-op（POSIX 已經
+/// 保證最後一段是 symlink 時 `EEXIST`），**所以那個旗標本來就驅動不出來**。
+/// 這條測試因此不再宣稱驗它——它驗的是可觀察且真的會紅的那些性質。
+@Test("prune 產生的備份恰好一個，且是我們自己的一般檔案")
+func theBackupIsExactlyOneRegularFileWeOwn() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("ltm-mem-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -389,16 +396,15 @@ func theBackupFileDoesNotFollowASymlink() throws {
     try Data("{\"bad\":1}\n".utf8).write(to: events)
     let store = try FileEventStore(url: events)
 
-    // 備份名字含隨機字尾，所以無法預先在那個確切路徑上擺連結——改為驗
-    // `O_NOFOLLOW` 這個旗標本身存在：把 `events.jsonl` 的**目錄**裡塞滿不可能
-    // 的名字沒有意義。這裡驗的是可觀察的等價物：prune 之後，目錄裡新增的那個
-    // 備份是一般檔案且只有一個名字。
-    _ = try? store.pruneUnusable()
-    let entries = try FileManager.default.contentsOfDirectory(atPath: root.path)
-    for name in entries where name.hasPrefix("events.jsonl.bak-") {
-        var info = stat()
-        #expect(lstat(root.appendingPathComponent(name).path, &info) == 0)
-        #expect((info.st_mode & S_IFMT) == S_IFREG, "備份不是一般檔案")
-        #expect(info.st_nlink == 1, "備份與別的名字共用 inode")
-    }
+    // **不吞錯誤。** 吞掉的話「備份沒被建出來」與「備份建對了」無法區分。
+    _ = try store.pruneUnusable()
+
+    let backups = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        .filter { $0.hasPrefix("events.jsonl.bak-") }
+    #expect(backups.count == 1, "備份應恰好一個，實際 \(backups.count) 個：\(backups)")
+    var info = stat()
+    #expect(lstat(root.appendingPathComponent(backups[0]).path, &info) == 0)
+    #expect((info.st_mode & S_IFMT) == S_IFREG, "備份不是一般檔案")
+    #expect(info.st_nlink == 1, "備份與別的名字共用 inode")
+    #expect(info.st_uid == getuid(), "備份不是我們建的")
 }

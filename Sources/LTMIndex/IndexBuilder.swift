@@ -231,6 +231,22 @@ public struct IndexBuilder: Sendable {
     ///   是讓那個前提變成呼叫端可以強制的東西。
     public func build(full: Bool = false, refusingFullRebuild: Bool = false) throws -> BuildReport {
         try location.createRootIfNeeded()
+        // **#44 Expected ② 沒有被實作，而且它與 #44 實際交付的東西相衝突。**
+        //
+        // 那條要求寫的是「批次邊界上釋放寫鎖，讓查詢路徑的 `refreshIncrementally`
+        // 有機會插進來」。實際上這把 `flock` 在 `build()` 的**第一個動作**取得、
+        // 全程持有，所以查詢路徑插進來的窗口是 **0%**——分批讓交易變成 per-batch，
+        // 但沒有第二個寫者走得到那裡去競爭它（#44 R13 verify，requirements lens）。
+        //
+        // **為什麼不現在補上**：`refreshIncrementally` 本身也走 `build()`，所以
+        // 「讓它插進來」等於讓**兩個寫者**在同一個 derived root 上交錯。批次交易
+        // 在 SQLite 層會序列化，但側車 append 與它們不在同一個交易裡——那正是
+        // #44 花整個 change 修掉的耦合。**照字面實作 Expected ② 會把它打開。**
+        //
+        // 所以這是一個**未滿足的要求**，不是一個已完成的項目。追蹤於 #53。
+        // CHANGELOG 先前用「並發寫入是具名拒絕（#44 ②）」回答了它——**那回答的是
+        // issue 裡另一句話**（Out of scope 段的「撞上寫鎖會怎樣尚未實測」），
+        // 兩句不同，而 Expected ② 因此變成沒有實作也沒有紀錄。
         let lock = try FileLock.acquire(at: location.lockURL)
         defer { lock.release() }
 

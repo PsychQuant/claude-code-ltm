@@ -1075,7 +1075,10 @@ func rerunAfterCrashDoesNotRecomputeCompletedWork() throws {
 /// 這一條在 #44 開單時被列為「仍未實測」——而它決定 ② 的嚴重度：具名失敗是可
 /// 接受的（使用者看得懂），靜默阻塞或誤報索引損壞高一級。
 ///
-/// 分批之後，寫鎖只在每批的那個交易內持有（不再是全程），所以撞上的窗口小得多。
+/// 這條測試 `flock` 的是 `build.lock`，而**那把鎖是全程持有的**——不是「每批的
+/// 那個交易內」。先前這裡寫「窗口小得多」，對這把鎖是假的（#44 R13 verify）。
+/// 分批確實讓 SQLite 交易變成 per-batch，但沒有第二個寫者走得到那裡去競爭它。
+/// Expected ② 的狀態見 `IndexBuilder.build()` 裡那段註解與 #53。
 /// 但「小」不是「沒有」，而這條測試釘的是**撞上時的行為**，不是機率。
 @Test(.timeLimit(.minutes(1)))
 func aSecondWriterMeetsANamedFailureNotASilentHang() throws {

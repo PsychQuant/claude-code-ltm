@@ -123,8 +123,28 @@ enum CommandSupport {
     /// 跟著走，那是 TOCTOU 類、#40 的既決限度。**它買到的是「使用者自己把
     /// `~/.claude-ltm` 做成連結」這一類，不是對抗者。**
     private static func refuseSymlinkedMemoryRoot(_ root: URL) throws {
+        // **只有 `ENOENT` 才是「不存在」。** 先前寫的是「任何 `lstat` 失敗都當成
+        // 不存在」——`EACCES` / `ELOOP` / `ENOTDIR` / `EIO` 全部從這個分支溜過去，
+        // 而註解說的是另一件事（#44 R13 verify，codex）。
+        //
+        // 這是 CLAUDE.md 那條「`FileManager` 的失敗常常不是回 `nil`，是安靜地回
+        // 『空的』……判準：問『這個 API 失敗時我怎麼知道』」的同一個形狀，換成
+        // 了 raw syscall。
         var probe = stat()
-        guard lstat(root.path, &probe) == 0 else { return }  // 不存在 = 待會建它
+        if lstat(root.path, &probe) != 0 {
+            let code = errno
+            guard code == ENOENT else {
+                throw CocoaError(
+                    .fileReadUnknown,
+                    userInfo: [
+                        NSFilePathErrorKey: root.path,
+                        NSLocalizedDescriptionKey:
+                            "無法判斷記憶層根目錄是什麼：\(String(cString: strerror(code)))"
+                            + "（errno \(code)）——這裡不猜，因為猜錯的方向是寫進別人的檔案。",
+                    ])
+            }
+            return  // 真的不存在，待會建它
+        }
         guard (probe.st_mode & S_IFMT) != S_IFLNK else {
             throw CocoaError(
                 .fileWriteUnknown,
