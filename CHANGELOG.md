@@ -37,7 +37,20 @@
   歸錯功勞的話，而程式碼行為完全沒動。
 - **`lstat` 失敗不再一律當成「不存在」。** 先前 `EACCES` / `ELOOP` / `ENOTDIR` /
   `EIO` 全部從那個分支溜過去，而註解說的是另一件事。現在只有 `ENOENT` 放行。
-- **記憶層根目錄是符號連結時具名拒絕（行為改變）。** `validatedRoot:` 先前只是一個
+- **收回上一輪那道 `refuseSymlinkedMemoryRoot`——它裝錯了地方。** R12 診斷
+  「`validatedRoot:` 只是參數標籤」是對的，但那個修法對不變式 1 的邊際貢獻是
+  **零**：三種佈局實測顯示，指進語料樹的那一格由更早的
+  `policy.isInsideReadOnlyCorpus` 擋住（`fullyResolve` 解析最後一段的 symlink），
+  拿掉守衛行為逐字相同。它唯一可觀測的效果是**拒絕良性搬遷**——對同一種搬遷，
+  只因為連結做在 `<base>` 還是 `<base>/memory` 就給出相反的答案。已拆除。
+  （#44 R13 verify，devil's advocate 的更正推翻了另外三個 lens 的處方
+  「補到 prune 上」——那會把一個只擋良性組態的檢查擴散到復原路徑。）
+
+  **同一輪的變異另外揭露**：不變式 1 在記憶層這一側是**縱深防禦**的，拿掉
+  `LTMService.make` 那一層之後 `CanonicalStore.validatedPath` 仍然接住它，
+  只是訊息退化。新測試扛的是「上游那一層還在」，不是「不變式沒被違反」——
+  這個區分寫在測試裡。
+- ~~**記憶層根目錄是符號連結時具名拒絕（行為改變）。**~~ `validatedRoot:` 先前只是一個
   **參數標籤**，型別仍是任意 `URL`，而 `createDirectory` 會**重新解析**那條路徑
   ——呼叫端先前驗過的是一條可變的路徑，那正是本 repo 記過的「不要從一個值反推
   另一件事」。現在 `<root>/memory` 是 symlink 就拒絕並說明原因。

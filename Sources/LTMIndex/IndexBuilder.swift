@@ -893,7 +893,7 @@ public struct IndexBuilder: Sendable {
 /// | `memory-prune-write` | `write(2)` | ✅ 在 `memory-prune-open` 的檢查之後 |
 /// | `memory-append-write` | `write(2)` | ✅ 在 `memory-append-open` 的檢查之後 |
 /// | `memory-append-seal` | `write(2)` | 同上（殘行封口）|
-/// | `cli-memory-root-mkdir-a` | `lstat` + `createDirectory` | 最後一段是 symlink 就拒絕；`validatedRoot:` 只是標籤，不是型別保證 |
+/// | `cli-memory-root-mkdir-a` | `createDirectory` | **由上游 containment 擋**（兩層：`LTMService.make` 與 `CanonicalStore.validatedPath`）；`validatedRoot:` 只是標籤 |
 /// | `cli-memory-root-mkdir-b` | 同上 | 同上 |
 ///
 /// **記憶層在表裡。** 上一版寫「記憶層不在這張表裡：它有自己的守衛與自己的威脅

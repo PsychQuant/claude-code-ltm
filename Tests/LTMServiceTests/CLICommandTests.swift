@@ -1009,12 +1009,28 @@ private func presentationID(in output: String) -> String? {
     return id.count == 36 ? id : nil
 }
 
-/// 記憶層根目錄是 symlink 時要具名拒絕。
+/// **不變式 1 的那一格由上游的 containment 擋，不是由記憶層的路徑檢查。**
 ///
-/// `validatedRoot:` 只是一個參數標籤，型別仍是任意 `URL`——呼叫端先前驗過的是
-/// 一條**可變的路徑**，而 `createDirectory` 會重新解析它（#44 R12 verify）。
-@Test("記憶層根目錄是 symlink 時具名拒絕，不在連結目標底下建檔")
-func aSymlinkedMemoryRootIsRefused() throws {
+/// R12 診斷「`validatedRoot:` 只是參數標籤」是對的，而 R13 加的那道
+/// `refuseSymlinkedMemoryRoot` 裝錯了地方：三種佈局實測之後，它對這一格的
+/// 邊際貢獻是**零**（拿掉它行為逐字相同），唯一可觀測的效果是拒絕良性搬遷。
+/// 已拆除（#44 R13 verify，devil's advocate 的更正，我自己重跑確認）。
+///
+/// 這條測試釘的是真正在擋的那個東西——先前沒有任何測試釘它。
+///
+/// **而變異揭露了一件比我預期更好的事**：拿掉 `LTMService.make` 那道
+/// `isInsideReadOnlyCorpus`，語料**仍然沒有被寫入**——第二層
+/// （`CanonicalStore.validatedPath` 的 `pathInsideReadOnlyCorpus`）接住了它，
+/// 只是訊息退化成 enum 原文。所以：
+///
+/// - **不變式 1 在這一側是縱深防禦的**，不是單點。
+/// - 這條測試扛的是**上游那一層還在**（訊息可讀、`唯讀語料` 字樣），
+///   **不是**「不變式沒被違反」——後者由兩層共同保證，而拿掉任一層都不足以
+///   讓語料被寫入。
+///
+/// 這個區分要寫出來：說它「扛住不變式 1」會是又一個範圍寫太大的宣稱。
+@Test("記憶層根目錄指進語料樹時被上游 containment 拒絕")
+func aMemoryRootPointingIntoTheCorpusIsRefusedUpstream() throws {
     let workspace = try CLIWorkspace.make(texts: ["內容"])
     defer { workspace.cleanup() }
 
@@ -1022,90 +1038,20 @@ func aSymlinkedMemoryRootIsRefused() throws {
         .appendingPathComponent("ltm-memroot-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: base) }
-    // **連結要做在 `<base>/memory` 上，不是 `<base>` 上。**
-    //
-    // `memoryRootURL()` 會 append `"memory"`，所以守衛看的最後一段是 `memory`。
-    // 第一版我把 `<base>` 做成連結——那是**父目錄**那一半，而它是文件裡明列的
-    // 既接受限度（TOCTOU 類、#40）。於是測試與守衛對不上，而它「通過」了。
-    let real = base.appendingPathComponent("real")
-    try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
-    let link = base.appendingPathComponent("linked")
-    try FileManager.default.createDirectory(at: link, withIntermediateDirectories: true)
+
+    // `<base>/memory` 是一個指進語料樹的 symlink——`fullyResolve` 會解析它。
+    let insideCorpus = workspace.corpus.appendingPathComponent("proj-demo")
     try FileManager.default.createSymbolicLink(
-        at: link.appendingPathComponent("memory"), withDestinationURL: real)
+        at: base.appendingPathComponent("memory"), withDestinationURL: insideCorpus)
 
-    // **先建索引。** 不建的話查詢會因為「索引不存在」先失敗，於是 `code != 0`
-    // 被一個與 symlink 無關的理由滿足——第一版就是這樣綠的（拿掉守衛也綠）。
-    let built = try runCLI(["build", "--quiet"], environment: workspace.environment)
-    #expect(built.code == 0, "前提：索引要先建起來，實際 stderr：\(built.err)")
-
+    let before = try FileManager.default.contentsOfDirectory(atPath: insideCorpus.path).sorted()
     var environment = workspace.environment
-    environment["LTM_MEMORY_ROOT"] = link.path
-    let result = try runCLI(["query", "內容", "--all-projects", "--record"], environment: environment)
-    #expect(result.code != 0, "symlink 的記憶層根目錄應被拒絕，實際 exit \(result.code)")
-    #expect(result.err.contains("符號連結"), "訊息要指名原因，實際 stderr：\(result.err)")
+    environment["LTM_MEMORY_ROOT"] = base.path
+    let result = try runCLI(["mark", UUID().uuidString, "1", "--opened"], environment: environment)
+
+    #expect(result.code != 0, "指進語料樹的記憶層根目錄應被拒絕，實際 exit \(result.code)")
+    #expect(result.err.contains("唯讀語料"), "訊息要指名原因，實際 stderr：\(result.err)")
     #expect(
-        !FileManager.default.fileExists(atPath: real.appendingPathComponent("events.jsonl").path),
-        "在連結目標底下建了事件檔")
-}
-
-/// `lstat` 失敗但**不是** `ENOENT` 時要具名拒絕，不得當成「不存在」。
-///
-/// 先前寫的是「任何 `lstat` 失敗都當成不存在」，而 `EACCES` / `ELOOP` /
-/// `ENOTDIR` / `EIO` 全部從那個分支溜過去，註解說的卻是另一件事
-/// （#44 R13 verify，codex）。這是 CLAUDE.md 那條「問『這個 API 失敗時我怎麼
-/// 知道』」的 raw-syscall 版本。
-///
-/// 驅動方式：把父目錄設成 0o000，`lstat` 回 `EACCES`。
-@Test("記憶層根目錄的 lstat 失敗不是 ENOENT 時具名拒絕")
-func anUnreadableMemoryRootParentIsRefusedByName() throws {
-    let workspace = try CLIWorkspace.make(texts: ["內容"])
-    defer { workspace.cleanup() }
-    let built = try runCLI(["build", "--quiet"], environment: workspace.environment)
-    #expect(built.code == 0, "前提：索引要先建起來")
-
-    let base = FileManager.default.temporaryDirectory
-        .appendingPathComponent("ltm-memroot-\(UUID().uuidString)")
-    let blocked = base.appendingPathComponent("blocked")
-    try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
-    defer {
-        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blocked.path)
-        try? FileManager.default.removeItem(at: base)
-    }
-    // 0o000：底下的 `lstat` 會回 EACCES，不是 ENOENT。
-    try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: blocked.path)
-
-    var environment = workspace.environment
-    environment["LTM_MEMORY_ROOT"] = blocked.path
-    let result = try runCLI(["query", "內容", "--all-projects", "--record"], environment: environment)
-    #expect(result.code != 0, "不可讀的父目錄應被具名拒絕，實際 exit \(result.code)")
-    #expect(
-        result.err.contains("無法判斷記憶層根目錄是什麼"),
-        "訊息要說出它為什麼拒絕，實際 stderr：\(result.err)")
-}
-
-/// `memoryRecordsURL` 的守衛要**自己**被驅動得到。
-///
-/// 兩個 helper 對同一個 root 跑同一道 guard，而 `memoryEventsURL` 先被呼叫——
-/// 所以單靠上面那條測試，`memoryRecordsURL` 那一行 `try refuseSymlinkedMemoryRoot`
-/// 可以整行刪掉而仍然全綠（#44 R13 verify，codex）。
-///
-/// 這裡直接呼叫它，繞過呼叫順序。
-@Test("memoryRecordsURL 自己也拒絕 symlink 的記憶層根目錄")
-func memoryRecordsURLRefusesASymlinkedRoot() throws {
-    let base = FileManager.default.temporaryDirectory
-        .appendingPathComponent("ltm-memroot-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: base) }
-    let real = base.appendingPathComponent("real")
-    try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
-    let root = base.appendingPathComponent("memory")
-    try FileManager.default.createSymbolicLink(at: root, withDestinationURL: real)
-
-    #expect(throws: (any Error).self) {
-        _ = try CommandSupport.memoryRecordsURL(validatedRoot: root)
-    }
-    #expect(
-        !FileManager.default.fileExists(atPath: real.appendingPathComponent("presentations.jsonl").path),
-        "在連結目標底下建了呈現紀錄檔")
+        try FileManager.default.contentsOfDirectory(atPath: insideCorpus.path).sorted() == before,
+        "語料目錄多出了檔案")
 }

@@ -110,56 +110,32 @@ enum CommandSupport {
     ///
     /// 與衍生索引分開（`derived/`）是刻意的：索引可以隨時刪掉重建，記憶層不行
     /// ——它記的是 jsonl 記不得的事（CLAUDE.md 的例外條款）。
-    /// `root` 本身是 symlink 就拒絕。
+    /// **這裡曾經有一道 `refuseSymlinkedMemoryRoot`，已於 R14 拆掉。**
     ///
-    /// **`validatedRoot:` 只是一個參數標籤，型別仍是任意 `URL`。** 呼叫端先前
-    /// 驗過的是一條**可變的路徑**，而 `createDirectory` 會重新解析它——所以那個
-    /// 標籤承諾了型別沒有攜帶的東西（#44 R12 verify，codex）。
+    /// 它是為了 R12 的「`validatedRoot:` 只是參數標籤」而加的，而那個診斷是對的
+    /// ——**但這個修法裝錯了地方**。三種佈局的實測（`ltm mark`，我自己重跑過
+    /// devil's advocate 的量測）：
     ///
-    /// 這正是本 repo 記過的判準：**不要從一個值反推另一件事**；而「先前驗過」
-    /// 是關於過去的一個斷言，不是關於現在這條路徑的性質。
+    /// | `<base>/memory` | 有守衛 | 拿掉守衛 |
+    /// |---|---|---|
+    /// | 指進語料樹（**不變式 1 那一格**）| 拒絕 `rootInsideCorpus` | **逐字相同** |
+    /// | 指到語料外的真目錄（良性搬遷）| **拒絕** | 正常運作 |
+    /// | `<base>` 自己是連結（註解點名的那一類）| 不 fire | 不 fire |
     ///
-    /// **誠實邊界**：這只擋最後一段是 symlink 的情形。中間路徑元件被換掉仍然
-    /// 跟著走，那是 TOCTOU 類、#40 的既決限度。**它買到的是「使用者自己把
-    /// `~/.claude-ltm` 做成連結」這一類，不是對抗者。**
-    private static func refuseSymlinkedMemoryRoot(_ root: URL) throws {
-        // **只有 `ENOENT` 才是「不存在」。** 先前寫的是「任何 `lstat` 失敗都當成
-        // 不存在」——`EACCES` / `ELOOP` / `ENOTDIR` / `EIO` 全部從這個分支溜過去，
-        // 而註解說的是另一件事（#44 R13 verify，codex）。
-        //
-        // 這是 CLAUDE.md 那條「`FileManager` 的失敗常常不是回 `nil`，是安靜地回
-        // 『空的』……判準：問『這個 API 失敗時我怎麼知道』」的同一個形狀，換成
-        // 了 raw syscall。
-        var probe = stat()
-        if lstat(root.path, &probe) != 0 {
-            let code = errno
-            guard code == ENOENT else {
-                throw CocoaError(
-                    .fileReadUnknown,
-                    userInfo: [
-                        NSFilePathErrorKey: root.path,
-                        NSLocalizedDescriptionKey:
-                            "無法判斷記憶層根目錄是什麼：\(String(cString: strerror(code)))"
-                            + "（errno \(code)）——這裡不猜，因為猜錯的方向是寫進別人的檔案。",
-                    ])
-            }
-            return  // 真的不存在，待會建它
-        }
-        guard (probe.st_mode & S_IFMT) != S_IFLNK else {
-            throw CocoaError(
-                .fileWriteUnknown,
-                userInfo: [
-                    NSFilePathErrorKey: root.path,
-                    NSLocalizedDescriptionKey:
-                        "記憶層根目錄是一個符號連結。記憶層會在它底下建檔與就地覆寫，"
-                        + "所以這裡不跟著它走——請把它換成真正的目錄，或改設 LTM_MEMORY_ROOT。",
-                ])
-        }
-    }
-
+    /// 第一列是關鍵：擋住它的是更早跑的 `policy.isInsideReadOnlyCorpus(memoryRoot)`
+    /// ——而 `CorpusLocation.fullyResolve` 明文解析最後一段的 symlink。**所以這道
+    /// 守衛對不變式 1 的邊際貢獻是零。**
+    ///
+    /// 於是它完整的可觀測行為只剩一件事：**對同一種良性搬遷，只因為連結做在
+    /// `<base>` 還是 `<base>/memory` 就給出相反的答案**。repo 的規則（驅動不了
+    /// 真正風險的守衛要拆掉，不是留著加註解）在這裡指向拆除。
+    ///
+    /// **而 R13 那個「補到 prune 上」的處方也是錯的**：那會把一個只擋良性組態的
+    /// 檢查擴散到復原路徑上。真正在擋不變式 1 的是上游的 containment，
+    /// 表的判定已改成那樣寫。
+    ///
     /// 事件檔路徑。**呼叫端必須先確認 root 不在語料裡**（見 `LTMService.make`）。
     static func memoryEventsURL(validatedRoot root: URL) throws -> URL {
-        try refuseSymlinkedMemoryRoot(root)
         // WRITE-SITE: cli-memory-root-mkdir-a
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root.appendingPathComponent("events.jsonl")
@@ -171,7 +147,6 @@ enum CommandSupport {
     /// anchor，一筆紀錄對整次呈現），混在同一份 JSON Lines 裡會逼讀取端先猜
     /// 這一行是哪一種。同一個目錄、同一條落地紀律（見 `CanonicalStore`）。
     static func memoryRecordsURL(validatedRoot root: URL) throws -> URL {
-        try refuseSymlinkedMemoryRoot(root)
         // WRITE-SITE: cli-memory-root-mkdir-b
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root.appendingPathComponent("presentations.jsonl")
