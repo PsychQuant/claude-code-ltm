@@ -484,6 +484,7 @@ public struct FileEventStore: EventStore {
         // ── 備份，並且確認它真的在磁碟上，才動原檔 ──
         let backup = url.appendingPathExtension(
             "bak-\(UUID().uuidString.prefix(8))")
+        // WRITE-SITE: memory-backup-create
         let backupFD = open(backup.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
         guard backupFD >= 0 else {
             throw EventStoreError.appendFailed(
@@ -493,7 +494,8 @@ public struct FileEventStore: EventStore {
             try bytes.withUnsafeBytes { raw in
                 var offset = 0
                 while offset < raw.count {
-                    let n = write(backupFD, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                    // WRITE-SITE: memory-backup-write
+            let n = write(backupFD, raw.baseAddress!.advanced(by: offset), raw.count - offset)
                     if n > 0 { offset += n } else if n < 0, errno == EINTR { continue } else {
                         throw EventStoreError.appendFailed(
                             path: backup.path, underlying: "備份寫入失敗：errno \(errno)（未修剪）")
@@ -535,7 +537,8 @@ public struct FileEventStore: EventStore {
         try payload.withUnsafeBytes { raw in
             var offset = 0
             while offset < raw.count {
-                let n = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                // WRITE-SITE: memory-prune-write
+            let n = write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
                 if n > 0 { offset += n }
                 else if n < 0, errno == EINTR { continue }
                 else {

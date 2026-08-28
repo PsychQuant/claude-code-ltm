@@ -112,6 +112,7 @@ enum CommandSupport {
     /// ——它記的是 jsonl 記不得的事（CLAUDE.md 的例外條款）。
     /// 事件檔路徑。**呼叫端必須先確認 root 不在語料裡**（見 `LTMService.make`）。
     static func memoryEventsURL(validatedRoot root: URL) throws -> URL {
+        // WRITE-SITE: cli-memory-root-mkdir-a
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root.appendingPathComponent("events.jsonl")
     }
@@ -122,6 +123,7 @@ enum CommandSupport {
     /// anchor，一筆紀錄對整次呈現），混在同一份 JSON Lines 裡會逼讀取端先猜
     /// 這一行是哪一種。同一個目錄、同一條落地紀律（見 `CanonicalStore`）。
     static func memoryRecordsURL(validatedRoot root: URL) throws -> URL {
+        // WRITE-SITE: cli-memory-root-mkdir-b
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root.appendingPathComponent("presentations.jsonl")
     }

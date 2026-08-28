@@ -212,6 +212,7 @@ public enum CanonicalStore {
         var remaining = line[...]
         var wroteAnything = false
         while !remaining.isEmpty {
+            // WRITE-SITE: memory-append-write
             let written = remaining.withUnsafeBytes { buffer in
                 write(fd, buffer.baseAddress, buffer.count)
             }
@@ -331,6 +332,7 @@ public enum CanonicalStore {
     /// 原始原因，而封口失敗的後果不會比不封口更糟。
     private static func terminatePartialLine(_ fd: Int32) {
         var newline: UInt8 = 0x0A
+        // WRITE-SITE: memory-append-seal
         _ = withUnsafeBytes(of: &newline) { write(fd, $0.baseAddress, 1) }
     }
     /// 開啟、驗形、上共享鎖、從**同一個 fd** 讀完。

@@ -39,11 +39,9 @@ func everyWriteSiteAppearsInTheTable() throws {
 
     // 1. 原始碼裡的標記。
     var marked: Set<String> = []
-    for module in ["LTMIndex", "LTMMemory"] {
-        let dir = root.appendingPathComponent("Sources/\(module)")
-        for name in try FileManager.default.contentsOfDirectory(atPath: dir.path)
-        where name.hasSuffix(".swift") {
-            let text = try String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8)
+    for file in try swiftSourcesUnderSources(root) {
+        do {
+            let text = try String(contentsOf: file, encoding: .utf8)
             for line in text.components(separatedBy: "\n") {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 guard trimmed.hasPrefix("// WRITE-SITE:") else { continue }
@@ -89,29 +87,48 @@ func everyWriteSiteAppearsInTheTable() throws {
 ///
 /// 這一條掃會改變檔案系統的呼叫，要求每一個上方兩行內有 `// WRITE-SITE:`。
 ///
-/// ## 誠實邊界（這次要寫準——上一次我把它寫小了一級）
+/// ## 誠實邊界（第三次寫，前兩次都把界線畫小了一級）
 ///
-/// 它的涵蓋範圍**等於下面那份 primitive 清單**，不多也不少。一個用清單外的手段
-/// 寫檔的新站點仍然隱形（例如 `FileManager.copyItem`、`link(2)`、`rename(2)`、
-/// 或任何經由 `Process` 呼叫的外部程式）。**這不是「較弱的形式」，是一份會漏的
-/// 列舉**——而本 repo 對會漏的列舉的處置是把判準寫成性質。這裡做不到：
-/// 「會改變檔案系統」在 Swift 的型別層沒有表達方式，沒有 AST 工具就只能列舉。
+/// 前兩次的紀錄，因為它們是同一個錯的兩個變體：
 ///
-/// 所以這條檢查買到的是：**清單內的手段一定要掛標記**。清單外的要靠人。
+/// 1. R10：說它「比對數量不比對身分」，而真相是**它連表都沒讀**。
+/// 2. R11：說它「涵蓋範圍等於那份 primitive 清單」，而真相是清單 ∩ 兩個模組 ∩
+///    非遞迴 ∩ 單行連續文字。三個額外的限制一個都沒寫出來，其中一個讓
+///    **R10 用來殺死上一版的那個變異對新版照樣全綠**。
+///
+/// 現在的界線，逐條寫出來：
+///
+/// - **範圍**：`Sources/` 底下每一個 `.swift`，遞迴。不再限模組。
+/// - **手段**：下方 `primitives` 清單。它現在含 `open(` / `write(`（記憶層實際
+///   使用的那兩個），但**它仍然是一份會漏的列舉**——一個經由 `Process` 呼叫外部
+///   程式、或用清單外 syscall 的新站點仍然隱形。
+/// - **形式**：**單行連續文字比對**，標記要在呼叫上方 **3 行內**。呼叫被換行
+///   拆開就抓不到（`try data\n    .write(to: …)` 逃得掉，實測過），拆得比 3 行
+///   更開也逃得掉。兩者是同一個限制的兩面：這條檢查看的是文字，不是語法樹。
+///
+/// **為什麼不寫成性質**：「會改變檔案系統」在 Swift 型別層沒有表達方式。要真正
+/// 關掉它需要 SwiftSyntax／lint 層的 AST 檢查，或禁止業務模組直接呼叫這些 API
+/// 而強制走少數可稽核的 wrapper。**兩者都沒做，這是一個具名的未完成，不是邊界。**
 @Test("每一個寫入 primitive 的呼叫都掛了 WRITE-SITE 標記")
 func everyWritePrimitiveCarriesAMarker() throws {
     let root = try repositoryRootForWriteSites()
+    // **`open(` 與 `write(` 在清單裡。** 上一版沒有它們，而它們是記憶層**實際
+    // 使用**的寫入手段——`memory-prune-open` / `memory-append-open` / `lock-open`
+    // / `derived-open-helper` 全部走它。更難看的是：R10 用來證明上一版檢查無效的
+    // 那個變異，用的正是 `open(` / `write(`，而我把它們寫進了敘述、沒寫進清單，
+    // 於是同一個變異對新版**照樣全綠**（#44 R11 verify，實測）。
     let primitives = [
         "FileHandle(forWritingTo:", "FileHandle(forUpdating:", ".write(to:",
         "removeItem(", "replaceItemAt(", "createDirectory(", "sqlite3_open_v2(",
         "ftruncate(", "mkfifo(", "openDerivedFileNoFollow(",
+        "open(", "write(", "pwrite(", "truncate(", "rename(", "link(", "copyItem(",
+        "moveItem(", "createFile(", "createSymbolicLink(",
     ]
     var unmarked: [String] = []
-    for module in ["LTMIndex", "LTMMemory"] {
-        let dir = root.appendingPathComponent("Sources/\(module)")
-        for name in try FileManager.default.contentsOfDirectory(atPath: dir.path)
-        where name.hasSuffix(".swift") {
-            let lines = try String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8)
+    for file in try swiftSourcesUnderSources(root) {
+        do {
+            let name = file.lastPathComponent
+            let lines = try String(contentsOf: file, encoding: .utf8)
                 .components(separatedBy: "\n")
             for (index, line) in lines.enumerated() {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -119,7 +136,22 @@ func everyWritePrimitiveCarriesAMarker() throws {
                 // helper 自身的宣告不是站點，它是所有走它的站點的實作。
                 guard !trimmed.hasPrefix("func openDerivedFileNoFollow") else { continue }
                 guard primitives.contains(where: { trimmed.contains($0) }) else { continue }
-                let window = lines[max(0, index - 2)..<index]
+                // **三類精確排除，逐條寫出理由——不是靠放寬誠實邊界。**
+                //
+                // 1. `O_RDONLY` 的 open：唯讀，不改變檔案系統。
+                // 2. `.open(` 前面有點：那是 Swift 的方法名（`VectorSidecar.open`），
+                //    不是 `open(2)`。`open(` 這個 pattern 抓不出這個差別。
+                // 3. 寫到 stdout／stderr 的 `FileHandle.standard*.write`：那是串流，
+                //    不是檔案系統。
+                if trimmed.contains("O_RDONLY") { continue }
+                if trimmed.contains(".open(") { continue }
+                if trimmed.contains("FileHandle.standard") { continue }
+                // 4. 函式**宣告**不是呼叫站點（`public static func open(url:…)`）。
+                if trimmed.hasPrefix("func ") || trimmed.contains(" func ") { continue }
+                // 窗口 3 行而不是 2：一個呼叫可以跨行（三元運算子的第二個分支
+                // 距離標記三行）。**這是一個會漏的常數**——把呼叫拆得更開就逃得掉，
+                // 而那條與下方誠實邊界的「單行連續文字比對」是同一個限制的兩面。
+                let window = lines[max(0, index - 3)..<index]
                     .map { $0.trimmingCharacters(in: .whitespaces) }
                 guard !window.contains(where: { $0.hasPrefix("// WRITE-SITE:") }) else { continue }
                 unmarked.append("\(name):\(index + 1) \(trimmed.prefix(60))")
@@ -129,6 +161,25 @@ func everyWritePrimitiveCarriesAMarker() throws {
     #expect(
         unmarked.isEmpty,
         "這些呼叫會改變檔案系統但沒掛 WRITE-SITE 標記：\n\(unmarked.joined(separator: "\n"))")
+}
+
+/// `Sources/` 底下**每一個** `.swift`，遞迴。
+///
+/// 上一版寫 `for module in ["LTMIndex", "LTMMemory"]` + 非遞迴的
+/// `contentsOfDirectory`——而 `Sources/` 有 8 個模組，其中 `Sources/ltm/Commands.swift`
+/// 就有兩個 `createDirectory`（建的正是**記憶層根目錄**）逃掉了。那兩處用的是
+/// **清單內**的 primitive，逃掉純粹因為所在模組沒被打開，而我寫的誠實邊界說
+/// 「涵蓋範圍等於那份清單」——**第二次把界線寫小了一級**（#44 R11 verify）。
+private func swiftSourcesUnderSources(_ root: URL) throws -> [URL] {
+    let sources = root.appendingPathComponent("Sources")
+    guard
+        let walker = FileManager.default.enumerator(
+            at: sources, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+    else {
+        struct SourcesUnreadable: Error {}
+        throw SourcesUnreadable()
+    }
+    return walker.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
 }
 
 private func repositoryRootForWriteSites(file: StaticString = #filePath) throws -> URL {

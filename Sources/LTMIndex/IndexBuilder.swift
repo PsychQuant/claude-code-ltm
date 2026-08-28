@@ -730,6 +730,7 @@ public struct IndexBuilder: Sendable {
             throw BuildError.sidecarShorterThanDeclared(
                 declared: rows, found: rowBytes == 0 ? 0 : Int(current) / rowBytes)
         }
+        // WRITE-SITE: sidecar-truncate-apply
         try handle.truncate(atOffset: target)
     }
 
@@ -741,6 +742,7 @@ public struct IndexBuilder: Sendable {
             let handle = try openDerivedFileNoFollow(location.vectorsURL, flags: O_WRONLY)
             defer { try? handle.close() }
             try handle.seekToEnd()
+            // WRITE-SITE: sidecar-append-write
             try handle.write(contentsOf: data)
             try handle.synchronize()
         } else {
@@ -859,6 +861,16 @@ public struct IndexBuilder: Sendable {
 /// | `memory-append-open` | `open(O_NOFOLLOW)` + `ExclusiveFile.verify` | ✅ |
 /// | `memory-backup-cleanup-a` | `try? removeItem` | 只動我們自己剛建的備份檔 |
 /// | `memory-backup-cleanup-b` | 同上 | 同上 |
+/// | `sidecar-truncate-apply` | `FileHandle.truncate` | ✅ 在 `sidecar-truncate` 的檢查之後 |
+/// | `sidecar-append-write` | `FileHandle.write` | ✅ 在 `sidecar-append` 的檢查之後 |
+/// | `lock-write-pid` | `write(2)` | ✅ 在 `lock-open` 的檢查與 `lock-truncate` 之後 |
+/// | `memory-backup-create` | `open(O_CREAT\|O_EXCL)` | `O_EXCL`：既存名稱一律 `EEXIST`，**結構上不跟任何連結走** |
+/// | `memory-backup-write` | `write(2)` | ✅ 在上一列建立的 fd 上 |
+/// | `memory-prune-write` | `write(2)` | ✅ 在 `memory-prune-open` 的檢查之後 |
+/// | `memory-append-write` | `write(2)` | ✅ 在 `memory-append-open` 的檢查之後 |
+/// | `memory-append-seal` | `write(2)` | 同上（殘行封口）|
+/// | `cli-memory-root-mkdir-a` | `createDirectory` | 建記憶層根目錄；呼叫端已驗過它不在語料裡 |
+/// | `cli-memory-root-mkdir-b` | 同上 | 同上 |
 ///
 /// **記憶層在表裡。** 上一版寫「記憶層不在這張表裡：它有自己的守衛與自己的威脅
 /// 模型（#40）」——**那句話沒有量過，而且是假的**：`ltm memory --prune --force`
@@ -870,10 +882,16 @@ public struct IndexBuilder: Sendable {
 ///
 /// ## 這張表由什麼守著
 ///
-/// `WriteSiteTableSyncTests` 掃 `Sources/LTMIndex` 與 `Sources/LTMMemory` 裡會
-/// 改變檔案系統的呼叫並與這張表的數量比對。**新增一個站點而沒更新這張表，它會紅。**
-/// 它比對數量而非身分（誠實邊界寫在那條測試裡）——建立它的當下就抓到這張表少了
-/// 兩處，那正是它存在的理由。
+/// `WriteSiteTableSyncTests`。**機制與它的誠實邊界只寫在那個檔案裡，這裡不複述。**
+///
+/// 先前這一段自己描述了一次機制，而那段描述在機制被換掉之後留在原地：它說檢查
+/// 「比對數量而非身分」（那句話正是上一輪被判為 CRITICAL 的錯誤自我設限），
+/// 並援引「建立它的當下就抓到這張表少了兩處」當證據（那個量測重跑不重現，是我
+/// 調常數調到綠之後編的）。**我在 CHANGELOG 收回了它們，卻把原文留在原始碼裡
+/// ——收回只做了一半**（#44 R11 verify，requirements lens）。
+///
+/// 這是 CLAUDE.md 記過的「把一份規格收斂到單一位置，不等於它從此不會漂移」的
+/// 第三個實例，而這一次漂移的距離是**同一則 doc comment 裡的 35 行**。
 ///
 /// ## `replaceItemAt` 那一格：量完了（先前是具名未知）
 ///
@@ -1126,6 +1144,7 @@ public final class FileLock: @unchecked Sendable {
         _ = ftruncate(descriptor, 0)
         _ = lseek(descriptor, 0, SEEK_SET)
         let pid = "\(ProcessInfo.processInfo.processIdentifier)\n"
+        // WRITE-SITE: lock-write-pid
         _ = pid.withCString { write(descriptor, $0, strlen($0)) }
         return FileLock(url: url, descriptor: descriptor)
     }
