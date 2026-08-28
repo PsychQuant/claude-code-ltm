@@ -835,12 +835,20 @@ public struct IndexBuilder: Sendable {
 
 
 
-/// # derived root 底下每一個會改變檔案系統的站點，逐一列出
+/// # 會改變檔案系統的站點：一份**被檢查守著的清單**，不是一份完整性證明
+///
+/// **標題先前寫「每一個」，那是一句完整性宣稱，而守著它的檢查明知會漏**
+/// （`setAttributes` / `chmod` / `openat` / `writev` 都不在 primitive 清單裡）。
+/// 本 repo 的硬規則是「宣稱完整的列舉必須附上證明它完整的檢查」——附不出來，
+/// 就不能宣稱。所以標題改成它實際是的東西：**一份被檢查守著的清單**。
+///
+/// 那條檢查（`WriteSiteTableSyncTests`）買到的是「清單內的手段一定要進表」，
+/// 而它的限制逐條寫在那個檔案裡。**它已經被驗證推翻四次，每次都是我把界線
+/// 寫小了一級**——所以現在標題不再替它宣稱它做不到的事。
 ///
 /// R6 起有一條 finding 掛著：security lens 數出「約 14 個站點，只有 5 個走共用
-/// 開檔器」，而我連續兩輪沒有處理它。實際數過之後，**那個數字是高估的**——但
-/// 「只有 5 個走共用開檔器」是對的，而正確的答案不是「把全部改成走它」，是
-/// **逐站點說清楚它為什麼安全或不安全**。
+/// 開檔器」。實際數過之後那個數字是高估的，但「只有 5 個走共用開檔器」是對的，
+/// 而正確的答案不是「把全部改成走它」，是**逐站點說清楚它為什麼安全或不安全**。
 ///
 /// | `WRITE-SITE` 標記 | 動作 | 判定 |
 /// |---|---|---|
@@ -864,12 +872,12 @@ public struct IndexBuilder: Sendable {
 /// | `sidecar-truncate-apply` | `FileHandle.truncate` | ✅ 在 `sidecar-truncate` 的檢查之後 |
 /// | `sidecar-append-write` | `FileHandle.write` | ✅ 在 `sidecar-append` 的檢查之後 |
 /// | `lock-write-pid` | `write(2)` | ✅ 在 `lock-open` 的檢查與 `lock-truncate` 之後 |
-/// | `memory-backup-create` | `open(O_CREAT\|O_EXCL)` | `O_EXCL`：既存名稱一律 `EEXIST`，**結構上不跟任何連結走** |
+/// | `memory-backup-create` | `open(O_CREAT\|O_EXCL\|O_NOFOLLOW)` | 最後一段擋住；**父目錄不擋**（TOCTOU 類，#40 既決限度）|
 /// | `memory-backup-write` | `write(2)` | ✅ 在上一列建立的 fd 上 |
 /// | `memory-prune-write` | `write(2)` | ✅ 在 `memory-prune-open` 的檢查之後 |
 /// | `memory-append-write` | `write(2)` | ✅ 在 `memory-append-open` 的檢查之後 |
 /// | `memory-append-seal` | `write(2)` | 同上（殘行封口）|
-/// | `cli-memory-root-mkdir-a` | `createDirectory` | 建記憶層根目錄；呼叫端已驗過它不在語料裡 |
+/// | `cli-memory-root-mkdir-a` | `lstat` + `createDirectory` | 最後一段是 symlink 就拒絕；`validatedRoot:` 只是標籤，不是型別保證 |
 /// | `cli-memory-root-mkdir-b` | 同上 | 同上 |
 ///
 /// **記憶層在表裡。** 上一版寫「記憶層不在這張表裡：它有自己的守衛與自己的威脅

@@ -110,8 +110,36 @@ enum CommandSupport {
     ///
     /// 與衍生索引分開（`derived/`）是刻意的：索引可以隨時刪掉重建，記憶層不行
     /// ——它記的是 jsonl 記不得的事（CLAUDE.md 的例外條款）。
+    /// `root` 本身是 symlink 就拒絕。
+    ///
+    /// **`validatedRoot:` 只是一個參數標籤，型別仍是任意 `URL`。** 呼叫端先前
+    /// 驗過的是一條**可變的路徑**，而 `createDirectory` 會重新解析它——所以那個
+    /// 標籤承諾了型別沒有攜帶的東西（#44 R12 verify，codex）。
+    ///
+    /// 這正是本 repo 記過的判準：**不要從一個值反推另一件事**；而「先前驗過」
+    /// 是關於過去的一個斷言，不是關於現在這條路徑的性質。
+    ///
+    /// **誠實邊界**：這只擋最後一段是 symlink 的情形。中間路徑元件被換掉仍然
+    /// 跟著走，那是 TOCTOU 類、#40 的既決限度。**它買到的是「使用者自己把
+    /// `~/.claude-ltm` 做成連結」這一類，不是對抗者。**
+    private static func refuseSymlinkedMemoryRoot(_ root: URL) throws {
+        var probe = stat()
+        guard lstat(root.path, &probe) == 0 else { return }  // 不存在 = 待會建它
+        guard (probe.st_mode & S_IFMT) != S_IFLNK else {
+            throw CocoaError(
+                .fileWriteUnknown,
+                userInfo: [
+                    NSFilePathErrorKey: root.path,
+                    NSLocalizedDescriptionKey:
+                        "記憶層根目錄是一個符號連結。記憶層會在它底下建檔與就地覆寫，"
+                        + "所以這裡不跟著它走——請把它換成真正的目錄，或改設 LTM_MEMORY_ROOT。",
+                ])
+        }
+    }
+
     /// 事件檔路徑。**呼叫端必須先確認 root 不在語料裡**（見 `LTMService.make`）。
     static func memoryEventsURL(validatedRoot root: URL) throws -> URL {
+        try refuseSymlinkedMemoryRoot(root)
         // WRITE-SITE: cli-memory-root-mkdir-a
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root.appendingPathComponent("events.jsonl")
@@ -123,6 +151,7 @@ enum CommandSupport {
     /// anchor，一筆紀錄對整次呈現），混在同一份 JSON Lines 裡會逼讀取端先猜
     /// 這一行是哪一種。同一個目錄、同一條落地紀律（見 `CanonicalStore`）。
     static func memoryRecordsURL(validatedRoot root: URL) throws -> URL {
+        try refuseSymlinkedMemoryRoot(root)
         // WRITE-SITE: cli-memory-root-mkdir-b
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root.appendingPathComponent("presentations.jsonl")

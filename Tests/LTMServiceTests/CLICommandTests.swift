@@ -1008,3 +1008,43 @@ private func presentationID(in output: String) -> String? {
     let id = String(rest.prefix(36))
     return id.count == 36 ? id : nil
 }
+
+/// 記憶層根目錄是 symlink 時要具名拒絕。
+///
+/// `validatedRoot:` 只是一個參數標籤，型別仍是任意 `URL`——呼叫端先前驗過的是
+/// 一條**可變的路徑**，而 `createDirectory` 會重新解析它（#44 R12 verify）。
+@Test("記憶層根目錄是 symlink 時具名拒絕，不在連結目標底下建檔")
+func aSymlinkedMemoryRootIsRefused() throws {
+    let workspace = try CLIWorkspace.make(texts: ["內容"])
+    defer { workspace.cleanup() }
+
+    let base = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ltm-memroot-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: base) }
+    // **連結要做在 `<base>/memory` 上，不是 `<base>` 上。**
+    //
+    // `memoryRootURL()` 會 append `"memory"`，所以守衛看的最後一段是 `memory`。
+    // 第一版我把 `<base>` 做成連結——那是**父目錄**那一半，而它是文件裡明列的
+    // 既接受限度（TOCTOU 類、#40）。於是測試與守衛對不上，而它「通過」了。
+    let real = base.appendingPathComponent("real")
+    try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+    let link = base.appendingPathComponent("linked")
+    try FileManager.default.createDirectory(at: link, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(
+        at: link.appendingPathComponent("memory"), withDestinationURL: real)
+
+    // **先建索引。** 不建的話查詢會因為「索引不存在」先失敗，於是 `code != 0`
+    // 被一個與 symlink 無關的理由滿足——第一版就是這樣綠的（拿掉守衛也綠）。
+    let built = try runCLI(["build", "--quiet"], environment: workspace.environment)
+    #expect(built.code == 0, "前提：索引要先建起來，實際 stderr：\(built.err)")
+
+    var environment = workspace.environment
+    environment["LTM_MEMORY_ROOT"] = link.path
+    let result = try runCLI(["query", "內容", "--all-projects", "--record"], environment: environment)
+    #expect(result.code != 0, "symlink 的記憶層根目錄應被拒絕，實際 exit \(result.code)")
+    #expect(result.err.contains("符號連結"), "訊息要指名原因，實際 stderr：\(result.err)")
+    #expect(
+        !FileManager.default.fileExists(atPath: real.appendingPathComponent("events.jsonl").path),
+        "在連結目標底下建了事件檔")
+}

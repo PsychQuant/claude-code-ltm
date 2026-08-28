@@ -484,8 +484,18 @@ public struct FileEventStore: EventStore {
         // ── 備份，並且確認它真的在磁碟上，才動原檔 ──
         let backup = url.appendingPathExtension(
             "bak-\(UUID().uuidString.prefix(8))")
+        // `O_NOFOLLOW` 與 `O_EXCL` 各擋一半，而**兩半加起來仍然不涵蓋父目錄**。
+        //
+        // `O_EXCL` 只保證「最後一段若已存在就 `EEXIST`」，`O_NOFOLLOW` 只看最後
+        // 一段是不是符號連結——**中間任何一段是 symlink，路徑解析照樣跟著走**。
+        // 所以一個在驗證之後被換成指向語料樹的父目錄，會讓備份落在語料裡
+        // （#44 R12 verify，codex）。
+        //
+        // 那是 TOCTOU 類，在 #40 的模型下是被接受的限度（需要並行的本機攻擊者）。
+        // **要記的是我上一輪把它寫成「結構上不跟任何連結走」——那句話是假的**，
+        // 表的判定已改。
         // WRITE-SITE: memory-backup-create
-        let backupFD = open(backup.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        let backupFD = open(backup.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
         guard backupFD >= 0 else {
             throw EventStoreError.appendFailed(
                 path: backup.path, underlying: "無法建立備份：errno \(errno)（未修剪）")
