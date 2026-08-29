@@ -80,42 +80,39 @@ func everyWriteSiteAppearsInTheTable() throws {
 ///
 /// 這一條掃會改變檔案系統的呼叫，要求每一個上方 **3 行內**有 `// WRITE-SITE:`。
 ///
-/// ## 誠實邊界（第四次寫；前三次都把界線畫小了一級）
+/// ## 誠實邊界（第五次寫；前四次都把界線畫小了一級）
 ///
-/// 四次的紀錄一起留著，因為它們是**同一個錯的四個變體**——每一次的修法都是再
+/// 五次的紀錄一起留著，因為它們是**同一個錯的五個變體**——每一次的修法都是再
 /// 列舉一次限度，每一次都有下一個沒被列到的：
 ///
 /// 1. R10：說它「比對數量不比對身分」，而真相是**它連表都沒讀**。
 /// 2. R11：說它「涵蓋範圍等於那份 primitive 清單」，而真相是清單 ∩ 兩個模組 ∩
-///    非遞迴 ∩ 單行連續文字。三個額外的限制一個都沒寫出來，其中一個讓
-///    **R10 用來殺死上一版的那個變異對新版照樣全綠**。
-/// 3. R14：收緊成「一個標記只背書一個呼叫」，而實作是**逐行**認領——同一行上的
-///    兩個呼叫仍然共用一個標記，包含它剛「修掉」的那個三元運算子形狀折成一行。
-/// 4. R15（本次）：又一個沒被寫進來的限度——**排除是整行的**。一行只要出現
-///    `O_RDONLY` 就整行跳過，同一行上真正的寫入呼叫一起隱形。
+///    非遞迴 ∩ 單行連續文字。
+/// 3. R14：收緊成「一個標記只背書一個呼叫」，而實作是**逐行**認領。
+/// 4. R15：關掉整行排除，卻換成 **60 字元回看**——同一個缺陷換一個參數。
+/// 5. R16（本次）：上一版寫「`try data\n    .write(to: …)` 逃得掉，**實測過**」
+///    ——**三種拆法全部抓得到**（第二行含 `.write(to:`）。那句「實測過」是假的。
 ///
-/// 而 R14 那次還有一個不在「限度」這個軸上的問題：**那個機制沒有執行點**。
-/// 檢查跑在真實的樹上，而樹裡按定義不含它要防的反例，所以退掉整段
-/// `claimedMarkers` 是全綠的。修法見 `WriteSiteScan` 的 doc comment：把掃描抽成
-/// 純函式，反例用合成輸入餵進來。
+/// **所以這一節現在只寫量過的東西，不寫推測的逃逸。** 下面每一條都可以用
+/// `WriteSiteScan` 的合成輸入重跑。
 ///
-/// 現在的界線，逐條寫出來：
-///
-/// - **範圍**：`Sources/` 底下每一個 `.swift`，遞迴。不再限模組。
-/// - **手段**：下方 `primitives` 清單。它現在含 `open(` / `write(`（記憶層實際
-///   使用的那兩個），但**它仍然是一份會漏的列舉**——一個經由 `Process` 呼叫外部
-///   程式、或用清單外 syscall 的新站點仍然隱形。
-/// - **形式**：**單行連續文字比對**，標記要在呼叫上方 **3 行內**。呼叫被換行
-///   拆開就抓不到（`try data\n    .write(to: …)` 逃得掉，實測過），拆得比 3 行
-///   更開也逃得掉。兩者是同一個限制的兩面：這條檢查看的是文字，不是語法樹。
-/// - **粒度**：逐**呼叫**（同一行上的每一個），逐**比對**排除。不是逐行——那是
-///   R14 與 R15 各自踩到的一次。
-/// - **標記名稱唯一**，由 `writeSiteMarkerNamesAreUnique` 執行。沒有這條的話，
-///   複製一個既有名字就能讓新站點在兩個 `Set` 的比對裡隱形。
+/// - **範圍**：`Sources/` 底下每一個 `.swift`，遞迴。
+/// - **手段**：`primitives` 清單。**它是一份會漏的列舉**——經由 `Process` 呼叫外部
+///   程式、或用清單外 syscall 的站點隱形。這一條沒有變過。
+/// - **形式**：單行文字比對。標記要在呼叫上方 **3 行內**；拆得比 3 行更開就逃得掉
+///   （這一項量過：把標記與呼叫拉開 4 行，`unmarked` 回報那個呼叫）。
+/// - **粒度**：逐**呼叫**、逐**比對**排除，排除的判準是 **receiver** 而不是字元窗口。
+/// - **四條排除規則各自的殘餘限度**（都量過，都是**偽陽性**方向——要求掛標記，
+///   不是放行）：
+///   1. `func ` 只認一個空白（`func  open(` 會被當成呼叫）。
+///   2. receiver 是別名時判不出來（`let o = Darwin.open` 之後的 `o(...)`；
+///      `let h = FileHandle.standardError` 之後的 `h.write(...)`）。
+///   3. libc 限定詞是三個字面（`Darwin`／`Glibc`／`Foundation`），其他模組名不認。
+///   4. 引數跨行時 `argumentText` 回 `nil` → **不排除**（無法判定時的安全方向）。
 ///
 /// **為什麼不寫成性質**：「會改變檔案系統」在 Swift 型別層沒有表達方式。要真正
-/// 關掉它需要 SwiftSyntax／lint 層的 AST 檢查，或禁止業務模組直接呼叫這些 API
-/// 而強制走少數可稽核的 wrapper。**兩者都沒做，這是一個具名的未完成，不是邊界。**
+/// 關掉它需要 SwiftSyntax／lint 層的 AST 檢查，或禁止業務模組直接呼叫這些 API。
+/// **兩者都沒做，這是一個具名的未完成，不是邊界。**
 @Test("每一個寫入 primitive 的呼叫都掛了 WRITE-SITE 標記")
 func everyWritePrimitiveCarriesAMarker() throws {
     let root = try repositoryRootForWriteSites()
@@ -139,10 +136,7 @@ func everyWritePrimitiveCarriesAMarker() throws {
 @Test("WRITE-SITE 標記名稱在整棵 Sources/ 樹裡唯一")
 func writeSiteMarkerNamesAreUnique() throws {
     let root = try repositoryRootForWriteSites()
-    let markers = WriteSiteScan.markers(in: try sourceFiles(root))
-    var seen: [String: [String]] = [:]
-    for marker in markers { seen[marker.name, default: []].append(marker.location) }
-    let duplicated = seen.filter { $0.value.count > 1 }
+    let duplicated = WriteSiteScan.duplicateNames(in: try sourceFiles(root))
         .map { "\($0.key): \($0.value.joined(separator: ", "))" }
         .sorted()
     #expect(
@@ -156,8 +150,20 @@ func writeSiteMarkerNamesAreUnique() throws {
 // MARK: - 掃描器自己的執行點（合成輸入）
 
 /// 下面這組測試存在的理由寫在 `WriteSiteScan` 的 doc comment 裡：真實的樹按定義
-/// 不含這些反例，所以機制在那裡驅動不到。**逐一退掉 `WriteSiteScan` 的任一機制，
-/// 這組裡都至少有一條變紅**——這是 R14 那版沒有的性質。
+/// 不含這些反例，所以機制在那裡驅動不到。
+///
+/// **上一版在這裡寫「逐一退掉任一機制，這組裡都至少有一條變紅」——那是假的**
+/// （#44 R16 verify，五個實測反例）。誰扛什麼是量出來的，不是宣稱的：
+///
+/// | 退掉的機制 | 由誰抓到 |
+/// |---|---|
+/// | 逐呼叫、`claimed` 集合、重疊合併、逐比對排除、`markers()` 不去重 | 本組合成測試 |
+/// | `duplicateNames` 判準、receiver 定界、libc 限定詞、`argumentText` 不閉合 | 本組合成測試（R16 新增） |
+/// | 三條排除規則本身（整條移除） | **真實樹**那條檢查——移除後 `everyWritePrimitiveCarriesAMarker` 多出偽陽性 |
+///
+/// 查法：把某個機制改掉，`swift test --filter writeSite`，看**哪一條**變紅。
+/// 注意 swift-testing 的失敗行首是 `􀢄` 不是 `✘`——用錯 pattern 會數到 0 而以為
+/// 沒紅（本輪踩過）。
 private func synthetic(_ body: String) -> [(path: String, lines: [String])] {
     [(path: "Synthetic.swift", lines: body.components(separatedBy: "\n"))]
 }
@@ -202,9 +208,16 @@ func writeSiteScannerRejectsBorrowedMarker() {
 @Test("同一行上的唯讀 open 不會讓同一行的寫入 open 隱形")
 func writeSiteScannerScopesExclusionsPerCall() {
     // 上一版對整行 `continue`：這一行含 `O_RDONLY`，於是**兩個**呼叫一起隱形。
-    let flagged = WriteSiteScan.unmarked(
-        in: synthetic("let r = open(a, O_RDONLY); let w = open(b, O_WRONLY)"))
-    #expect(flagged.count == 1, "唯讀那個要放行、寫入那個要抓出來，實得 \(flagged)")
+    // **指名是哪一個被抓**：`count == 1` 不說是哪一個，而「唯讀被抓、寫入放行」
+    // 也滿足它（#44 R16 verify）。同時測兩種順序——危險的是寫入在前那一種。
+    for line in ["let r = open(a, O_RDONLY); let w = open(b, O_WRONLY)",
+                 "let w = open(b, O_WRONLY); let r = open(a, O_RDONLY)"] {
+        let flagged = WriteSiteScan.unmarked(in: synthetic(line))
+        #expect(flagged.count == 1, "\(line) → 實得 \(flagged)")
+        #expect(
+            flagged.first?.contains("O_WRONLY") == true,
+            "被抓的必須是寫入那個，實得 \(flagged)")
+    }
 }
 
 @Test("巢狀的 pattern 只算一個呼叫")
@@ -226,8 +239,10 @@ func writeSiteScannerAcceptsAProperlyMarkedCall() {
 
 @Test("重名的標記在 markers() 裡看得見")
 func writeSiteScannerSurfacesDuplicateNames() {
-    // 這是 `writeSiteMarkerNamesAreUnique` 的執行點：真實的樹沒有重名，所以那條
-    // 測試在樹上永遠綠，驅動不到它自己的判準。
+    // **這一條驅動的是 `markers()` 不去重，不是唯一性判準本身。**
+    // 上一版的註解寫著「這是 `writeSiteMarkerNamesAreUnique` 的執行點」——假的：
+    // 它從不經過 `seen`／`filter` 那段偵測邏輯。「A 的前置條件被測到」不等於
+    // 「A 有執行點」（#44 R16 verify）。真正的執行點是下一條。
     let names = WriteSiteScan.markers(
         in: synthetic(
             """
@@ -238,6 +253,59 @@ func writeSiteScannerSurfacesDuplicateNames() {
             """)
     ).map(\.name)
     #expect(names == ["dup", "dup"], "重複的名字必須都在，不能被去重，實得 \(names)")
+}
+
+@Test("重名偵測本身由合成輸入驅動")
+func writeSiteScannerDetectsDuplicateNames() {
+    // `writeSiteMarkerNamesAreUnique` 的**真正**執行點。真實的樹零重名，所以那條
+    // 測試在樹上恆綠——把它的判準改成 `> 99` 曾經零測試變紅（#44 R16 verify）。
+    let duplicated = WriteSiteScan.duplicateNames(
+        in: synthetic(
+            """
+            // WRITE-SITE: dup
+            open(a, O_WRONLY)
+            // WRITE-SITE: unique
+            open(b, O_WRONLY)
+            // WRITE-SITE: dup
+            open(c, O_WRONLY)
+            """))
+    #expect(duplicated.keys.sorted() == ["dup"], "只有 dup 重複，實得 \(duplicated.keys.sorted())")
+    #expect(
+        duplicated["dup"] == ["Synthetic.swift:1", "Synthetic.swift:5"],
+        "要指出每一個出現位置，實得 \(duplicated["dup"] ?? [])")
+}
+
+@Test("排除的判準是 receiver，不是附近的文字")
+func writeSiteScannerScopesExclusionByReceiver() {
+    // R15 把「整行排除」縮成 60 字元回看——**同一個缺陷換一個參數**：
+    // 這一行的兩個呼叫在上一版全部消失，而同一行多打幾個空白就只消失一個。
+    let flagged = WriteSiteScan.unmarked(
+        in: synthetic("FileHandle.standardError.write(a); g.write(b)"))
+    #expect(flagged.count == 1, "串流那個要放行、g.write 要抓出來，實得 \(flagged)")
+    // 空白數量不得改變結果——上一版會。
+    let spaced = WriteSiteScan.unmarked(
+        in: synthetic("FileHandle.standardError.write(a);        g.write(b)"))
+    #expect(flagged.count == spaced.count, "判準裡不該有空白字元的數量")
+}
+
+@Test("模組限定的 syscall 不是 Swift 方法名")
+func writeSiteScannerDoesNotExcludeModuleQualifiedOpen() {
+    // 上一版只問「前一個字元是不是點」，於是 `Darwin.open(` 被當成
+    // `VectorSidecar.open(` 一起排除——一個真正的 `open(2)` 完全逃過檢查。
+    #expect(
+        WriteSiteScan.unmarked(in: synthetic("Darwin.open(p, O_WRONLY | O_CREAT, 0o600)")).count
+            == 1, "Darwin.open 是 syscall，必須要求標記")
+    #expect(
+        WriteSiteScan.unmarked(in: synthetic("VectorSidecar.open(at: url)")).isEmpty,
+        "Swift 方法名不該被要求標記")
+}
+
+@Test("括號沒閉合時不吞下後面呼叫的引數")
+func writeSiteScannerDoesNotOverrunUnbalancedParens() {
+    // 上一版在括號不閉合時取到行尾，於是第一個呼叫吞下**第二個**呼叫的
+    // `O_RDONLY`，把一個真正的寫入靜默排除。
+    let flagged = WriteSiteScan.unmarked(in: synthetic("open(a, flags; open(b, O_RDONLY)"))
+    #expect(flagged.count == 1, "未閉合那個無法判定 → 不排除；唯讀那個照常排除，實得 \(flagged)")
 }
 
 // MARK: - 掃描器（純函式，抽出來是為了讓它有執行點）
@@ -299,39 +367,84 @@ enum WriteSiteScan {
         return merged.map(\.start)
     }
 
-    /// **排除是逐個比對，不是逐行。**
+    /// **排除是逐個比對，而「逐個」的判準是這個呼叫的 receiver，不是字元窗口。**
     ///
-    /// 上一版對整行 `continue`：一行只要出現 `O_RDONLY`／`.open(`／
-    /// `FileHandle.standard`，**同一行上真正的寫入呼叫就一起隱形**。那是第四個
-    /// 沒被寫進誠實邊界的限度，而那份邊界當時已經是第三次改寫（#44 R15 verify）。
+    /// 這條規則已經被寫錯兩次，兩次都是同一個形狀——把「這個呼叫自己」近似成
+    /// 「附近的文字」：
+    ///
+    /// 1. R15 之前：整行 `continue`。一行只要出現 `O_RDONLY`／`.open(`／
+    ///    `FileHandle.standard`，同一行上真正的寫入呼叫就一起隱形。
+    /// 2. R15 的修法：把窗口從整行縮成 60 字元回看。**同一個缺陷，換一個參數**
+    ///    ——實測 `FileHandle.standardError.write(a); g.write(b)` 兩個呼叫都消失，
+    ///    而同一行多打幾個空白就只消失一個。**判準裡出現了空白字元的數量。**
+    ///    （#44 R16 verify，logic lens 與作者自查各自獨立測到。）
+    ///
+    /// 現在第 3 條走 `receiverChain`：從比對起點往回走**這個呼叫自己的**識別碼與
+    /// 點構成的鏈，遇到空白／分號／括號／運算子就停。窗口大小從此不在判準裡。
     private static func excluded(
         chars: [Character], span: (start: Int, end: Int, pattern: String)
     ) -> Bool {
-        let lead = String(chars[max(0, span.start - 60)..<span.start])
         // 1. 函式**宣告**不是呼叫站點（`public static func open(url:…)`）。
-        if lead.hasSuffix("func ") { return true }
+        //    `func ` 與名字之間只能有一個空白，所以緊鄰比對是正確的定界。
+        if String(chars[max(0, span.start - 5)..<span.start]) == "func " { return true }
+
+        let receiver = receiverChain(chars: chars, before: span.start)
+
         // 2. `VectorSidecar.open(` 是 Swift 方法名，不是 `open(2)`。
-        //    只對 `open(` 這個名字套用——`.write(to:` 前面也是點，但它是真呼叫。
-        if span.pattern == "open(", span.start > 0, chars[span.start - 1] == "." { return true }
-        // 3. 寫到 stdout／stderr 的 `FileHandle.standard*.write`：串流不是檔案系統。
-        if span.pattern == "write(" || span.pattern == ".write(to:",
-            lead.contains("FileHandle.standard")
-        {
-            return true
+        //    **但 `Darwin.open(` 是 `open(2)`**——上一版只問「前一個字元是不是點」，
+        //    於是模組限定的 syscall 被靜默排除（#44 R16 verify）。改成看 receiver
+        //    是不是已知的 libc 模組限定；是就**不**排除。
+        //
+        //    **殘餘限度（具名，不是邊界）**：任何其他寫法的 receiver（`typealias`
+        //    出來的別名、`let o = open` 之類）仍會被誤判。文字比對到此為止。
+        if span.pattern == "open(", !receiver.isEmpty {
+            let libcQualifiers = ["Darwin", "Glibc", "Foundation"]
+            return !libcQualifiers.contains(receiver)
         }
-        // 4. `O_RDONLY` 的 open 是唯讀。**只看這個呼叫自己的引數**——用括號配對
-        //    取出來，而不是問「這一行有沒有出現 O_RDONLY」。
+
+        // 3. 寫到 stdout／stderr 的 `FileHandle.standard*.write`：串流不是檔案系統。
+        //    判準是 **receiver 本身**，不是「附近有沒有出現這個字串」。
+        if span.pattern == "write(" || span.pattern == ".write(to:" {
+            if receiver == "FileHandle.standardError" || receiver == "FileHandle.standardOutput" {
+                return true
+            }
+        }
+
+        // 4. `O_RDONLY` 的 open 是唯讀。只看這個呼叫自己的引數。
         if ["open(", "sqlite3_open_v2(", "openDerivedFileNoFollow("].contains(span.pattern) {
-            if argumentText(chars: chars, openParenAt: span.end - 1).contains("O_RDONLY") {
+            if let args = argumentText(chars: chars, openParenAt: span.end - 1),
+                args.contains("O_RDONLY")
+            {
                 return true
             }
         }
         return false
     }
 
-    /// 從 `(` 起算的括號配對內容。呼叫被換行拆開時括號不會閉合，於是取到行尾
-    /// ——那是「單行文字比對」這個既有限度的延伸，不是新的洞。
-    private static func argumentText(chars: [Character], openParenAt index: Int) -> String {
+    /// 從 `index` 往回走一條 `A.b.c` 形式的 receiver 鏈；沒有就回空字串。
+    ///
+    /// 停在任何不是識別碼字元也不是點的地方——空白、分號、括號、運算子。所以
+    /// 它取到的是**這個呼叫的接收者**，與行上其他位置的文字無關。
+    private static func receiverChain(chars: [Character], before index: Int) -> String {
+        guard index > 0, chars[index - 1] == "." else { return "" }
+        var cursor = index - 1
+        while cursor > 0 {
+            let previous = chars[cursor - 1]
+            let isIdentifier = previous.isLetter || previous.isNumber || previous == "_"
+            guard isIdentifier || previous == "." else { break }
+            cursor -= 1
+        }
+        // 去掉尾端那個把 receiver 與呼叫分開的點。
+        return String(chars[cursor..<(index - 1)])
+    }
+
+    /// 從 `(` 起算的括號配對內容；**括號沒有在本行閉合就回 `nil`**。
+    ///
+    /// 上一版在不閉合時回「到行尾為止」，於是一個未閉合的呼叫會吞掉**後面另一個
+    /// 呼叫的** `O_RDONLY`，把真正的寫入靜默排除（#44 R16 verify）。回 `nil` 讓
+    /// 第 4 條無法判定，而無法判定時的安全方向是**不排除**——寧可要求它掛標記。
+    private static func argumentText(chars: [Character], openParenAt index: Int) -> String? {
+        guard index < chars.count, chars[index] == "(" else { return nil }
         var depth = 0
         var out: [Character] = []
         var cursor = index
@@ -340,13 +453,13 @@ enum WriteSiteScan {
                 depth += 1
             } else if chars[cursor] == ")" {
                 depth -= 1
-                if depth == 0 { break }
+                if depth == 0 { return String(out) }
             } else if depth > 0 {
                 out.append(chars[cursor])
             }
             cursor += 1
         }
-        return String(out)
+        return nil
     }
 
     /// 每一個標記的名字與位置。**回傳陣列不是集合**——重複的名字必須看得見
@@ -367,6 +480,19 @@ enum WriteSiteScan {
         return out
     }
 
+    /// 重複的標記名稱 → 它出現的每個位置。
+    ///
+    /// **這段邏輯先前住在 `@Test` 裡，只跑真實的樹，而樹裡零重名**——把判準從
+    /// `> 1` 改成 `> 99`，525 條測試全綠（#44 R16 verify，兩個 lens 各自變異證實）。
+    /// 那正是 R15 判為一號 CRITICAL 的東西：**為更正加的機制沒有執行點**，而 R15
+    /// 的修法（抽成純函式）只套用在 `markers` / `unmarked` / `writeCallOffsets`，
+    /// 漏了它自己新增的這一條。
+    static func duplicateNames(in files: [(path: String, lines: [String])]) -> [String: [String]] {
+        var seen: [String: [String]] = [:]
+        for marker in markers(in: files) { seen[marker.name, default: []].append(marker.location) }
+        return seen.filter { $0.value.count > 1 }
+    }
+
     /// 沒掛標記的寫入呼叫。
     ///
     /// **claimed 是每個檔案自己一份的行號集合**，所以不需要任何檔案識別鍵。
@@ -380,8 +506,10 @@ enum WriteSiteScan {
             for (index, line) in file.lines.enumerated() {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 guard !trimmed.hasPrefix("//") else { continue }
-                // helper 自身的宣告不是站點，它是所有走它的站點的實作。
-                guard !trimmed.hasPrefix("func openDerivedFileNoFollow") else { continue }
+                // （上一版這裡有一條 `func openDerivedFileNoFollow` 的守衛。
+                //   退掉它零測試變紅，真實樹上也不多不少——因為第 1 條排除已經
+                //   涵蓋所有 `func ` 宣告。**驅動不了的守衛要拆掉，不是留著加
+                //   註解**，而這正是本輪自己援引的那條規則，#44 R16 verify。）
                 let calls = writeCallOffsets(in: trimmed)
                 guard !calls.isEmpty else { continue }
                 let nearby = (max(0, index - 3)..<index).filter {
@@ -404,11 +532,15 @@ enum WriteSiteScan {
 
 /// `Sources/` 底下每一個 `.swift` 的 (repo 相對路徑, 行)。
 private func sourceFiles(_ root: URL) throws -> [(path: String, lines: [String])] {
-    try swiftSourcesUnderSources(root).map { file in
-        let relative =
-            file.path.hasPrefix(root.path + "/")
-            ? String(file.path.dropFirst(root.path.count + 1))
-            : file.path
+    let sourcesDepth = root.appendingPathComponent("Sources").pathComponents.count - 1
+    let files = try swiftSourcesUnderSources(root)
+    // finding 30/43：掃到零個檔案時，吃它的檢查會**虛真通過**。
+    precondition(!files.isEmpty, "Sources/ 掃出零個 .swift——檢查會虛真通過，這比失敗更糟")
+    return try files.map { file in
+        // **相對鍵在遍歷當下由起點目錄構造**，不用字串前綴相減——`FileManager`
+        // 對同一棵樹會給 `/var/...` 與 `/private/var/...` 兩種形式，前綴比對會
+        // 落空而靜默退化成絕對路徑（CLAUDE.md 具名的反模式）。
+        let relative = file.pathComponents.suffix(from: sourcesDepth).joined(separator: "/")
         return (
             path: relative,
             lines: try String(contentsOf: file, encoding: .utf8).components(separatedBy: "\n")

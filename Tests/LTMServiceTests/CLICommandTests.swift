@@ -1012,7 +1012,7 @@ private func presentationID(in output: String) -> String? {
 /// **不變式 1 的那一格由上游的 containment 擋，不是由記憶層的路徑檢查。**
 ///
 /// R12 診斷「`validatedRoot:` 只是參數標籤」是對的，而 R13 加的那道
-/// `refuseSymlinkedMemoryRoot` 裝錯了地方：三種佈局實測之後，它對這一格的
+/// `refuseSymlinkedMemoryRoot` 裝錯了地方：**兩種**佈局實測之後（見下方表），它對這一格的
 /// 邊際貢獻是**零**（拿掉它行為逐字相同），唯一可觀測的效果是拒絕良性搬遷。
 /// 已拆除（#44 R13 verify，devil's advocate 的更正，我自己重跑確認）。
 ///
@@ -1094,15 +1094,36 @@ func aMemoryRootPointingIntoTheCorpusIsRefusedUpstream() throws {
 /// 上一條的佈局在拿掉上游守衛之後語料不變（`mkdir -p` 對既存目錄是 no-op），
 /// 所以它驅動不到「不變式 1 沒被違反」。**這一條可以**：拿掉
 /// `LTMService.make` 那道 containment，`ltm mark` 會在唯讀語料裡建出
-/// `<root>` 與 `<root>/memory` 兩個目錄，然後才被第二層拒絕——退出碼與訊息
-/// 都不變，變的只有磁碟。
+/// `<root>` 與 `<root>/memory` 兩個目錄，然後才被第二層拒絕。
+///
+/// **上一版接著寫「退出碼與訊息都不變，變的只有磁碟」——兩者都會變**
+/// （#44 R16 verify，實測）：
+///
+/// | | 退出碼 | stderr |
+/// |---|---|---|
+/// | 有守衛 | **5**（`corpusError`）| `✗ 這個路徑落在唯讀語料裡：…` |
+/// | 拿掉守衛 | **3**（`indexStateError`）| `✗ pathInsideReadOnlyCorpus(path: …)` |
+///
+/// 路徑：`.rootInsideCorpus` 走 `corpusError`；守衛拿掉後 `FileEventStore` 的錯
+/// 不是 `ServiceError`，掉進 `MarkCommand` 的泛型 `catch` → `indexStateError`。
+///
+/// **而同一則註解往下 8 行的表自己說了相反的話**（「上一條 → 只有訊息那個」）
+/// ——訊息會變正是舊測試那個斷言變紅的原因。一則註解、8 行之內、兩個相反的答案。
+///
+/// **這句假話的實質代價**：因為以為退出碼與訊息不變，這條測試原本只斷言
+/// `code != 0`。於是 `makeService` 裡任何**更早**的 throw（embedding assets 拿不到、
+/// `anchorKey()` 失敗、日後新增的前置檢查）都會讓它 trivially 通過——測試全綠而
+/// containment 守衛已經爛掉。下方兩個斷言把失敗的**原因**釘住。
 ///
 /// 變異驗證（#44 R15）：把 `LTMService.swift:461` 那個 `if` 拿掉，逐條量到的是：
 ///
 /// | 測試 | 變紅的斷言 |
 /// |---|---|
-/// | 本條 | `fileExists(target)` 與語料根的 `contentsOfDirectory` ——**兩個都是檔案系統斷言** |
-/// | 上一條 | **只有訊息那個**（第二層報的是 `pathInsideReadOnlyCorpus(path: …)`，不含「唯讀語料」字樣）|
+/// | 本條 | **四個**：退出碼（5→3）、訊息、`fileExists(target)`、語料根的 `contentsOfDirectory` |
+/// | 上一條 | **只有訊息那個**；它的檔案系統斷言在變異下仍然是綠的 |
+///
+/// （R15 那一版這張表只有兩列，因為當時本條只斷言 `code != 0`——補上原因斷言之後
+/// 才有前兩列。表本身沒錯，是它涵蓋的斷言變多了。）
 ///
 /// **上一條的檔案系統斷言在變異下仍然是綠的**——這正是它驅動不到不變式 1 的
 /// 可執行證據，不是推論。
@@ -1123,7 +1144,9 @@ func aMemoryRootAtANonexistentCorpusPathCreatesNothing() throws {
     environment["LTM_MEMORY_ROOT"] = target.path
     let result = try runCLI(["mark", UUID().uuidString, "1", "--opened"], environment: environment)
 
-    #expect(result.code != 0, "指進語料樹的記憶層根目錄應被拒絕，實際 exit \(result.code)")
+    // **釘住失敗的原因，不只是「有失敗」**（#44 R16 verify）。
+    #expect(result.code == 5, "應為 corpusError(5)——不是任何早於守衛的錯，實際 \(result.code)")
+    #expect(result.err.contains("唯讀語料"), "訊息要指名原因，實際 stderr：\(result.err)")
     #expect(
         !FileManager.default.fileExists(atPath: target.path),
         "\(target.lastPathComponent) 被建進唯讀語料了——違反不變式 1 的是那個 mkdir")

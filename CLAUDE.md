@@ -316,13 +316,20 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 的另一行。驅動不了的守衛要拆掉，不是留著加註解（同 `conservative` 自檢那次的
 處置）。做法是**逐一退掉**每個新增的機制，而不是整批退。
 
-**`/idd-verify` 的 codex leg 目前跑不動——Codex 額度用完，不是設定問題。** 所以跑
-verify 時傳 `codexEnabled: false`，別再讓它失敗一次然後把 `cross-model pass
-incomplete` 報成 process gap（前四輪都這樣報，歸類是錯的）。
+**`/idd-verify` 的 codex leg 會間歇性因額度用完而失敗——是額度，不是設定問題。**
+所以**照常傳 `codexEnabled: true`**（上一版寫「傳 `false`」，那是額度全滿時的權宜，
+會讓能跑的輪次白白失去跨模型盲驗）。
 
-這件事的實質後果要說清楚：**沒有跨模型盲驗**。ensemble 的 4 個 lens 加 devil's
-advocate 全是 Claude 家族，所以同家族的共同盲點沒有任何東西會抓到。額度回來之前，
-verify 的結論要以「同一家族的五個視角都沒看到」來理解，不是「兩個家族都沒看到」。
+**每一輪的跨模型狀態要看那一輪的 `stats.reviewers`，不要照抄上一輪的結論**：
+
+| 輪次 | codex `ok` | 該輪能說的話 |
+|---|---|---|
+| R14 / R15 | `true` | 兩個模型家族都看過；codex 各自貢獻了 CRITICAL |
+| R16 | `false`（連同 devil's advocate，`integrity: 2`）| **只有 Claude 家族的四個 lens**，同家族的共同盲點沒有東西會抓到 |
+
+codex leg 失敗那幾輪，結論要以「同一家族的 N 個視角都沒看到」來理解，不是「兩個
+家族都沒看到」——而 N 也要照實數，R16 是 4 不是 5（DA 一起掛了）。
+
 設計討論走 Spectra／superpowers 的 spec 流程，spec 落在 `docs/superpowers/specs/`。
 
 ## 誠實邊界

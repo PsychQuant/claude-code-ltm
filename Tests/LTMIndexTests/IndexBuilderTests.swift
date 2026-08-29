@@ -860,7 +860,7 @@ func crashingBeforeTheFirstBatchDoesNotBrickTheIndex() throws {
     #expect(recovered.chunksIndexed == 3)
 }
 
-// MARK: - 記憶體預算與具名拒絕（#46 Expected ②③）
+// MARK: - 記憶體預算與具名拒絕（#46 Expected ②(a) 與 ③；②(b)「超過就分批寫檔」未實作）
 
 /// #46 ③ 逐字要的是「到達上限時**具名拒絕**，而不是讓 OS 決定」。
 ///

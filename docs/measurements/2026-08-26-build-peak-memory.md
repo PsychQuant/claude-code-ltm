@@ -155,28 +155,37 @@ chunks 與檔案數，且**沒有對照組**）：
 
 1. **不能**據此宣稱 #46 已解決或前提已被推翻。
 
-   > **② 與 ③ 的狀態不同，上一版的更正把它們一起抹掉了**（#44 R15 verify，
-   > devil's advocate）。逐項寫：
+   > **這一段被寫錯過三次，三次都是同一句話的不同錯法**，所以三版一起留著：
    >
-   > - **③（到達上限時具名拒絕）已出貨**：`BuildError.memoryBudgetExceeded`。
-   >   查法：`grep -n memoryBudgetExceeded Sources/LTMIndex/IndexBuilder.swift`
-   >   → 三處（doc、case、throw）；`git log --oneline -S memoryBudgetExceeded --
-   >   Sources/LTMIndex/IndexBuilder.swift` → `4df4e46`。
-   > - **②（超過上限就「分批寫檔而不是繼續累積」）按字面仍未實作。** 出貨的行為
-   >   是**拒絕**，不是降級成分批落地——那是 ③ 的行為。上一版的刪除線同時蓋住 ②，
-   >   而它給的查法（同一條 `git log`）**只證得到 ③**：一條 grep 找到具名拒絕，
-   >   並不能證明「超過就分批寫檔」存在。
+   > | 版本 | 說法 | 錯在哪 |
+   > |---|---|---|
+   > | 原句 | 「②③ 仍未實作」 | ③ 已出貨 |
+   > | 第一次更正 | 「②③ 都已出貨」 | ②(b) 未出貨 |
+   > | 第二次更正 | 「只有 ③ 出貨」 | **②(a) 已出貨** |
    >
-   > 原句與第一次更正一併留著，因為它們是同一個錯的兩個方向：
+   > 錯的根源是**把 ② 當成一個原子命題**。它是**合取**：
    >
-   > ~~#46 Expected ②③ 仍未實作。~~（2026-08-28 第一次更正：說兩項都已出貨。
-   > **也是錯的**——只有 ③ 出貨。查法：`gh issue view 46 --jq .body | grep -A1 加上限`
-   > 讀 ② 的字面要求，再對照 `:526` 那個 `throw`。）
+   > > 2. **加上限**：(a) 一個可設定的記憶體預算（環境變數或旗標），(b) 超過就
+   > >    分批寫檔而不是繼續累積。
    >
-   > **「這份紀錄在那之後被編輯過好幾次」也是假的。** 查法：
-   > `git log --oneline 4df4e46..HEAD -- docs/measurements/2026-08-26-build-peak-memory.md`
-   > → 兩筆，其中一筆就是那次更正本身，所以在它之前是**一筆**。一個沒有查法的
-   > 數量詞，出現在一段譴責「沒查就寫下的事實斷言」的文字裡。
+   > 三分之後的狀態，各附查法：
+   >
+   > | 項 | 狀態 | 查法 |
+   > |---|---|---|
+   > | ②(a) 可設定的預算 | **已出貨** | `grep -c memory-budget-mb Sources/ltm/Commands.swift` → 10 |
+   > | ②(b) 超過就分批寫檔 | **未實作** | 出貨的行為是**拒絕**（見 ③），不是降級成分批落地 |
+   > | ③ 到達上限具名拒絕 | **已出貨** | `grep -n "throw BuildError.memoryBudgetExceeded" Sources/LTMIndex/IndexBuilder.swift` → 一處 |
+   >
+   > ③ 的字面是「**到達上限時**具名拒絕」，它預設一個上限存在——所以「③ 出貨而
+   > ② 完全沒出貨」在邏輯上站不住，那正是第二版的錯。
+   >
+   > **上一版另外新增了三條查法，三條都跑不出它宣稱的東西**（#44 R16 verify）：
+   >
+   > | 上一版寫的 | 為什麼跑不出來 | 現在 |
+   > |---|---|---|
+   > | ``git log 4df4e46..HEAD -- <本檔>`` → 兩筆 | `..HEAD` 是**移動標的**——寫下它的那個 commit 自己就是第三筆，句子在被 commit 的那一刻變假 | 釘死 ref：`git log --oneline 4df4e46..f9987a4^ -- docs/measurements/2026-08-26-build-peak-memory.md \| wc -l` → **1**（第一次更正之前的編輯次數）|
+   > | ``再對照 `:526` 那個 throw`` | **裸行號**，而且一開始就指錯（`throw` 在 565）；同一個 commit 在 `IndexBuilder.swift` 明文禁止裸行號 | 改用上表的 `grep -n` |
+   > | ``gh issue view 46 --jq .body`` | `--jq` 不能不帶 `--json`，指令直接失敗 | `gh issue view 46 --repo PsychQuant/claude-code-ltm --json body --jq .body \| grep -A1 加上限` |
 
 2. **不能**據此重構 scanner——因果尚未定位，重構完記憶體可能照樣線性成長。
    先跑上表最後兩列。

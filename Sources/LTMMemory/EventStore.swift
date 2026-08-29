@@ -506,8 +506,14 @@ public struct FileEventStore: EventStore {
         // - R12 的更正把它改成「各擋一半」，那把一句**範圍寫太大**的話換成一句
         //   **效果歸錯功勞**的話，而程式碼行為完全沒動。
         //
-        // 真正未涵蓋的仍然只有一件事：**中間路徑元件**。那是 TOCTOU 類、#40 的
-        // 既決限度，需要並行的本機攻擊者。
+        // **這裡不列舉「未涵蓋的有哪些」——上一版寫「仍然只有一件事」，那是一份
+        // 宣稱自己完整的列舉**（#44 R16 verify）。改寫成判準：
+        //
+        //   `O_CREAT|O_EXCL` 只保證**最後一段**在 open 的那一刻不是既存項目。
+        //   路徑上的其他每一段、以及最後一段在 open **之後**的替換，都不在保證內。
+        //
+        // 由這條判準可以自己導出中間路徑元件、TOCTOU 替換等等，不必依賴我數對。
+        // 這些都是 #40 的既決限度，需要並行的本機攻擊者。
         // WRITE-SITE: memory-backup-create
         let backupFD = open(backup.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
         guard backupFD >= 0 else {

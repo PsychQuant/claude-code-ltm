@@ -113,7 +113,8 @@ enum CommandSupport {
     /// **這裡曾經有一道 `refuseSymlinkedMemoryRoot`，已於 R14 拆掉。**
     ///
     /// 它是為了 R12 的「`validatedRoot:` 只是參數標籤」而加的，而那個診斷是對的
-    /// ——**但這個修法裝錯了地方**。三種佈局的實測（`ltm mark`，我自己重跑過
+    /// ——**但這個修法裝錯了地方**。**兩種**佈局的實測（`ltm mark`，我自己重跑過
+    /// ——「三種」是上一版沒查過就寫下的數量詞，#44 R16 verify；被量過的只有兩格，
     /// devil's advocate 的量測）：
     ///
     /// | `<base>/memory` | 有守衛 | 拿掉守衛 |

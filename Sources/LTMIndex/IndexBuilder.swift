@@ -235,7 +235,13 @@ public struct IndexBuilder: Sendable {
         //
         // 那條要求寫的是「批次邊界上釋放寫鎖，讓查詢路徑的 `refreshIncrementally`
         // 有機會插進來」。實際上這把 `flock` 在 `build()` **開頭**取得、
-        // 全程持有，所以查詢路徑插進來的窗口是 **0%**——分批讓交易變成 per-batch，
+        // 全程持有，所以查詢路徑插進**索引工作**的窗口是 **0%**。
+        //
+        // **但「0%」只涵蓋索引工作，不涵蓋整個 `build()`**：第一個動作是
+        // `location.createRootIfNeeded()`，它在鎖**之外**，而它本身是一個寫入
+        // （建 derived root）。兩個並行的 build 都會跑它——冪等且無害，但那句話
+        // 上一版寫成無條件的（#44 R15/R16 verify，兩輪各抓到一半）。
+        // 分批讓交易變成 per-batch，
         // 但沒有第二個寫者走得到那裡去競爭它（#44 R13 verify，requirements lens）。
         //
         // **為什麼不現在補上。** 上一版這裡寫「照字面實作 Expected ② 會把 #44 修掉的
@@ -243,7 +249,21 @@ public struct IndexBuilder: Sendable {
         // 一輪**（#44 R15 verify，requirements + regression 兩個 lens 各自抓到，
         // 並指出這一份才是追 #53 的人會落到的地方）。
         //
-        // 成立的較窄陳述，以及它的三個障礙（都可以指名）：
+        // **這份清單不宣稱自己完整，而且它上一版宣稱過。**
+        //
+        // 上一版寫「三個障礙（都可以指名）」，並替每一項配一條 grep——但那三條
+        // grep 驗的是**每個成員存在**，沒有一條驗**成員資格完整**。R16 verify 因此
+        // 又找到第四項，而且來源與上次漏掉的 `truncateSidecar` 一樣：**#44 的
+        // issue body 自己指名過它**（開場的程式碼節錄第一行就是
+        // `for sourceKey in scan.invalidatedSources`）。
+        //
+        // 所以這裡改寫查法，讓下一個讀者能自己**重算成員資格**，而不是核對我的清單：
+        //
+        //     # 在批次迴圈之外算一次、卻在迴圈之內（或之後）被消費的值
+        //     grep -n "let scan = \|var vectorRow\|scan.invalidatedSources\|scan.state" \
+        //       Sources/LTMIndex/IndexBuilder.swift | grep -v "//"
+        //
+        // 每一個命中都要問：「中途放鎖之後，這個值還成立嗎？」目前已知的四項：
         //
         // 用具名符號＋查法，不用裸行號——這個檔案每一輪都在動，而上一版用行號
         // 當「可查的」指標（#44 R15 verify）。
@@ -266,6 +286,11 @@ public struct IndexBuilder: Sendable {
         // 3. `truncateSidecar(toRows:)` **整個 build 只被呼叫一次**（查法：
         //    `grep -n "try truncateSidecar" Sources/LTMIndex/IndexBuilder.swift
         //    | grep -vc "//"` → 1）。
+        // 4. `scan.invalidatedSources` 在**迴圈之內**被消費，而且是**破壞性的**：
+        //    每一批都用放鎖前的集合呼叫 `deleteChunks`。這一項與前三項不同類——
+        //    前三項的後果是「重做」（拿舊快照重算），這一項的後果是**刪掉另一個
+        //    寫者剛提交的 chunk**，直接踩不變式 2 而且沒有任何 error path。
+        //    迴圈結束後那個把 `scan.state.files` 整份寫回的收尾交易同理。
         //    **#44 的 issue body 自己指名過這一項**（「改批次之後這個前提要重新
         //    確認」），而上一版的「障礙是這兩個值」把它漏掉了——一份宣稱自己完整
         //    的列舉，漏的那項還是需求自己寫過的。
@@ -909,7 +934,7 @@ public struct IndexBuilder: Sendable {
 /// | `sidecar-temp-write` | `Data.write(.atomic)` | **不對目標路徑開檔**——比走共用檢查更強 |
 /// | `sidecar-replace` | rename | 三種情形全部量過，見下 |
 /// | `derived-open-helper` | `open(O_NOFOLLOW\|O_NONBLOCK)` + `ExclusiveFile.verify` | ✅ 共用入口本身 |
-/// | `lock-open` | 同上 | ✅ |
+/// | `lock-open` | `open(O_CREAT\|O_RDWR\|O_NOFOLLOW)` | ✅ 自己的 `open`，**不走共用入口、不帶 `O_NONBLOCK`**（上一版寫「同上」，繼承了上一列的旗標宣稱，#44 R16 verify）|
 /// | `lock-truncate` | `ftruncate` | ✅ 檢查在它之前 |
 /// | `sqlite-open` | `lstat` × 4 後綴 + `sqlite3_open_v2` | 主檔與 `-wal`/`-shm`/`-journal` |
 /// | `memory-prune-open` | `open(O_NOFOLLOW)` + `ExclusiveFile.verify` | ✅ |
