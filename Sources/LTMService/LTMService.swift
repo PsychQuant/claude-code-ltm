@@ -494,7 +494,10 @@ public struct LTMService {
     ///   **沒有預設值是刻意的**——本 repo 沒有任何量測支撐得起一個門檻，憑感覺挑
     ///   一個只是把「OS 決定後果」換成「一個編出來的數字決定後果」。見 #46 與
     ///   `docs/measurements/2026-08-26-build-peak-memory.md`。
-    /// - Parameter batchChunkTarget: 批次切點的**下限**，不是上界（見 #47）。
+    /// - Parameter batchChunkTarget: 一批 chunk 數的**上界**（#47 起批次以 chunk
+    ///   為粒度、來源可跨批切開）。（這一行曾是「下限→上界」更正漏掉的第八份
+    ///   副本、還引 #47 當權威——同步 grep 用 `largestSource|batchChunkUpperBound`
+    ///   列舉站點，而這行兩個 token 都不含。列舉會漏，#47 verify 四個視角各自命中。）
     public func build(
         full: Bool = false, batchChunkTarget: Int = 2_000, memoryBudgetBytes: Int? = nil,
         progress: (@Sendable (BuildProgress) -> Void)? = nil

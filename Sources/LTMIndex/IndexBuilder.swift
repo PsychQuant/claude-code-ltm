@@ -579,6 +579,19 @@ public struct IndexBuilder: Sendable {
         // state 逐批累積：崩在中途時，已完成來源的 entry 已經在磁碟上，重跑
         // 的 scanner 不會再吐出它們。**沒有這一步，分批提交只降低了「資料丟失」
         // 而沒有降低「重算成本」**——使用者感受到的中斷代價一點都沒變。
+        // **invalidated 來源的 DB 寫入整個推遲到它最後一個 slice 的交易**（#47
+        // verify R1，DA 裁決的第三案）。嵌入與側車照樣分批（記憶體上界不變），
+        // 但 delete＋insert 全部＋最終游標合成**一個**交易——崩在中途時舊 chunk
+        // 原封、游標未動，下一輪重新 invalidate 重做。改寫來源因此保住
+        // per-source 原子性（#47 之前由整來源分批的構造給出、第一版 slice 化把
+        // 它換掉了——那是回歸，不是可具名放棄的 trade）；代價只落在改寫來源的
+        // 中斷重做（重 embed 整個來源），而 append-only 成長（常態）仍享 slice
+        // 級的有界中斷損失。
+        //
+        // 崩潰殘留：推遲期間已 append 的側車列成為孤兒（被 vector_count 計入、
+        // 無 chunk 引用）——空間洩漏、不影響正確性，--full 回收。
+        var deferredInserts: [String: [(chunk: CorpusChunk, row: Int?)]] = [:]
+
         let totalChunks = scan.chunks.count
         var doneChunks = 0
         let started = Date()
@@ -637,32 +650,44 @@ public struct IndexBuilder: Sendable {
             // 交易，崩在中間會留下 vector_row 為 NULL 的 chunk，而它們既已提交、
             // state 又沒寫，下一輪會再插一次。
             try database.transaction {
-                // **只有 invalidated 來源的第一個 slice 刪一次**（#47 Expected ②）。
-                // delete 舊 + insert 第一個 slice + 游標指**新內容** prefix(b) 在
-                // 同一個交易；崩掉後下一輪 scan 對新內容雜湊相符 → 續讀、不再
-                // invalidate、**不再重刪**——「先刪舊再提交半份新、中間崩掉比舊
-                // 索引還糟」的狀態構造不出來。具名放棄的是改寫來源的 per-source
-                // 原子替換：崩潰後到下一輪 build 完成之間，讀者看得到該來源的
-                // 部分新內容（有界批次換來的，記在 CHANGELOG）。
-                for slice in batch
-                where slice.range.lowerBound == 0
-                    && scan.invalidatedSources.contains(slice.sourceKey)
-                {
-                    try database.deleteChunks(sourceKey: slice.sourceKey)
-                }
                 var cursor = 0
                 for slice in batch {
                     guard let all = grouped[slice.sourceKey] else { continue }
                     let sliceChunks = Array(all[slice.range])
+                    let sliceRows = Array(rowForChunk[cursor..<cursor + sliceChunks.count])
+                    cursor += sliceChunks.count
+                    let isInvalidated = scan.invalidatedSources.contains(slice.sourceKey)
+                    let isFinalSlice = slice.range.upperBound == all.count
+
+                    if isInvalidated, !isFinalSlice {
+                        // 中間 slice：**這個交易對這個來源什麼都不寫**（不刪、
+                        // 不 insert、不動游標）。嵌入成果暫存，最後一個 slice 的
+                        // 交易一次落地。
+                        deferredInserts[slice.sourceKey, default: []]
+                            .append(
+                                contentsOf: zip(sliceChunks.map(\.chunk), sliceRows)
+                                    .map { (chunk: $0, row: $1) })
+                        continue
+                    }
+
+                    var pending: [(chunk: CorpusChunk, row: Int?)] =
+                        zip(sliceChunks.map(\.chunk), sliceRows).map { ($0, $1) }
+                    if isInvalidated {
+                        // 最後一個 slice：delete 舊＋insert 全部＋（下方）最終游標，
+                        // 同一個交易——原子替換。
+                        try database.deleteChunks(sourceKey: slice.sourceKey)
+                        pending =
+                            (deferredInserts.removeValue(forKey: slice.sourceKey) ?? [])
+                            + pending
+                    }
                     let ids = try database.insert(
-                        chunks: sliceChunks.map(\.chunk), sourceKey: slice.sourceKey)
-                    for id in ids {
-                        if let row = rowForChunk[cursor] {
+                        chunks: pending.map(\.chunk), sourceKey: slice.sourceKey)
+                    for (id, entry) in zip(ids, pending) {
+                        if let row = entry.row {
                             try database.execute(
                                 "UPDATE chunks SET vector_row = ? WHERE id = ?",
                                 bind: [.integer(Int64(row)), .integer(id)])
                         }
-                        cursor += 1
                     }
                 }
                 try database.setMeta("vector_count", String(vectorRow))
@@ -679,6 +704,14 @@ public struct IndexBuilder: Sendable {
                 // slice 尾端那個 chunk 的切點游標。兩者都可對檔案驗證。
                 for slice in batch {
                     guard let all = grouped[slice.sourceKey] else { continue }
+                    // invalidated 來源的中間 slice：游標**不動**（與上面的推遲
+                    // 一致——動了游標，崩後就續讀不 invalidate，推遲的 insert
+                    // 永遠不會發生，chunk 靜默遺失）。
+                    if scan.invalidatedSources.contains(slice.sourceKey),
+                        slice.range.upperBound != all.count
+                    {
+                        continue
+                    }
                     if slice.range.upperBound == all.count {
                         guard let entry = scan.state.files[slice.sourceKey] else { continue }
                         try database.upsertScanState(

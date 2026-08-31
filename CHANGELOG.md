@@ -13,10 +13,17 @@
   刪掉重算分支的整段前綴重讀）。
   舊上界公式 `max(target−1,0)+largestSource` 與它的測試**一併刪除**（那個量不存在
   了）；`memoryBudgetExceeded` 的 `largestSourceChunks` 欄位與 CLI 補救 caveat 同。
-  Expected ② 由構造滿足：delete 舊＋insert 第一個 slice＋游標指**新內容** prefix(b)
-  同一交易——崩後續讀不再 invalidate、不重刪。**具名放棄**：改寫來源的 per-source
-  原子替換（崩潰後到下輪 build 完成之間，讀者看得到該來源的部分新內容）；
-  「第 k 個 chunk」序數不落地（要落地就得改 schema → 全體 --full）。
+  **Expected ② 的第一版是回歸，verify 抓到後改掉**：第一版「delete＋insert 第一個
+  slice＋新內容游標同交易」給的是收斂＋不重刪，但把 #47 之前由整來源分批**構造
+  給出**的 per-source 原子性換掉了（DA 以 8→2 的探針證實：崩潰視窗內讀者看到的
+  是新內容的四分之一，不是完整舊內容——正是 Expected ② 字面禁止的狀態；註解還
+  同時寫著「構造不出來」與「看得到部分新內容」）。現行做法：**invalidated 來源
+  的 DB 寫入整個推遲到最後一個 slice 的交易**（嵌入照樣分批）——崩在中途舊 chunk
+  原封、游標未動，下輪重新 invalidate 重做。代價分佈是對的：改寫來源（罕）中斷
+  重做整個來源；append 成長（常態）仍享 slice 級有界損失。崩潰殘留＝孤兒側車列
+  （空間洩漏，--full 回收）。
+  **仍具名放棄**：「第 k 個 chunk」序數不落地（要落地就得改 schema → 全體 --full）；
+  「與 DB 互驗」的偵測那一半 → #55（零 schema 的方向已寫在 issue）。
   新測試：canary（CryptoKit hasher 快照）、切點可驗證、中途游標續讀、
   單來源中途崩續跑（callCount 只算剩餘——**#47 的存在理由**）、改寫中途崩不重刪、
   獨占來源多 slice 改寫（property test 因 identity 共享抓不到 M1 的那格）、

@@ -55,9 +55,11 @@
 第一版提出的正是被這段排除掉的論證，而且沒有引用、沒有反駁它。
 
 **(b) 那個前提本身是假的。** 第一版寫「`batchChunkTarget = 2,000` × 512 維 × 4 B
-≈ 4 MB，而且不隨語料成長」。實際上批次以**整個來源**為單位組裝，上界是
+≈ 4 MB，而且不隨語料成長」。當時批次以**整個來源**為單位組裝，上界是
 比 `batchChunkTarget` 大、且隨最大來源成長（公式的唯一一份在
-`IndexBuilder.batchChunkUpperBound(target:largestSource:)`；本檔刻意不複述——先前
+當時的 `IndexBuilder.batchChunkUpperBound(target:largestSource:)`
+（**#47 已刪**：批次改以 chunk 為粒度、`--batch-chunks` 成為真上界，該公式描述的
+量不存在了）；本檔刻意不複述——先前
 複述的那個版本是錯的）。使用者自己
 語料裡最大的 session 檔有 4,322 個可索引 chunk，該檔整個進同一批 ≈ 8.8 MB，
 加上 `VectorSidecar.encode` 同時存活的 `Data` ≈ 18 MB。詳見 [#47](https://github.com/PsychQuant/claude-code-ltm/issues/47)。
@@ -218,7 +220,7 @@ chunks 與檔案數，且**沒有對照組**）：
 | 第一版的話 | 實際 | 誰抓到 |
 |---|---|---|
 | 「這個結果推翻了 #46 的前提」 | 沒有推翻，見 (a)–(d) | devils-advocate |
-| 「向量那一項已被壓到 ≈4 MB，不隨語料成長」 | 上界隨最大來源成長（公式見 `IndexBuilder.batchChunkUpperBound`）；本機反例 4,322 chunk | codex / requirements / logic / devils-advocate |
+| 「向量那一項已被壓到 ≈4 MB，不隨語料成長」 | 當時上界隨最大來源成長（舊公式 `batchChunkUpperBound`，**#47 已刪**——現行 `--batch-chunks` 是真上界）；本機反例 4,322 chunk | codex / requirements / logic / devils-advocate |
 | 「**查證後的**實際來源：scanner 持有完整文字」 | 未經隔離量測的推斷；630 B/chunk 解釋不了 142 KB/chunk | codex / logic / regression / devils-advocate |
 | 「差了一個數量級以上」（16,000 vs 280,000）| 用數量級精度的估計支撐數量級結論，且錨點與現行 chunker 不符 | devils-advocate |
 | 「合成 chunk 明顯比真實 chunk 大很多」 | 方向可能相反；括號證據把 RSS 斜率當 chunk 大小 | devils-advocate |

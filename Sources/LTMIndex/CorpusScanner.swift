@@ -425,9 +425,12 @@ public struct CorpusScanner: Sendable {
             //
             // 判準：**不要從一個值反推另一件事，把那件事記下來。**
             var resumedFromVerifiedPrefix = false
-            // **增量雜湊**（#47）：整個檔案每個 byte 恰好被雜湊一次。前綴在比對
-            // 時餵進 hasher；比對用**快照**（value type 複製後 finalize），原件
-            // 繼續吃 tail——逐 chunk 的切點快照就從同一個 hasher 取。
+            // **增量雜湊**（#47）：續讀成功的路徑上每個 byte 恰好被雜湊一次；
+            // **invalidated 路徑上前綴會被雜湊兩次**（比對失敗的 candidate 被
+            // 丟棄、fresh hasher 從 0 重吃）——#47 刪掉的是第三次**讀取**，不是
+            // 第二次雜湊（第一版把這句寫成無條件的「恰好一次」，#47 verify 三個
+            // lens 各自證偽）。比對用**快照**（value type 複製後 finalize），
+            // 原件繼續吃 tail——逐 chunk 的切點快照就從同一個 hasher 取。
             // canary：`snapshotOfIncrementalHasherMatchesOneShotDigest`。
             var hasher = SHA256()
             if let prior = priorState, prior.processedBytes <= size,
@@ -440,7 +443,9 @@ public struct CorpusScanner: Sendable {
                     startOffset = prior.processedBytes
                     resumedFromVerifiedPrefix = true
                     hasher = candidate
-                } else if priorState != nil {
+                } else {
+                    // （這裡曾寫 `else if priorState != nil`——在 `if let prior`
+                    //   的成功分支內恆真，#47 verify L1。）
                     invalidated.insert(key)
                 }
             } else if priorState != nil {
@@ -487,10 +492,15 @@ public struct CorpusScanner: Sendable {
             //       等於 `prior.prefixHash`；
             //   (b) 這一輪沒有消化任何新 byte——於是 `processed == startOffset`。
             //
-            // 兩者同時成立時，`0..<processed` 就是剛剛驗證過的那一段，重讀它並
-            // 重算 SHA-256 的輸出**必然**是 `prior.prefixHash`。移除那次冗餘的
-            // 代價被直接量到：`build --quiet` 的中位數 6.58 → 3.56 s（**實測差
-            // −3.02 s**，`docs/measurements/2026-08-27-query-latency-decomposition.md`）。
+            // 兩者同時成立時，`0..<processed` 就是剛剛驗證過的那一段。
+            // **歸因更正（#47 verify）**：−3.02 s（6.58 → 3.56，
+            // `docs/measurements/2026-08-27-query-latency-decomposition.md`）當時
+            // 買它的是「省掉第二次整段重讀＋重算」；#47 的增量雜湊讓**兩個分支**
+            // 都不再重讀，所以這個分支如今是可證明的 no-op（退掉它 550 全綠，
+            // 兩個 lens 各自實測）。**留著它的理由不是效能**：它是
+            // `resumedFromVerifiedPrefix` 旗標的唯一消費端，拆掉它，
+            // `aSelfInconsistentCursorIsRecomputedNotReused` 那條守衛就無從驅動
+            // ——旗標防的縫（processedBytes=0 而 prefixHash 不符）仍然真實。
             //
             // 這裡刻意不寫「佔掃描的一半」那種分數，也不寫 `2.27` / `4.51`——
             // 那兩個數字曾經寫在這裡並被稱為「實測」，而它們是**模型值**（唯一
@@ -518,8 +528,10 @@ public struct CorpusScanner: Sendable {
             // 比對必然失敗 → invalidate → 整份重解 → 收斂。最壞是一次不必要的
             // 重解（貴，但正確），不會安靜錯。
             //
-            // **誠實邊界**：只收窄、沒有消除 —— `consumedBytes > 0` 時仍走下面的
-            // 重算路徑，同一個窗口還在。
+            // **誠實邊界**：只收窄、沒有消除——T1（驗前綴）與 T2（讀 tail）之間
+            // 的窗口仍在。（#47 之後「重算路徑」不再整段重讀，所以這段說的
+            // 「T3 重讀」已不存在——與下方重算分支的註解一致；先前兩段相隔 18 行
+            // 各說一版，#47 verify F2。）
             if resumedFromVerifiedPrefix, parsed.consumedBytes == 0, let prior = priorState {
                 // 這裡寫回 `prior` 而不是重造 `SourceFileState`，靠的是上面
                 // `resumedFromVerifiedPrefix` 為真時 `startOffset == prior.processedBytes`

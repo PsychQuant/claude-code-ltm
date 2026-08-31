@@ -113,3 +113,37 @@ func aMidFileCursorResumesWithoutInvalidation() throws {
 }
 
 private let sessionForCursorTests = "11111111-2222-3333-4444-555555555555"
+
+/// logic F1（#47 verify）：**最後一個 chunk 之後的 skip 行也要進 hasher**。
+///
+/// 那段餵入曾經零測試扛（`if false` 掉 550 全綠）——而它壞掉的方式是這個 repo
+/// 最恨的：存下的 prefixHash 少蓋了尾端 skip 行 → 下一輪比對必然失敗 → 來源
+/// **每一輪都被 invalidate**（重刪＋重解＋重 embed），build 與查詢路徑都中招，
+/// 而且收斂性完好所以等價測試看不見。真語料 27.2% 的檔案以非 turn 行結尾。
+@Test("尾端 skip 行計入最終 prefixHash——第二輪掃描不得 invalidate")
+func trailingSkipLinesAreHashedIntoTheFinalCursor() throws {
+    let corpus = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: corpus) }
+    _ = try writeSession(
+        in: corpus, project: "proj-cursor", file: "t.jsonl",
+        lines: [
+            turnLine(
+                uuid: "00000009-aaaa-bbbb-cccc-dddddddddddd", session: sessionForCursorTests,
+                role: "user", text: "內容內容內容內容內容內容"),
+            // 最後一個 chunk **之後**的 skip 行——它在 consumed 範圍內、不產 chunk。
+            "{\"type\":\"summary\",\"summary\":\"尾端摘要行\"}",
+        ])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    let first = try scanner.scan()
+    // 存下的 prefixHash 必須可對檔案驗證（涵蓋尾端 skip 行）。
+    let state = try #require(first.state.files["proj-cursor/t.jsonl"])
+    let fileData = try Data(
+        contentsOf: corpus.appendingPathComponent("proj-cursor/t.jsonl"))
+    #expect(
+        CorpusScanner.hexDigest(fileData.prefix(state.processedBytes)) == state.prefixHash,
+        "最終 prefixHash 必須涵蓋尾端 skip 行")
+    // 最尖銳的可觀測後果：第二輪不得 invalidate。
+    let second = try scanner.scan(previous: first.state)
+    #expect(second.invalidatedSources.isEmpty, "少餵尾端 skip 行 → 每一輪都重失效")
+    #expect(second.chunks.isEmpty)
+}

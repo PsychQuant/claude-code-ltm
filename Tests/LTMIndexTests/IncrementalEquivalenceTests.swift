@@ -398,6 +398,11 @@ private struct EquivalencePolicy: CorpusContainmentPolicy {
 
 /// 生成一條變異序列，並在磁碟上逐步套用；每一步之後跑一次增量建置。
 /// 回傳 (語料根, 增量衍生根, 套用過的序列)。
+/// 起手來源的 turn 數——property test 的跨批軸靠「它 > 偶數軸的 target」成立，
+/// 測試端有 precondition 守著（#47 verify H4）。
+let openingTurns: [Int] = [0, 1, 2]
+var openingTurnCount: Int { openingTurns.count }
+
 private func runIncremental(
     seed: UInt64, steps: Int, embedder: StubEmbedder, batchChunkTarget: Int = 2_000
 ) throws -> (corpus: URL, derived: DerivedLocation, trace: [Mutation]) {
@@ -448,11 +453,11 @@ private func runIncremental(
 
     // 起手一定要有東西可以變異。
     let first = "f0.jsonl"
-    model.files[first] = (0..<3).map {
+    model.files[first] = openingTurns.map {
         TurnSpec(identity: $0, session: model.nextSession(), timestampOffset: $0)
     }
     model.fileProjects[first] = projectFor(first)
-    trace.append(.createFile(name: first, turns: [0, 1, 2]))
+    trace.append(.createFile(name: first, turns: openingTurns))
     try flush(first)
     try build()
 
@@ -535,13 +540,22 @@ func incrementalMatchesFullRebuild(seed: UInt64) throws {
     let embedder = StubEmbedder(revision: "r1")
     let probes = ["共通詞", "keyword0", "keyword1", "keyword2", "keyword3"]
 
-    // **兩軸各半（#47 Expected ③）**：偶數 seed 用 target 2——rewrite/create 吐
-    // 1–3 個 chunk，target 2 讓「一個來源跨兩批」成為常態路徑（target 3 就切不
-    // 開了）；奇數 seed 維持 2,000（單批，原軸）。全量側恆用預設——不變式 2 的
-    // 字面就是「與乾淨重建等價」，兩側 target 不同正是要證明分批不影響結果。
+    // **兩軸各半（#47 Expected ③）**：偶數 seed 用 target 2；奇數 seed 維持
+    // 2,000（單批，原軸）。全量側恆用預設——不變式 2 的字面就是「與乾淨重建
+    // 等價」，兩側 target 不同正是要證明分批不影響結果。
+    //
+    // **「真的跨批」靠什麼成立**（#47 verify H4——第一版沒寫，涵蓋性靠一條沒
+    // 寫下的生成器性質）：起手固定的 `f0.jsonl` 有 **3 個 turn**，所以每個偶數
+    // seed 的第一次 build 就有一個 3-chunk 來源在 target 2 下跨批——不靠 RNG。
+    // 下面的 precondition 守住這個前提；生成器把起手改小時這裡會爆，不會安靜
+    // 退化成單批全綠。（第一版還寫了「target 3 就切不開了」——不是無條件真：
+    // currentCount 跨來源累積時 target 3 也切得開。拿掉。）
     let target = seed.isMultiple(of: 2) ? 2 : 2_000
     let run = try runIncremental(
         seed: seed, steps: 12, embedder: embedder, batchChunkTarget: target)
+    precondition(
+        openingTurnCount > target || !seed.isMultiple(of: 2),
+        "起手來源（\(openingTurnCount) turn）必須大於偶數軸的 target，否則跨批軸靜默失去解析度")
     defer {
         try? FileManager.default.removeItem(at: run.corpus)
         try? FileManager.default.removeItem(at: run.derived.root)

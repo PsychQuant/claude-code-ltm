@@ -424,8 +424,17 @@ func productionBatchingHonoursTheDeclaredBound() throws {
     final class PlanBox: @unchecked Sendable {
         private let mutex = NSLock()
         private var value: (batches: Int, largest: Int)?
+        private var committedDeltas: [Int] = []
+        private var lastDone = 0
         func set(_ new: (batches: Int, largest: Int)) { mutex.lock(); value = new; mutex.unlock() }
+        func committed(done: Int) {
+            mutex.lock()
+            committedDeltas.append(done - lastDone)
+            lastDone = done
+            mutex.unlock()
+        }
         var current: (batches: Int, largest: Int)? { mutex.lock(); defer { mutex.unlock() }; return value }
+        var deltas: [Int] { mutex.lock(); defer { mutex.unlock() }; return committedDeltas }
     }
     let plan = PlanBox()
     _ = try IndexBuilder(
@@ -434,6 +443,9 @@ func productionBatchingHonoursTheDeclaredBound() throws {
         progress: { event in
             if case .batchPlan(let batches, let largest, _) = event {
                 plan.set((batches, largest))
+            }
+            if case .batchCommitted(_, _, let done, _, _) = event {
+                plan.committed(done: done)
             }
         },
         batchChunkTarget: 3
@@ -448,6 +460,11 @@ func productionBatchingHonoursTheDeclaredBound() throws {
     // `max(target−1,0)+largestSource` 那條公式——公式與它的測試已隨整來源分批
     // 一併刪除；這條測試現在就是 openspec 指名的執行點。
     #expect(observed.largest <= 3, "實得 \(observed.largest)")
+    // **也釘實體批次，不只計畫**（#47 verify F6）：`largestBatchChunks` 來自組裝
+    // 階段的算術；若組裝與消費分岔（消費端把整個來源吃進一批），計畫數字照樣
+    // 漂亮。`batchCommitted` 的每批增量是實際提交的 chunk 數。
+    #expect(!plan.deltas.isEmpty && plan.deltas.allSatisfy { $0 <= 3 },
+            "實際提交的每批 chunk 數也不得超過 target，實得 \(plan.deltas)")
 }
 
 /// 回滾測試要在交易裡寫真的內容——只寫游標的交易證明不了「兩者一起回滾」。
@@ -1875,13 +1892,16 @@ func aCrashMidSourceResumesFromTheCommittedChunk() throws {
     #expect(try IndexDatabase(path: derived.databaseURL.path).chunkCount() == 6)
 }
 
-/// #47 Expected ②：改寫來源 re-ingest 中途崩掉，**不重刪、收斂**。
+/// #47 Expected ②：改寫來源 re-ingest 中途崩掉——**舊內容原封（原子替換）**。
 ///
-/// delete 舊 + insert 第一個 slice + 游標指**新內容** prefix(b) 在同一交易；
-/// 崩後下一輪 scan 對新內容雜湊相符 → 續讀、不 invalidate、不重刪。
-/// 若 delete 重跑（scanner invalidate → 全部重吐），counting 會是 6 而不是 4。
-@Test("改寫來源 re-ingest 中途崩掉：不重刪、重跑收斂")
-func aRewrittenSourceCrashMidReingestConvergesWithoutRedeleting() throws {
+/// 第一版 slice 化把這裡做成「delete＋insert 第一個 slice＋新內容游標」同交易，
+/// 崩後收斂不重刪——**但那是回歸**：#47 之前整來源分批讓 per-source 原子性由
+/// 構造成立，讀者在崩潰視窗看到的是舊的完整內容，不是新的四分之一（#47 verify，
+/// codex 判 NOT、DA 以 8→2 的探針證實）。現行做法：invalidated 來源的 DB 寫入
+/// 整個推遲到最後一個 slice 的交易——崩在中途時**舊 chunk 一個不少、游標未動**，
+/// 下一輪重新 invalidate 重做（代價：改寫來源的中斷重做整個來源）。
+@Test("改寫來源 re-ingest 中途崩掉：舊內容原封，重跑後原子替換")
+func aRewrittenSourceCrashMidReingestKeepsOldContentIntact() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
         try? FileManager.default.removeItem(at: corpus)
@@ -1894,7 +1914,6 @@ func aRewrittenSourceCrashMidReingestConvergesWithoutRedeleting() throws {
         embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 2
     ).build()
 
-    // 改寫成 6 個新 turn（uuid 從 100 起，與舊的完全不同）。
     var lines: [String] = []
     for i in 0..<6 {
         lines.append(
@@ -1905,7 +1924,6 @@ func aRewrittenSourceCrashMidReingestConvergesWithoutRedeleting() throws {
     }
     _ = try writeSession(in: corpus, project: "proj-one", file: "session.jsonl", lines: lines)
 
-    // re-ingest 在第 3 個 chunk 後崩——第一個 slice（2 chunk）已提交。
     let failing = FailingAfterNEmbedder(revision: "rev-A", failAfter: 3)
     #expect(throws: FailingAfterNEmbedder.Boom.self) {
         _ = try IndexBuilder(
@@ -1916,7 +1934,10 @@ func aRewrittenSourceCrashMidReingestConvergesWithoutRedeleting() throws {
     }
 
     let database = try IndexDatabase(path: derived.databaseURL.path)
-    #expect(try database.chunkCount() == 2, "舊的已刪、新的第一個 slice 已在")
+    #expect(try database.chunkCount() == 2, "崩潰視窗內舊內容要原封")
+    let survivors = try database.scanState().files["proj-one/session.jsonl"]
+    // 游標未動 → 下一輪對新檔比對失敗 → 重新 invalidate 重做。
+    #expect(survivors != nil)
 
     let counting = FailingAfterNEmbedder(revision: "rev-A", failAfter: .max)
     _ = try IndexBuilder(
@@ -1925,20 +1946,62 @@ func aRewrittenSourceCrashMidReingestConvergesWithoutRedeleting() throws {
         embedder: counting, batchChunkTarget: 2
     ).build()
     #expect(
-        counting.callCount == 4,
-        "不重刪、只補剩餘——重刪的話 scanner 會 invalidate 全部重吐（6），實得 \(counting.callCount)")
-    let final = try IndexDatabase(path: derived.databaseURL.path)
-    #expect(try final.chunkCount() == 6, "收斂到整份新內容")
+        counting.callCount == 6,
+        "原子性的代價：改寫來源的中斷重做整個來源，實得 \(counting.callCount)")
+    #expect(try IndexDatabase(path: derived.databaseURL.path).chunkCount() == 6)
 }
 
-/// M1 的執行點：**delete 只准發生在 invalidated 來源的第一個 slice**。
+/// DA 的特徵化探針轉正：舊來源**大於一個 slice**（8 chunk > target 2）——
+/// 第一版的測試用恰好 2 chunk 的舊來源，中間狀態（8→2 的召回率損失）根本沒被
+/// 展示；這條讓它可見並斷言它不再發生。
+@Test("大的改寫來源中途崩掉：全部 8 個舊 chunk 仍在")
+func aLargeRewrittenSourceCrashLeavesAllOldChunksVisible() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(
+        in: corpus,
+        texts: (0..<8).map { "舊內容第 \($0) 段舊內容第 \($0) 段" })
+    _ = try IndexBuilder(
+        location: derived,
+        scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 2
+    ).build()
+    #expect(try IndexDatabase(path: derived.databaseURL.path).chunkCount() == 8)
+
+    var lines: [String] = []
+    for i in 0..<6 {
+        lines.append(
+            turnLine(
+                uuid: String(format: "%08x-bbbb-cccc-dddd-eeeeeeeeeeee", 300 + i),
+                session: session, role: i.isMultiple(of: 2) ? "user" : "assistant",
+                text: "改寫後第 \(i) 段改寫後第 \(i) 段"))
+    }
+    _ = try writeSession(in: corpus, project: "proj-one", file: "session.jsonl", lines: lines)
+
+    let failing = FailingAfterNEmbedder(revision: "rev-A", failAfter: 3)
+    #expect(throws: FailingAfterNEmbedder.Boom.self) {
+        _ = try IndexBuilder(
+            location: derived,
+            scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+            embedder: failing, batchChunkTarget: 2
+        ).build()
+    }
+    #expect(
+        try IndexDatabase(path: derived.databaseURL.path).chunkCount() == 8,
+        "崩潰視窗內讀者看到的必須是完整的舊內容，不是新內容的一半")
+}
+
+/// 改寫來源跨 slice 的**快速確定性 driver**（原子性推遲後 delete 只發生在最後
+/// slice 的交易——「每個 slice 都 delete」的變異由這條與 property test 一起扛）。
 ///
-/// 崩潰測試抓不到這個變異（崩在第二個 slice 的交易之前，多餘的 delete 根本沒
-/// 跑到）；property test 也抓不到（生成器的 identity 刻意重疊，被誤刪的 chunk
-/// 多半與他檔共享、delete 只解除連結，最終集合靠共享收斂——#47 變異驗證實測
-/// M1 對兩者全綠）。這條用**獨占**來源＋**成功跑完**的改寫 build：若每個 slice
-/// 都 delete，後面的 slice 會把前面 slice 剛插入的 chunk 刪掉，最終只剩最後一個
-/// slice 的份。
+/// **這則 doc 的第一版寫「property test 也抓不到（identity 共享…收斂）」——假的**：
+/// 重量後 M1 讓 44/50 個偶數 seed 紅（正是 #47 自己加的 target-2 軸），我當時的
+/// 變異 harness 量錯了（#47 verify，logic F2 證偽、DA 逐字重跑確認）。留這條的
+/// 理由是新證據：把軸退回全 2,000 之後它是 551 條裡**唯一**的紅——property 的
+/// 涵蓋完全繫在 seed 奇偶那一行上，而這條不繫。
 @Test("改寫來源跨多 slice 成功重建後，全部 chunk 都在")
 func aMultiSliceRewriteKeepsEverySliceAfterASuccessfulBuild() throws {
     let (corpus, derived) = try makeWorkspace()
