@@ -9,22 +9,39 @@
 - **掃描階段不再靜默（#48）**：`CorpusScanner.scan()` 加 optional 進度 callback
   （預設 nil——查詢路徑零回報開銷），開工即報 `0/N`（空語料報 `0/0`），之後每
   N 檔或每 T 秒先到者發、發完兩個計數器都重置。`BuildProgress` 新增 `.scanning`；
-  CLI 印「正在掃描 N 個來源檔…」。首次全量在真實語料上的 310 秒沉默（與卡死
+  CLI 印「正在掃描 N 個來源檔…」。首次全量在真實語料上一次觀察到 310 秒沉默
+  （`docs/measurements/2026-08-28-scan-phase-silence.md`，9,935 檔——一次觀察、
+  不是受控量測；與卡死
   外觀相同）從此有心跳。builder→scanner 的接線由專屬測試扛（變異：接線換 nil
   → 紅）。`ltm-setup` skill 的進度表同步，散文裡的行數（「四種」）整個拿掉——
   那個數字已經錯過兩次。
 - **六個 legacy write 站點換成接得住 EPIPE 的形式（#50）**：stderr 四站
   `try? write(contentsOf:)`（診斷訊息沒有能力殺行程）；MCP stdout 兩站合成一次
   framed write、失敗時具名結束（stdout 是協定通道——client 關掉後繼續讀 stdin
-  只是空轉）。E2E：關掉 stdout 讀端，server 印具名訊息結束、無 SIGABRT。
+  只是空轉）。由兩條已提交的測試扛：`mcpExitsNamedWhenStdoutCloses`（關掉
+  stdout 讀端 → exit 3＋具名訊息，非 SIGABRT；變異退回 try? → 紅）與
+  `noLegacyStandardStreamWritesInSources`（擋第七個 legacy 站點；射程用**謂詞**
+  界定——與 `SIG_IGN` 同行程的 `Sources/`，`scripts/` 的獨立 target 死法是
+  SIGPIPE、不在射程，DA 實測）。**上一版這裡寫「E2E：…」而那個結果只存在於
+  commit message——沒有可指名的檢查**（batch verify R4/L5；「機制沒人驅動」的
+  處方一度是刪掉，DA 用 pipe harness 證偽：機制可驅動且 load-bearing，缺的是
+  driver——規則的前件是 cannot，不是 is not）。
 - **MCP 門面消費併入延後旗標（#51）**：`RetrievalTool.render` 前置
   `mergeDeferredForConcurrentBuild` 與 `tuningRejections` 警告（零命中也說——
   「沒有命中」可能正是因為新內容沒併入）。`lockUnavailable` 不降級寫明是刻意：
   會自癒的（`lockHeld`）降級並說出來，不修不會好的（權限／磁碟滿）具名失敗。
 - **量測腳本每規模 n 次；兩個 n=1 撐不起的結論降級成觀察（#52）**：
   `measure-build-memory.sh` 每規模跑 `LTM_MEASURE_REPS` 次（預設 3），每 rep 用
-  全新 derived root。「線性」與「在雜訊以下」在紀錄裡三處全部降級——n=1 沒有
-  點內變異，兩者字面上不可判定；數字仍是 n=1 時代的，重跑後才可升級回結論。
+  全新 derived root。「線性」與「在雜訊以下」在紀錄與原始碼裡的活宣稱全部降級
+  ——n=1 沒有點內變異，兩者字面上不可判定；數字仍是 n=1 時代的，重跑後才可升級
+  回結論。**這句話的第一版寫「三處全部降級」——batch verify 三個 lens 各自數出
+  三個不同的數（3／5／6），而第五份就活在被更正的檔案自己的結尾。所以這裡不寫
+  數字，寫查法**：`grep -rn "線性\|雜訊以下" --include='*.swift' --include='*.md'
+  --include='*.sh' Sources/ scripts/ docs/measurements/2026-08-26-build-peak-memory.md`
+  的每一個命中，凡是**關於「RSS 隨 chunk 數成長」這個宣稱**的，都必須是加註的
+  引述或方法論問句，不得是活的斷言。（判準指名宣稱而不是字面：「線性計數」
+  「線性機率模型」「線性掃描」是別的意思，會命中但不在射程——第一版沒寫這一句，
+  查法自己就會抓出五個假陽性。）
 - **`ltm query` 每次固定付的掃描成本降低（#49）：`build --quiet` 的中位數
   6.58 → 3.56 s、`query` 6.19 → 3.79 s**（同機同語料；改後各 7 次、改前 3–5 次，
   `docs/measurements/2026-08-27-query-latency-decomposition.md`）。`CorpusScanner`
@@ -478,9 +495,12 @@
   先前它在完成前一個字都不印，而全量建索引是數十分鐘等級的工作——**一個跑數十
   分鐘、完成前完全沉默的命令，跟卡死在外觀上是同一個樣子**。
 
-- **`docs/measurements/2026-08-26-build-peak-memory.md`**。結果**推翻了 #46 的
+- ~~**`docs/measurements/2026-08-26-build-peak-memory.md`**。結果**推翻了 #46 的
   前提**：向量累積已被分批封在 4 MB，線性成長來自 `CorpusScanner.scan()` 一次
-  回傳全部 chunk 連同完整文字。紀錄也寫明不可外推並附實證。
+  回傳全部 chunk 連同完整文字。~~**（這一則的三個宣稱後來全被更正：「推翻了前提」
+  是把 1/3 的進度寫成結案（#44 R3）；「線性」在 #52 降級成 n=1 的觀察；「成長
+  來自 scanner」被紀錄自己的數字否證——因果從未定位。現行敘述以該紀錄本文為準。）**
+  紀錄寫明不可外推並附實證。
 
 ## [0.2.1] - 2026-08-26
 

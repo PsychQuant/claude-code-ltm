@@ -197,6 +197,7 @@ func buildProgressGoesToStderrNotStdout() throws {
     #expect(!result.out.contains("掃描完成"), "進度不得寫 stdout")
     #expect(!result.out.contains("已提交"), "進度不得寫 stdout")
     #expect(result.out.contains("索引完成"), "最終報告仍在 stdout")
+    #expect(result.err.contains("正在掃描"), "開工行要在（#48）：\(result.err)")
     #expect(result.err.contains("掃描完成"), "分母要在 stderr 上說")
 }
 
@@ -243,8 +244,11 @@ func quietSuppressesProgressButNotTheReport() throws {
     let result = try runCLI(["build", "--quiet"], environment: workspace.environment)
 
     #expect(result.code == 0)
-    #expect(!result.err.contains("掃描完成"), "--quiet 下 stderr 不該有進度：\(result.err)")
-    #expect(!result.err.contains("已提交"))
+    // 名字說「完全沒有進度」就要斷言**空**，不是列舉幾種行——列舉會在新增
+    // case 時安靜落後（#48 加了「正在掃描」，這裡當時沒涵蓋——batch verify R10）。
+    #expect(
+        result.err.isEmpty,
+        "--quiet 下 stderr 要完全為空，實得：\(result.err)")
     #expect(result.out.contains("索引完成"), "--quiet 關的是進度，不是結果")
 }
 
@@ -255,10 +259,15 @@ func quietSuppressesProgressButNotTheReport() throws {
 /// `/dev/full`**——`FileHandle` 回 nil、fallback 到 `nullDevice`，寫入全部成功。
 /// 變異驗證抓到它：把修法還原成 legacy `FileHandle.write(_:)`，測試照樣綠。
 ///
-/// 真正的機制也跟原本以為的不同。殺掉 build 的不是 ObjC 例外，是 **SIGPIPE**：
-/// 往沒有讀端的 pipe 寫會收到訊號，預設處置是終止行程，`write()` 根本不回傳，
-/// 所以「包在 `try?` 裡」對這個情況完全無效。實測 exit 141 = 128 + 13。
-/// 修法是 `main.swift` 的 `signal(SIGPIPE, SIG_IGN)`。
+/// 真正的機制也跟原本以為的不同。**在 `SIG_IGN` 之前**，殺掉 build 的不是 ObjC
+/// 例外，是 **SIGPIPE**：訊號預設終止行程，`write()` 根本不回傳，所以單獨
+/// 「包在 `try?` 裡」擋不住。實測 exit 141 = 128 + 13。修法是 `main.swift` 的
+/// `signal(SIGPIPE, SIG_IGN)`。
+///
+/// **時序註記（#50 之後讀這段要小心）**：`SIG_IGN` 裝上後，write 改回 `EPIPE`
+/// 錯誤——這時 legacy `write(_:)` 的 ObjC exception **就是**死因（SIGABRT），
+/// `try? write(contentsOf:)` **就是**修法。上一段說「try? 完全無效」只對
+/// 「沒有 SIG_IGN」的世界成立；兩層缺一都會死，只是死法不同。#50 修的是第二層。
 @Test("stderr 讀端先關掉時 build 仍然成功——進度不該有能力殺掉主工作")
 func aClosedStderrDoesNotKillTheBuild() throws {
     let workspace = try CLIWorkspace.make(texts: ["第一段", "第二段", "第三段"])
@@ -1154,4 +1163,54 @@ func aMemoryRootAtANonexistentCorpusPathCreatesNothing() throws {
         try FileManager.default.contentsOfDirectory(atPath: workspace.corpus.path).sorted()
             == before,
         "語料根目錄多出了項目")
+}
+
+/// #51 R6：CLI 側的併入警告先前**零斷言**——把 `Commands.swift` 那段 if 整個刪掉，
+/// 全部測試照綠。MCP 側有測試而 CLI 側沒有，下一次分岔就往另一個方向跑。
+/// 佈局：先 build 一次（讓查詢有索引可用），另一個行程佔住 build.lock，再跑
+/// query——refreshIncrementally 撞 `lockHeld`、降級並在 stderr 說出來。
+@Test("查詢撞上建置鎖時 CLI 在 stderr 說出來")
+func cliAnnouncesDeferredMergeOnStderr() throws {
+    let workspace = try CLIWorkspace.make(texts: ["第一段內容第一段內容", "第二段內容第二段內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build", "--quiet"], environment: workspace.environment)
+
+    // 佔住鎖：flock 綁 inode 與行程——用一個長駐的子行程拿 LOCK_EX。
+    let lockPath = workspace.derived.appendingPathComponent("build.lock").path
+    let holder = Process()
+    holder.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    holder.arguments = [
+        "python3", "-c",
+        """
+        import fcntl, sys, time
+        f = open(sys.argv[1], "a")
+        fcntl.flock(f, fcntl.LOCK_EX)
+        print("held", flush=True)
+        time.sleep(30)
+        """, lockPath,
+    ]
+    let ready = Pipe()
+    holder.standardOutput = ready
+    try holder.run()
+    defer { holder.terminate() }
+    _ = ready.fileHandleForReading.readLine()  // 等到真的拿到鎖
+
+    let result = try runCLI(
+        ["query", "內容", "--all-projects"], environment: workspace.environment)
+    #expect(result.code == 0, "lockHeld 是降級不是失敗，實得 exit \(result.code)：\(result.err)")
+    #expect(
+        result.err.contains("本輪未併入新內容"),
+        "CLI 要在 stderr 說出來（#51）：\(result.err)")
+}
+
+extension FileHandle {
+    /// 讀到第一個換行為止（阻塞）。
+    fileprivate func readLine() -> String {
+        var buffer = Data()
+        while let byte = try? read(upToCount: 1), !byte.isEmpty {
+            if byte == Data("\n".utf8) { break }
+            buffer.append(byte)
+        }
+        return String(data: buffer, encoding: .utf8) ?? ""
+    }
 }

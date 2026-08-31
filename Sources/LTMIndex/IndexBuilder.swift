@@ -55,7 +55,7 @@ public enum BuildProgress: Sendable, Equatable {
     /// `largestBatchChunks × dimension × 4 B × 2`（×2 是因為 `VectorSidecar.encode`
     /// 產生的 `Data` 與 `batchVectors` 同時存活）。
     ///
-    /// **它不是整個 build 的峰值 RSS。** 量測顯示 RSS 隨 chunk 數線性成長，而
+    /// **它不是整個 build 的峰值 RSS。** 量測觀察到 RSS 隨 chunk 數成長（三點大致共線；n=1、「線性」尚不可宣稱），而
     /// 成長的來源尚未被隔離量測定位（`docs/measurements/2026-08-26-build-peak-memory.md`）。
     /// 這裡報的是那條線裡**唯一算得準**的一項——把它印出來，是為了讓「無上限」
     /// 從看不見變成看得見，不是為了假裝整體可預測。

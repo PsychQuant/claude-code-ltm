@@ -794,3 +794,28 @@ func scanWithoutProgressEmitsNothing() throws {
     // ——簽名若改成必填，這裡會編不過。
     _ = try scanner.scan()
 }
+
+@Test("時間側觸發也會發心跳，且發完重置檔案側計數器")
+func scanTimeSideTriggerAlsoBeatsAndResetsFileCounter() throws {
+    // 上一版唯一的心跳測試把時間側關掉（3600s），於是整個時間側觸發**零測試扛**
+    // （#48 verify，logic lens M3/M4 變異全綠）。interval 0 讓每個檔案邊界都
+    // 超時 → 每檔一則。這同時釘住「時間側觸發時檔案側也重置」——若不重置，
+    // 檔案側（間隔 3）會在第 3 檔疊發，序列裡會出現重複。
+    let corpus = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: corpus) }
+    for i in 0..<4 {
+        _ = try writeSession(
+            in: corpus, project: "proj-a", file: "s\(i).jsonl",
+            lines: [
+                turnLine(
+                    uuid: "0000000\(i)-aaaa-bbbb-cccc-dddddddddddd", session: sessionA,
+                    role: "user", text: "內容內容內容內容內容內容內容內容內容內容內容內容")
+            ])
+    }
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    var beats: [Int] = []
+    _ = try scanner.scan(
+        progress: { scanned, _ in beats.append(scanned) },
+        progressFileInterval: 3, progressTimeInterval: 0.000001)
+    #expect(beats == [0, 1, 2, 3, 4], "每檔案邊界一則、無重複，實得 \(beats)")
+}

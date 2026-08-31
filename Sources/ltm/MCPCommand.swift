@@ -97,8 +97,13 @@ enum MCPCommand {
             do {
                 try FileHandle.standardOutput.write(contentsOf: framed)
             } catch {
+                // 訊息不斷言原因——`NSFileWriteUnknownError` 也涵蓋 ENOSPC/EIO，
+                // 「stdout 已關閉」是沒觀察就寫下的因果；`\(error)` 會把活的
+                // heap 位址印進 client log（batch verify S2）。
                 try? FileHandle.standardError.write(
-                    contentsOf: Data("✗ stdout 已關閉，MCP server 結束：\(error)\n".utf8))
+                    contentsOf: Data(
+                        "✗ 寫入 stdout 失敗，MCP server 結束：\(error.localizedDescription)\n"
+                            .utf8))
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
             }
         }

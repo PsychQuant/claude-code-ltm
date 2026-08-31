@@ -304,20 +304,26 @@ public struct CorpusScanner: Sendable {
     /// 交給守衛常式」而安靜失去保護，成因看起來完全無辜。
     /// - Parameters:
     ///   - progress: 掃描進度 callback `(已掃檔數, 總檔數)`。**預設 nil**——查詢
-    ///     路徑（`refreshIncrementally` → `build` → 這裡）不傳，於是零回報開銷
-    ///     （#48）。分母在 `sourceFiles()` 回傳的那一刻就是精確的（完全物化的
-    ///     陣列，實測 10,098 檔 0.05 秒），所以第一則就是 `0/N`，不必先報
-    ///     「已掃 k 個」再升級成 `k/N`。
+    ///     路徑（`refreshIncrementally` → `build` → 這裡）不傳，此時整段心跳邏輯
+    ///     （含計數與取時鐘）都不執行（#48）。分母在 `sourceFiles()` 回傳的那一刻
+    ///     就是精確的（完全物化的陣列；掃描階段量測見
+    ///     `docs/measurements/2026-08-28-scan-phase-silence.md`，9,935 檔的語料），
+    ///     所以第一則就是 `0/N`，不必先報「已掃 k 個」再升級成 `k/N`。
     ///   - progressFileInterval: 每幾個檔案發一次心跳。與 `progressTimeInterval`
     ///     是 **or**：先到者發，**發完兩個計數器都重置**——否則慢檔情境下時間側
     ///     每次都觸發、快檔情境下計數側每次都觸發，各自把 stderr 洗版
     ///     （同 `IndexBuilder` 嵌入心跳的既決形狀，#45）。
+    ///     **時間側只在檔案邊界檢查**：單一超大或極慢的檔案處理期間仍然沒有心跳
+    ///     ——「每 T 秒」對那種形狀不成立（#48 verify，codex）。逐行 checkpoint
+    ///     要動解析迴圈，與 #47 相鄰，刻意不在本 issue 做。
     public func scan(
         previous: ScanState = ScanState(),
         progress: ((Int, Int) -> Void)? = nil,
         progressFileInterval: Int = 500,
         progressTimeInterval: TimeInterval = 5
     ) throws -> ScanResult {
+        precondition(progressFileInterval > 0, "心跳間隔必須為正（同 IndexBuilder 的既決形狀）")
+        precondition(progressTimeInterval > 0, "心跳間隔必須為正")
         var chunks: [CorpusChunk] = []
         var invalidated: Set<String> = []
         var unreadable: Set<String> = []
@@ -333,19 +339,25 @@ public struct CorpusScanner: Sendable {
         var filesSinceBeat = 0
         var lastBeat = Date()
         for (project, url, key) in walk.files {
-            // 心跳在 defer：這個迴圈體有多個 `continue`（讀不到、無新內容、拒絕），
-            // 每一條路都算「掃過一個檔」——insert 站點只有一個才不會漏。
+            // 心跳在 defer：迴圈體有 `continue`（現行**兩條**，都是「讀不到」；
+            // 上一版這裡列了三類——一份沒對過 code 的列舉，#48 verify），每一條
+            // 路都算「掃過一個檔」——insert 站點只有一個才不會漏。
+            //
+            // 整段包在 `if progress != nil` 裡：查詢路徑（progress 為 nil）連
+            // 計數與 `Date()` 都不執行——上一版寫「零回報開銷」而計數照跑，
+            // 一句可被 nil 輸入直接推翻的絕對句（#48 verify，codex + security）。
             defer {
-                scannedFiles += 1
-                filesSinceBeat += 1
-                let now = Date()
-                if let progress,
-                    filesSinceBeat >= progressFileInterval
+                if progress != nil {
+                    scannedFiles += 1
+                    filesSinceBeat += 1
+                    let now = Date()
+                    if filesSinceBeat >= progressFileInterval
                         || now.timeIntervalSince(lastBeat) >= progressTimeInterval
-                {
-                    progress(scannedFiles, walk.files.count)
-                    filesSinceBeat = 0
-                    lastBeat = now
+                    {
+                        progress?(scannedFiles, walk.files.count)
+                        filesSinceBeat = 0
+                        lastBeat = now
+                    }
                 }
             }
             seenKeys.insert(key)

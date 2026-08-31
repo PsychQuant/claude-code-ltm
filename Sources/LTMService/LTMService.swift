@@ -432,12 +432,28 @@ public struct LTMService {
     /// 放在這裡而不是 `Rejection` 上：訊息是呈現層的事，而 `BuildTuning` 活在
     /// 索引層。同一個 rejection 在 `ltm build` 是致命的、在查詢路徑是警告，
     /// 兩邊的措辭本來就不同。
+    /// 把外來字串壓成單行有界的形式。`value` 是**環境變數的原始內容**——它可以
+    /// 含換行與任意長度，而 describe 的輸出會進 CLI stderr 與 MCP 回應（後者的
+    /// 讀者是模型，一個含換行的值可以偽裝成回應裡的另一行，包括偽造 untrusted
+    /// banner——batch verify S1 實測過端到端）。消毒在**單一來源**做：兩個門面
+    /// 都吃這裡的輸出，不在各自的 render 複製判定。
+    private static func flattenedForDisplay(_ raw: String) -> String {
+        let flat = raw.replacingOccurrences(of: "\n", with: "␤")
+            .replacingOccurrences(of: "\r", with: "␤")
+        return flat.count > 80 ? String(flat.prefix(80)) + "…" : flat
+    }
+
+    /// 測試口：消毒行為的執行點（batch verify S1）。
+    static func describeForTesting(_ rejection: BuildTuning.Rejection) -> String {
+        describe(rejection)
+    }
+
     private static func describe(_ rejection: BuildTuning.Rejection) -> String {
         switch rejection {
         case .notAPositiveInteger(let variable, let value):
-            return "\(variable)=\(value) 不是正整數，已忽略"
+            return "\(variable)=\(Self.flattenedForDisplay(value)) 不是正整數，已忽略"
         case .megabytesOverflow(let variable, let value):
-            return "\(variable)=\(value) 換算成 bytes 會溢位，已忽略"
+            return "\(variable)=\(Self.flattenedForDisplay(value)) 換算成 bytes 會溢位，已忽略"
         }
     }
 
@@ -876,8 +892,13 @@ public struct LTMService {
     ///
     /// ## 兩處刻意的差異
     ///
-    /// - **拿不到鎖不失敗**：查詢仍可用既有索引回答，只是這一輪不併入新內容。
-    ///   `build` 相反——它的工作就是寫入，拿不到鎖必須明確失敗。
+    /// - **鎖被別人持有（`lockHeld`）不失敗**：查詢仍可用既有索引回答，只是
+    ///   這一輪不併入新內容——那個狀態會自癒。**`lockUnavailable`（權限、磁碟滿、
+    ///   EMFILE）照樣失敗**：不修不會好，降級它等於查詢永遠跑在舊索引上而每輪都
+    ///   「成功」。`build` 則兩種都失敗——它的工作就是寫入。
+    ///   （這一條先前寫「拿不到鎖不失敗」——一句沒分兩類的全稱，恰是 #51 逐字
+    ///   引用的缺陷；#51 的第一次修法在 33 行外**加**了正確版本而留著這句，
+    ///   同一個函式裡兩則相反的註解站了一輪——batch verify 抓到。）
     /// - **不可能觸發整份重建**：`query` 在呼叫這裡之前已經檢查過 layout 版本、
     ///   embedding revision 與 anchor 定址規則，三者不符都已拒答。所以
     ///   `build()` 內的 `stampsMismatch` 分支在這條路徑上到不了。

@@ -423,7 +423,7 @@ enum BuildCommand {
                     （#46 R2 verify，codex 與 devil's advocate 各自實測命中。）
 
                     誠實邊界：這個預算擋的是**向量累積**，不是整個 build 的峰值記憶體。
-                    後者隨 chunk 數線性成長而成長來源尚未定位，見
+                    後者隨 chunk 數成長（量測記到三點大致共線的觀察，n=1、尚不足以宣稱線性）而成長來源尚未定位，見
                     docs/measurements/2026-08-26-build-peak-memory.md。設了預算不等於安全。
                     """)
                 return LTMCommandLine.ExitCode.indexStateError.rawValue

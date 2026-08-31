@@ -1,7 +1,7 @@
 #!/bin/bash
 # 量 `ltm build` 的峰值 RSS 對語料規模的關係（#46）。
 #
-# 用**合成**語料而不是真實語料的單一觀察：三個點才看得出線性與否，而真實語料
+# 用**合成**語料而不是真實語料的單一觀察：三個規模才看得出成長形狀，而真實語料
 # 只給得出一個點，且要等數十分鐘。合成語料的 chunk 大小分布與真實不同——這是
 # 已知的限度，寫在產出的紀錄裡。
 set -u
@@ -13,6 +13,14 @@ BIN="${1:?用法: measure-build-memory.sh <ltm binary path>}"
 # **不要照抄下面的 `env LTM_ANCHOR_KEY=… ` 形式去跑真實語料**：那會讓真實密鑰
 # 進到 `ps` 看得到的 argv。真實語料請用 `export`，並從 keychain 取值：
 #   export LTM_ANCHOR_KEY="$(security find-generic-password -s ltm-anchor -w)"
+# 驗證要在**表頭之前**：非正整數要大聲失敗，不要先印表頭再產出「看似完整、
+# 其實是空的」表（實測 `abc` → 只有表頭、exit 0；`0` → BSD 的 `seq 1 0`
+# **倒數**，macOS 每規模跑出兩個 rep 而 GNU 跑零個——平台分岔且靜默。#52 verify）。
+REPS="${LTM_MEASURE_REPS:-3}"
+case "$REPS" in
+  ''|*[!0-9]*|0) echo "LTM_MEASURE_REPS 必須是正整數，收到：$REPS" >&2; exit 2 ;;
+esac
+
 KEY=$(python3 -c "print('ab'*32)")
 printf 'turns\trep\tchunks\tpeak_rss_mb\twall_s\n'
 for TURNS in 200 800 3200; do
@@ -42,7 +50,6 @@ PY
   # 這兩類結論在 n=1 的資料上不可判定——同 repo 的延遲紀錄每條件跑 3–7 次，
   # 這裡對齊。語料每規模生成一次（量的是建置的變異，不是語料生成的變異），
   # 每個 rep 用**全新的** derived root（否則第二次是增量 no-op，量到的是別的東西）。
-  REPS="${LTM_MEASURE_REPS:-3}"
   for REP in $(seq 1 "$REPS"); do
     rm -rf "$T/derived" && mkdir -p "$T/derived"
     OUT=$( { /usr/bin/time -l env LTM_CORPUS_ROOT="$T/corpus" LTM_DERIVED_ROOT="$T/derived" \

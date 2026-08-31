@@ -377,7 +377,10 @@ public final class IndexDatabase {
             // **`try?` + `write(contentsOf:)`，不是 legacy 的 `write(_:)`。**
             // 後者在 EPIPE 時丟 ObjC exception，而 `main.swift` 忽略 SIGPIPE 之後
             // 那個 exception 會讓行程以 SIGABRT 死掉——一個診斷訊息不該有能力
-            // 殺掉建置。（repo 裡還有六個 legacy 站點，追蹤於 #50。）
+            // 殺掉建置。（#50 已把 `Sources/` 的六個 legacy 站點全部換掉，並由
+            // `noLegacyStandardStreamWritesInSources` 守著第七個；`scripts/` 下的
+            // 獨立 target 不裝 SIG_IGN、死法是 SIGPIPE 而非 ObjC exception，
+            // 刻意不在守衛射程內。）
             try? FileHandle.standardError.write(
                 contentsOf: Data(
                     ("⚠ scan_state 有 \(rejected.count) 列的 processed_bytes 是負值，已丟棄"

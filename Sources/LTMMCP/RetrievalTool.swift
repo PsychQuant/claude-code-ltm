@@ -109,12 +109,19 @@ public enum RetrievalTool {
         let formatter = ISO8601DateFormatter()
         var lines = warnings + [untrustedBanner, authorityRule, ""]
         for (index, hit) in outcome.hits.enumerated() {
-            lines.append("\(index + 1). [\(hit.project)] \(formatter.string(from: hit.timestamp))")
+            // `project` 是 POSIX 目錄名、`sessionSources` 來自檔名——兩者換行合法。
+            // snippet 早就壓平了，而這兩個沒有：banner 之下的 corpus 側通道
+            // （batch verify，DA 收窄 S1 時抓到）。同一條規則：外來字串進單行
+            // 輸出前壓平。
+            let project = hit.project.replacingOccurrences(of: "\n", with: " ")
+            lines.append("\(index + 1). [\(project)] \(formatter.string(from: hit.timestamp))")
             lines.append("   \(hit.snippet.replacingOccurrences(of: "\n", with: " "))")
             // **指標與內容在同一段文字裡**，而 `sessions` 是集合（#25）：不挑代表。
             let label = hit.sessionSources.count > 1 ? "sessions" : "session"
+            let sources = hit.sessionSources.joined(separator: ", ")
+                .replacingOccurrences(of: "\n", with: " ")
             lines.append(
-                "   ↳ \(label) \(hit.sessionSources.joined(separator: ", "))  turn \(hit.uuid)")
+                "   ↳ \(label) \(sources)  turn \(hit.uuid)")
         }
         return lines.joined(separator: "\n")
     }
