@@ -90,7 +90,11 @@ func unreadableSourcesSurfaceInResponse() {
     let text = RetrievalTool.render(
         outcome(deferred: false, unreadable: ["proj-a/s1.jsonl", "proj-a/s2.jsonl"]))
     #expect(text.contains("2 個來源檔讀不到"), "要報數量，實得：\(text)")
-    #expect(!text.contains("s1.jsonl"), "不逐一列路徑——模型讀者、路徑清單是雜訊")
+    // **逐一斷言每條路徑與 basename 都不出現**——只查一條的話，實作改成
+    // 「只洩最後一條」照樣綠（#54 verify，codex）。
+    for leak in ["proj-a/s1.jsonl", "proj-a/s2.jsonl", "s1.jsonl", "s2.jsonl"] {
+        #expect(!text.contains(leak), "不得洩漏 \(leak)")
+    }
     #expect(text.contains("ltm build"), "指路去看明細")
 }
 
@@ -112,4 +116,22 @@ func unreadableWarningAppearsWithHits() {
         channels: ["trigram"], presentation: nil)
     let text = RetrievalTool.render(outcome(deferred: false, unreadable: ["k"], hits: [hit]))
     #expect(text.contains("1 個來源檔讀不到"), "實得：\(text)")
+}
+
+/// `skipped` 的排除是明示需求——沒有這條，將來有人把非零 SkipTally 加進警告，
+/// 既有測試（helper 固定 skipped 為零）攔不住（#54 verify，codex）。
+@Test("skipped 統計不影響 MCP 回應")
+func skippedTallyDoesNotAffectTheResponse() {
+    var tally = SkipTally()
+    tally.unparseableLine = 7
+    tally.notATurn = 3
+    let with = QueryOutcome(
+        hits: [], strategyID: "archival",
+        refresh: RefreshReport(
+            sourcesRefreshed: 0, sourcesUnreadable: [], sourcesInvalidated: 0,
+            skipped: tally),
+        eventsRecorded: 0, unattributableResults: 0)
+    #expect(
+        RetrievalTool.render(with) == RetrievalTool.render(outcome(deferred: false)),
+        "兩個只差 skipped 的 outcome 必須 render 出相同回應")
 }

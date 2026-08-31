@@ -102,13 +102,14 @@ public enum RetrievalTool {
         }
         // #54：「沒有命中」可能因為來源根本讀不到——模型讀者無法從答案本身看出。
         // 報**數量**不列路徑（路徑清單對模型是雜訊；明細在 `ltm build` 的 stderr）。
-        // `skipped`（SkipTally）**刻意不進來**：那是掃描統計不是警告——跳過行是
-        // 語料常態（46% 的行），每一輪都非零，放進回應等於每次查詢都帶一段
-        // 無行動性的噪音。
+        // `skipped`（SkipTally）**刻意不進來**：那是掃描統計不是警告——跳過行在
+        // 實際語料中經常出現（一次量測見 46%，樣本是使用者自己的語料、非產品
+        // 不變量；空語料或全可索引的一輪它就是零），放進每次回應通常只是
+        // 無行動性的噪音。這個排除由 `skippedTallyDoesNotAffectTheResponse` 釘住。
         if !outcome.refresh.sourcesUnreadable.isEmpty {
             warnings.append(
                 "⚠ \(outcome.refresh.sourcesUnreadable.count) 個來源檔讀不到，"
-                    + "本輪未更新（既有內容保留）——明細見 `ltm build`")
+                    + "本輪未更新（若有既有索引則保留）——明細見 `ltm build`")
         }
         for rejection in outcome.refresh.tuningRejections {
             warnings.append("⚠ \(rejection)")
