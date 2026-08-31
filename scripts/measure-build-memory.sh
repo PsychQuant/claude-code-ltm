@@ -14,7 +14,7 @@ BIN="${1:?用法: measure-build-memory.sh <ltm binary path>}"
 # 進到 `ps` 看得到的 argv。真實語料請用 `export`，並從 keychain 取值：
 #   export LTM_ANCHOR_KEY="$(security find-generic-password -s ltm-anchor -w)"
 KEY=$(python3 -c "print('ab'*32)")
-printf 'turns\tchunks\tpeak_rss_mb\twall_s\n'
+printf 'turns\trep\tchunks\tpeak_rss_mb\twall_s\n'
 for TURNS in 200 800 3200; do
   # mktemp 失敗時 T 會是空字串，後面的 "$T/corpus" 就變成絕對路徑 /corpus——
   # `set -u` 擋不住這個（T 有被賦值，只是賦成空的）。
@@ -38,23 +38,31 @@ for f in range((n + per - 1)//per):
                             "content": f"第 {k} 段內容。" + "測試語料需要足夠長度才能切成 chunk。" * 12},
             }, ensure_ascii=False) + "\n")
 PY
-  OUT=$( { /usr/bin/time -l env LTM_CORPUS_ROOT="$T/corpus" LTM_DERIVED_ROOT="$T/derived" \
-      LTM_ANCHOR_KEY="$KEY" "$BIN" build --quiet; } 2>&1 )
-  CH=$(printf '%s' "$OUT" | grep -oE '索引總計：[0-9]+' | grep -oE '[0-9]+')
-  RSS=$(printf '%s' "$OUT" | grep "maximum resident set size" | awk '{printf "%.0f", $1/1048576}')
-  WALL=$(printf '%s' "$OUT" | grep -E "^ *[0-9.]+ real" | awk '{print $1}')
+  # **每個規模跑 REPS 次**（#52）：n=1 沒有點內變異，「線性」與「在雜訊以下」
+  # 這兩類結論在 n=1 的資料上不可判定——同 repo 的延遲紀錄每條件跑 3–7 次，
+  # 這裡對齊。語料每規模生成一次（量的是建置的變異，不是語料生成的變異），
+  # 每個 rep 用**全新的** derived root（否則第二次是增量 no-op，量到的是別的東西）。
+  REPS="${LTM_MEASURE_REPS:-3}"
+  for REP in $(seq 1 "$REPS"); do
+    rm -rf "$T/derived" && mkdir -p "$T/derived"
+    OUT=$( { /usr/bin/time -l env LTM_CORPUS_ROOT="$T/corpus" LTM_DERIVED_ROOT="$T/derived" \
+        LTM_ANCHOR_KEY="$KEY" "$BIN" build --quiet; } 2>&1 )
+    CH=$(printf '%s' "$OUT" | grep -oE '索引總計：[0-9]+' | grep -oE '[0-9]+')
+    RSS=$(printf '%s' "$OUT" | grep "maximum resident set size" | awk '{printf "%.0f", $1/1048576}')
+    WALL=$(printf '%s' "$OUT" | grep -E "^ *[0-9.]+ real" | awk '{print $1}')
 
-  # 解析失敗要讓整輪失敗，不要印一行帶 `?` 的資料然後繼續。
-  #
-  # 產出的是一份要被引用的量測紀錄：一份「看似完整、其中一格是 ?」的表格
-  # 會被當成有效資料讀，而讀的人不會回頭問那個 ? 是什麼意思。
-  if [ -z "$CH" ] || [ -z "$RSS" ] || [ -z "$WALL" ]; then
-    echo "解析失敗（turns=${TURNS}）：chunks='$CH' rss='$RSS' wall='$WALL'" >&2
-    echo "--- build 輸出 ---" >&2
-    printf '%s\n' "$OUT" >&2
-    rm -rf "$T"
-    exit 1
-  fi
-  printf '%s\t%s\t%s\t%s\n' "$TURNS" "$CH" "$RSS" "$WALL"
+    # 解析失敗要讓整輪失敗，不要印一行帶 `?` 的資料然後繼續。
+    #
+    # 產出的是一份要被引用的量測紀錄：一份「看似完整、其中一格是 ?」的表格
+    # 會被當成有效資料讀，而讀的人不會回頭問那個 ? 是什麼意思。
+    if [ -z "$CH" ] || [ -z "$RSS" ] || [ -z "$WALL" ]; then
+      echo "解析失敗（turns=${TURNS} rep=${REP}）：chunks='$CH' rss='$RSS' wall='$WALL'" >&2
+      echo "--- build 輸出 ---" >&2
+      printf '%s\n' "$OUT" >&2
+      rm -rf "$T"
+      exit 1
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$TURNS" "$REP" "$CH" "$RSS" "$WALL"
+  done
   rm -rf "$T"
 done
