@@ -907,6 +907,12 @@ public struct LTMService {
         } catch IndexBuilder.BuildError.lockHeld {
             // 不拒答：既有索引仍然有效，為了「有人在建置」而讓查詢失敗是過度反應。
             // 但也不靜默：把它記進 report，由呈現層說出來。
+            //
+            // **只 catch `lockHeld` 是刻意的，`lockUnavailable` 照樣往上丟**（#51）：
+            // 兩者的分界是**會不會自癒**。`lockHeld`（另一個 build 正在跑）等一下
+            // 就好，降級一輪是正確的；`lockUnavailable`（權限、磁碟滿、EMFILE）
+            // 不修不會好——若也降級，查詢會**永遠**跑在舊索引上而每一輪都「成功」，
+            // 沒有人會發現。持續性的故障要具名失敗，不要變成永久的靜默降級。
             return RefreshReport(
                 sourcesRefreshed: 0, sourcesUnreadable: [], sourcesInvalidated: 0,
                 skipped: SkipTally(), mergeDeferredForConcurrentBuild: true,

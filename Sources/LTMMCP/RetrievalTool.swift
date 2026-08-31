@@ -92,9 +92,22 @@ public enum RetrievalTool {
     }
 
     static func render(_ outcome: QueryOutcome) -> String {
-        guard !outcome.hits.isEmpty else { return "（沒有命中）" }
+        // **兩個門面消費同一個旗標**（#51）：CLI 早就把「本輪未併入新內容」說出來
+        // 了，而 MCP 的讀者是模型——它更沒有辦法從答案本身看出「使用者剛講的那段
+        // 可能不在這次結果裡」。沒有命中時也要說：那個「沒有命中」可能正是因為
+        // 新內容還沒併入。
+        var warnings: [String] = []
+        if outcome.refresh.mergeDeferredForConcurrentBuild {
+            warnings.append("⚠ 有另一個 `ltm build` 正在跑，本輪未併入新內容（答案來自既有索引）")
+        }
+        for rejection in outcome.refresh.tuningRejections {
+            warnings.append("⚠ \(rejection)")
+        }
+        guard !outcome.hits.isEmpty else {
+            return (warnings + ["（沒有命中）"]).joined(separator: "\n")
+        }
         let formatter = ISO8601DateFormatter()
-        var lines = [untrustedBanner, authorityRule, ""]
+        var lines = warnings + [untrustedBanner, authorityRule, ""]
         for (index, hit) in outcome.hits.enumerated() {
             lines.append("\(index + 1). [\(hit.project)] \(formatter.string(from: hit.timestamp))")
             lines.append("   \(hit.snippet.replacingOccurrences(of: "\n", with: " "))")
