@@ -51,6 +51,7 @@ struct Arguments {
 
 enum Output {
     static func error(_ message: String) {
-        FileHandle.standardError.write(Data((message + "\n").utf8))
+        // `try?`：診斷訊息沒有能力殺掉行程（#50）。
+        try? FileHandle.standardError.write(contentsOf: Data((message + "\n").utf8))
     }
 }

@@ -70,8 +70,9 @@ enum MCPCommand {
             return LTMCommandLine.ExitCode.success.rawValue
         }
         guard arguments.isEmpty else {
-            FileHandle.standardError.write(
-                Data("✗ `ltm mcp` 不收引數，收到：\(arguments.joined(separator: " "))\n\n\(usage)\n".utf8))
+            try? FileHandle.standardError.write(
+                contentsOf: Data(
+                    "✗ `ltm mcp` 不收引數，收到：\(arguments.joined(separator: " "))\n\n\(usage)\n".utf8))
             return LTMCommandLine.ExitCode.usageError.rawValue
         }
 
@@ -88,8 +89,18 @@ enum MCPCommand {
                     to: Data(line.utf8), tools: tools,
                     serverName: "claude-ltm", serverVersion: LTMVersion.current)
             else { continue }  // notification：不回應
-            FileHandle.standardOutput.write(response)
-            FileHandle.standardOutput.write(Data("\n".utf8))
+            // **stdout 是協定通道，不是診斷通道**——寫入失敗不能 `try?` 吞掉：
+            // client 已經關掉 stdout，繼續讀 stdin 只是空轉，該具名結束（#50）。
+            // 合成一次 write：response 與換行分兩次寫，崩在中間會留半則訊息。
+            var framed = response
+            framed.append(Data("\n".utf8))
+            do {
+                try FileHandle.standardOutput.write(contentsOf: framed)
+            } catch {
+                try? FileHandle.standardError.write(
+                    contentsOf: Data("✗ stdout 已關閉，MCP server 結束：\(error)\n".utf8))
+                return LTMCommandLine.ExitCode.indexStateError.rawValue
+            }
         }
         return LTMCommandLine.ExitCode.success.rawValue
     }

@@ -37,7 +37,10 @@ public enum LTMCommandLine {
 
     public static func run(arguments: [String]) -> Int32 {
         guard let first = arguments.first else {
-            FileHandle.standardError.write(Data((usage + "\n").utf8))
+            // `try?`：stderr 被關掉時（EPIPE）usage 印不出來，但診斷訊息沒有
+            // 能力殺掉行程——legacy `write(_:)` 丟 ObjC exception，Swift 接不住，
+            // 行程以 SIGABRT 死（#50；SIG_IGN 只把 SIGPIPE 換成 EPIPE，接不住一樣死）。
+            try? FileHandle.standardError.write(contentsOf: Data((usage + "\n").utf8))
             return ExitCode.usageError.rawValue
         }
         switch first {
@@ -55,7 +58,9 @@ public enum LTMCommandLine {
         case "mcp":
             return MCPCommand.run(arguments: Array(arguments.dropFirst()))
         default:
-            FileHandle.standardError.write(Data("未知子命令：\(first)\n\n\(usage)\n".utf8))
+            // `try?`：同上（#50）。
+            try? FileHandle.standardError.write(
+                contentsOf: Data("未知子命令：\(first)\n\n\(usage)\n".utf8))
             return ExitCode.usageError.rawValue
         }
     }
