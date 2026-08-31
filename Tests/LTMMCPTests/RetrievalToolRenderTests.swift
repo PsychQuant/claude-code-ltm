@@ -13,12 +13,13 @@ import LTMCore
 /// 消費同一個旗標**，而且沒有命中時也要說（「沒有命中」可能正是因為沒併入）。
 
 private func outcome(
-    deferred: Bool, rejections: [String] = [], hits: [QueryHit] = []
+    deferred: Bool, rejections: [String] = [], unreadable: [String] = [],
+    hits: [QueryHit] = []
 ) -> QueryOutcome {
     QueryOutcome(
         hits: hits, strategyID: "archival",
         refresh: RefreshReport(
-            sourcesRefreshed: 0, sourcesUnreadable: [], sourcesInvalidated: 0,
+            sourcesRefreshed: 0, sourcesUnreadable: unreadable, sourcesInvalidated: 0,
             skipped: SkipTally(), mergeDeferredForConcurrentBuild: deferred,
             tuningRejections: rejections),
         eventsRecorded: 0, unattributableResults: 0)
@@ -80,4 +81,35 @@ func rejectionNewlinesAreFlattenedAtTheSource() {
         .notAPositiveInteger(variable: "LTM_BUILD_BATCH_CHUNKS", value: injected))
     #expect(!text.contains("\n"), "換行必須被壓平，實得：\(text)")
     #expect(text.count < 200, "超長值必須截斷，實得長度 \(text.count)")
+}
+
+/// #54：`sourcesUnreadable` 也要進 MCP 回應——「沒有命中」可能因為來源根本讀不到，
+/// 而模型讀者無法從答案本身看出這件事（CLI 早就報了，#51 只對齊了一半）。
+@Test("讀不到的來源數進 MCP 回應——零命中時尤其重要")
+func unreadableSourcesSurfaceInResponse() {
+    let text = RetrievalTool.render(
+        outcome(deferred: false, unreadable: ["proj-a/s1.jsonl", "proj-a/s2.jsonl"]))
+    #expect(text.contains("2 個來源檔讀不到"), "要報數量，實得：\(text)")
+    #expect(!text.contains("s1.jsonl"), "不逐一列路徑——模型讀者、路徑清單是雜訊")
+    #expect(text.contains("ltm build"), "指路去看明細")
+}
+
+@Test("有命中時讀不到的警告也在")
+func unreadableWarningAppearsWithHits() {
+    let hit = QueryHit(
+        project: "proj-a", sessionSources: ["s-1"],
+        uuid: "00000000-aaaa-bbbb-cccc-dddddddddddd",
+        timestamp: Date(timeIntervalSince1970: 1_760_000_000),
+        snippet: "內容片段", score: 1.0, band: 1, displacement: 0,
+        historyDescription: "", movementDescription: "",
+        anchor: Anchor(
+            source: "fixture-a",
+            turn: Turn(
+                id: "00000000-aaaa-bbbb-cccc-dddddddddddd", role: "user",
+                timestamp: Date(timeIntervalSince1970: 1_760_000_000),
+                text: "內容片段內容片段內容片段"),
+            span: 0..<4, key: .forTesting),
+        channels: ["trigram"], presentation: nil)
+    let text = RetrievalTool.render(outcome(deferred: false, unreadable: ["k"], hits: [hit]))
+    #expect(text.contains("1 個來源檔讀不到"), "實得：\(text)")
 }

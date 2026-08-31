@@ -256,6 +256,16 @@ public final class IndexDatabase {
         // 放進同一個交易之後，回滾會把 state 一起帶走——兩者**由構造**一致，
         // 不是靠加 fsync 去縮小窗口。（由跨模型盲驗的 devil's advocate 指出；
         // 其他五個 reviewer 都沒看到這條。）
+        //
+        // **這層保證的界線（#55，decision 記錄）**：它防的是**本系統自己**寫出
+        // 分岔（交易語意），加上游標對**檔案**可驗證（prefixHash）。它**不防**
+        // 「外部把游標改成一個雜湊自洽的超前值」——那個游標與 append 成長後的
+        // 正常舊 EOF 游標形狀上無法區分（cursor < size 且雜湊相符是**常態**，
+        // 不是崩潰特徵），而每一個 sound 的偵測都打到不能打的地方：parse 前綴
+        // 數 chunk 落在 #49 刪掉的熱路徑上；序數落地要改 schema（#47 declined）；
+        // 「cursor > 0 而 chunk 數 == 0」對純 skip 行的合法檔案偽陽性、會造成
+        // #47 F1 剛修掉的永久重失效迴圈。改 DB 游標需要的權限與直接刪 chunk
+        // 相同，而後者本來就不設防——界線劃在這裡，具名而非靜默。
         try execute(
             """
             CREATE TABLE IF NOT EXISTS scan_state (
