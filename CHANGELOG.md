@@ -6,6 +6,25 @@
 
 ### Fixed
 
+- **掃描階段不再靜默（#48）**：`CorpusScanner.scan()` 加 optional 進度 callback
+  （預設 nil——查詢路徑零回報開銷），開工即報 `0/N`（空語料報 `0/0`），之後每
+  N 檔或每 T 秒先到者發、發完兩個計數器都重置。`BuildProgress` 新增 `.scanning`；
+  CLI 印「正在掃描 N 個來源檔…」。首次全量在真實語料上的 310 秒沉默（與卡死
+  外觀相同）從此有心跳。builder→scanner 的接線由專屬測試扛（變異：接線換 nil
+  → 紅）。`ltm-setup` skill 的進度表同步，散文裡的行數（「四種」）整個拿掉——
+  那個數字已經錯過兩次。
+- **六個 legacy write 站點換成接得住 EPIPE 的形式（#50）**：stderr 四站
+  `try? write(contentsOf:)`（診斷訊息沒有能力殺行程）；MCP stdout 兩站合成一次
+  framed write、失敗時具名結束（stdout 是協定通道——client 關掉後繼續讀 stdin
+  只是空轉）。E2E：關掉 stdout 讀端，server 印具名訊息結束、無 SIGABRT。
+- **MCP 門面消費併入延後旗標（#51）**：`RetrievalTool.render` 前置
+  `mergeDeferredForConcurrentBuild` 與 `tuningRejections` 警告（零命中也說——
+  「沒有命中」可能正是因為新內容沒併入）。`lockUnavailable` 不降級寫明是刻意：
+  會自癒的（`lockHeld`）降級並說出來，不修不會好的（權限／磁碟滿）具名失敗。
+- **量測腳本每規模 n 次；兩個 n=1 撐不起的結論降級成觀察（#52）**：
+  `measure-build-memory.sh` 每規模跑 `LTM_MEASURE_REPS` 次（預設 3），每 rep 用
+  全新 derived root。「線性」與「在雜訊以下」在紀錄裡三處全部降級——n=1 沒有
+  點內變異，兩者字面上不可判定；數字仍是 n=1 時代的，重跑後才可升級回結論。
 - **`ltm query` 每次固定付的掃描成本降低（#49）：`build --quiet` 的中位數
   6.58 → 3.56 s、`query` 6.19 → 3.79 s**（同機同語料；改後各 7 次、改前 3–5 次，
   `docs/measurements/2026-08-27-query-latency-decomposition.md`）。`CorpusScanner`
