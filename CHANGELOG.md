@@ -6,6 +6,15 @@
 
 ### Fixed
 
+- **MCP 回應補「N 個來源檔讀不到」警告（#54）**：與 CLI 的 refresh 診斷對齊的
+  另一半。報數量不列路徑（模型讀者、路徑清單是雜訊，明細見 `ltm build`）；
+  `skipped` 統計**刻意不進**——跳過行是語料常態（46%）、每輪非零，放進回應等於
+  每次查詢帶無行動性噪音，理由在 `render` 註解。
+- **#55 記為 decision（decline）**：「偵測外部改壞但雜湊自洽的游標」——issue 的
+  前提（中途游標罕見）是假的：`cursor < size` 且雜湊相符是 append 成長的常態。
+  三個候選檢查逐一失效（熱路徑／schema／對純 skip 檔偽陽性）。界線具名寫進
+  `scan_state` 的權威註解：交易語意防自己、prefixHash 防檔案；外部改 DB 游標與
+  外部刪 chunk 同威脅等級、本來就不設防。
 - **`--batch-chunks` 成為真上界：批次以 chunk 為粒度、來源可跨批切開（#47）**。
   `ScannedChunk` 讓每個 chunk 帶 `(endOffset, prefixHashAtEnd)` 切點游標——與
   `scan_state` 同格式，批次交易把 slice 尾端的游標寫進去，下一輪掃描的續讀比對
