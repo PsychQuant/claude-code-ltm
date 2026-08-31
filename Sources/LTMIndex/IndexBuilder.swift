@@ -43,6 +43,12 @@ public enum BuildProgress: Sendable, Equatable {
     /// 相同的數字合成一個會讓日後真的分岔時沒有地方放。
     case scanCompleted(files: Int, chunks: Int, vectorsNeeded: Int)
 
+    /// **掃描進行中的心跳**（#48）。`scanCompleted` 在 `scan()` 回傳之後才發，而
+    /// `scan()` 把整份語料讀完才回來——首次全量在真實語料上是 310 秒，這段時間
+    /// 先前在定義上就是靜默的，與卡死外觀相同（#45 的症狀原封不動留在這個階段）。
+    /// 第一則恆為 `0/N`（分母在列目錄後即精確），之後每 N 檔或每 T 秒，先到者發。
+    case scanning(filesScanned: Int, filesTotal: Int, elapsed: TimeInterval)
+
     /// 分批算完之後的計畫，含**可以精確算出來**的那一項記憶體上界。
     ///
     /// `estimatedVectorBytes` 是最大那一批的向量累積：
@@ -415,7 +421,20 @@ public struct IndexBuilder: Sendable {
                         + "請跑 `ltm build --full` 從零重建")
             }
         }
-        let scan = try scanner.scan(previous: previousState)
+        let scanStarted = Date()
+        let scan = try scanner.scan(
+            previous: previousState,
+            // `progress` 為 nil（查詢路徑）時這裡也是 nil——scanner 走零回報路徑，
+            // MCP 每次查詢不付 10,000 次 callback 的成本（#48 診斷的具名風險）。
+            progress: progress.map { emit in
+                { scanned, total in
+                    emit(
+                        .scanning(
+                            filesScanned: scanned, filesTotal: total,
+                            elapsed: Date().timeIntervalSince(scanStarted)))
+                }
+            },
+            progressTimeInterval: progressTimeInterval)
         let refreshedSourceKeys = Set(scan.chunks.map(\.sourceKey))
 
         // 分母在這裡就知道了，而 embedding 一個都還沒算。#45 Expected ① 指名的

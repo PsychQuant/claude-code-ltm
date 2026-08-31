@@ -216,6 +216,10 @@ enum BuildCommand {
     static func writeProgress(_ progress: BuildProgress) {
         let line: String
         switch progress {
+        case .scanning(let scanned, let total, let elapsed):
+            line = scanned == 0
+                ? "  正在掃描 \(total) 個來源檔…"
+                : "  … 掃描 \(scanned)/\(total) 檔（已用 \(Self.duration(elapsed))）"
         case .scanCompleted(let files, let chunks, let vectorsNeeded):
             line = "  掃描完成：\(files) 個來源檔，\(chunks) 個新 chunk，"
                 + "其中 \(vectorsNeeded) 個要算向量"

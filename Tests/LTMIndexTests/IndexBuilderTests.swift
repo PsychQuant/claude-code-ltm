@@ -1798,3 +1798,50 @@ func aDanglingSidecarSymlinkDoesNotWriteIntoTheCorpus() throws {
     #expect(recovered.wasFullRebuild)
     #expect(recovered.chunksIndexed > 0)
 }
+
+/// #48：`.scanning` 由 builder→scanner 的接線發出，而那條接線曾經沒有執行點——
+/// 把 `build()` 裡傳給 `scan(progress:)` 的參數換成 `nil`，538 條測試全綠
+/// （實測，#48 implement 的變異）。這條測試扛的就是那條接線：跑真的 build，
+/// 斷言 `.scanning` 在 `.scanCompleted` 之前至少發了一次（開工那則 `0/N` 是
+/// 無條件的，所以「至少一次」在任何語料大小下都成立）。
+@Test("build 的進度流含掃描心跳，且在 scanCompleted 之前")
+func buildEmitsScanningBeforeScanCompleted() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    _ = try writeSession(
+        in: corpus, project: "proj-one", file: "s.jsonl",
+        lines: [
+            turnLine(
+                uuid: "00000001-aaaa-bbbb-cccc-dddddddddddd",
+                session: "11111111-2222-3333-4444-555555555555",
+                role: "user", text: "內容內容內容內容內容內容")
+        ])
+
+    final class EventBox: @unchecked Sendable {
+        private let mutex = NSLock()
+        private var names: [String] = []
+        func append(_ name: String) { mutex.lock(); names.append(name); mutex.unlock() }
+        var current: [String] { mutex.lock(); defer { mutex.unlock() }; return names }
+    }
+    let events = EventBox()
+    _ = try IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"),
+        progress: { event in
+            switch event {
+            case .scanning: events.append("scanning")
+            case .scanCompleted: events.append("scanCompleted")
+            default: break
+            }
+        }
+    ).build()
+
+    let names = events.current
+    let scanningIndex = try #require(
+        names.firstIndex(of: "scanning"), "沒有任何 .scanning——builder→scanner 的接線斷了")
+    let completedIndex = try #require(names.firstIndex(of: "scanCompleted"))
+    #expect(scanningIndex < completedIndex, "心跳要在掃描完成之前，實得 \(names)")
+}

@@ -302,7 +302,22 @@ public struct CorpusScanner: Sendable {
     ///
     /// 這則表格是刻意寫的：git 2018 年的 split-index bug 就是「某條路徑沒把 entry
     /// 交給守衛常式」而安靜失去保護，成因看起來完全無辜。
-    public func scan(previous: ScanState = ScanState()) throws -> ScanResult {
+    /// - Parameters:
+    ///   - progress: 掃描進度 callback `(已掃檔數, 總檔數)`。**預設 nil**——查詢
+    ///     路徑（`refreshIncrementally` → `build` → 這裡）不傳，於是零回報開銷
+    ///     （#48）。分母在 `sourceFiles()` 回傳的那一刻就是精確的（完全物化的
+    ///     陣列，實測 10,098 檔 0.05 秒），所以第一則就是 `0/N`，不必先報
+    ///     「已掃 k 個」再升級成 `k/N`。
+    ///   - progressFileInterval: 每幾個檔案發一次心跳。與 `progressTimeInterval`
+    ///     是 **or**：先到者發，**發完兩個計數器都重置**——否則慢檔情境下時間側
+    ///     每次都觸發、快檔情境下計數側每次都觸發，各自把 stderr 洗版
+    ///     （同 `IndexBuilder` 嵌入心跳的既決形狀，#45）。
+    public func scan(
+        previous: ScanState = ScanState(),
+        progress: ((Int, Int) -> Void)? = nil,
+        progressFileInterval: Int = 500,
+        progressTimeInterval: TimeInterval = 5
+    ) throws -> ScanResult {
         var chunks: [CorpusChunk] = []
         var invalidated: Set<String> = []
         var unreadable: Set<String> = []
@@ -311,7 +326,28 @@ public struct CorpusScanner: Sendable {
         var seenKeys: Set<String> = []
 
         let walk = try sourceFiles()
+        // 開工先說一句（0/N）——「完全沉默」與「卡死」外觀相同（#48；空語料也報，
+        // 0/0 仍然是「我開工了而且沒有東西要掃」這個有內容的訊息）。
+        progress?(0, walk.files.count)
+        var scannedFiles = 0
+        var filesSinceBeat = 0
+        var lastBeat = Date()
         for (project, url, key) in walk.files {
+            // 心跳在 defer：這個迴圈體有多個 `continue`（讀不到、無新內容、拒絕），
+            // 每一條路都算「掃過一個檔」——insert 站點只有一個才不會漏。
+            defer {
+                scannedFiles += 1
+                filesSinceBeat += 1
+                let now = Date()
+                if let progress,
+                    filesSinceBeat >= progressFileInterval
+                        || now.timeIntervalSince(lastBeat) >= progressTimeInterval
+                {
+                    progress(scannedFiles, walk.files.count)
+                    filesSinceBeat = 0
+                    lastBeat = now
+                }
+            }
             seenKeys.insert(key)
             guard let handle = try? FileHandle(forReadingFrom: url) else {
                 unreadable.insert(key)

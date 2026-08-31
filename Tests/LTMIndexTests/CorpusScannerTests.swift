@@ -730,3 +730,67 @@ func aNegativeCursorIsDiscardedRatherThanTrapping() throws {
     #expect(second.chunks.count == first.chunks.count, "應該從頭重掃出同樣的內容")
     #expect(second.state.files[key]?.processedBytes == first.state.files[key]?.processedBytes)
 }
+
+// MARK: - 掃描進度（#48）
+
+/// 掃描期間在定義上是靜默的：全部工作在 `scan()` 這一行內，`scanCompleted` 在它
+/// 回傳之後才發。首次全量在真實語料上是 310 秒——與卡死外觀相同（#45 的症狀原封
+/// 不動地留在這個階段）。這組測試扛的是 `scan()` 的 optional 進度 callback。
+
+@Test("scan 一開始就報分母（0/N），之後每 N 檔發心跳")
+func scanReportsDenominatorFirstThenHeartbeats() throws {
+    let corpus = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: corpus) }
+    for i in 0..<5 {
+        _ = try writeSession(
+            in: corpus, project: "proj-a", file: "s\(i).jsonl",
+            lines: [
+                turnLine(
+                    uuid: "0000000\(i)-aaaa-bbbb-cccc-dddddddddddd", session: sessionA,
+                    role: "user", text: "內容內容內容內容內容內容內容內容內容內容內容內容")
+            ])
+    }
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    var beats: [(scanned: Int, total: Int)] = []
+    _ = try scanner.scan(
+        progress: { beats.append((scanned: $0, total: $1)) },
+        progressFileInterval: 2, progressTimeInterval: 3600)
+
+    #expect(beats.first?.scanned == 0, "第一則要在迴圈前發，實得 \(beats)")
+    #expect(beats.first?.total == 5, "分母是精確的檔案數，實得 \(beats)")
+    #expect(beats.allSatisfy { $0.total == 5 }, "分母不變，實得 \(beats)")
+    // **精確序列，不是「至少一次」**：間隔 2、時間側關掉（3600s）、5 個檔案
+    // → 開工 0，之後 2、4（第 5 個檔沒到門檻）。斷言精確值才抓得到「發完沒有
+    // 重置計數器」這個變異——那個變異下序列是 [0,2,3,4,5]，單調性照樣成立。
+    #expect(beats.map(\.scanned) == [0, 2, 4], "實得 \(beats.map(\.scanned))")
+}
+
+@Test("零檔案的語料仍然報分母")
+func scanReportsDenominatorForEmptyCorpus() throws {
+    let corpus = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: corpus) }
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    var beats: [(Int, Int)] = []
+    _ = try scanner.scan(progress: { beats.append(($0, $1)) })
+    #expect(beats.count == 1, "空語料一則（0/0），實得 \(beats)")
+    #expect(beats.first?.0 == 0)
+    #expect(beats.first?.1 == 0)
+}
+
+@Test("不帶 progress 的 scan 走零回報路徑——查詢路徑零影響")
+func scanWithoutProgressEmitsNothing() throws {
+    let corpus = try makeFixtureCorpus()
+    defer { try? FileManager.default.removeItem(at: corpus) }
+    _ = try writeSession(
+        in: corpus, project: "proj-a", file: "s.jsonl",
+        lines: [
+            turnLine(
+                uuid: "00000000-aaaa-bbbb-cccc-dddddddddddd", session: sessionA,
+                role: "user", text: "內容內容內容內容內容內容內容內容內容內容內容內容")
+        ])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    // 編譯期事實：progress 預設 nil，查詢路徑（refreshIncrementally → build →
+    // scan）不傳它就不會有任何 callback。這條測試釘的是「預設值存在且為 nil」
+    // ——簽名若改成必填，這裡會編不過。
+    _ = try scanner.scan()
+}
