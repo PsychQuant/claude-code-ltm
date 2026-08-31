@@ -34,9 +34,9 @@ public enum BuildProgress: Sendable, Equatable {
     /// **掃描結束，分母已知。** 在任何 embedding 之前發生，成本近乎零。
     ///
     /// 第一版沒有這一則，於是第一行輸出要等整批 embedding + 側車寫入 + DB commit
-    /// 全部完成——而一批的實際上界隨最大的那個來源檔成長（見 #47 與
-    /// `batchChunkUpperBound(target:largestSource:)`），所以最壞情況下
-    /// 那仍然是數分鐘的沉默。#45 的核心症狀（「慢」與「卡死」外觀相同）原封不動。
+    /// 全部完成——當時一批的實際上界還隨最大的來源檔成長（#47 之前的整來源
+    /// 分批），最壞情況是數分鐘的沉默。#45 的核心症狀（「慢」與「卡死」外觀相同）
+    /// 在這一則出現前原封不動。
     ///
     /// `vectorsNeeded` 在目前的設計裡**恆等於** `chunks`：每個新掃到的 chunk 都要
     /// 算一次向量，沒有可以跳過的。分開列是因為 #45 逐字要了三個數字，而把兩個
@@ -81,56 +81,19 @@ public struct IndexBuilder: Sendable {
     /// 用 callback 而不是讓 `IndexBuilder` 自己 print：這一層不該決定輸出去哪
     /// （stdout 的 `--json` 形態是給程式讀的），那是 CLI 的決定。
     private let progress: (@Sendable (BuildProgress) -> Void)?
-    /// 一批**至少**累積幾個 chunk 才切（#44 分批）。**這不是上界。**
+    /// 一批 chunk 數的**上界**（#44 分批；#47 起是**真上界**）。
     ///
-    /// 名字裡的 `target` 是字面意思。批次以整個來源為單位組裝，切點只在
-    /// **加完一整個來源之後**判斷，所以實際上界比它大——**公式只有一份，在
-    /// `batchChunkUpperBound(target:largestSource:)`**，並由
-    /// `batchUpperBoundMatchesTheDeclaredFormula` 釘住。這裡刻意不複述它。
+    /// 批次以 chunk 為粒度組裝、來源可在任意 chunk 邊界切開，所以最大批次不會
+    /// 超過這個數。執行點是 `productionBatchingHonoursTheDeclaredBound`（跑真的
+    /// build、斷言 `batchPlan.largestBatchChunks <= target`）——也是 openspec
+    /// 指名的那條。
     ///
-    /// 上界的**右項隨語料成長**：session 檔會隨 resume 單調變長，所以「最大來源的
-    /// chunk 數」本身就是語料規模的遞增函數。
-    ///
-    /// 一批 chunk 數的**上界**——這個公式在整個 repo 只有這一份。
-    ///
-    /// ```
-    /// target − 1 + largestSource
-    /// ```
-    ///
-    /// 推導（`makeBatches` 的迴圈，逐行可查）：切點在 append **之後**判斷，所以
-    /// 進入最後一次 append 前 `currentCount ≤ target − 1`；那次 append 最多加進
-    /// `largestSource` 個。兩者相加就是上界，而且它**取得到**（見
-    /// `batchUpperBoundMatchesTheDeclaredFormula`）。
-    ///
-    /// **先前這裡寫的是 `max(target, largestSource)`，那是錯的**，而且被複製到
-    /// 六處——含 `openspec/specs/ltm-cli/spec.md` 的 SHALL 文字。實測：
-    /// `target = 2_000`、`largestSource = 4_322` 時真值是 6,321，舊公式報 4,322，
-    /// 低估 46%（#46 R2 verify，codex lens）。
-    ///
-    /// 那次錯誤的形狀值得記：它是**為了修一個錯的上界宣稱而新寫的上界宣稱**，
-    /// 而修法（把正確公式寫進六處散文）重犯了 CLAUDE.md 記過的「一個數字被複述
-    /// N 次就是 N 份會漂移的規格」。所以現在它是一個**可執行的函式加一條測試**，
-    /// 散文一律只指名、不複述。
-    public static func batchChunkUpperBound(target: Int, largestSource: Int) -> Int {
-        // `target ≤ 0` 由 CLI 擋掉（`--batch-chunks` 要正整數），但這個函式是
-        // public，所以自己也不能靠呼叫端。target = 1 時每個來源自成一批，上界
-        // 就是 largestSource——公式在該點正好給出 0 + largestSource。
-        max(target - 1, 0) + largestSource
-    }
-
-    /// 為什麼是結構後果而不是疏忽：`ScanState` 的續讀游標 `processedBytes` 是
-    /// **per-file** 的，一個來源切一半就沒有地方記「這個檔處理到哪」。要真正以
-    /// chunk 為單位分批，得先讓 state 能表達來源內的位置——見 #47。
-    ///
-    /// **這條註解先前寫的是相反的話**（「以 chunk 數為單位而不是來源數……避免
-    /// 上界由最大的那個來源決定」），而實作做的正是它說要避免的事。跨模型盲驗
-    /// 在使用者自己的語料上抓到反例：單一 session 檔 4,322 chunk > 2,000，該檔
-    /// 整個進同一批。查法：
-    ///
-    /// ```
-    /// wc -l < <最大的 .jsonl>          # 行數
-    /// grep -c '"type":"text"' <同檔>    # 可索引 chunk 的下界
-    /// ```
+    /// **歷史**：#47 之前批次以整個來源為單位、越線後才切，上界是
+    /// `max(target−1,0) + largestSource`，右項隨 resume 語料單調成長（實測單一
+    /// session 檔 4,322 chunk）。那個公式與 `batchUpperBoundMatchesTheDeclaredFormula`
+    /// 已一併刪除——不是收編進散文，是**這個量不存在了**。在那之前它還錯過一次
+    /// （`max(target, largestSource)`，低估 46%，被複製到六處散文——#46 R2）；
+    /// 「公式只有一份、散文只指名不複述」的教訓由現在的執行點繼承。
     ///
     /// **預設值 2,000 沒有量測支撐**（#46）。選它是為了「明顯安全」，不是為了
     /// 最佳。要調它得先有 `docs/measurements/` 的**批次大小 trade-off** 紀錄
@@ -216,8 +179,7 @@ public struct IndexBuilder: Sendable {
         /// 成長來源尚未定位，所以擋不了。這一點必須寫在錯誤訊息裡，否則使用者
         /// 會以為設了預算就安全。
         case memoryBudgetExceeded(
-            estimatedBytes: Int, budgetBytes: Int, largestBatchChunks: Int,
-            largestSourceChunks: Int)
+            estimatedBytes: Int, budgetBytes: Int, largestBatchChunks: Int)
     }
 
     /// 建置索引。
@@ -435,7 +397,7 @@ public struct IndexBuilder: Sendable {
                 }
             },
             progressTimeInterval: progressTimeInterval)
-        let refreshedSourceKeys = Set(scan.chunks.map(\.sourceKey))
+        let refreshedSourceKeys = Set(scan.chunks.map(\.chunk.sourceKey))
 
         // 分母在這裡就知道了，而 embedding 一個都還沒算。#45 Expected ① 指名的
         // 就是這個時機：「這一步在嵌入開始之前就知道，成本近乎零」。
@@ -505,7 +467,7 @@ public struct IndexBuilder: Sendable {
         //
         // 重複索引的風險改用另一個方式縮小：insert 與指標更新併進**同一個**
         // 交易（見下方 ③），把窗口壓到「交易提交 → 寫 state」之間。
-        let grouped = Dictionary(grouping: scan.chunks, by: \.sourceKey)
+        let grouped = Dictionary(grouping: scan.chunks, by: \.chunk.sourceKey)
 
         // 只失效、沒有新 chunk 的來源（檔案被刪／改寫成空）先清掉。
         let deleteOnly = scan.invalidatedSources.subtracting(grouped.keys)
@@ -520,31 +482,42 @@ public struct IndexBuilder: Sendable {
             }
         }
 
-        // **批次以整個來源為單位。** `batchChunkTarget` 是切點的下限、不是上界：
-        // 這個迴圈把一整個來源 append 進去之後才判斷有沒有越線。上界的公式在
-        // `batchChunkUpperBound(target:largestSource:)`——**這裡不複述**。
+        // **批次以 chunk 為粒度（#47）。** 來源可以在任意 chunk 邊界切開：
+        // `ScannedChunk` 帶著切點游標 `(endOffset, prefixHashAtEnd)`，與
+        // `scan_state` 同格式——批次交易把 slice 尾端的游標寫進去，下一輪掃描的
+        // 續讀比對原樣接受。`batchChunkTarget` 因此是**可取到的真上界**。
         //
-        // 不是疏忽：`ScanState.processedBytes` 是 per-file 的，來源切一半沒有地方
-        // 記進度。要真正以 chunk 分批得先擴充 state——見 #47。在那之前，`batchChunkTarget`
-        // 對「語料裡有個超大 session 檔」這個情況不提供任何保護。
-        //
-        var batches: [[String]] = []
-        var current: [String] = []
+        // （上一版以整個來源為單位、越線後才切，上界是
+        // `max(target−1,0) + largestSource`，右項隨 resume 語料單調成長——
+        // 實測最大 session 檔 116 MB。那個公式與它的測試已一併移除。）
+        struct BatchSlice {
+            let sourceKey: String
+            /// `grouped[sourceKey]` 的下標範圍。
+            let range: Range<Int>
+        }
+        var batches: [[BatchSlice]] = []
+        var current: [BatchSlice] = []
         var currentCount = 0
         for sourceKey in grouped.keys.sorted() {
-            current.append(sourceKey)
-            currentCount += grouped[sourceKey]?.count ?? 0
-            if currentCount >= batchChunkTarget {
-                batches.append(current)
-                current = []
-                currentCount = 0
+            let total = grouped[sourceKey]?.count ?? 0
+            var taken = 0
+            while taken < total {
+                let take = min(batchChunkTarget - currentCount, total - taken)
+                current.append(BatchSlice(sourceKey: sourceKey, range: taken..<taken + take))
+                currentCount += take
+                taken += take
+                if currentCount == batchChunkTarget {
+                    batches.append(current)
+                    current = []
+                    currentCount = 0
+                }
             }
         }
         if !current.isEmpty { batches.append(current) }
 
         // 這裡是唯一一個「上界算得準」的時點：批次已經定案，維度已知。
         let largestBatchChunks = batches.map { batch in
-            batch.reduce(0) { $0 + (grouped[$1]?.count ?? 0) }
+            batch.reduce(0) { $0 + $1.range.count }
         }.max() ?? 0
 
         // **公式與迴圈的對應由 `productionBatchingHonoursTheDeclaredBound` 扛，
@@ -554,10 +527,12 @@ public struct IndexBuilder: Sendable {
         // 一段註解論證它與 CLAUDE.md 的「驅動不了的守衛要拆掉」不同類。**那三個
         // 論點逐一被可執行證據推翻**（#46 R4 verify，devil's advocate）：
         //
-        // 1. 它不是語料相依的性質。迴圈在 `currentCount >= target` 時歸零，所以
-        //    append 前 `<= target − 1`、append 後 `<= (target − 1) + largestSource`
-        //    = 宣告上界。**對所有輸入恆成立**——唯一能違反它的是有人改那個迴圈，
-        //    而那是一次程式碼變更，正是測試的職責。
+        // 1. 它不是語料相依的性質（**以下描述的是 #47 之前的整來源迴圈**）。
+        //    當時迴圈在 `currentCount >= target` 時歸零，append 前 `<= target − 1`、
+        //    append 後 `<= (target − 1) + largestSource` = 當時的宣告上界。
+        //    對所有輸入恆成立——唯一能違反它的是有人改那個迴圈，而那是一次
+        //    程式碼變更，正是測試的職責。這個論證形式在 slice 化之後依然適用，
+        //    只是上界變成 target 本身。
         // 2. 交叉變異證明測試自己扛得住：把切點改成 `>= target * 10` **並且同時
         //    刪掉守衛**，那條測試 `failed with 2 issues`。我當時只量了兩個單一
         //    變異，而決定「由誰扛」的是交叉——CLAUDE.md 對 #40 寫的正是
@@ -578,11 +553,9 @@ public struct IndexBuilder: Sendable {
                 estimatedVectorBytes: estimatedVectorBytes))
 
         if let budget = memoryBudgetBytes, estimatedVectorBytes > budget {
-            let largestSourceChunks = grouped.values.map(\.count).max() ?? 0
             throw BuildError.memoryBudgetExceeded(
                 estimatedBytes: estimatedVectorBytes, budgetBytes: budget,
-                largestBatchChunks: largestBatchChunks,
-                largestSourceChunks: largestSourceChunks)
+                largestBatchChunks: largestBatchChunks)
         }
 
         // **stamps 與 dimension 在批次開始之前就寫**（#44）。
@@ -613,7 +586,9 @@ public struct IndexBuilder: Sendable {
         var lastBeatChunks = 0
 
         for (batchIndex, batch) in batches.enumerated() {
-            let batchChunks = batch.flatMap { grouped[$0] ?? [] }
+            let batchChunks = batch.flatMap { slice in
+                (grouped[slice.sourceKey] ?? [])[slice.range]
+            }
 
             // ① 交易外：算向量。慢、不持鎖、可中斷。
             var vectors: [[Float]?] = []
@@ -636,7 +611,7 @@ public struct IndexBuilder: Sendable {
                 // 產不出向量的 chunk 仍然留在 lexical 通道裡——少一路比整段
                 // 不可檢索好，而且 `vector_row` 為 NULL 讓「這一筆沒有向量」
                 // 是可查詢的事實，不是猜測。
-                vectors.append(try embedder.vector(for: chunk.text))
+                vectors.append(try embedder.vector(for: chunk.chunk.text))
             }
 
             // ② 交易外：側車落地並 fsync。**必須在寫指標的交易之前**。
@@ -662,13 +637,25 @@ public struct IndexBuilder: Sendable {
             // 交易，崩在中間會留下 vector_row 為 NULL 的 chunk，而它們既已提交、
             // state 又沒寫，下一輪會再插一次。
             try database.transaction {
-                for sourceKey in batch where scan.invalidatedSources.contains(sourceKey) {
-                    try database.deleteChunks(sourceKey: sourceKey)
+                // **只有 invalidated 來源的第一個 slice 刪一次**（#47 Expected ②）。
+                // delete 舊 + insert 第一個 slice + 游標指**新內容** prefix(b) 在
+                // 同一個交易；崩掉後下一輪 scan 對新內容雜湊相符 → 續讀、不再
+                // invalidate、**不再重刪**——「先刪舊再提交半份新、中間崩掉比舊
+                // 索引還糟」的狀態構造不出來。具名放棄的是改寫來源的 per-source
+                // 原子替換：崩潰後到下一輪 build 完成之間，讀者看得到該來源的
+                // 部分新內容（有界批次換來的，記在 CHANGELOG）。
+                for slice in batch
+                where slice.range.lowerBound == 0
+                    && scan.invalidatedSources.contains(slice.sourceKey)
+                {
+                    try database.deleteChunks(sourceKey: slice.sourceKey)
                 }
                 var cursor = 0
-                for sourceKey in batch {
-                    guard let chunks = grouped[sourceKey] else { continue }
-                    let ids = try database.insert(chunks: chunks, sourceKey: sourceKey)
+                for slice in batch {
+                    guard let all = grouped[slice.sourceKey] else { continue }
+                    let sliceChunks = Array(all[slice.range])
+                    let ids = try database.insert(
+                        chunks: sliceChunks.map(\.chunk), sourceKey: slice.sourceKey)
                     for id in ids {
                         if let row = rowForChunk[cursor] {
                             try database.execute(
@@ -680,17 +667,29 @@ public struct IndexBuilder: Sendable {
                 }
                 try database.setMeta("vector_count", String(vectorRow))
 
-                // ④ 本批來源的續讀游標——**在同一個交易內**。
+                // ④ 本批各 slice 的續讀游標——**在同一個交易內**。
                 //
                 // 這是這段程式碼最重要的一行位置。放到交易外（先前就是）會讓
                 // 「已索引到哪」與「索引裡有什麼」落在兩個各自不保證落地的域，
                 // 而 `synchronous=NORMAL` 下的 COMMIT 可以被硬重啟回滾。
                 // 詳見 `createSchema()` 裡 `scan_state` 的註解。
-                for sourceKey in batch {
-                    guard let entry = scan.state.files[sourceKey] else { continue }
-                    try database.upsertScanState(
-                        sourceKey: sourceKey, prefixHash: entry.prefixHash,
-                        processedBytes: entry.processedBytes)
+                //
+                // 游標規則（#47）：本來源的**最後一個** slice → 寫 scan 的最終
+                // entry（涵蓋最後一個 chunk 之後的 skip 行）；中間 slice → 寫
+                // slice 尾端那個 chunk 的切點游標。兩者都可對檔案驗證。
+                for slice in batch {
+                    guard let all = grouped[slice.sourceKey] else { continue }
+                    if slice.range.upperBound == all.count {
+                        guard let entry = scan.state.files[slice.sourceKey] else { continue }
+                        try database.upsertScanState(
+                            sourceKey: slice.sourceKey, prefixHash: entry.prefixHash,
+                            processedBytes: entry.processedBytes)
+                    } else {
+                        let last = all[slice.range.upperBound - 1]
+                        try database.upsertScanState(
+                            sourceKey: slice.sourceKey, prefixHash: last.prefixHashAtEnd,
+                            processedBytes: last.endOffset)
+                    }
                 }
             }
 

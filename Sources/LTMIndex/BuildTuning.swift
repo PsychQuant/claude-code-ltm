@@ -20,7 +20,7 @@ import Foundation
 /// 收斂到單一位置**不等於**它從此不會漂移，只是把漂移搬到一個沒人看守的地方
 /// （CLAUDE.md 對 #14 的紀錄）。看守它的是 `BuildTuningTests`。
 public struct BuildTuning: Sendable, Equatable {
-    /// 批次切點的**下限**。上界見 `IndexBuilder.batchChunkUpperBound(target:largestSource:)`。
+    /// 一批 chunk 數的**上界**（#47 起批次以 chunk 為粒度、來源可跨批切開）。
     public var batchChunkTarget: Int
     /// 向量累積的預算（bytes）。`nil` = 不設限。
     ///

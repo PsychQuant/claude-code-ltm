@@ -78,10 +78,25 @@ public struct ScanState: Codable, Sendable, Equatable {
     public init(files: [String: SourceFileState] = [:]) { self.files = files }
 }
 
+/// 一個 chunk 連同它在來源檔中的**切點游標**（#47）。
+///
+/// `(endOffset, prefixHashAtEnd)` 與 `SourceFileState(prefixHash, processedBytes)`
+/// 是同一格式——批次層把任何一個 chunk 的切點原樣寫進 `scan_state`，下一輪掃描
+/// 的續讀比對就會接受它並從那裡續讀。**來源因此可以在任意 chunk 邊界切開提交**，
+/// 而游標永遠可對檔案驗證（重算 `0..<endOffset` 的 SHA-256 必須等於
+/// `prefixHashAtEnd`）。
+public struct ScannedChunk: Sendable, Equatable {
+    public let chunk: CorpusChunk
+    /// 該 chunk 那一行在來源檔中的結束位移（含行尾換行，絕對值）。
+    public let endOffset: Int
+    /// 來源檔 `0..<endOffset` 的 SHA-256（hex 小寫）——與 `prefixHash` 同格式。
+    public let prefixHashAtEnd: String
+}
+
 /// 一次掃描的產出。
 public struct ScanResult: Sendable {
     /// 這次新讀到的 chunk。
-    public let chunks: [CorpusChunk]
+    public let chunks: [ScannedChunk]
     /// 需要先清掉既有 chunk 的來源檔（prefix 不符 → 整份重解）。
     ///
     /// 分開回報而不是讓呼叫端自己比對 state：舊 chunk 沒清掉的話，被改寫的
@@ -324,7 +339,7 @@ public struct CorpusScanner: Sendable {
     ) throws -> ScanResult {
         precondition(progressFileInterval > 0, "心跳間隔必須為正（同 IndexBuilder 的既決形狀）")
         precondition(progressTimeInterval > 0, "心跳間隔必須為正")
-        var chunks: [CorpusChunk] = []
+        var chunks: [ScannedChunk] = []
         var invalidated: Set<String> = []
         var unreadable: Set<String> = []
         var nextState = ScanState()
@@ -410,12 +425,24 @@ public struct CorpusScanner: Sendable {
             //
             // 判準：**不要從一個值反推另一件事，把那件事記下來。**
             var resumedFromVerifiedPrefix = false
+            // **增量雜湊**（#47）：整個檔案每個 byte 恰好被雜湊一次。前綴在比對
+            // 時餵進 hasher；比對用**快照**（value type 複製後 finalize），原件
+            // 繼續吃 tail——逐 chunk 的切點快照就從同一個 hasher 取。
+            // canary：`snapshotOfIncrementalHasherMatchesOneShotDigest`。
+            var hasher = SHA256()
             if let prior = priorState, prior.processedBytes <= size,
-                let prefix = try? readBytes(handle, from: 0, count: prior.processedBytes),
-                Self.hexDigest(prefix) == prior.prefixHash
+                let prefix = try? readBytes(handle, from: 0, count: prior.processedBytes)
             {
-                startOffset = prior.processedBytes
-                resumedFromVerifiedPrefix = true
+                var candidate = SHA256()
+                candidate.update(data: prefix)
+                let digest = candidate.finalize().map { String(format: "%02x", $0) }.joined()
+                if digest == prior.prefixHash {
+                    startOffset = prior.processedBytes
+                    resumedFromVerifiedPrefix = true
+                    hasher = candidate
+                } else if priorState != nil {
+                    invalidated.insert(key)
+                }
             } else if priorState != nil {
                 invalidated.insert(key)
             }
@@ -427,7 +454,27 @@ public struct CorpusScanner: Sendable {
                 continue
             }
             let parsed = parse(data: tail, project: project, sourceKey: key, tally: &tally)
-            chunks.append(contentsOf: parsed.chunks)
+            // 逐 chunk 切點：hasher 吃到每個切點、取快照當該 chunk 的游標（#47）。
+            var hashedUpTo = 0
+            for (chunk, relEnd) in zip(parsed.chunks, parsed.chunkEnds) {
+                if relEnd > hashedUpTo {
+                    hasher.update(data: tail.subdata(
+                        in: tail.startIndex + hashedUpTo..<tail.startIndex + relEnd))
+                    hashedUpTo = relEnd
+                }
+                let snapshot = hasher
+                chunks.append(
+                    ScannedChunk(
+                        chunk: chunk, endOffset: startOffset + relEnd,
+                        prefixHashAtEnd: snapshot.finalize()
+                            .map { String(format: "%02x", $0) }.joined()))
+            }
+            // 最後一個切點到 consumed 之間的 skip 行也要進 hasher——最終 digest
+            // 就是新的 prefixHash。
+            if parsed.consumedBytes > hashedUpTo {
+                hasher.update(data: tail.subdata(
+                    in: tail.startIndex + hashedUpTo..<tail.startIndex + parsed.consumedBytes))
+            }
 
             // offset 只推進到**最後一個完整紀錄**之後；雜湊只涵蓋那一段。
             // 半行留給下一輪從它的起點重讀。
@@ -489,9 +536,13 @@ public struct CorpusScanner: Sendable {
                 // 扛這條不變式的是測試，不是斷言——見上面那兩條守衛測試。
                 nextState.files[key] = prior
             } else {
-                let whole = (try? readBytes(handle, from: 0, count: processed)) ?? Data()
+                // **不再整段重讀**（#47）：hasher 已恰好吃完 `0..<processed`
+                // （續讀時前綴在比對時餵入、tail 在逐切點時餵入）。存的是
+                // **實際被解析的 bytes** 的雜湊——TOCTOU 的 T3 重讀窗口消失，
+                // T1–T2 之間的窗口仍在（誠實邊界，同上一段註解）。
                 nextState.files[key] = SourceFileState(
-                    prefixHash: Self.hexDigest(whole), processedBytes: processed)
+                    prefixHash: hasher.finalize().map { String(format: "%02x", $0) }.joined(),
+                    processedBytes: processed)
             }
         }
 
@@ -558,20 +609,29 @@ public struct CorpusScanner: Sendable {
     ///   推到檔案結尾、`prefixHash` 也涵蓋那半行，於是下一輪 prefix 仍然吻合、
     ///   只讀「後半段」——那段不含 JSON 前半，仍然解析失敗。**該 turn 就此永久
     ///   從索引消失**，而註解卻宣稱它會被重讀。
+    /// `chunkEnds[i]` 是 `chunks[i]` 那一行的結束位移（**相對 `data` 起點**，
+    /// 含行尾換行）——#47 的批次層拿它組游標。
     func parse(
         data: Data, project: String, sourceKey: String, tally: inout SkipTally
-    ) -> (chunks: [CorpusChunk], consumedBytes: Int) {
-        guard !data.isEmpty else { return ([], 0) }
+    ) -> (chunks: [CorpusChunk], chunkEnds: [Int], consumedBytes: Int) {
+        guard !data.isEmpty else { return ([], [], 0) }
         var chunks: [CorpusChunk] = []
+        var chunkEnds: [Int] = []
         // 最後一個換行之後的 bytes 是不完整的一行（除非檔案剛好以換行結尾）。
         let lastNewline = data.lastIndex(of: UInt8(ascii: "\n"))
         let consumed = lastNewline.map { data.distance(from: data.startIndex, to: $0) + 1 } ?? 0
         if consumed < data.count { tally.incompleteTrailingRecord += 1 }
-        let complete = consumed > 0 ? data.prefix(consumed) : Data()
-        for lineData in complete.split(separator: UInt8(ascii: "\n")) {
-            guard !lineData.isEmpty else { continue }
+        // 手動走 newline（不用 `split`）——每個產出 chunk 的行要記它的 end offset。
+        // `bytes` 以 0 起算，避開 Data slice 的非零 startIndex 陷阱。
+        let bytes = [UInt8](consumed > 0 ? data.prefix(consumed) : Data())
+        var lineStart = 0
+        while lineStart < bytes.count {
+            let lineEnd = bytes[lineStart...].firstIndex(of: UInt8(ascii: "\n")) ?? bytes.count
+            defer { lineStart = lineEnd + 1 }
+            guard lineEnd > lineStart else { continue }
+            let lineData = Data(bytes[lineStart..<lineEnd])
             guard
-                let object = try? JSONSerialization.jsonObject(with: Data(lineData))
+                let object = try? JSONSerialization.jsonObject(with: lineData)
                     as? [String: Any]
             else {
                 tally.unparseableLine += 1
@@ -582,9 +642,11 @@ public struct CorpusScanner: Sendable {
                 tally: &tally)
             {
                 chunks.append(chunk)
+                // 含換行：`lineEnd` 指到 `\n` 本身（或 bytes.count），切點在其後。
+                chunkEnds.append(min(lineEnd + 1, consumed))
             }
         }
-        return (chunks, consumed)
+        return (chunks, chunkEnds, consumed)
     }
 
     /// 一筆 jsonl 紀錄 → chunk。任何不合語料預期的紀錄一律**跳過並記帳**，

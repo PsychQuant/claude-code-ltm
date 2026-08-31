@@ -254,11 +254,9 @@ enum BuildCommand {
         選項：
           --full                捨棄既有索引，從零重建
           --quiet               不印進度（進度預設寫 stderr；CI／腳本可關掉）
-          --batch-chunks N      批次切點的下限（預設 2000）。**不是上界**：批次以
-                                整個來源檔為單位組裝，所以實際上界比 N 大、且隨
-                                最大來源檔成長。見 issue #47。（要看實際數字就設
-                                --memory-budget-mb，拒絕訊息會印出實算的最大批次。）
-                                環境變數：LTM_BUILD_BATCH_CHUNKS
+          --batch-chunks N      一批 chunk 數的上界（預設 2000）。批次以 chunk 為
+                                粒度組裝、來源可在 chunk 邊界切開（#47），最大
+                                批次不會超過 N。環境變數：LTM_BUILD_BATCH_CHUNKS
           --memory-budget-mb N  向量累積超過 N MB 就具名拒絕，不跑。
                                 **預設不設限**——本 repo 沒有量測支撐得起一個門檻，
                                 憑感覺挑一個只是換一個東西替你決定後果。
@@ -403,19 +401,19 @@ enum BuildCommand {
                     """)
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .memoryBudgetExceeded(
-                let estimated, let budget, let largestBatch, let largestSource):
+                let estimated, let budget, let largestBatch):
                 Output.error(
                     """
                     ✗ 向量累積的估計值 \(Self.megabytes(estimated)) 超過你設定的預算 \
                     \(Self.megabytes(budget))
-                      最大的一批有 \(largestBatch) 個 chunk，其中最大的單一來源檔佔 \
-                    \(largestSource) 個。
+                      最大的一批有 \(largestBatch) 個 chunk。
 
                     補救：
                       1. 提高預算：--memory-budget-mb <N>，或不設它（預設無上限）。
-                      2. 縮小批次：--batch-chunks <N>。**只在最大來源本身小於 N 時有效**
-                         ——批次以整個來源為單位組裝（見 issue #47），所以它壓不下
-                         一個 \(largestSource) chunk 的檔案。
+                      2. 縮小批次：--batch-chunks <N>。批次以 chunk 為粒度、來源可在
+                         chunk 邊界切開（#47），所以這一項**無條件有效**——上一版
+                         「只在最大來源小於 N 時有效」的 caveat 隨舊的整來源分批
+                         一併移除。
 
                     ⚠ **不要用 LTM_CORPUS_ROOT 分次索引。** 這裡先前把它列為首要補救，
                     那是錯的、而且是破壞性的：本輪沒掃到的來源會被標成 invalidated
@@ -649,7 +647,7 @@ enum QueryCommand {
                     """)
             case .lockHeld(let path):
                 Output.error("✗ 意外的鎖錯誤（\(path)）——查詢路徑本應吞掉它。這是 bug。")
-            case .memoryBudgetExceeded(let estimated, let budget, _, _):
+            case .memoryBudgetExceeded(let estimated, let budget, _):
                 // **這條分支到得了，而且是設計如此。** 上一版的註解寫「查詢路徑不設
                 // 預算，所以這裡到不了」——那句話被同一次改動變成假的（#46 的 F 列
                 // 讓 `LTM_BUILD_MEMORY_BUDGET_MB` 到得了 `refreshIncrementally`），

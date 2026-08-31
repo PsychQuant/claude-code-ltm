@@ -52,7 +52,11 @@ import Testing
 // - **並發寫入**。單執行緒依序套用變異。
 // - **真實 embedder**。用 `StubEmbedder`，所以向量比對驗的是「同樣的文字得到同樣的
 //   向量、且 `vector_row` 解參考正確」，不是 `NLContextualEmbedding` 的行為。
-// - **崩潰中止**。沒有在建置中途殺掉行程再續跑。
+// - **崩潰中止（#47 後半關）**。以 embed 拋錯模擬中斷的續跑等價由
+//   `aCrashMidSourceResumesFromTheCommittedChunk` 與
+//   `aRewrittenSourceCrashMidReingestConvergesWithoutRedeleting` 扛（含來源內
+//   中斷）；**SIGKILL／硬重啟仍未模擬**——WAL 回滾語意由「游標與內容同一交易」
+//   的設計扛，不由任何測試扛。
 // **上面四條已於 #29 關閉**（三個 project、`chunk_sources.timestamp` 與 `state.json`
 // 進 `Snapshot`、每個檔混入四種跳過行、`ORDER BY` 拿掉 `c.uuid` 改成按分數分組）。
 // 各自的變異驗證：唯一鍵退回 `uuid` 單獨 → 紅 100；跳過分類漂移 → 紅 100；
@@ -395,7 +399,7 @@ private struct EquivalencePolicy: CorpusContainmentPolicy {
 /// 生成一條變異序列，並在磁碟上逐步套用；每一步之後跑一次增量建置。
 /// 回傳 (語料根, 增量衍生根, 套用過的序列)。
 private func runIncremental(
-    seed: UInt64, steps: Int, embedder: StubEmbedder
+    seed: UInt64, steps: Int, embedder: StubEmbedder, batchChunkTarget: Int = 2_000
 ) throws -> (corpus: URL, derived: DerivedLocation, trace: [Mutation]) {
     var rng = SeededGenerator(seed: seed)
     let corpus = FileManager.default.temporaryDirectory
@@ -437,7 +441,8 @@ private func runIncremental(
 
     func build() throws {
         _ = try IndexBuilder(
-            location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting), embedder: embedder
+            location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+            embedder: embedder, batchChunkTarget: batchChunkTarget
         ).build()
     }
 
@@ -530,7 +535,13 @@ func incrementalMatchesFullRebuild(seed: UInt64) throws {
     let embedder = StubEmbedder(revision: "r1")
     let probes = ["共通詞", "keyword0", "keyword1", "keyword2", "keyword3"]
 
-    let run = try runIncremental(seed: seed, steps: 12, embedder: embedder)
+    // **兩軸各半（#47 Expected ③）**：偶數 seed 用 target 2——rewrite/create 吐
+    // 1–3 個 chunk，target 2 讓「一個來源跨兩批」成為常態路徑（target 3 就切不
+    // 開了）；奇數 seed 維持 2,000（單批，原軸）。全量側恆用預設——不變式 2 的
+    // 字面就是「與乾淨重建等價」，兩側 target 不同正是要證明分批不影響結果。
+    let target = seed.isMultiple(of: 2) ? 2 : 2_000
+    let run = try runIncremental(
+        seed: seed, steps: 12, embedder: embedder, batchChunkTarget: target)
     defer {
         try? FileManager.default.removeItem(at: run.corpus)
         try? FileManager.default.removeItem(at: run.derived.root)

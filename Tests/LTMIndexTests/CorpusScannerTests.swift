@@ -62,10 +62,10 @@ func fullScanProducesPointeredChunks() throws {
 
     #expect(result.chunks.count == 2)
     for chunk in result.chunks {
-        #expect(chunk.project == "proj-one")
-        #expect(!chunk.sessionID.isEmpty)
-        #expect(!chunk.uuid.isEmpty)
-        #expect(chunk.timestamp.timeIntervalSince1970 > 0)
+        #expect(chunk.chunk.project == "proj-one")
+        #expect(!chunk.chunk.sessionID.isEmpty)
+        #expect(!chunk.chunk.uuid.isEmpty)
+        #expect(chunk.chunk.timestamp.timeIntervalSince1970 > 0)
     }
 }
 
@@ -97,7 +97,7 @@ func incrementalScanReadsOnlyTheTail() throws {
 
     // 只讀到新那一則——舊的那則不會重複出現。
     #expect(second.chunks.count == 1)
-    #expect(second.chunks.first?.uuid == "aaaaaaaa-0000-0000-0000-000000000002")
+    #expect(second.chunks.first?.chunk.uuid == "aaaaaaaa-0000-0000-0000-000000000002")
     #expect(second.invalidatedSources.isEmpty)
 }
 
@@ -132,7 +132,7 @@ func rewrittenSourceIsFullyReparsed() throws {
     #expect(second.invalidatedSources.contains("proj-one/session.jsonl"))
     #expect(second.chunks.count == 2)
     // 舊 anchor 綁的是舊文字，所以改寫後的 chunk 一定有不同的 content hash。
-    #expect(second.chunks.first?.anchor.contentHash != first.chunks.first?.anchor.contentHash)
+    #expect(second.chunks.first?.chunk.anchor.contentHash != first.chunks.first?.chunk.anchor.contentHash)
 }
 
 @Test("非 turn 紀錄與缺欄位紀錄被跳過並記帳，不中止掃描")
@@ -181,8 +181,8 @@ func toolOnlyTurnIsIndexedAsMetadata() throws {
     let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
 
     let chunk = try #require(result.chunks.first, "tool-only turn 現在該被索引")
-    #expect(chunk.text.contains("Bash"), "工具名要搜得到")
-    #expect(chunk.text.contains("swift test"), "指令要搜得到——那是「做了什麼」")
+    #expect(chunk.chunk.text.contains("Bash"), "工具名要搜得到")
+    #expect(chunk.chunk.text.contains("swift test"), "指令要搜得到——那是「做了什麼」")
     #expect(result.skipped.noIndexableText == 0)
 }
 
@@ -331,20 +331,20 @@ func fixtureCorpusYieldsOneChunkPerTurn() throws {
     let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
 
     #expect(result.chunks.count == 50)
-    #expect(Set(result.chunks.map(\.uuid)) == expectedUUIDs)
-    #expect(Set(result.chunks.map(\.project)).count == 3)
+    #expect(Set(result.chunks.map(\.chunk.uuid)) == expectedUUIDs)
+    #expect(Set(result.chunks.map(\.chunk.project)).count == 3)
     for chunk in result.chunks {
-        #expect(!chunk.project.isEmpty)
-        #expect(!chunk.sessionID.isEmpty)
-        #expect(!chunk.uuid.isEmpty)
-        #expect(chunk.timestamp.timeIntervalSince1970 > 0)
+        #expect(!chunk.chunk.project.isEmpty)
+        #expect(!chunk.chunk.sessionID.isEmpty)
+        #expect(!chunk.chunk.uuid.isEmpty)
+        #expect(chunk.chunk.timestamp.timeIntervalSince1970 > 0)
         // anchor 綁的內容必須真的能還原成該 chunk 的文字。
-        #expect(chunk.anchor.turnID == chunk.uuid)
+        #expect(chunk.chunk.anchor.turnID == chunk.chunk.uuid)
         // source 是 **project 指紋**，不是 sessionID——後者在 session resume 時會變，
         // 用它定址會讓使用歷史蒸發（見 ProjectFingerprint）。sessionID 仍在 chunk 上，
         // 但只作導航用。
-        #expect(chunk.anchor.source == ProjectFingerprint.of(chunk.project))
-        #expect(chunk.anchor.source != chunk.sessionID)
+        #expect(chunk.chunk.anchor.source == ProjectFingerprint.of(chunk.chunk.project))
+        #expect(chunk.chunk.anchor.source != chunk.chunk.sessionID)
     }
 }
 
@@ -374,12 +374,12 @@ func anchorSurvivesSessionResume() throws {
         ])
 
     let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
-    let shared = result.chunks.filter { $0.uuid == sharedTurn }
+    let shared = result.chunks.filter { $0.chunk.uuid == sharedTurn }
 
     #expect(shared.count == 2, "掃描階段兩個檔各產生一筆；去重是索引層的職責（task 2.2）")
     // 關鍵斷言：兩筆的 sessionID 不同，但 anchor 完全相同——這正是舊實作壞掉的地方。
-    #expect(Set(shared.map(\.sessionID)).count == 2)
-    #expect(Set(shared.map(\.anchor)).count == 1, "同一則 turn 必須得到同一個 anchor，否則使用歷史會在 resume 後對不上")
+    #expect(Set(shared.map(\.chunk.sessionID)).count == 2)
+    #expect(Set(shared.map(\.chunk.anchor)).count == 1, "同一則 turn 必須得到同一個 anchor，否則使用歷史會在 resume 後對不上")
 }
 
 @Test("來源檔消失時它的 chunk 被作廢")
@@ -429,7 +429,7 @@ func incompleteTrailingRecordIsRereadNextScan() throws {
     // 補完檔案後再掃：那一則必須被索引到。
     try (complete + "\n" + full + "\n").write(to: url, atomically: true, encoding: .utf8)
     let second = try scanner.scan(previous: first.state)
-    #expect(second.chunks.contains { $0.uuid == "aaaaaaaa-0000-0000-0000-000000000002" },
+    #expect(second.chunks.contains { $0.chunk.uuid == "aaaaaaaa-0000-0000-0000-000000000002" },
             "半行補完後必須被索引 —— 先前它會永久消失且無錯誤訊息")
 }
 

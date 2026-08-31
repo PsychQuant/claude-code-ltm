@@ -6,6 +6,23 @@
 
 ### Fixed
 
+- **`--batch-chunks` 成為真上界：批次以 chunk 為粒度、來源可跨批切開（#47）**。
+  `ScannedChunk` 讓每個 chunk 帶 `(endOffset, prefixHashAtEnd)` 切點游標——與
+  `scan_state` 同格式，批次交易把 slice 尾端的游標寫進去，下一輪掃描的續讀比對
+  原樣接受。**零 schema 遷移**；掃描改用增量雜湊（每 byte 恰好雜湊一次，並順帶
+  刪掉重算分支的整段前綴重讀）。
+  舊上界公式 `max(target−1,0)+largestSource` 與它的測試**一併刪除**（那個量不存在
+  了）；`memoryBudgetExceeded` 的 `largestSourceChunks` 欄位與 CLI 補救 caveat 同。
+  Expected ② 由構造滿足：delete 舊＋insert 第一個 slice＋游標指**新內容** prefix(b)
+  同一交易——崩後續讀不再 invalidate、不重刪。**具名放棄**：改寫來源的 per-source
+  原子替換（崩潰後到下輪 build 完成之間，讀者看得到該來源的部分新內容）；
+  「第 k 個 chunk」序數不落地（要落地就得改 schema → 全體 --full）。
+  新測試：canary（CryptoKit hasher 快照）、切點可驗證、中途游標續讀、
+  單來源中途崩續跑（callCount 只算剩餘——**#47 的存在理由**）、改寫中途崩不重刪、
+  獨占來源多 slice 改寫（property test 因 identity 共享抓不到 M1 的那格）、
+  property test 兩軸各半（偶數 seed target 2）。變異 M1–M6 逐一記錄（M4 以
+  **crash** 被抓——變異 harness 數 failed 行會把 crash 當 0 紅，驗證工具假綠
+  第三例；M5 是等價變異，兩個切點都合法）。
 - **掃描階段不再靜默（#48）**：`CorpusScanner.scan()` 加 optional 進度 callback
   （預設 nil——查詢路徑零回報開銷），開工即報 `0/N`（空語料報 `0/0`），之後每
   N 檔或每 T 秒先到者發、發完兩個計數器都重置。`BuildProgress` 新增 `.scanning`；
