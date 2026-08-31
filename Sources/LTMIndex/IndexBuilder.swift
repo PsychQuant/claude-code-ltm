@@ -249,51 +249,49 @@ public struct IndexBuilder: Sendable {
         // 一輪**（#44 R15 verify，requirements + regression 兩個 lens 各自抓到，
         // 並指出這一份才是追 #53 的人會落到的地方）。
         //
-        // **這份清單不宣稱自己完整，而且它上一版宣稱過。**
+        // **這份清單被寫壞過三次，每次都是「再列舉一次」。**
         //
-        // 上一版寫「三個障礙（都可以指名）」，並替每一項配一條 grep——但那三條
-        // grep 驗的是**每個成員存在**，沒有一條驗**成員資格完整**。R16 verify 因此
-        // 又找到第四項，而且來源與上次漏掉的 `truncateSidecar` 一樣：**#44 的
-        // issue body 自己指名過它**（開場的程式碼節錄第一行就是
-        // `for sourceKey in scan.invalidatedSources`）。
+        // 兩項 → 三項 → 四項，每一版都替成員配一條 grep，而**那些 grep 驗的是
+        // 每個成員存在，沒有一條驗成員資格完整**。第三版更糟：它把四個已知成員
+        // 的符號名硬編成一條 regex 並自稱「讓下一個讀者重算成員資格」——一份
+        // 封閉列舉換一種語法，結構上不可能回傳第 N+1 個，而且**連它正下方的第 3
+        // 項都回傳不出來**（`truncateSidecar` 不含那四個 pattern 的任何一個）。
         //
-        // 所以這裡改寫查法，讓下一個讀者能自己**重算成員資格**，而不是核對我的清單：
+        // 所以這裡改成一條**機械程序**，它的候選集合由構造保證完整：
         //
-        //     # 在批次迴圈之外算一次、卻在迴圈之內（或之後）被消費的值
-        //     grep -n "let scan = \|var vectorRow\|scan.invalidatedSources\|scan.state" \
-        //       Sources/LTMIndex/IndexBuilder.swift | grep -v "//"
+        //   1. 取鎖之後、批次迴圈之前的**每一個** `let`／`var` 繫結：
+        //        awk 'NR>=A && NR<=B' Sources/LTMIndex/IndexBuilder.swift \
+        //          | grep -nE '^        (let|var) '
+        //      （A = `FileLock.acquire` 那行，B = `for (batchIndex, batch)` 那行；
+        //       兩者查法：`grep -n "FileLock.acquire\|for (batchIndex, batch)" \
+        //       Sources/LTMIndex/IndexBuilder.swift | grep -v "//"`）
+        //   2. 對每一個問：**中途放鎖之後，它還成立嗎？** 三種答案——
+        //      「不受影響」「重做（拿舊快照重算）」「**破壞性**（用舊快照去刪或寫）」。
         //
-        // 每一個命中都要問：「中途放鎖之後，這個值還成立嗎？」目前已知的四項：
+        // 候選集合來自語法（區間內的繫結），不來自我的記憶，所以它不會漏。**下面
+        // 是目前分類的結果，不是候選清單本身**——分類可能錯，集合不會少。
         //
-        // 用具名符號＋查法，不用裸行號——這個檔案每一輪都在動，而上一版用行號
-        // 當「可查的」指標（#44 R15 verify）。
+        // 已知落在「破壞性」那一格的兩個（**兩個都是 #44 issue body 自己寫出來的**，
+        // 查法：`gh issue view 44 --repo PsychQuant/claude-code-ltm --json body \
+        // --jq .body | grep -nE 'invalidatedSources|grouped|truncateSidecar'`）：
         //
-        // **下面三條查法都要 `| grep -v '//'`**：把查法寫進註解之後，grep 會數到
-        // 查法自己。第一版沒有這一段，於是三條裡有兩條的預期值當場就是錯的
-        // ——一個宣稱自己可查的指標，跑一次就推翻。
+        // - `scan.invalidatedSources`：每一批都用放鎖前的集合呼叫 `deleteChunks`
+        //   ——刪掉另一個寫者剛提交的 chunk。
+        // - `grouped`：同一枚硬幣的**插入面**。放鎖後另一個寫者索引了來源 X 並提交，
+        //   第一個寫者手上仍是舊的 `grouped[X]`，照樣 insert 一次。而那道
+        //   `invalidatedSources.contains` 的補救**只對失效來源觸發**——純 append
+        //   的來源（prefix 相符、不是 invalidated，最常見的情形）沒有 delete 蓋過去，
+        //   結果是重複 chunk、沒有 error path、增量與全量不等價（不變式 2）。
         //
-        // 1. `scanner.scan(previous:)` 在批次迴圈**之外**算一次（查法：
-        //    `grep -n "scanner.scan(previous:" Sources/LTMIndex/IndexBuilder.swift
-        //    | grep -v "//"` → 一處）。中途放鎖，另一個寫者推進游標之後，第一個寫者拿的是放鎖前
-        //    的快照。
-        // 2. `vectorRow` 從 `vector_count` 起算一次，之後是**本地計數器**；而
-        //    `appendVectors` 用 `seekToEnd()` 定位（查法：
-        //    `grep -n "seekToEnd\|var vectorRow" Sources/LTMIndex/IndexBuilder.swift
-        //    | grep -v "//"` → 三處：`vectorRow` 的宣告與 `appendVectors`／
-        //    `truncateSidecar` 各自的 `seekToEnd`）。
-        //    兩個寫者交錯之後，第一個寫者的指標指向對方寫的向量。**「重讀
-        //    scan_state」擋不住這一項——`vector_count` 不在 `scan_state` 裡。**
-        // 3. `truncateSidecar(toRows:)` **整個 build 只被呼叫一次**（查法：
-        //    `grep -n "try truncateSidecar" Sources/LTMIndex/IndexBuilder.swift
-        //    | grep -vc "//"` → 1）。
-        // 4. `scan.invalidatedSources` 在**迴圈之內**被消費，而且是**破壞性的**：
-        //    每一批都用放鎖前的集合呼叫 `deleteChunks`。這一項與前三項不同類——
-        //    前三項的後果是「重做」（拿舊快照重算），這一項的後果是**刪掉另一個
-        //    寫者剛提交的 chunk**，直接踩不變式 2 而且沒有任何 error path。
-        //    迴圈結束後那個把 `scan.state.files` 整份寫回的收尾交易同理。
-        //    **#44 的 issue body 自己指名過這一項**（「改批次之後這個前提要重新
-        //    確認」），而上一版的「障礙是這兩個值」把它漏掉了——一份宣稱自己完整
-        //    的列舉，漏的那項還是需求自己寫過的。
+        // 落在「重做」那一格的：`scan`（迴圈外算一次的快照）、`vectorRow`
+        // （從 `vector_count` 起算後是本地計數器，而 `appendVectors` 用
+        // `seekToEnd()` 定位——重讀 `scan_state` 擋不住它，`vector_count` 不在裡面）。
+        //
+        // 另有一項不是繫結而是**呼叫次數**：`truncateSidecar(toRows:)` 整個 build
+        // 只跑一次（查法：`grep -n "try truncateSidecar" … | grep -vc "//"` → 1）。
+        // **#44 body 對這一項寫得很明白**：「`truncateSidecar(toRows:)` 在**每批開始**
+        // 時仍要能把上一批的殘留截掉——現行它只在整個 build 開頭跑一次」。
+        // 上一版把這句引註錯掛到 `invalidatedSources` 上了。
         //
         // 所以「兩個寫者照同一個協定走就沒事」不成立：那個協定要列的不只是
         // `scan_state`。中斷的情形更明確——A 在批次中途死掉，倖存的 B 早已過了
@@ -934,7 +932,7 @@ public struct IndexBuilder: Sendable {
 /// | `sidecar-temp-write` | `Data.write(.atomic)` | **不對目標路徑開檔**——比走共用檢查更強 |
 /// | `sidecar-replace` | rename | 三種情形全部量過，見下 |
 /// | `derived-open-helper` | `open(O_NOFOLLOW\|O_NONBLOCK)` + `ExclusiveFile.verify` | ✅ 共用入口本身 |
-/// | `lock-open` | `open(O_CREAT\|O_RDWR\|O_NOFOLLOW)` | ✅ 自己的 `open`，**不走共用入口、不帶 `O_NONBLOCK`**（上一版寫「同上」，繼承了上一列的旗標宣稱，#44 R16 verify）|
+/// | `lock-open` | `open(O_CREAT\|O_RDWR\|O_NOFOLLOW)` + `ExclusiveFile.verify` | ✅ **檢查有**（與共用入口同一個 `ExclusiveFile.verify`）；**旗標不同**——自己的 `open`，不經 `openDerivedFileNoFollow`、不帶 `O_NONBLOCK`。上一版寫「同上」而繼承了上一列的旗標宣稱（#44 R16）；R17 的改法只寫「不走共用入口」，讀起來像「沒有共用檢查」，而下面兩列正是靠那個檢查（#44 R17 verify）|
 /// | `lock-truncate` | `ftruncate` | ✅ 檢查在它之前 |
 /// | `sqlite-open` | `lstat` × 4 後綴 + `sqlite3_open_v2` | 主檔與 `-wal`/`-shm`/`-journal` |
 /// | `memory-prune-open` | `open(O_NOFOLLOW)` + `ExclusiveFile.verify` | ✅ |

@@ -322,13 +322,18 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 
 **每一輪的跨模型狀態要看那一輪的 `stats.reviewers`，不要照抄上一輪的結論**：
 
-| 輪次 | codex `ok` | 該輪能說的話 |
+查法：那一輪 workflow 結果的 `stats.reviewers[].ok` 與 `stats.integrity`；
+落地在該輪 master comment 的 Engine 段。**不要從別輪推。**
+
+| 輪次 | 完成的 lens | `integrity` |
 |---|---|---|
-| R14 / R15 | `true` | 兩個模型家族都看過；codex 各自貢獻了 CRITICAL |
-| R16 | `false`（連同 devil's advocate，`integrity: 2`）| **只有 Claude 家族的四個 lens**，同家族的共同盲點沒有東西會抓到 |
+| R14 / R15 | 全部六個（含 codex）| 0 |
+| R16 | 四個（codex + DA 掛）| 2 |
+| R17 | **兩個**（只有 requirements + regression）| 4 |
 
 codex leg 失敗那幾輪，結論要以「同一家族的 N 個視角都沒看到」來理解，不是「兩個
-家族都沒看到」——而 N 也要照實數，R16 是 4 不是 5（DA 一起掛了）。
+家族都沒看到」——而 N 要照實數（R16 是 4、R17 是 2）。**N 越小，該輪「沒發現問題」
+的資訊量越低**：R17 只有兩個 lens 卻仍找出 8 個 CRITICAL，所以低 N 不代表乾淨。
 
 設計討論走 Spectra／superpowers 的 spec 流程，spec 落在 `docs/superpowers/specs/`。
 

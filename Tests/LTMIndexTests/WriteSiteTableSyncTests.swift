@@ -80,35 +80,41 @@ func everyWriteSiteAppearsInTheTable() throws {
 ///
 /// 這一條掃會改變檔案系統的呼叫，要求每一個上方 **3 行內**有 `// WRITE-SITE:`。
 ///
-/// ## 誠實邊界（第五次寫；前四次都把界線畫小了一級）
+/// ## 誠實邊界（第六次寫；前五次都把界線畫小了一級）
 ///
-/// 五次的紀錄一起留著，因為它們是**同一個錯的五個變體**——每一次的修法都是再
-/// 列舉一次限度，每一次都有下一個沒被列到的：
+/// 六次的紀錄一起留著，因為它們是**同一個錯的六個變體**：
 ///
 /// 1. R10：說它「比對數量不比對身分」，而真相是**它連表都沒讀**。
-/// 2. R11：說它「涵蓋範圍等於那份 primitive 清單」，而真相是清單 ∩ 兩個模組 ∩
-///    非遞迴 ∩ 單行連續文字。
+/// 2. R11：說它「涵蓋範圍等於那份 primitive 清單」——還有三個限制沒寫。
 /// 3. R14：收緊成「一個標記只背書一個呼叫」，而實作是**逐行**認領。
 /// 4. R15：關掉整行排除，卻換成 **60 字元回看**——同一個缺陷換一個參數。
-/// 5. R16（本次）：上一版寫「`try data\n    .write(to: …)` 逃得掉，**實測過**」
-///    ——**三種拆法全部抓得到**（第二行含 `.write(to:`）。那句「實測過」是假的。
+/// 5. R16：宣稱的一個「實測過」的逃逸**不存在**（三種拆法全部抓得到）。
+/// 6. R17（本次）：列了四條殘餘限度並說**「都是偽陽性方向」**——**兩條方向標反了，
+///    而且反在危險那一側**（真正的寫入被放行）。實測見下表。
 ///
-/// **所以這一節現在只寫量過的東西，不寫推測的逃逸。** 下面每一條都可以用
-/// `WriteSiteScan` 的合成輸入重跑。
+/// **這一節的每一格都是跑出來的**，不是推的。重跑方式：對 `WriteSiteScan.unmarked`
+/// 餵單行合成輸入，看回傳幾筆。
 ///
 /// - **範圍**：`Sources/` 底下每一個 `.swift`，遞迴。
-/// - **手段**：`primitives` 清單。**它是一份會漏的列舉**——經由 `Process` 呼叫外部
-///   程式、或用清單外 syscall 的站點隱形。這一條沒有變過。
-/// - **形式**：單行文字比對。標記要在呼叫上方 **3 行內**；拆得比 3 行更開就逃得掉
-///   （這一項量過：把標記與呼叫拉開 4 行，`unmarked` 回報那個呼叫）。
-/// - **粒度**：逐**呼叫**、逐**比對**排除，排除的判準是 **receiver** 而不是字元窗口。
-/// - **四條排除規則各自的殘餘限度**（都量過，都是**偽陽性**方向——要求掛標記，
-///   不是放行）：
-///   1. `func ` 只認一個空白（`func  open(` 會被當成呼叫）。
-///   2. receiver 是別名時判不出來（`let o = Darwin.open` 之後的 `o(...)`；
-///      `let h = FileHandle.standardError` 之後的 `h.write(...)`）。
-///   3. libc 限定詞是三個字面（`Darwin`／`Glibc`／`Foundation`），其他模組名不認。
-///   4. 引數跨行時 `argumentText` 回 `nil` → **不排除**（無法判定時的安全方向）。
+/// - **手段**：`primitives` 清單。**一份會漏的列舉**——`Process` 呼叫外部程式、
+///   清單外 syscall、或**函式別名**（`let o = Darwin.open` 之後的 `o(p, O_WRONLY)`）
+///   都隱形。**這是唯一一條「放行」方向的限度**，其餘都在偽陽性側。
+/// - **形式**：單行文字比對，標記要在呼叫上方 **3 行內**。
+/// - **粒度**：逐**呼叫**、逐**比對**排除，判準是 **receiver** 而不是字元窗口。
+///   回報帶**欄位位置**，所以同一行的兩個呼叫在輸出裡可分辨。
+///
+/// ### 四條排除規則的殘餘限度，與各自量到的方向
+///
+/// | 限度 | 合成輸入 | flagged | 方向 |
+/// |---|---|---|---|
+/// | `func ` 只認一個空白 | `func  open(url: URL)` | 1 | 偽陽性 |
+/// | receiver 是別名 | `h.write(data)` | 1 | 偽陽性 |
+/// | **函式別名**（primitive 清單漏） | `o(p, O_WRONLY)` | **0** | **放行** |
+/// | 未知 receiver 的 `open` | `SomeModule.open(p, O_WRONLY)` | 1 | 偽陽性 |
+/// | 引數跨行 → `argumentText` 回 `nil` | `open(p,` | 1 | 偽陽性 |
+///
+/// **R16 的版本在第四列是 `0`（放行）**，因為它用 denylist（「不是 libc 就排除」）。
+/// 改成 allowlist 之後未知的落在偽陽性側——**偽陽性看得到並修得掉，放行看不到**。
 ///
 /// **為什麼不寫成性質**：「會改變檔案系統」在 Swift 型別層沒有表達方式。要真正
 /// 關掉它需要 SwiftSyntax／lint 層的 AST 檢查，或禁止業務模組直接呼叫這些 API。
@@ -282,6 +288,11 @@ func writeSiteScannerScopesExclusionByReceiver() {
     let flagged = WriteSiteScan.unmarked(
         in: synthetic("FileHandle.standardError.write(a); g.write(b)"))
     #expect(flagged.count == 1, "串流那個要放行、g.write 要抓出來，實得 \(flagged)")
+    // **指名是哪一個**：欄位 38 是 `g.write(b)` 的 `write(`；串流那個在欄位 26。
+    // `count == 1` 兩邊都滿足，所以只斷言數量是空的（#44 R17）。
+    #expect(
+        flagged.first?.hasPrefix("Synthetic.swift:1:38") == true,
+        "被抓的必須是 g.write 那個呼叫，實得 \(flagged)")
     // 空白數量不得改變結果——上一版會。
     let spaced = WriteSiteScan.unmarked(
         in: synthetic("FileHandle.standardError.write(a);        g.write(b)"))
@@ -308,6 +319,38 @@ func writeSiteScannerDoesNotOverrunUnbalancedParens() {
     #expect(flagged.count == 1, "未閉合那個無法判定 → 不排除；唯讀那個照常排除，實得 \(flagged)")
 }
 
+@Test("未知 receiver 的 open 一律要求標記（allowlist 不是 denylist）")
+func writeSiteScannerAllowlistsOnlyKnownSwiftMethodReceivers() {
+    // R16 用 denylist（「不是 libc 就排除」），於是**任何**其他模組限定的寫入
+    // 靜默逃掉。allowlist 讓未知的落在偽陽性那一側。
+    #expect(
+        WriteSiteScan.unmarked(in: synthetic("SomeModule.open(p, O_WRONLY)")).count == 1,
+        "未知 receiver 必須要求標記")
+    #expect(
+        WriteSiteScan.unmarked(in: synthetic("VectorSidecar.open(url: u)")).isEmpty,
+        "allowlist 內的 Swift 方法名不該被要求標記")
+}
+
+@Test("libc 限定的唯讀 open 仍然享有 O_RDONLY 排除")
+func writeSiteScannerDoesNotShortCircuitReadOnlyForLibc() {
+    // R16 的 libc 例外直接 `return`，於是第 4 條唯讀排除跑不到——
+    // `Darwin.open(p, O_RDONLY)` 被要求掛標記，而 `open(p, O_RDONLY)` 不會。
+    #expect(WriteSiteScan.unmarked(in: synthetic("Darwin.open(p, O_RDONLY)")).isEmpty)
+    #expect(WriteSiteScan.unmarked(in: synthetic("Darwin.open(p, O_WRONLY)")).count == 1)
+}
+
+@Test("被抓的是哪一個呼叫，看得出來")
+func writeSiteScannerReportsTheCallNotTheLine() {
+    // 回報整行時，同一行的兩個呼叫在輸出裡不可分辨——本輪之前的「指名是哪一個」
+    // 斷言因此兩個方向都綠。
+    let flagged = WriteSiteScan.unmarked(
+        in: synthetic("let r = open(a, O_RDONLY); let w = open(b, O_WRONLY)"))
+    #expect(flagged.count == 1)
+    #expect(
+        flagged.first?.hasPrefix("Synthetic.swift:1:36") == true,
+        "要帶欄位位置且指向寫入那個呼叫，實得 \(flagged)")
+}
+
 // MARK: - 掃描器（純函式，抽出來是為了讓它有執行點）
 
 /// **為什麼這是一個純函式，而不是寫在測試迴圈裡。**
@@ -322,7 +365,11 @@ func writeSiteScannerDoesNotOverrunUnbalancedParens() {
 /// （R14 收緊當下就在 `openDerivedFileNoFollow` 抓到一個），差別只在於**檢查跑在
 /// 一棵不可能含有反例的樹上**。把掃描抽成吃 `[(path, lines)]` 的純函式之後，
 /// 反例可以用合成輸入餵進來——下方 `writeSiteScannerRejects*` 那組測試就是它的
-/// 執行點，逐一退掉任一機制都會變紅。
+/// 執行點——**但不是「任一機制」**。誰扛什麼見上方那張分工表（查法：
+/// `grep -n "由誰抓到" Tests/LTMIndexTests/WriteSiteTableSyncTests.swift`）。
+/// 上一版這裡逐字寫「逐一退掉任一機制都會變紅」，而同一次 commit 在同一個檔案
+/// 上方 170 行已經把那句判為假——**同檔、同 commit、一邊說是假的、一邊當事實
+/// 宣告**（#44 R17 verify）。
 enum WriteSiteScan {
     /// **它仍然是一份會漏的列舉。** 經由 `Process` 呼叫外部程式、或用清單外
     /// syscall 的新站點仍然隱形。這是具名的限度，不是「檢查涵蓋所有寫入」。
@@ -391,15 +438,24 @@ enum WriteSiteScan {
         let receiver = receiverChain(chars: chars, before: span.start)
 
         // 2. `VectorSidecar.open(` 是 Swift 方法名，不是 `open(2)`。
-        //    **但 `Darwin.open(` 是 `open(2)`**——上一版只問「前一個字元是不是點」，
-        //    於是模組限定的 syscall 被靜默排除（#44 R16 verify）。改成看 receiver
-        //    是不是已知的 libc 模組限定；是就**不**排除。
         //
-        //    **殘餘限度（具名，不是邊界）**：任何其他寫法的 receiver（`typealias`
-        //    出來的別名、`let o = open` 之類）仍會被誤判。文字比對到此為止。
+        //    **這條用 allowlist，不是 denylist。** R16 的版本問「receiver 是不是
+        //    libc 限定詞」，不是就排除——於是**任何**其他模組限定的寫入都靜默逃掉
+        //    （實測 `SomeModule.open(p, O_WRONLY)` → 0 flagged，#44 R17 verify）。
+        //    未知的 receiver 現在一律**要求標記**：偽陽性可以看到並修，放行看不到。
+        //
+        //    allowlist 的成員要能查：
+        //    `grep -rn "\.open(" Sources/ --include='*.swift' | grep -v "//"` → 兩處，
+        //    都是 `VectorSidecar.open`。新增 Swift 方法名叫 `open` 的型別時要加進來，
+        //    而檢查會先變紅（偽陽性），不會安靜放行。
+        //
+        //    **上一版還有一個短路**：libc 那格直接 `return`，於是
+        //    `Darwin.open(p, O_RDONLY)` 連第 4 條唯讀排除都跑不到（實測 1 flagged，
+        //    而 `open(p, O_RDONLY)` 是 0）。現在只在確定是 Swift 方法名時 `return
+        //    true`，其餘往下走。
         if span.pattern == "open(", !receiver.isEmpty {
-            let libcQualifiers = ["Darwin", "Glibc", "Foundation"]
-            return !libcQualifiers.contains(receiver)
+            let swiftMethodReceivers = ["VectorSidecar"]
+            if swiftMethodReceivers.contains(receiver) { return true }
         }
 
         // 3. 寫到 stdout／stderr 的 `FileHandle.standard*.write`：串流不是檔案系統。
@@ -517,9 +573,19 @@ enum WriteSiteScan {
                         .hasPrefix("// WRITE-SITE:")
                 }
                 // **一個標記背書一個呼叫**，而「呼叫」是這一行上的每一個。
-                for _ in calls {
+                // **回報被抓的那個呼叫，不是整行。**
+                //
+                // 上一版回報 `trimmed.prefix(60)`——整行文字。於是同一行上的兩個
+                // 呼叫在輸出裡不可分辨，而本輪新增的「指名是哪一個被抓」斷言
+                // （`flagged.first?.contains("O_WRONLY")`）**兩個方向都綠**：把
+                // 排除反向成抓唯讀那個，字串照樣含 `O_WRONLY`（#44 R17 verify，
+                // regression lens 用變異證實）。一條不可能失敗的斷言，寫在一則
+                // 自稱在修「不可能失敗的斷言」的註解下面。
+                let chars = Array(trimmed)
+                for offset in calls {
                     guard let claimable = nearby.first(where: { !claimed.contains($0) }) else {
-                        out.append("\(file.path):\(index + 1) \(trimmed.prefix(60))")
+                        let tail = String(chars[offset..<min(chars.count, offset + 48)])
+                        out.append("\(file.path):\(index + 1):\(offset + 1) \(tail)")
                         continue
                     }
                     claimed.insert(claimable)
@@ -532,15 +598,16 @@ enum WriteSiteScan {
 
 /// `Sources/` 底下每一個 `.swift` 的 (repo 相對路徑, 行)。
 private func sourceFiles(_ root: URL) throws -> [(path: String, lines: [String])] {
-    let sourcesDepth = root.appendingPathComponent("Sources").pathComponents.count - 1
     let files = try swiftSourcesUnderSources(root)
-    // finding 30/43：掃到零個檔案時，吃它的檢查會**虛真通過**。
-    precondition(!files.isEmpty, "Sources/ 掃出零個 .swift——檢查會虛真通過，這比失敗更糟")
     return try files.map { file in
-        // **相對鍵在遍歷當下由起點目錄構造**，不用字串前綴相減——`FileManager`
-        // 對同一棵樹會給 `/var/...` 與 `/private/var/...` 兩種形式，前綴比對會
-        // 落空而靜默退化成絕對路徑（CLAUDE.md 具名的反模式）。
-        let relative = file.pathComponents.suffix(from: sourcesDepth).joined(separator: "/")
+        // **相對鍵從路徑尾端找 `Sources` 起算**，既不用字串前綴相減、也不用
+        // `root` 的深度。上一版用 `root` 的 component 數當起點——`FileManager`
+        // 對同一棵樹會給 `/var/...` 與 `/private/var/...` 兩種形式，兩者深度差一，
+        // 於是切點會錯一格而**沒有任何錯誤訊息**（#44 R17 verify；上一版的註解
+        // 說它「在遍歷當下由起點目錄構造」，而實作並不是）。
+        let components = file.pathComponents
+        let start = components.lastIndex(of: "Sources") ?? 0
+        let relative = components.suffix(from: start).joined(separator: "/")
         return (
             path: relative,
             lines: try String(contentsOf: file, encoding: .utf8).components(separatedBy: "\n")
