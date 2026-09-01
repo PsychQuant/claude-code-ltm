@@ -141,8 +141,10 @@ public struct SkipTally: Sendable, Equatable {
 
 extension SkipTally {
     /// 逐檔 tally 的合併（#56）：逐欄相加。放在型別旁邊，加新欄位的人在
-    /// 同一屏就看得到「這裡也要加」——漏加的症狀是統計靜默少計，等價測試
-    /// 只在 fixture 恰好觸發該欄位時抓得到。
+    /// 同一屏就看得到「這裡也要加」。漏加的症狀是統計靜默少計，而**等價測試
+    /// 永遠抓不到它**（width 1 與 4 走同一條合併，共同模式的漏兩邊一起漏
+    /// ——#56 verify 實測：刪一行全套仍綠）。扛這裡的是逐欄位的明確數值
+    /// 斷言（`ParallelScanTests` 的 skip 統計斷言＋既有 skip-tally 測試）。
     mutating func add(_ other: SkipTally) {
         notATurn += other.notATurn
         missingPointerField += other.missingPointerField
@@ -305,17 +307,23 @@ public struct CorpusScanner: Sendable {
     /// 掃描語料，只讀出上次之後的新內容。
     ///
     /// `previous` 給空狀態即為全量掃描。
-    /// ## `nextState.files[key]` 的五個賦值點、四類情境（動它之前先讀這段）
+    /// ## state 的賦值點自 #56 起分兩層（動它之前先讀這段）
     ///
-    /// 查法：`grep -n 'nextState.files\[key\] =' Sources/LTMIndex/CorpusScanner.swift`
-    /// —— 應該回**五**行。主路徑是一個 `if`／`else`，兩個賦值點屬於同一類。
+    /// **決定**在 `scanOne`（`outcome.stateEntry =`），**寫入**在 `scan()`（
+    /// `nextState.files[key] =`）。查法（兩條，各自可重跑）：
+    /// `grep -n 'outcome.stateEntry = ' Sources/LTMIndex/CorpusScanner.swift`
+    /// —— 應該回**四**行（下表前三列＋主路徑的 `if`/`else` 算兩個）；
+    /// `grep -n 'nextState.files\[key\] = ' Sources/LTMIndex/CorpusScanner.swift`
+    /// —— 應該回**兩**行（合併漏斗＋列目錄失敗的 project 保留）。
+    /// （這段的前一版寫「應該回五行」——#56 的抽取讓它過期了一輪才被 verify
+    /// 抓到；同一類錯這個 repo 記過多次：查法要跟著 refactor 一起改。）
     ///
     /// | 情境 | 賦值點 | 寫入什麼 | 前提 |
     /// |---|---|---|---|
-    /// | 開檔失敗 | 1 | `prior` | **僅在 `previous` 有該鍵時**——首次見到就讀不到的檔案一個 entry 都不寫 |
-    /// | 讀 tail 失敗 | 1 | `prior` | 同上 |
-    /// | 主路徑 | **2** | 重用 `prior` ／ 重算 | 見下方 `#49` 的兩個條件 |
-    /// | 列目錄失敗的 project | 1 | `prior` | 同上（`previous.files` 迭代而來，必有）|
+    /// | 開檔失敗 | 1（`stateEntry`）| `prior` | **僅在 `previous` 有該鍵時**——首次見到就讀不到的檔案 `prior` 為 nil，一個 entry 都不寫 |
+    /// | 讀 tail 失敗 | 1（`stateEntry`）| `prior` | 同上 |
+    /// | 主路徑 | **2**（`stateEntry` 的 `if`／`else`）| 重用 `prior` ／ 重算 | 見下方 `#49` 的兩個條件 |
+    /// | 列目錄失敗的 project | 1（`nextState` 直寫）| `prior` | 同上（`previous.files` 迭代而來，必有）|
     ///
     /// ## 沿用 `prior` 的兩個理由（封閉列舉，不得依性質相似類推第三個）
     ///
@@ -333,7 +341,9 @@ public struct CorpusScanner: Sendable {
     /// 這則表格是刻意寫的：git 2018 年的 split-index bug 就是「某條路徑沒把 entry
     /// 交給守衛常式」而安靜失去保護，成因看起來完全無辜。
     /// - Parameters:
-    ///   - progress: 掃描進度 callback `(已掃檔數, 總檔數)`。**預設 nil**——查詢
+    ///   - progress: 掃描進度 callback `(已掃檔數, 總檔數)`。**自 #56 起由
+    ///     worker 執行緒、單鎖序列化呼叫**（`@Sendable` 是簽名的一部分）：不得
+    ///     假設 caller 執行緒，不得同步跳回等待 `scan()` 的 queue。**預設 nil**——查詢
     ///     路徑（`refreshIncrementally` → `build` → 這裡）不傳，此時整段心跳邏輯
     ///     （含計數與取時鐘）都不執行（#48）。分母在 `sourceFiles()` 回傳的那一刻
     ///     就是精確的（完全物化的陣列；掃描階段量測見
@@ -348,7 +358,7 @@ public struct CorpusScanner: Sendable {
     ///     要動解析迴圈，與 #47 相鄰，刻意不在本 issue 做。
     public func scan(
         previous: ScanState = ScanState(),
-        progress: ((Int, Int) -> Void)? = nil,
+        progress: (@Sendable (Int, Int) -> Void)? = nil,
         progressFileInterval: Int = 500,
         progressTimeInterval: TimeInterval = 5,
         concurrency: Int = ProcessInfo.processInfo.activeProcessorCount
@@ -374,9 +384,12 @@ public struct CorpusScanner: Sendable {
         // 關在這個 box 裡：workers 用 claim/store 領工作、存結果，width 1 與
         // width N 走同一條 `runWorker`——等價測試比的就是這兩端。
         //
-        // 心跳在 store 點、單一 lock 序列化；`progress == nil`（查詢路徑）連
-        // lock 與 `Date()` 都不碰（#48——上一版寫「零回報開銷」而計數照跑，
-        // 被 nil 輸入直接推翻過）。
+        // 心跳在 store 點、單一 lock 序列化。`progress == nil`（查詢路徑）時
+        // **不計數、不取當下時間、不呼叫 callback**——但 claim/store 的鎖照拿
+        // （那是工作分配的成本，與回報無關），`lastBeat` 的初始化也取一次
+        // `Date()`。上一版把這句寫成「連 lock 與 Date() 都不碰」——一句被
+        // 無條件取鎖直接推翻的絕對句，#56 verify 三個 lens 各自抓到；而它引的
+        // #48 正是「別寫可被 nil 輸入推翻的絕對句」那一課。
         let files = walk.files
         let box = ScanWorkBox(
             fileCount: files.count, progress: progress,
@@ -401,9 +414,13 @@ public struct CorpusScanner: Sendable {
         //
         // `outcomes[i]` 的預設值是空 outcome：claim/store 對 0..<N 是雙射（claim
         // 遞增發號、store 在同一次迭代內無條件執行、`scanOne` 不拋錯），所以
-        // 「漏存」構造不出來；若未來的改動打破雙射，空 outcome 會讓該檔案在
-        // 下一輪被當成新檔重掃（症狀吵），且 width 4 vs 1 的等價測試當場紅
-        // ——這裡刻意不放驅動不了的守衛（#40 形狀）。
+        // 「漏存」構造不出來。若未來的改動打破雙射，後果要說準（#56 verify
+        // 修正過這裡的兩句錯話）：`IndexBuilder` 對 scan_state 只 **upsert**，
+        // 空 outcome 不會清游標——該檔下一輪從舊游標**續讀**，症狀是**靜默且
+        // 自癒**，不是「當新檔重掃」也不吵；而等價測試只抓**寬度相依**的
+        // 雙射破壞（width 1 與 4 走同一條 runWorker，共同模式的錯兩邊一起錯）。
+        // 這裡仍不放守衛：驅動不了（#40 形狀），且錯的方向是少索引一輪、
+        // 不是編造。
         for (i, file) in files.enumerated() {
             let key = file.key
             let outcome = box.outcomes[i]
@@ -459,16 +476,20 @@ public struct CorpusScanner: Sendable {
     }
 
     /// 並行掃描的工作分配與結果收集（#56）。`@unchecked Sendable` 的責任由
-    /// 單一 lock 扛：claim、store、心跳計數全部在同一把鎖下——每檔的鎖持有時間
-    /// 是微秒級，相對逐檔雜湊（毫秒到百毫秒級）可忽略。
+    /// 單一 lock 扛：claim、store、心跳計數全部在同一把鎖下。鎖內只做常數量
+    /// 工作（發號、寫槽、計數）；它相對逐檔雜湊的成本**未量測**——
+    /// `docs/measurements/2026-09-01-scan-parallelism.md` 把鎖列為加速比缺口的
+    /// 未驗證候選之一，這裡不寫數量級形容詞。
     ///
-    /// `progress` 閉包在鎖下呼叫：跨執行緒序列化正是呼叫端（stderr 心跳）要的。
+    /// `progress` 閉包在**worker 執行緒、鎖下**呼叫（序列化是刻意的）。因此
+    /// callback 不得假設 caller 執行緒／main actor，也不得同步跳回正在等待
+    /// `scan()` 的 queue（會 deadlock）；阻塞的 callback 會擋住所有 claim/store。
     private final class ScanWorkBox: @unchecked Sendable {
         private let lock = NSLock()
         private var nextIndex = 0
         private let fileCount: Int
         private(set) var outcomes: [PerFileOutcome]
-        private let progress: ((Int, Int) -> Void)?
+        private let progress: (@Sendable (Int, Int) -> Void)?
         private let progressFileInterval: Int
         private let progressTimeInterval: TimeInterval
         private var scannedFiles = 0
@@ -476,7 +497,7 @@ public struct CorpusScanner: Sendable {
         private var lastBeat = Date()
 
         init(
-            fileCount: Int, progress: ((Int, Int) -> Void)?,
+            fileCount: Int, progress: (@Sendable (Int, Int) -> Void)?,
             progressFileInterval: Int, progressTimeInterval: TimeInterval
         ) {
             self.fileCount = fileCount

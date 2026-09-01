@@ -392,7 +392,7 @@ public struct IndexBuilder: Sendable {
             // `progress` 為 nil（查詢路徑）時這裡也是 nil——scanner 走零回報路徑，
             // MCP 每次查詢不付 10,000 次 callback 的成本（#48 診斷的具名風險）。
             progress: progress.map { emit in
-                { scanned, total in
+                { @Sendable scanned, total in
                     emit(
                         .scanning(
                             filesScanned: scanned, filesTotal: total,

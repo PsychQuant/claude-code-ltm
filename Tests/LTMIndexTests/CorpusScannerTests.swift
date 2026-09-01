@@ -751,18 +751,18 @@ func scanReportsDenominatorFirstThenHeartbeats() throws {
             ])
     }
     let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
-    var beats: [(scanned: Int, total: Int)] = []
+    let log = BeatLog()
     _ = try scanner.scan(
-        progress: { beats.append((scanned: $0, total: $1)) },
+        progress: { log.append($0, $1) },
         progressFileInterval: 2, progressTimeInterval: 3600)
 
-    #expect(beats.first?.scanned == 0, "第一則要在迴圈前發，實得 \(beats)")
-    #expect(beats.first?.total == 5, "分母是精確的檔案數，實得 \(beats)")
-    #expect(beats.allSatisfy { $0.total == 5 }, "分母不變，實得 \(beats)")
+    #expect(log.beats.first?.scanned == 0, "第一則要在迴圈前發，實得 \(log.beats)")
+    #expect(log.beats.first?.total == 5, "分母是精確的檔案數，實得 \(log.beats)")
+    #expect(log.beats.allSatisfy { $0.total == 5 }, "分母不變，實得 \(log.beats)")
     // **精確序列，不是「至少一次」**：間隔 2、時間側關掉（3600s）、5 個檔案
     // → 開工 0，之後 2、4（第 5 個檔沒到門檻）。斷言精確值才抓得到「發完沒有
     // 重置計數器」這個變異——那個變異下序列是 [0,2,3,4,5]，單調性照樣成立。
-    #expect(beats.map(\.scanned) == [0, 2, 4], "實得 \(beats.map(\.scanned))")
+    #expect(log.beats.map(\.scanned) == [0, 2, 4], "實得 \(log.beats.map(\.scanned))")
 }
 
 @Test("零檔案的語料仍然報分母")
@@ -770,11 +770,11 @@ func scanReportsDenominatorForEmptyCorpus() throws {
     let corpus = try makeFixtureCorpus()
     defer { try? FileManager.default.removeItem(at: corpus) }
     let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
-    var beats: [(Int, Int)] = []
-    _ = try scanner.scan(progress: { beats.append(($0, $1)) })
-    #expect(beats.count == 1, "空語料一則（0/0），實得 \(beats)")
-    #expect(beats.first?.0 == 0)
-    #expect(beats.first?.1 == 0)
+    let log = BeatLog()
+    _ = try scanner.scan(progress: { log.append($0, $1) })
+    #expect(log.beats.count == 1, "空語料一則（0/0），實得 \(log.beats)")
+    #expect(log.beats.first?.scanned == 0)
+    #expect(log.beats.first?.total == 0)
 }
 
 @Test("不帶 progress 的 scan 走零回報路徑——查詢路徑零影響")
@@ -813,9 +813,27 @@ func scanTimeSideTriggerAlsoBeatsAndResetsFileCounter() throws {
             ])
     }
     let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
-    var beats: [Int] = []
+    let log = BeatLog()
+    // `concurrency: 1` 是本測試的前提，不是簡化（#56 verify 抓到的 flaky）：
+    // 它斷言「每個檔案邊界都超過 1µs 時間閾值」，而那只在逐檔循序時成立——
+    // 並行下兩次 store 的間隔可以小於 1µs（實測 HEAD 4/40 紅、width 1 0/20，
+    // 且 load-anti-correlated：機器越閒越容易紅）。時間側觸發的語意與寬度
+    // 無關，所以釘在 width 1 測不損失覆蓋。
     _ = try scanner.scan(
-        progress: { scanned, _ in beats.append(scanned) },
-        progressFileInterval: 3, progressTimeInterval: 0.000001)
-    #expect(beats == [0, 1, 2, 3, 4], "每檔案邊界一則、無重複，實得 \(beats)")
+        progress: { scanned, total in log.append(scanned, total) },
+        progressFileInterval: 3, progressTimeInterval: 0.000001, concurrency: 1)
+    #expect(log.beats.map(\.scanned) == [0, 1, 2, 3, 4], "每檔案邊界一則、無重複，實得 \(log.beats.map(\.scanned))")
+}
+
+/// 心跳收集盒：`progress` 自 #56 起是 `@Sendable`（worker 執行緒呼叫），測試
+/// 不能再讓閉包直接改捕捉的 `var`——編譯器現在會擋，而那正是簽名要傳達的契約。
+private final class BeatLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [(scanned: Int, total: Int)] = []
+    func append(_ scanned: Int, _ total: Int) {
+        lock.lock()
+        storage.append((scanned, total))
+        lock.unlock()
+    }
+    var beats: [(scanned: Int, total: Int)] { lock.lock(); defer { lock.unlock() }; return storage }
 }

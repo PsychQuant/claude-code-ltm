@@ -8,12 +8,18 @@
 
 - **掃描逐檔並行化（#56）**：`CorpusScanner.scan()` 的逐檔工作（prefix 重雜湊＋
   tail 解析）抽成 `scanOne` 純函式，由 `ScanWorkBox`（claim/store，單鎖）以
-  `activeProcessorCount` 個 worker 執行，合併一律按 `walk.files` 既有排序——
-  輸出與循序**逐 byte 相同**（`parallelScanMatchesSequentialScanExactly` 釘住，
-  width 4 vs 1；三個變異各自變紅）。語意零變更：每 byte 仍被核對、scan_state
-  交易紀律不動、查詢路徑 `progress == nil` 的零開銷性質保留。前後量測：
-  `docs/measurements/2026-09-01-scan-parallelism.md`——查詢穩態 3.5–3.9s →
-  約 1.0–1.7s；「1 秒以內」未穩定達成，剩餘在掃描段下限，該紀錄明寫不歸因。
+  `activeProcessorCount` 個 worker 執行，合併一律按 `walk.files` 既有排序。
+  **`ScanResult` 的全部欄位（含 chunk 順序）與循序全等**——等價測試證的是
+  寬度不敏感（width 4 vs 1），與舊迴圈的等價由既有測試扛（skip-tally 數值、
+  改寫重解、增量等價 property test）。每 byte 仍被核對、scan_state 交易紀律
+  不動。**有兩處語意確實改變**：`progress` callback 改自 worker 執行緒發出
+  （簽名加 `@Sendable`，單鎖序列化）、節奏隨完成時序而非掃描順序；時間側
+  心跳測試因此釘在 width 1（並行下兩次完成間隔可 <1µs，時間閾值合法地不
+  觸發——#56 verify 抓到的 flaky，4/40 → 0/25）。`progress == nil` 時不計數、
+  不取當下時間、不呼叫 callback，但工作分配的鎖照拿（第一版寫「連 lock 都
+  不碰」，被 verify 證偽後收窄）。前後量測：
+  `docs/measurements/2026-09-01-scan-parallelism.md`——查詢端到端 3.5–3.9s →
+  約 1.0–1.7s；「1 秒以內」未穩定達成；加速比 ≈3×，該紀錄明寫不歸因。
 
 - **#53 已決定：收回 #44 Expected ②（批次邊界釋放寫鎖），鎖全程持有。** 權威
   紀錄在 `openspec/specs/ltm-cli/spec.md`「Concurrent builds are refused」段：

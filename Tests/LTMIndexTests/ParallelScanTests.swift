@@ -42,7 +42,14 @@ func parallelScanMatchesSequentialScanExactly() throws {
                         uuid: "aaaaaaa\(p)-000\(f)-4000-8000-00000000000\($0)",
                         session: sessionA, role: $0.isMultiple(of: 2) ? "assistant" : "user",
                         text: "p\(p) f\(f) turn \($0) 內容")
-                } + ["這行不是 JSON"])  // skip 行：unparseableLine 每檔 +1
+                } + [
+                    "這行不是 JSON",  // skip 行：unparseableLine 每檔 +1
+                    turnLine(
+                        uuid: "eeeeeee\(p)-000\(f)-4000-8000-000000000077",
+                        session: sessionA, role: "user", text: "   "),
+                    // ↑ 純空白 text → noIndexableText 每檔 +1。#56 verify 抓到
+                    // 這個欄位全 suite 無任何 >0 驅動——合併行刪掉 557 仍綠。
+                ])
         }
     }
 
@@ -51,6 +58,10 @@ func parallelScanMatchesSequentialScanExactly() throws {
     let par1 = try scanner.scan(concurrency: 4)
     assertScanResultsEqual(par1, seq1)
     #expect(!seq1.chunks.isEmpty)
+    // 明確數值斷言，不只 seq/par 互比：共同模式的漏欄位（SkipTally.add 少加一行）
+    // 兩邊一起錯、結構相等照樣成立——等價測試永遠抓不到（#56 verify）。8 檔。
+    #expect(seq1.skipped.unparseableLine == 8)
+    #expect(seq1.skipped.noIndexableText == 8)
 
     // 第二輪：append（續讀）＋改寫（invalidated）＋刪除（消失作廢）＋結尾半行。
     let appended = root.appendingPathComponent("proj-1/s1.jsonl")
@@ -103,5 +114,9 @@ func parallelScanTreatsUnreadableFilesLikeSequential() throws {
     let seq = try scanner.scan(previous: first.state, concurrency: 1)
     let par = try scanner.scan(previous: first.state, concurrency: 4)
     assertScanResultsEqual(par, seq)
-    #expect(seq.unreadableSources.count == 1)
+    #expect(seq.unreadableSources == ["proj/s2.jsonl"])
+    // 「沿用 prior」要直接斷言，不能只靠 seq/par 互比（共同模式的錯兩邊一起錯）：
+    // 讀不到的來源必須原封保留上一輪的 state entry（#56 verify）。
+    #expect(seq.state.files["proj/s2.jsonl"] == first.state.files["proj/s2.jsonl"])
+    #expect(seq.invalidatedSources.isEmpty)
 }
