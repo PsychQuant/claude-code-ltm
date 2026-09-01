@@ -311,8 +311,9 @@ public struct CorpusScanner: Sendable {
     ///
     /// **決定**在 `scanOne`（`outcome.stateEntry =`），**寫入**在 `scan()`（
     /// `nextState.files[key] =`）。查法（兩條，各自可重跑）：
-    /// `grep -n 'outcome.stateEntry = ' Sources/LTMIndex/CorpusScanner.swift`
-    /// —— 應該回**四**行（下表前三列＋主路徑的 `if`/`else` 算兩個）；
+    /// `grep -n 'outcome.stateEntry = ' Sources/LTMIndex/CorpusScanner.swift | grep -v '///'`
+    /// —— 應該回**四**行（下表前三列＋主路徑的 `if`/`else` 算兩個；`-v '///'`
+    /// 排除本查法自己引用的字面——沒有它會數到 5，#56 verify-fix 當場踩過）；
     /// `grep -n 'nextState.files\[key\] = ' Sources/LTMIndex/CorpusScanner.swift`
     /// —— 應該回**兩**行（合併漏斗＋列目錄失敗的 project 保留）。
     /// （這段的前一版寫「應該回五行」——#56 的抽取讓它過期了一輪才被 verify
