@@ -266,10 +266,13 @@ public struct IndexBuilder: Sendable {
         // 它唯一那次截斷，之後的 append 落在孤兒列之後而指標從 `vector_count`
         // 起算，靜默錯位且印 `✓ 索引完成`。**中斷正是 #44 存在的理由。**
         //
-        // 所以這是一個**未滿足的要求**，不是一個已完成的項目。追蹤於 #53。
-        // CHANGELOG 先前用「並發寫入是具名拒絕（#44 ②）」回答了它——**那回答的是
-        // issue 裡另一句話**（Out of scope 段的「撞上寫鎖會怎樣尚未實測」），
-        // 兩句不同，而 Expected ② 因此變成沒有實作也沒有紀錄。
+        // **#53 已決定（2026-09-01）：收回 Expected ②，鎖全程持有。** 權威紀錄在
+        // `openspec/specs/ltm-cli/spec.md` 的「Concurrent builds are refused」段
+        // ——含已交付的較弱性質（讀者不取鎖＋已提交批次漸進可見，附查法與
+        // 「構造推論、無專門測試」的誠實邊界）與接受的殘餘缺口（staleness ≤
+        // build 時長）。上面的機械分類程序**保留**：它是「為什麼收回」的證據，
+        // 也是任何人日後想重開這條路時的第一站（重開的形狀見 #53 diagnosis 的
+        // 選項 3：per-batch mini-build，第一步是量測、不是實作）。
         let lock = try FileLock.acquire(at: location.lockURL)
         defer { lock.release() }
 

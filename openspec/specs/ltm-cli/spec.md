@@ -24,6 +24,10 @@ TBD - created by archiving change 'retrieval-engine-and-cli'. Update Purpose aft
 - **WHEN** a second `ltm build` starts while another holds the single-writer lock under `~/.claude-ltm/derived`
 - **THEN** the second exits non-zero naming the lock as the reason, leaving the running build undisturbed
 
+The single-writer lock SHALL be held for the whole build — there is no mid-build release at batch boundaries. This retracts #44 Expected ② (decision recorded in #53): the loop state assembled between lock acquisition and the batch loop is classified by the mechanical procedure in `IndexBuilder.build()`'s opening comment, and two bindings are destructive under mid-build release (`scan.invalidatedSources` deletes another writer's freshly committed chunks; `grouped` re-inserts from a stale snapshot), with the deferred-commit path for invalidated sources (#47) additionally requiring that a source's delete+insert complete within one build.
+
+What batching **does** deliver to a concurrent reader is weaker and is the property this spec records instead: the query path never takes the writer lock (`FileLock.acquire` has exactly one call site, inside `build()` — check: `grep -rn "FileLock.acquire" Sources/ | grep -v "//"`), and on encountering a held lock it reports deferral and answers on the existing index (check: the `lockHeld` catch in `LTMService.refreshIncrementally`). Because each batch commits in its own transaction with the vector sidecar landed first, a reader sees committed batches progressively while the build runs. **Honest boundary**: progressive visibility is an inference from construction — no dedicated test pins it. The accepted residual gap is that content newer than the running build's scan snapshot waits for the next merge; that staleness is bounded by the build's duration.
+
 ---
 ### Requirement: ltm query prints pointered hits in human and JSON forms
 

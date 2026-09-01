@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+### Changed
+
+- **#53 已決定：收回 #44 Expected ②（批次邊界釋放寫鎖），鎖全程持有。** 權威
+  紀錄在 `openspec/specs/ltm-cli/spec.md`「Concurrent builds are refused」段：
+  照字面放鎖有五類障礙（`build()` 開頭機械分類程序的兩個破壞性繫結、兩個重做
+  繫結、`truncateSidecar` 呼叫次數，加上 #47 推遲提交要求同一 build 走完）；
+  批次實際交付的是較弱性質——讀者不取 flock、撞鎖照常在既有索引作答、已提交
+  批次漸進可見（構造推論、無專門測試，spec 附兩條查法）；接受的殘餘缺口是
+  staleness ≤ build 時長。日後重開走 per-batch mini-build，第一步是量測。
+
 ### Fixed
 
 - **#54/#55 的 verify 修正**：render 註解兩句可被單一輸入推翻的話收窄（「每輪
