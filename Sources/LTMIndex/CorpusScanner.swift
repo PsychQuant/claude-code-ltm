@@ -139,6 +139,21 @@ public struct SkipTally: Sendable, Equatable {
     }
 }
 
+extension SkipTally {
+    /// 逐檔 tally 的合併（#56）：逐欄相加。放在型別旁邊，加新欄位的人在
+    /// 同一屏就看得到「這裡也要加」——漏加的症狀是統計靜默少計，等價測試
+    /// 只在 fixture 恰好觸發該欄位時抓得到。
+    mutating func add(_ other: SkipTally) {
+        notATurn += other.notATurn
+        missingPointerField += other.missingPointerField
+        malformedIdentifier += other.malformedIdentifier
+        noIndexableText += other.noIndexableText
+        unparseableLine += other.unparseableLine
+        incompleteTrailingRecord += other.incompleteTrailingRecord
+    }
+}
+
+
 /// 語料掃描：唯讀地走過 `~/.claude/projects/**/*.jsonl`，產生 chunk。
 ///
 /// 增量策略沿用 CLAUDE.md 的那一句：**不假設 jsonl 是 append-only，但利用它**。
@@ -335,10 +350,12 @@ public struct CorpusScanner: Sendable {
         previous: ScanState = ScanState(),
         progress: ((Int, Int) -> Void)? = nil,
         progressFileInterval: Int = 500,
-        progressTimeInterval: TimeInterval = 5
+        progressTimeInterval: TimeInterval = 5,
+        concurrency: Int = ProcessInfo.processInfo.activeProcessorCount
     ) throws -> ScanResult {
         precondition(progressFileInterval > 0, "心跳間隔必須為正（同 IndexBuilder 的既決形狀）")
         precondition(progressTimeInterval > 0, "心跳間隔必須為正")
+        precondition(concurrency > 0, "並行寬度必須為正（呼叫端錯誤，非語料資料）")
         var chunks: [ScannedChunk] = []
         var invalidated: Set<String> = []
         var unreadable: Set<String> = []
@@ -350,38 +367,172 @@ public struct CorpusScanner: Sendable {
         // 開工先說一句（0/N）——「完全沉默」與「卡死」外觀相同（#48；空語料也報，
         // 0/0 仍然是「我開工了而且沒有東西要掃」這個有內容的訊息）。
         progress?(0, walk.files.count)
-        var scannedFiles = 0
-        var filesSinceBeat = 0
-        var lastBeat = Date()
-        for (project, url, key) in walk.files {
-            // 心跳在 defer：迴圈體有 `continue`（現行**兩條**，都是「讀不到」；
-            // 上一版這裡列了三類——一份沒對過 code 的列舉，#48 verify），每一條
-            // 路都算「掃過一個檔」——insert 站點只有一個才不會漏。
-            //
-            // 整段包在 `if progress != nil` 裡：查詢路徑（progress 為 nil）連
-            // 計數與 `Date()` 都不執行——上一版寫「零回報開銷」而計數照跑，
-            // 一句可被 nil 輸入直接推翻的絕對句（#48 verify，codex + security）。
-            defer {
-                if progress != nil {
-                    scannedFiles += 1
-                    filesSinceBeat += 1
-                    let now = Date()
-                    if filesSinceBeat >= progressFileInterval
-                        || now.timeIntervalSince(lastBeat) >= progressTimeInterval
-                    {
-                        progress?(scannedFiles, walk.files.count)
-                        filesSinceBeat = 0
-                        lastBeat = now
-                    }
+        // ── 並行執行（#56）──
+        //
+        // 逐檔工作（`scanOne`）互不相干；正確性只由**合併順序**決定，而合併一律
+        // 按 `walk.files` 的既有排序走（下面那個 for）。所以並行的全部複雜度都
+        // 關在這個 box 裡：workers 用 claim/store 領工作、存結果，width 1 與
+        // width N 走同一條 `runWorker`——等價測試比的就是這兩端。
+        //
+        // 心跳在 store 點、單一 lock 序列化；`progress == nil`（查詢路徑）連
+        // lock 與 `Date()` 都不碰（#48——上一版寫「零回報開銷」而計數照跑，
+        // 被 nil 輸入直接推翻過）。
+        let files = walk.files
+        let box = ScanWorkBox(
+            fileCount: files.count, progress: progress,
+            progressFileInterval: progressFileInterval,
+            progressTimeInterval: progressTimeInterval)
+        let runWorker: @Sendable () -> Void = {
+            while let i = box.claimNext() {
+                let (project, url, key) = files[i]
+                box.store(
+                    scanOne(project: project, url: url, key: key, prior: previous.files[key]),
+                    at: i)
+            }
+        }
+        let workerCount = max(1, min(concurrency, max(files.count, 1)))
+        if workerCount == 1 {
+            runWorker()
+        } else {
+            DispatchQueue.concurrentPerform(iterations: workerCount) { _ in runWorker() }
+        }
+
+        // ── 有序合併：輸出與循序逐 byte 相同的地方就在這裡 ──
+        //
+        // `outcomes[i]` 的預設值是空 outcome：claim/store 對 0..<N 是雙射（claim
+        // 遞增發號、store 在同一次迭代內無條件執行、`scanOne` 不拋錯），所以
+        // 「漏存」構造不出來；若未來的改動打破雙射，空 outcome 會讓該檔案在
+        // 下一輪被當成新檔重掃（症狀吵），且 width 4 vs 1 的等價測試當場紅
+        // ——這裡刻意不放驅動不了的守衛（#40 形狀）。
+        for (i, file) in files.enumerated() {
+            let key = file.key
+            let outcome = box.outcomes[i]
+            seenKeys.insert(key)
+            if outcome.unreadable { unreadable.insert(key) }
+            if outcome.invalidated { invalidated.insert(key) }
+            chunks.append(contentsOf: outcome.chunks)
+            if let entry = outcome.stateEntry { nextState.files[key] = entry }
+            tally.add(outcome.tally)
+        }
+        // **列不出內容的 project 底下的既有來源，一律視為讀不到而非消失**（#26）。
+        //
+        // 這一步必須在下面的作廢之前：`enumerator` 失敗會讓那個 project 一個檔都沒
+        // 被看到，而「沒看到」在下一段就是「消失」。一次權限錯誤因此會作廢那個
+        // project 的全部 chunk，**而且回報成功**——這正是 #26 的症狀。
+        //
+        // 保護的同時也要**說出來**：把它們併進 `unreadable`，那是
+        // `ScanResult.unreadableSources` 的 doc 一直宣稱涵蓋（「列目錄失敗、開檔
+        // 失敗」）而實際沒有涵蓋的一半。
+        for project in walk.unreadableProjects {
+            let prefix = "\(project)/"
+            for key in previous.files.keys where key.hasPrefix(prefix) {
+                unreadable.insert(key)
+                if let prior = previous.files[key] { nextState.files[key] = prior }
+            }
+        }
+
+        // 上一輪有、這一輪沒看到、而且不是「讀不到」的來源 → 它消失了，作廢它的 chunk。
+        // 少了這一步，增量索引會保留全量重建不會產生的內容——直接違反不變式 2，
+        // 而且那些 chunk 指向已不存在的 turn。
+        for key in previous.files.keys where !seenKeys.contains(key) && !unreadable.contains(key) {
+            invalidated.insert(key)
+        }
+
+        return ScanResult(
+            chunks: chunks, invalidatedSources: invalidated, unreadableSources: unreadable,
+            state: nextState, skipped: tally)
+    }
+
+    /// 逐檔掃描的結果——`scan()` 的工作單位（#56）。
+    ///
+    /// 欄位與先前迴圈裡的累加器一一對應；`scan()` 一律按 `walk.files` 的既有
+    /// 排序合併（`sourceFiles()` 對 project 與檔案各排序一次），所以執行順序
+    /// 不影響輸出——這是並行化的等價前提。
+    private struct PerFileOutcome {
+        var chunks: [ScannedChunk] = []
+        /// 要寫進新 state 的 entry；`nil` ＝ 這一輪不寫（唯一情形：首次見到
+        /// 就讀不到的檔案——`previous` 沒有它，寫了就是憑空造出一個來源）。
+        var stateEntry: SourceFileState?
+        var unreadable = false
+        var invalidated = false
+        var tally = SkipTally()
+    }
+
+    /// 並行掃描的工作分配與結果收集（#56）。`@unchecked Sendable` 的責任由
+    /// 單一 lock 扛：claim、store、心跳計數全部在同一把鎖下——每檔的鎖持有時間
+    /// 是微秒級，相對逐檔雜湊（毫秒到百毫秒級）可忽略。
+    ///
+    /// `progress` 閉包在鎖下呼叫：跨執行緒序列化正是呼叫端（stderr 心跳）要的。
+    private final class ScanWorkBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var nextIndex = 0
+        private let fileCount: Int
+        private(set) var outcomes: [PerFileOutcome]
+        private let progress: ((Int, Int) -> Void)?
+        private let progressFileInterval: Int
+        private let progressTimeInterval: TimeInterval
+        private var scannedFiles = 0
+        private var filesSinceBeat = 0
+        private var lastBeat = Date()
+
+        init(
+            fileCount: Int, progress: ((Int, Int) -> Void)?,
+            progressFileInterval: Int, progressTimeInterval: TimeInterval
+        ) {
+            self.fileCount = fileCount
+            self.outcomes = Array(repeating: PerFileOutcome(), count: fileCount)
+            self.progress = progress
+            self.progressFileInterval = progressFileInterval
+            self.progressTimeInterval = progressTimeInterval
+        }
+
+        func claimNext() -> Int? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard nextIndex < fileCount else { return nil }
+            let i = nextIndex
+            nextIndex += 1
+            return i
+        }
+
+        func store(_ outcome: PerFileOutcome, at index: Int) {
+            lock.lock()
+            defer { lock.unlock() }
+            outcomes[index] = outcome
+            // 心跳：每檔恰好一次（store 與 claim 雙射）。progress 為 nil 時
+            // 連計數與取時鐘都不做——查詢路徑的零開銷性質（#48）。
+            if progress != nil {
+                scannedFiles += 1
+                filesSinceBeat += 1
+                let now = Date()
+                if filesSinceBeat >= progressFileInterval
+                    || now.timeIntervalSince(lastBeat) >= progressTimeInterval
+                {
+                    progress?(scannedFiles, fileCount)
+                    filesSinceBeat = 0
+                    lastBeat = now
                 }
             }
-            seenKeys.insert(key)
+        }
+    }
+
+    /// 掃一個來源檔。**所有效果都在回傳值裡**：只讀檔案與 `prior`，不碰任何
+    /// 共享可變狀態——這是 #56 並行化的前提。唯一例外是 `readTally`（測試
+    /// 計數器），它自帶鎖（見其定義）。
+    ///
+    /// `prior` 是 `previous.files[key]` 的**原值**：負游標的修正只影響續讀判定
+    /// （下方 `priorState`），讀不到時沿用的仍是原值——與迴圈時代逐字相同。
+    private func scanOne(
+        project: String, url: URL, key: String, prior: SourceFileState?
+    ) -> PerFileOutcome {
+        var outcome = PerFileOutcome()
             guard let handle = try? FileHandle(forReadingFrom: url) else {
-                unreadable.insert(key)
+                outcome.unreadable = true
                 // 讀不到的來源**保留上一輪的狀態**：既不作廢它的 chunk，也不讓
                 // 新 state 少掉這個鍵——否則下一輪會把它誤判成「消失」。
-                if let prior = previous.files[key] { nextState.files[key] = prior }
-                continue
+                // （首次見到就讀不到 → `prior` 為 nil → 一個 entry 都不寫。）
+                outcome.stateEntry = prior
+                return outcome
             }
             defer { try? handle.close() }
 
@@ -401,10 +552,10 @@ public struct CorpusScanner: Sendable {
             // `CorpusScanner` 是 public 且 `previous:` 由呼叫端給——一個直接呼叫端
             // 仍然遞得進負值，而語料解析路徑一律不得 trap。驅動它的是
             // `aNegativeCursorIsDiscardedRatherThanTrapping`，那條測試正是直接呼叫端。
-            var priorState = previous.files[key]
+            var priorState = prior
             if let prior = priorState, prior.processedBytes < 0 {
                 priorState = nil
-                invalidated.insert(key)
+                outcome.invalidated = true
             }
             // 續讀的三個條件缺一不可：有舊狀態、檔案沒有變短、且已處理段落的
             // 雜湊對得上。檔案變短代表它被改寫過，即使前綴雜湊碰巧相符。
@@ -412,7 +563,9 @@ public struct CorpusScanner: Sendable {
             // **雜湊涵蓋整段已處理前綴，不是固定開頭**——所以檔案中段被改而
             // size 未變時會被偵測到（#5 兩難的第一角）。代價是每次都要重讀那一
             // 段；成本量在 `docs/measurements/2026-08-26-resume-prefix-hash-cost.md`
-            // （當下語料的上界約 4 秒），該紀錄同時寫了改用分塊 Merkle 的重議觸發。
+            // （該紀錄同時寫了改用分塊 Merkle 的重議觸發）。#56 起逐檔並行執行
+            // （見 `ScanWorkBox`），前後量測在
+            // `docs/measurements/2026-09-01-scan-parallelism.md`。
             var startOffset = 0
             // **顯式旗標，不從 `startOffset` 反推。**
             //
@@ -446,19 +599,19 @@ public struct CorpusScanner: Sendable {
                 } else {
                     // （這裡曾寫 `else if priorState != nil`——在 `if let prior`
                     //   的成功分支內恆真，#47 verify L1。）
-                    invalidated.insert(key)
+                    outcome.invalidated = true
                 }
             } else if priorState != nil {
-                invalidated.insert(key)
+                outcome.invalidated = true
             }
 
             guard let tail = try? readBytes(handle, from: startOffset, count: size - startOffset)
             else {
-                unreadable.insert(key)
-                if let prior = previous.files[key] { nextState.files[key] = prior }
-                continue
+                outcome.unreadable = true
+                outcome.stateEntry = prior
+                return outcome
             }
-            let parsed = parse(data: tail, project: project, sourceKey: key, tally: &tally)
+            let parsed = parse(data: tail, project: project, sourceKey: key, tally: &outcome.tally)
             // 逐 chunk 切點：hasher 吃到每個切點、取快照當該 chunk 的游標（#47）。
             var hashedUpTo = 0
             for (chunk, relEnd) in zip(parsed.chunks, parsed.chunkEnds) {
@@ -468,7 +621,7 @@ public struct CorpusScanner: Sendable {
                     hashedUpTo = relEnd
                 }
                 let snapshot = hasher
-                chunks.append(
+                outcome.chunks.append(
                     ScannedChunk(
                         chunk: chunk, endOffset: startOffset + relEnd,
                         prefixHashAtEnd: snapshot.finalize()
@@ -546,45 +699,17 @@ public struct CorpusScanner: Sendable {
                 // 後面的測試整批沒跑到：把一個可診斷的失敗變成了行程中止。
                 //
                 // 扛這條不變式的是測試，不是斷言——見上面那兩條守衛測試。
-                nextState.files[key] = prior
+                outcome.stateEntry = prior
             } else {
                 // **不再整段重讀**（#47）：hasher 已恰好吃完 `0..<processed`
                 // （續讀時前綴在比對時餵入、tail 在逐切點時餵入）。存的是
                 // **實際被解析的 bytes** 的雜湊——TOCTOU 的 T3 重讀窗口消失，
                 // T1–T2 之間的窗口仍在（誠實邊界，同上一段註解）。
-                nextState.files[key] = SourceFileState(
+                outcome.stateEntry = SourceFileState(
                     prefixHash: hasher.finalize().map { String(format: "%02x", $0) }.joined(),
                     processedBytes: processed)
             }
-        }
-
-        // **列不出內容的 project 底下的既有來源，一律視為讀不到而非消失**（#26）。
-        //
-        // 這一步必須在下面的作廢之前：`enumerator` 失敗會讓那個 project 一個檔都沒
-        // 被看到，而「沒看到」在下一段就是「消失」。一次權限錯誤因此會作廢那個
-        // project 的全部 chunk，**而且回報成功**——這正是 #26 的症狀。
-        //
-        // 保護的同時也要**說出來**：把它們併進 `unreadable`，那是
-        // `ScanResult.unreadableSources` 的 doc 一直宣稱涵蓋（「列目錄失敗、開檔
-        // 失敗」）而實際沒有涵蓋的一半。
-        for project in walk.unreadableProjects {
-            let prefix = "\(project)/"
-            for key in previous.files.keys where key.hasPrefix(prefix) {
-                unreadable.insert(key)
-                if let prior = previous.files[key] { nextState.files[key] = prior }
-            }
-        }
-
-        // 上一輪有、這一輪沒看到、而且不是「讀不到」的來源 → 它消失了，作廢它的 chunk。
-        // 少了這一步，增量索引會保留全量重建不會產生的內容——直接違反不變式 2，
-        // 而且那些 chunk 指向已不存在的 turn。
-        for key in previous.files.keys where !seenKeys.contains(key) && !unreadable.contains(key) {
-            invalidated.insert(key)
-        }
-
-        return ScanResult(
-            chunks: chunks, invalidatedSources: invalidated, unreadableSources: unreadable,
-            state: nextState, skipped: tally)
+        return outcome
     }
 
     private func readBytes(_ handle: FileHandle, from offset: Int, count: Int) throws -> Data {

@@ -6,6 +6,15 @@
 
 ### Changed
 
+- **掃描逐檔並行化（#56）**：`CorpusScanner.scan()` 的逐檔工作（prefix 重雜湊＋
+  tail 解析）抽成 `scanOne` 純函式，由 `ScanWorkBox`（claim/store，單鎖）以
+  `activeProcessorCount` 個 worker 執行，合併一律按 `walk.files` 既有排序——
+  輸出與循序**逐 byte 相同**（`parallelScanMatchesSequentialScanExactly` 釘住，
+  width 4 vs 1；三個變異各自變紅）。語意零變更：每 byte 仍被核對、scan_state
+  交易紀律不動、查詢路徑 `progress == nil` 的零開銷性質保留。前後量測：
+  `docs/measurements/2026-09-01-scan-parallelism.md`——查詢穩態 3.5–3.9s →
+  約 1.0–1.7s；「1 秒以內」未穩定達成，剩餘在掃描段下限，該紀錄明寫不歸因。
+
 - **#53 已決定：收回 #44 Expected ②（批次邊界釋放寫鎖），鎖全程持有。** 權威
   紀錄在 `openspec/specs/ltm-cli/spec.md`「Concurrent builds are refused」段：
   照字面放鎖有五類障礙（`build()` 開頭機械分類程序的兩個破壞性繫結、兩個重做
