@@ -6,6 +6,14 @@
 
 ### Changed
 
+- **no-op build 的 SQL 閘加速（#58）**：sample 歸因顯示 #56 之後瓶頸移到
+  `sourcesWithoutCursor()`（#44 正確性閘，兩次取樣 81%／~100%）。Q2 改寫成
+  `EXCEPT`（精確等價，CLI 3×）；連線加 `PRAGMA mmap_size=4GiB`（讀路徑，
+  durability 不動）。同語料 A/B 方向為正；「1 秒以內」仍未達成——剩餘是兩個
+  隨索引總量成長的每 build 固定項（閘 Q1、`chunkCount()`），根治需維護式記帳
+  （新設計決定，未在本 issue 偷渡）。兩個不 sound／更糟的 Q1 改寫已在
+  `docs/measurements/2026-09-01-noop-build-attribution.md` 具名淘汰。
+
 - **掃描逐檔並行化（#56）**：`CorpusScanner.scan()` 的逐檔工作（prefix 重雜湊＋
   tail 解析）抽成 `scanOne` 純函式，由 `ScanWorkBox`（claim/store，單鎖）以
   `activeProcessorCount` 個 worker 執行，合併一律按 `walk.files` 既有排序。

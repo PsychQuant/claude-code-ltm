@@ -159,6 +159,13 @@ public final class IndexDatabase {
         // WAL：讀者看見的是一致的快照，所以查詢不會讀到建置中途的半成品。
         try execute("PRAGMA journal_mode=WAL")
         try execute("PRAGMA synchronous=NORMAL")
+        // mmap（#58）：sourcesWithoutCursor 的逐列 b-tree 探查在 pread 路徑上被
+        // sample 到主導 no-op build（兩次取樣 81%／~100%）；mmap 讓頁讀走記憶體
+        // 映射、免每頁 syscall。**只影響讀路徑，不動 durability 語意**（寫入仍
+        // 走 WAL＋NORMAL）。4 GiB 上限涵蓋當下 1.9GB 的 DB；超過就部分映射，
+        // 行為正確只是部分回 pread。效果量測在
+        // `docs/measurements/`（#58）——量出來無效就整段刪，不留裝飾。
+        try execute("PRAGMA mmap_size=4294967296")
     }
 
     deinit { sqlite3_close_v2(handle) }
@@ -437,11 +444,14 @@ public final class IndexDatabase {
         if orphanChunks > 0 {
             missing.append("(\(orphanChunks) 個 chunk 沒有任何 source mapping)")
         }
+        // `EXCEPT` 而非 DISTINCT＋LEFT JOIN（#58）：兩者對任何資料庫狀態回同一
+        // 集合（EXCEPT 本身就去重），但 EXCEPT 走排序合併、不做逐列 NULL 探查
+        // ——對生產規模（660K 列）CLI 實測 0.20s → 0.073s。語意守衛是
+        // `IndexBuilderTests` 的缺游標測試，不是這句話。
         try query(
             """
-            SELECT DISTINCT s.source_key FROM chunk_sources s
-            LEFT JOIN scan_state c ON c.source_key = s.source_key
-            WHERE c.source_key IS NULL
+            SELECT source_key FROM chunk_sources
+            EXCEPT SELECT source_key FROM scan_state
             """
         ) { statement in
             missing.append(columnText(statement, 0))
