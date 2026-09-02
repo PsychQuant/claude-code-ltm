@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`mcpExitsNamedWhenStdoutCloses` 的 flake（#57）**：全套件約 1–3% 紅、filtered
+  單跑 0/40。server 端追蹤證明那次寫入**晚於 close 卻成功**——讀端被某個東西持有
+  ≥4.5 ms，而六輪量測（CLOEXEC／atfork／raw read／dispatch 讀源／spawn 風暴含大
+  映像／並發 readDataToEndOfFile）**全部排除、機制未定**。測試改成不依賴機制的
+  形狀：持續送請求直到 server 退出（每 5 ms、≤2 s），同 suite 200 次全綠。
+  「1/32 flake」在 #56 verify 時被 DA 首次觀測，本次修法讓「全綠」重新成為可
+  引用的性質；未定的機制具名記在 #57 與測試註解。
+
 ### Changed
 
 - **no-op build 的 SQL 閘加速（#58）**：sample 歸因顯示 #56 之後瓶頸移到

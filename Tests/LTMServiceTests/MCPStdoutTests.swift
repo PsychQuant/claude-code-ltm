@@ -35,14 +35,40 @@ func mcpExitsNamedWhenStdoutCloses() throws {
     process.standardError = stderr
     try process.run()
 
-    // 送 initialize 讓 server 產生一則回應，然後**關掉 stdout 的讀端**——下一次
+    // 送 initialize 讓 server 產生一則回應，然後**關掉 stdout 的讀端**——之後的
     // write 就是 EPIPE。
     stdin.fileHandleForWriting.write(
         Data((#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"# + "\n").utf8))
     _ = try? stdout.fileHandleForReading.read(upToCount: 1)  // 等第一則回應開始
     try stdout.fileHandleForReading.close()
-    stdin.fileHandleForWriting.write(
-        Data((#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"# + "\n").utf8))
+
+    // **持續送請求直到 server 退出，不是只送一則**（#57）。
+    //
+    // 只送一則時全套件約 1–3% 紅（filtered 單跑 0/40）。server 端追蹤實測：
+    // 那一則的回應**寫成功**、接著正常 EOF、exit 0——寫入嚴格晚於 close 卻成功，
+    // 所以那一瞬 pipe 的讀端仍被某個東西持有；連送 5 則時 6 次寫入全部成功，
+    // 持有者活了 ≥4.5 ms。**持有者是誰，沒有查出來。** 逐一量測排除掉的：
+    // 外部行程繼承（parent 端 pipe fd 設 CLOEXEC 後 4/120，同率）、fork
+    // （`pthread_atfork` 120 次零觸發）、Foundation 的 read／close 路徑（raw
+    // `read(2)` 同率；600 輪探針 close 後零成功寫入）、dispatch 讀源（repo 零
+    // 命中）、XNU `posix_spawn` 的 fd 表複製窗口（風暴探針 10 萬次 spawn、含
+    // 大映像，close 後零成功寫入）、並發 `readDataToEndOfFile`（3,744 輪零）。
+    // 證據鏈在 #57。
+    //
+    // 測試因此改成不依賴機制的形狀：斷言的是**stdout 一旦沒有讀者，server
+    // 就具名退出**——每 5 ms 送一則、最多 2 s，任何 ms 級的暫態持有者都撐不
+    // 過去（同 suite 下 200 次全綠；改前 1–3%）。這些補寫必須用
+    // `write(contentsOf:)`＋`try?`：server 一退出，對 stdin 的 legacy
+    // `write(_:)` 會丟 ObjC exception 把整個測試行程 SIGABRT。
+    let deadline = Date().addingTimeInterval(2)
+    var requestID = 2
+    while process.isRunning && Date() < deadline {
+        try? stdin.fileHandleForWriting.write(
+            contentsOf: Data(
+                (#"{"jsonrpc":"2.0","id":"# + "\(requestID)" + #","method":"tools/list"}"# + "\n").utf8))
+        requestID += 1
+        usleep(5_000)
+    }
     try? stdin.fileHandleForWriting.close()
 
     process.waitUntilExit()
