@@ -27,7 +27,7 @@ claude-code-ltm 在它之上建可拋棄的索引與可插拔的記憶策略，�
 
 ```bash
 # 1. 拿 binary。Developer ID 簽章 + notarized，Gatekeeper 直接放行
-curl -fL https://github.com/PsychQuant/claude-code-ltm/releases/download/v0.3.0/ltm -o ~/bin/ltm
+curl -fL https://github.com/PsychQuant/claude-code-ltm/releases/download/v0.4.0/ltm -o ~/bin/ltm
 chmod +x ~/bin/ltm
 
 # 2. 建索引。**這一步不能省**——沒有索引時 MCP server 會啟動、會回應、但查不到
@@ -41,7 +41,7 @@ claude mcp add --scope user --transport stdio claude-ltm -- ~/bin/ltm mcp
 要核對下載完整性（擋的是截斷，不是竄改——雜湊與 binary 走同一條 TLS）：
 
 ```bash
-curl -fsL https://github.com/PsychQuant/claude-code-ltm/releases/download/v0.3.0/ltm.sha256
+curl -fsL https://github.com/PsychQuant/claude-code-ltm/releases/download/v0.4.0/ltm.sha256
 shasum -a 256 ~/bin/ltm
 ```
 

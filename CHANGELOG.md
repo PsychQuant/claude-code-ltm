@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## [0.4.0] - 2026-09-03
+
 ### Fixed
 
 - **`mcpExitsNamedWhenStdoutCloses` 的 flake（#57）**：全套件約 1–3% 紅、filtered
