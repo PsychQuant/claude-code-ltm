@@ -8,6 +8,7 @@
   "plugins": [
     {
       "name": "ltm",
+      "version": "0.4.0",
       "source": "./plugin",
       "description": "查詢這台機器上過去的 Claude Code 對話。ltm_query（MCP tool）回傳帶指標的命中；ltm-recall（skill）告訴模型什麼時候該查、以及怎麼讀回傳值。預設只搜當前工作目錄對應的 project，跨 project 要明示。Wrapper 從 GitHub Release 自動下載 Developer ID 簽章 + notarized 的 ltm binary。首次使用要跑一次 ltm build 建索引。",
       "category": "productivity"
