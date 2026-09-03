@@ -114,3 +114,25 @@ func skillRestatesTheRulesThatMatter() throws {
     #expect(text.contains("不要挑一個當"), "sessions 是集合，不挑代表（#25）")
     #expect(text.contains("all_projects"), "預設只搜當前 project")
 }
+
+// MARK: - hooks manifest（proactive-recall-cued-hook 5.1）
+
+@Test("plugin/hooks/hooks.json 註冊 UserPromptSubmit 與 SessionStart，且指到存在、可執行的腳本")
+func hooksManifestRegistersBothEventsWithExecutableScripts() throws {
+    let root = repositoryRoot()
+    let manifest = try json(at: "plugin/hooks/hooks.json")
+    let hooks = try #require(manifest["hooks"] as? [String: Any])
+    for (event, script, timeout) in [
+        ("UserPromptSubmit", "ltm-recall-gate.sh", 28), ("SessionStart", "ltm-session-start.sh", 5),
+    ] {
+        let groups = try #require(hooks[event] as? [[String: Any]], Comment(rawValue: event))
+        let entries = try #require(groups.first?["hooks"] as? [[String: Any]], Comment(rawValue: event))
+        let entry = try #require(entries.first, Comment(rawValue: event))
+        #expect(entry["type"] as? String == "command")
+        let command = try #require(entry["command"] as? String)
+        #expect(command.contains("${CLAUDE_PLUGIN_ROOT}") && command.hasSuffix("/hooks/\(script)"), Comment(rawValue: command))
+        #expect(entry["timeout"] as? Int == timeout, Comment(rawValue: "\(event) timeout"))
+        let path = root.appendingPathComponent("plugin/hooks/\(script)").path
+        #expect(FileManager.default.isExecutableFile(atPath: path), Comment(rawValue: "\(script) 不存在或沒有執行位元"))
+    }
+}

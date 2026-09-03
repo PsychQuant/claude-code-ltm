@@ -1,0 +1,28 @@
+# ltm 主動回想的線索表（proactive-recall-cued-hook）
+#
+# 一行一個 POSIX 擴充正規表示式（ERE），UTF-8；空行與 # 開頭的行忽略。
+# 使用者輸入命中任一條，UserPromptSubmit hook 才會跑 ltm query 並注入回想。
+#
+# 這是一份**列舉**，它**會漏**：用別的說法提到過去的輸入（例如「那時候」「原本」）
+# 不在表上就不會觸發。漏的代價是**現狀**——沒有自動回想，跟裝 hook 之前一樣；
+# 可以手動呼叫 ltm_query。要擴充就直接加一行；要換整份用 LTM_RECALL_CUES=<路徑>。
+# 為什麼不用 JSONL：append 一樣是一行，但這份檔每輪都在 30 秒預算內被 grep -E -f
+# 讀，純文字零依賴、pattern 不用跳脫；某條線索需要第二個欄位那天再改。
+之前
+上次
+上回
+當初
+以前
+先前
+過去
+那次
+還記得
+記得
+earlier
+last time
+previously
+before we
+remember
+recall
+what did we decide
+why did we
