@@ -67,3 +67,38 @@ private func releaseRepositoryRoot(file: StaticString = #filePath) throws -> URL
     struct RootNotFound: Error {}
     throw RootNotFound()
 }
+
+// MARK: - proactive-recall-cued-hook 6.3：閘門的最低版本與 CHANGELOG 對得上
+
+/// 閘門腳本在跑 `ltm query --format recall` 之前先探 `--help`，探不到就印「版本過舊，需 ≥ X」。
+/// X 是**第一個出貨 `--format recall` 的版本**，而那個事實只有 CHANGELOG 知道：
+/// - 該旗標仍在 `## Unreleased` 下 → X 必須**大於** `LTMVersion.current`（任何已出貨版本都沒有它）；
+/// - 已落在 `## [X.Y.Z]` 下 → X 必須**等於** X.Y.Z。
+/// 兩個方向都會漂移：release 時把 Unreleased 改成版本號卻忘了腳本，或腳本先改了而 CHANGELOG 沒跟上。
+@Test("閘門的 LTM_RECALL_MIN_VERSION 與 CHANGELOG 裡 --format recall 首次出貨的版本一致")
+func recallGateMinimumVersionTracksTheChangelog() throws {
+    let root = try releaseRepositoryRoot()
+    let gate = try String(
+        contentsOf: root.appendingPathComponent("plugin/hooks/ltm-recall-gate.sh"), encoding: .utf8)
+    let minimum = try #require(
+        gate.firstMatch(of: #/LTM_RECALL_MIN_VERSION="([^"]+)"/#).map { String($0.1) },
+        "閘門腳本裡找不到 LTM_RECALL_MIN_VERSION")
+    let changelog = try String(contentsOf: root.appendingPathComponent("CHANGELOG.md"), encoding: .utf8)
+    var section = "(none)"
+    var found = false
+    for line in changelog.components(separatedBy: "\n") {
+        if line.hasPrefix("## ") { section = line }
+        if line.contains("--format recall") { found = true; break }
+    }
+    #expect(found, "CHANGELOG 沒有任何一段提到 --format recall")
+    func parts(_ v: String) -> [Int] { v.split(separator: ".").compactMap { Int($0) } }
+    if section.hasPrefix("## Unreleased") {
+        #expect(
+            parts(minimum).lexicographicallyPrecedes(parts(LTMVersion.current)) == false && minimum != LTMVersion.current,
+            "旗標尚未出貨，閘門的最低版本 \(minimum) 必須大於 LTMVersion.current=\(LTMVersion.current)")
+    } else {
+        let shipped = try #require(
+            section.firstMatch(of: #/## \[(\d+\.\d+\.\d+)\]/#).map { String($0.1) }, "段落標題不是版本：\(section)")
+        #expect(minimum == shipped, "閘門要求 ≥ \(minimum)，但 --format recall 首次出貨在 \(shipped)")
+    }
+}

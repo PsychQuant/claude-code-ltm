@@ -35,6 +35,14 @@ PY
 SESSION=$(sed -n 1p "$TMP/meta")
 CWD=$(sed -n 2p "$TMP/meta")
 
+# Claude Code 自己產生、不是使用者打字的 prompt 一律當作未命中——它們的內文常含
+# 「earlier」「previously」這類字（skill 本文、compaction 續接摘要、slash command
+# 展開），量過：不排除時命中率 21–30%，只算使用者打字的 prompt 是 2.5–9%
+# （docs/measurements/2026-09-04-proactive-recall.md）。這是封閉列舉三種前綴，會漏。
+case "$(head -c 40 "$TMP/prompt")" in
+    "<"*|"Base directory for this skill"*|"This session is being continued"*) exit 0 ;;
+esac
+
 if [ "$MODE" = cued ]; then
     ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
     CUES="${LTM_RECALL_CUES:-$ROOT/hooks/recall-cues.txt}"
@@ -52,6 +60,10 @@ LTM="${LTM_BIN:-$HOME/bin/ltm}"
 "$LTM" query --help 2>/dev/null | grep -q -- '--format recall' \
     || notice "ltm 版本過舊，需 ≥ $LTM_RECALL_MIN_VERSION"
 
+# 併入的批次要小：預算判定只在批次邊界，預設 2,000 chunk 一批在本機約 25 s 才到下一個邊界
+# （量到 ~78 chunk/s），15 s 的預算永遠等不到第一個邊界、整輪逾時。200 一批約 2.6 s，
+# 一輪最多併入約 5 批，backlog 跨幾輪回想慢慢消化。使用者若自己設了就尊重。
+export LTM_BUILD_BATCH_CHUNKS="${LTM_BUILD_BATCH_CHUNKS:-200}"
 PROMPT=$(head -c 2000 "$TMP/prompt")
 [ -n "$CWD" ] && cd "$CWD" 2>/dev/null
 set -- query "$PROMPT" --format recall --k 3 --max-refresh-seconds 15

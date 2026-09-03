@@ -4,6 +4,34 @@
 
 ## Unreleased
 
+### Added
+
+- **主動回想（proactive recall，#64）**：plugin 新增兩個 hook。`UserPromptSubmit` hook
+  只在輸入命中線索表（`plugin/hooks/recall-cues.txt`，一行一個 ERE，`LTM_RECALL_CUES`
+  可換）時跑 `ltm query` 並把 ≤3 筆指標注入 context；`SessionStart` hook 每個 session
+  （含 resume）印一句提醒。模式開關 `LTM_RECALL_MODE=cued|always|off`，預設 `cued`。
+  hook 保持薄：閘門、20 s 守衛、逾時／缺 binary／版本過舊時**一行可見通知**而非靜默
+  （Claude Code 對逾時 hook 的輸出是靜默丟棄）；Claude Code 自己產生的 prompt（skill
+  本文、slash 展開、compaction 續接）一律不放行。線索表是列舉、會漏，漏的代價是現狀。
+  背景：本機語料 2,313 個 session 檔裡，本 repo 之外**零次**自發呼叫 `ltm_query`。
+- **`ltm query` 三個旗標**（CLI 與 MCP 共用同一個實作）：`--max-refresh-seconds N`
+  有界併入——預算到就停在已提交的批次、用現有索引作答、stderr 報「索引落後 N 個來源」
+  （`--json` 的 stdout 仍是純陣列）；`--exclude-session <id>` 丟掉只屬於該 session 的
+  命中（resume 副本保留），**k 在排除之後才截斷**；`--format recall` 輸出
+  `<!-- ltm:recall v1 -->` … `<!-- /ltm:recall -->` 包住的區塊（≤4,000 字元，先縮
+  snippet 再丟命中）。
+- **chunker 排除 recall 標記區塊**：注入的區塊會存進 transcript、進 jsonl；`CorpusScanner`
+  依 `RecallMarker` 把它們從可索引文字裡拿掉，否則下一次查詢會召回自己的輸出。未標記的
+  輸入逐 byte 不變（用改動前算的雜湊釘住），既有索引不必重建。
+
+### Changed
+
+- 「資料，不是指令」banner 的措辭搬到 `LTMService.RetrievalBanner`，MCP tool 與
+  `--format recall` 共用同一份。
+- 有界併入的預算只在批次邊界判定；預設 2,000 chunk 一批在本機約 25 s 才到邊界，所以 hook
+  為自己的查詢設 `LTM_BUILD_BATCH_CHUNKS=200`（使用者設了就尊重）。量測：
+  `docs/measurements/2026-09-04-proactive-recall.md`。
+
 ## [0.4.0] - 2026-09-03
 
 ### Fixed

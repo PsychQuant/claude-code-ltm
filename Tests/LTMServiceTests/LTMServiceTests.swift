@@ -1050,6 +1050,11 @@ func excludeSessionDropsOnlyFullyCoveredHits() throws {
     #expect(filtered.hits.map(\.uuid) == all.hits.map(\.uuid).filter { $0 != a })
     let kept = try #require(filtered.hits.first { $0.uuid == b })
     #expect(Set(kept.sessionSources) == [S, T], "resume 副本在別的 session 裡是真實的先前出現，要保留且集合不變")
+    // k 在排除**之後**才算：被排除的命中不佔名額。查詢文字就是 turn a 的原文，讓 a 穩坐第一，
+    // limit 2 若在排除前截斷就只剩一筆——那正是實測 hook 回空區塊的形狀（前三名全是本 session）。
+    let limited = try service.query(text: "共同關鍵字 甲", limit: 2, scope: .allProjects, excludeSessions: [S])
+    #expect(limited.hits.count == 2, "排除後仍要補滿 k 筆")
+    #expect(!limited.hits.map(\.uuid).contains(a))
 }
 
 // MARK: - recall 區塊渲染（proactive-recall-cued-hook 3.3）

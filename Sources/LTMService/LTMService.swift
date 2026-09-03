@@ -542,7 +542,10 @@ public struct LTMService {
         refreshBudget: TimeInterval? = nil,
         excludeSessions: Set<String> = []
     ) throws -> QueryOutcome {
-        try withRetrieval(text: text, limit: limit, scope: scope, refreshBudget: refreshBudget) {
+        // 排除要在 k 之後才截斷：被排除的命中不佔名額。否則「前 k 名全是本 session」時回傳
+        // 空集合——實測 hook 第一次量測就是這個形狀。多撈 4 倍再過濾，上限 1000（--k 的上限）。
+        let fetchLimit = excludeSessions.isEmpty ? limit : min(limit * 4, 1_000)
+        return try withRetrieval(text: text, limit: fetchLimit, scope: scope, refreshBudget: refreshBudget) {
             database, scored, refreshed in
             let chosen = strategy ?? ArchivalStrategy()
 
@@ -595,6 +598,7 @@ public struct LTMService {
                         presentation: presentation))
             }
 
+            if hits.count > limit { hits = Array(hits.prefix(limit)) }
             var recorded = 0
             if recordEvents, let eventStore {
                 recorded = try record(

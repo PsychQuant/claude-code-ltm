@@ -122,6 +122,11 @@ func systemReminderSpansDoNotTriggerAndArgumentsAreWired() throws {
     let injected = try runHook(
         "ltm-recall-gate.sh", prompt: "幫我改這個函式 <system-reminder>earlier we said</system-reminder>")
     #expect(injected.code == 0 && !injected.stubInvoked && injected.out.isEmpty)
+    // Claude Code 自己產生的 prompt（skill 本文／slash 展開／compaction 續接）即使含線索也不放行。
+    for synthetic in ["Base directory for this skill: /x\n\n之前", "<command-message>idd</command-message>\n上次", "This session is being continued from a previous conversation. earlier"] {
+        let run = try runHook("ltm-recall-gate.sh", prompt: synthetic, env: ["LTM_RECALL_MODE": "always"])
+        #expect(run.code == 0 && !run.stubInvoked && run.out.isEmpty, Comment(rawValue: synthetic))
+    }
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-hook-args-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: dir) }

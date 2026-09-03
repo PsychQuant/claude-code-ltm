@@ -21,12 +21,17 @@
 
 ### Requirement: ltm query can exclude the caller's own session
 
-`ltm query` SHALL accept `--exclude-session <id>`. A hit SHALL be omitted from the results when its `sessions` set is a subset of the excluded set. A hit whose `sessions` set contains any identifier outside the excluded set SHALL be kept unchanged, including its full `sessions` set. Exclusion SHALL apply after ranking and SHALL NOT alter the relative order of the remaining hits.
+`ltm query` SHALL accept `--exclude-session <id>`. A hit SHALL be omitted from the results when its `sessions` set is a subset of the excluded set. A hit whose `sessions` set contains any identifier outside the excluded set SHALL be kept unchanged, including its full `sessions` set. Exclusion SHALL apply after ranking and SHALL NOT alter the relative order of the remaining hits. The `--k` limit SHALL apply after exclusion: an excluded hit does not consume a result slot, so a query whose top-k candidates all belong to the excluded session still returns up to k hits from the remaining candidates.
 
 #### Scenario: A turn held only by the excluded session is dropped
 
 - **WHEN** a hit's `sessions` set is `{S}` and `--exclude-session S` is given
 - **THEN** the hit does not appear in the output
+
+#### Scenario: Excluded hits do not consume result slots
+
+- **WHEN** the top two ranked candidates both have `sessions` `{S}`, three further candidates exist, and `ltm query --k 2 --exclude-session S` runs
+- **THEN** the output contains two hits, both from the further candidates, in their ranked order
 
 #### Scenario: A resume copy in another session keeps the turn
 
