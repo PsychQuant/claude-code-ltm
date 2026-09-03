@@ -161,10 +161,19 @@ public final class IndexDatabase {
         try execute("PRAGMA synchronous=NORMAL")
         // mmap（#58）：sourcesWithoutCursor 的逐列 b-tree 探查在 pread 路徑上被
         // sample 到主導 no-op build（兩次取樣 81%／~100%）；mmap 讓頁讀走記憶體
-        // 映射、免每頁 syscall。**只影響讀路徑，不動 durability 語意**（寫入仍
-        // 走 WAL＋NORMAL）。4 GiB 上限涵蓋當下 1.9GB 的 DB；超過就部分映射，
-        // 行為正確只是部分回 pread。效果量測在
-        // `docs/measurements/`（#58）——量出來無效就整段刪，不留裝飾。
+        // 映射、免每頁 syscall。寫入仍走 WAL＋NORMAL，commit 協定不變。
+        //
+        // **請求 4 GiB，實際拿到 1 GiB**：系統 libsqlite3 的 `SQLITE_MAX_MMAP_SIZE`
+        // 是 1073741824，超過的請求被靜默 clamp（查法：`sqlite3 :memory:
+        // 'PRAGMA mmap_size=4294967296; PRAGMA mmap_size;'` → 1073741824）。當下
+        // 2.0 GB 的 DB 只有約一半可映射，其餘照走 pread；`execute()` 丟掉 PRAGMA
+        // 的回傳列，所以 clamp 在執行期不可見。第一版這裡寫「4 GiB 涵蓋 1.9GB」
+        // ——一句可查證而為假的話，#58 verify 四方各自重現。
+        //
+        // 代價與失敗模式（`docs/measurements/2026-09-01-noop-build-attribution.md`）：
+        // 觸碰過的檔案頁計入 RSS（閘查詢 15.9 MB → 237 MB 實測）；映射中的 DB
+        // 若被外部截短，mmap 路徑可能 SIGBUS 而非可接的 SQLITE_IOERR（SQLite 文件
+        // 明列；本 repo 未實測到，截短實驗得 SQLITE_CORRUPT）。
         try execute("PRAGMA mmap_size=4294967296")
     }
 
@@ -444,10 +453,15 @@ public final class IndexDatabase {
         if orphanChunks > 0 {
             missing.append("(\(orphanChunks) 個 chunk 沒有任何 source mapping)")
         }
-        // `EXCEPT` 而非 DISTINCT＋LEFT JOIN（#58）：兩者對任何資料庫狀態回同一
-        // 集合（EXCEPT 本身就去重），但 EXCEPT 走排序合併、不做逐列 NULL 探查
-        // ——對生產規模（660K 列）CLI 實測 0.20s → 0.073s。語意守衛是
-        // `IndexBuilderTests` 的缺游標測試，不是這句話。
+        // `EXCEPT` 而非 DISTINCT＋LEFT JOIN（#58）：**在出貨 schema 下**回同一
+        // 集合——兩欄都是 `TEXT NOT NULL`、無顯式 collation（BINARY），查法
+        // `sqlite3 <db> '.schema chunk_sources' '.schema scan_state'`。這句刻意
+        // 不寫「對任何資料庫狀態」（第一版如此，#58 verify 抓到）：NULL（EXCEPT
+        // 視兩 NULL 相等、`=` 不）、collation 不一致、混合 storage class 的
+        // affinity 三類反例在 schema 之外存在，codex 各給了構造。EXCEPT 走排序
+        // 合併、不做逐列 NULL 探查——對生產規模（643,895 列）CLI 實測
+        // 0.20s → 0.073s（≈2.7×）。語意守衛是 `IndexBuilderTests` 的缺游標測試
+        // （其 fixture 讓一個來源帶多列，所以去重那一半也被釘住），不是這句話。
         try query(
             """
             SELECT source_key FROM chunk_sources

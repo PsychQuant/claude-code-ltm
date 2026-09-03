@@ -34,32 +34,38 @@ func mcpExitsNamedWhenStdoutCloses() throws {
     process.standardOutput = stdout
     process.standardError = stderr
     try process.run()
+    // **測試 host 的 SIGPIPE 是 SIG_DFL**（三方各自實測 `sigaction` raw=0，#57
+    // verify）。server 退出後對它 stdin 的任何 write 會發 SIGPIPE 殺掉整個
+    // 測試行程——`try?` 擋不住訊號（第一版就是這樣：負載下 5/270 整輪靜默死，
+    // exit 141）。`F_SETNOSIGPIPE` 把這個 fd 的失敗轉成可接的 EPIPE。
+    _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
 
-    // 送 initialize 讓 server 產生一則回應，然後**關掉 stdout 的讀端**——之後的
-    // write 就是 EPIPE。
-    stdin.fileHandleForWriting.write(
-        Data((#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"# + "\n").utf8))
+    // 送 initialize 讓 server 產生一則回應，然後關掉**本測試持有的** stdout
+    // 讀端——當 pipe 已沒有任何其他讀者時，server 之後的 write 才是 EPIPE
+    // （這兩件事不同：本地 `close()` 返回 ≠ kernel 端讀者計數歸零，見下）。
+    try stdin.fileHandleForWriting.write(
+        contentsOf: Data((#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"# + "\n").utf8))
     _ = try? stdout.fileHandleForReading.read(upToCount: 1)  // 等第一則回應開始
     try stdout.fileHandleForReading.close()
 
     // **持續送請求直到 server 退出，不是只送一則**（#57）。
     //
     // 只送一則時全套件約 1–3% 紅（filtered 單跑 0/40）。server 端追蹤實測：
-    // 那一則的回應**寫成功**、接著正常 EOF、exit 0——寫入嚴格晚於 close 卻成功，
-    // 所以那一瞬 pipe 的讀端仍被某個東西持有；連送 5 則時 6 次寫入全部成功，
-    // 持有者活了 ≥4.5 ms。**持有者是誰，沒有查出來。** 逐一量測排除掉的：
-    // 外部行程繼承（parent 端 pipe fd 設 CLOEXEC 後 4/120，同率）、fork
-    // （`pthread_atfork` 120 次零觸發）、Foundation 的 read／close 路徑（raw
-    // `read(2)` 同率；600 輪探針 close 後零成功寫入）、dispatch 讀源（repo 零
-    // 命中）、XNU `posix_spawn` 的 fd 表複製窗口（風暴探針 10 萬次 spawn、含
-    // 大映像，close 後零成功寫入）、並發 `readDataToEndOfFile`（3,744 輪零）。
-    // 證據鏈在 #57。
+    // 那一則的回應**寫成功**、接著正常 EOF、exit 0——寫入嚴格晚於本地 close
+    // 卻成功，所以那一瞬 pipe 的讀端仍被某個東西持有；連送 5 則時 6 次寫入全部
+    // 成功，持有者活了 ≥4.5 ms（這是**下界**，上界未知）。**持有者是誰，沒有
+    // 查出來。** 逐一探測而未獲支持的候選：外部行程繼承（CLOEXEC 後同率）、
+    // fork（atfork 零觸發）、Foundation read／close 路徑（raw read 同率；探針
+    // 600 輪零）、dispatch 讀源（repo 零命中）、XNU spawn fd 表複製窗口（風暴
+    // 10 萬次 spawn 含大映像，零）、並發 `readDataToEndOfFile`（3,744 輪零）。
+    // 零命中支持的是「在該探針設定下未重現」，不是邏輯上的排除。verify DA 另提
+    // 第八候選（本行程以別的 fd 號持有）：30 次全套零別名但無 flake 取樣，未決。
+    // 數字與命令在 `docs/measurements/2026-09-02-mcp-epipe-flake.md`。
     //
-    // 測試因此改成不依賴機制的形狀：斷言的是**stdout 一旦沒有讀者，server
-    // 就具名退出**——每 5 ms 送一則、最多 2 s，任何 ms 級的暫態持有者都撐不
-    // 過去（同 suite 下 200 次全綠；改前 1–3%）。這些補寫必須用
-    // `write(contentsOf:)`＋`try?`：server 一退出，對 stdin 的 legacy
-    // `write(_:)` 會丟 ObjC exception 把整個測試行程 SIGABRT。
+    // 測試因此改成不依賴機制的形狀：斷言**stdout 一旦沒有讀者，server 就具名
+    // 退出**——每 5 ms 送一則、最多 2 s。2 s 是經驗上限（同 suite 200 次全綠），
+    // 不是由已知機制導出的安全界線。補寫用 `try?`：server 退出後的 EPIPE 是
+    // 預期（上面已把 SIGPIPE 轉成 EPIPE，否則 `try?` 什麼都擋不住）。
     let deadline = Date().addingTimeInterval(2)
     var requestID = 2
     while process.isRunning && Date() < deadline {
@@ -71,6 +77,19 @@ func mcpExitsNamedWhenStdoutCloses() throws {
     }
     try? stdin.fileHandleForWriting.close()
 
+    // **有界等待，deadline 到就親手結束子行程。** 若持有者不排水且活得夠久，
+    // stdout pipe（65,504 B）在約 98 則回應後填滿、server 卡在 `write(2)`、不再
+    // 讀 stdin、永遠看不到 EOF——`waitUntilExit()` 會無限等（verify 用 dup()
+    // 探針重現：stdin 關後 10 s 仍活）。**不用 `.timeLimit`**：它對卡在 C call
+    // 的同步 body 只記 issue、不解除阻塞（DA 實測 60 s 記錄後 body 跑滿 150 s；
+    // repo 內三條既有測試的同一宣稱另開 issue 追）。
+    let hardDeadline = Date().addingTimeInterval(10)
+    while process.isRunning && Date() < hardDeadline { usleep(10_000) }
+    if process.isRunning {
+        process.terminate()
+        usleep(200_000)
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+    }
     process.waitUntilExit()
     let err = String(
         data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""

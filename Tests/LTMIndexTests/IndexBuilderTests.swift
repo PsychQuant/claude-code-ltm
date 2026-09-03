@@ -1414,12 +1414,18 @@ func aPartiallyCoveredIndexIsRefused() throws {
     }
     let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
     for file in 0..<2 {
+        // s0 帶**三**則 turn → `chunk_sources` 有三列同一個 source_key。這樣
+        // `sourcesWithoutCursor()` 的**去重**那一半才有守衛（#58 verify：兩個
+        // fixture 都每來源一列時，丟掉去重的查詢 557 全綠）。
+        let turns = file == 0 ? 3 : 1
         _ = try writeSession(
             in: corpus, project: "proj-one", file: "s\(file).jsonl",
-            lines: [turnLine(
-                uuid: String(format: "%08x-aaaa-bbbb-cccc-dddddddddddd", file),
-                session: "1111111\(file)-2222-3333-4444-555555555555",
-                role: "user", text: "來源 \(file) 的內容")])
+            lines: (0..<turns).map { i in
+                turnLine(
+                    uuid: String(format: "%08x-aaaa-bbbb-cccc-dddddddddd%02d", file, i),
+                    session: "1111111\(file)-2222-3333-4444-555555555555",
+                    role: "user", text: "來源 \(file) 的第 \(i) 則")
+            })
     }
     _ = try IndexBuilder(location: derived, scanner: scanner,
                          embedder: StubEmbedder(revision: "rev-A")).build()
@@ -1430,7 +1436,12 @@ func aPartiallyCoveredIndexIsRefused() throws {
         defer { database.close() }
         try database.execute("DELETE FROM scan_state WHERE source_key LIKE '%s0.jsonl'")
         #expect(try !database.scanState().files.isEmpty, "前提：表不是空的，代理判準會放行")
-        #expect(try database.sourcesWithoutCursor().count == 1)
+        var rows = 0
+        try database.query("SELECT COUNT(*) FROM chunk_sources WHERE source_key LIKE '%s0.jsonl'") {
+            rows = Int(sqlite3_column_int64($0, 0))
+        }
+        #expect(rows == 3, "前提：缺游標的來源在 chunk_sources 有多列，實得 \(rows)")
+        #expect(try database.sourcesWithoutCursor() == ["proj-one/s0.jsonl"], "去重後恰好一個來源")
     }
 
     #expect(throws: IndexBuilder.BuildError.self) {

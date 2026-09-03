@@ -8,18 +8,24 @@
 
 - **`mcpExitsNamedWhenStdoutCloses` 的 flake（#57）**：全套件約 1–3% 紅、filtered
   單跑 0/40。server 端追蹤證明那次寫入**晚於 close 卻成功**——讀端被某個東西持有
-  ≥4.5 ms，而六輪量測（CLOEXEC／atfork／raw read／dispatch 讀源／spawn 風暴含大
-  映像／並發 readDataToEndOfFile）**全部排除、機制未定**。測試改成不依賴機制的
-  形狀：持續送請求直到 server 退出（每 5 ms、≤2 s），同 suite 200 次全綠。
-  「1/32 flake」在 #56 verify 時被 DA 首次觀測，本次修法讓「全綠」重新成為可
-  引用的性質；未定的機制具名記在 #57 與測試註解。
+  ≥4.5 ms（下界），七項探測（CLOEXEC／atfork／raw read／Foundation close／dispatch
+  讀源／spawn 風暴含大映像／並發 readDataToEndOfFile）**皆未重現、機制未定**。
+  測試改成不依賴機制的形狀：持續送請求直到 server 退出（每 5 ms、≤2 s），同
+  suite 200 次全綠。**verify 抓到第一版修法比 flake 更糟**：測試 host 的 SIGPIPE
+  是 SIG_DFL，server 退出後對 stdin 的補寫會殺掉整個測試行程（負載下 5/270），
+  `try?` 擋不住訊號——現以 `F_SETNOSIGPIPE` 轉成 EPIPE；不排水的持有者會讓
+  `waitUntilExit()` 無限等——現改有界等待、逾時親手 terminate/kill（`.timeLimit`
+  對卡在 C call 的同步 body 無效，DA 實測；既有三條測試的同一宣稱另開 issue）。
+  數字與命令：`docs/measurements/2026-09-02-mcp-epipe-flake.md`。
 
 ### Changed
 
 - **no-op build 的 SQL 閘加速（#58）**：sample 歸因顯示 #56 之後瓶頸移到
   `sourcesWithoutCursor()`（#44 正確性閘，兩次取樣 81%／~100%）。Q2 改寫成
-  `EXCEPT`（精確等價，CLI 3×）；連線加 `PRAGMA mmap_size=4GiB`（讀路徑，
-  durability 不動）。同語料 A/B 方向為正；「1 秒以內」仍未達成——剩餘是兩個
+  `EXCEPT`（出貨 schema 下精確等價，CLI ≈2.7×；缺游標測試的 fixture 改為一來源
+  多列，去重那一半有了守衛）；連線請求 `mmap_size` 4 GiB——**系統 SQLite clamp
+  到 1 GiB**，DB 只有約一半可映射（第一版寫「涵蓋 1.9GB」，verify 四方各自證
+  偽）；RSS 15.9→237 MB、SIGBUS 失敗模式補入量測紀錄。同語料 A/B 方向為正；「1 秒以內」仍未達成——剩餘是兩個
   隨索引總量成長的每 build 固定項（閘 Q1、`chunkCount()`），根治需維護式記帳
   （新設計決定，未在本 issue 偷渡）。兩個不 sound／更糟的 Q1 改寫已在
   `docs/measurements/2026-09-01-noop-build-attribution.md` 具名淘汰。
