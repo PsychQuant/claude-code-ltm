@@ -7,7 +7,7 @@ When extracting indexable text from a turn, the indexer SHALL remove every span 
 #### Scenario: An injected recall block does not become a chunk
 
 - **WHEN** a user turn's text contains `<!-- ltm:recall v1 -->` … `<!-- /ltm:recall -->` around three pointered hits and the token `ZQXJ-7731` appears only inside that span
-- **THEN** after `ltm build`, `ltm query ZQXJ-7731` returns no hit for that turn, and the turn's chunk text equals the turn text with the span removed
+- **THEN** after `ltm build`, no text returned by `ltm query ZQXJ-7731` contains `ZQXJ-7731` (the semantic channel still ranks nearest neighbours, so hit count is not the criterion), and the turn's chunk text equals the turn text with the span removed
 
 #### Scenario: Unmarked turns are unchanged
 

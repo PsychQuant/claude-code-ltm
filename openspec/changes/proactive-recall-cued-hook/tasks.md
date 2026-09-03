@@ -18,9 +18,9 @@
 
 ## 4. Chunker exclusion
 
-- [ ] 4.1 Requirement 'Recall-marked spans are excluded from indexable text': `CorpusScanner.indexableText(from:)` removes every `<!-- ltm:recall` … `<!-- /ltm:recall -->` span (inclusive, across lines, unterminated span to end of block) before concatenation. Verification: table test in `Tests/LTMIndexTests/CorpusScannerTests.swift` with the four rows from the spec example (`A  B`, empty, `A `, `A B`).
-- [ ] 4.2 A user turn containing an injected block indexes without the block's text and a distinctive token inside the block is not retrievable. Verification: end-to-end test building a fixture jsonl with the token `ZQXJ-7731` only inside a marked span and asserting `ltm query ZQXJ-7731` returns no hit for that turn.
-- [ ] 4.3 Existing indexes need no rebuild: an unmarked fixture corpus produces identical `chunks` rows before and after the change. Verification: the existing equivalence test extended with an assertion that the row set for the unmarked fixture is unchanged (guarded by a checked-in expected hash of the fixture's chunk texts).
+- [x] 4.1 Requirement 'Recall-marked spans are excluded from indexable text': `CorpusScanner.indexableText(from:)` removes every `<!-- ltm:recall` … `<!-- /ltm:recall -->` span (inclusive, across lines, unterminated span to end of block) before concatenation. Verification: table test in `Tests/LTMIndexTests/CorpusScannerTests.swift` with the four rows from the spec example (`A  B`, empty, `A `, `A B`).
+- [x] 4.2 A user turn containing an injected block indexes without the block's text and a distinctive token inside the block is not retrievable. Verification: end-to-end test building a fixture jsonl with the token `ZQXJ-7731` only inside a marked span and asserting no returned snippet contains `ZQXJ-7731` and the turn's chunk text equals the text with the span removed (hit count is not the criterion — the semantic channel always ranks nearest neighbours).
+- [x] 4.3 Existing indexes need no rebuild: an unmarked fixture corpus produces identical `chunks` rows before and after the change. Verification: the existing equivalence test extended with an assertion that the row set for the unmarked fixture is unchanged (guarded by a checked-in expected hash of the fixture's chunk texts).
 
 ## 5. Plugin hooks and cue file
 

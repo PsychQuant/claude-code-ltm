@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 
@@ -836,4 +837,46 @@ private final class BeatLog: @unchecked Sendable {
         lock.unlock()
     }
     var beats: [(scanned: Int, total: Int)] { lock.lock(); defer { lock.unlock() }; return storage }
+}
+
+// MARK: - recall 標記區塊排除（proactive-recall-cued-hook 4.1／4.3）
+
+@Test("indexableText 移除每一段 recall 標記區塊（規格 Example 四列）")
+func recallSpansAreStrippedFromIndexableText() throws {
+    let open = "<!-- ltm:recall v1 -->", close = "<!-- /ltm:recall -->"
+    let rows: [(input: String, expected: String)] = [
+        ("A \(open)hit\(close) B", "A  B"),
+        ("\(open)hit\(close)", ""),
+        ("A \(open)hit", "A "),
+        ("A B", "A B"),
+    ]
+    for row in rows {
+        // 字串 content 與 text block 兩種形狀都要一致。
+        #expect(CorpusScanner.indexableText(from: row.input) == row.expected, Comment(rawValue: row.input))
+        let block: [String: Any] = ["type": "text", "text": row.input]
+        #expect(CorpusScanner.indexableText(from: [block]) == row.expected, Comment(rawValue: row.input))
+    }
+    // 跨行、多段。
+    let multi = "前\n\(open)\nline1\nline2\n\(close)\n中\n\(open)x\(close)後"
+    #expect(CorpusScanner.indexableText(from: multi) == "前\n\n中\n後")
+    // 空掉的 text block 不貢獻任何東西（連分隔換行都不留）。
+    let blocks: [[String: Any]] = [
+        ["type": "text", "text": "\(open)only\(close)"], ["type": "text", "text": "保留"],
+    ]
+    #expect(CorpusScanner.indexableText(from: blocks) == "保留")
+}
+
+/// 4.3：未標記的輸入，改動前後的輸出逐 byte 相同。常數是在加入排除**之前**用同一份輸入算的。
+@Test("未標記的輸入，indexableText 的輸出與改動前逐 byte 相同（雜湊釘住）")
+func unmarkedInputIsIndexedExactlyAsBefore() throws {
+    let inputs: [Any] = [
+        "純字串內容，含 <!-- 註解 --> 但不是 recall 標記",
+        [["type": "text", "text": "第一段"], ["type": "text", "text": ""], ["type": "text", "text": "第二段\n續行"]],
+        [["type": "text", "text": "工具前"], ["type": "tool_use", "name": "Bash", "input": ["command": "ls -la"]],
+         ["type": "tool_result", "is_error": true, "content": "x"]],
+        [["type": "image"], ["type": "text", "text": "只有這段"]],
+    ]
+    let joined = inputs.map { CorpusScanner.indexableText(from: $0) }.joined(separator: "\u{1F}")
+    let digest = SHA256.hash(data: Data(joined.utf8)).map { String(format: "%02x", $0) }.joined()
+    #expect(digest == "e71cda0d6606bcad2a09b69d620498977e7fd88e52c8d1abca064eda0d634b92", Comment(rawValue: "actual=\(digest)"))
 }

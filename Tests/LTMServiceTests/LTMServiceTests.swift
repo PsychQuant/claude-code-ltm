@@ -1082,3 +1082,24 @@ func recallBlockNeverExceedsFourThousandCharacters() throws {
     #expect(withShortfall.contains("索引落後 7 個來源（併入預算 15 s 已用完）"))
     #expect(withShortfall.range(of: "索引落後")!.lowerBound > withShortfall.range(of: "1. [proj]")!.lowerBound)
 }
+
+// MARK: - 注入的 recall 區塊不會被再索引（proactive-recall-cued-hook 4.2）
+
+@Test("含 recall 區塊的 user turn 索引後，區塊內的獨特 token 查不到，chunk 文字等於移除區塊後的文字")
+func injectedRecallBlockIsNotIndexed() throws {
+    let workspace = try Workspace.make()
+    defer { try? FileManager.default.removeItem(at: workspace.corpus.deletingLastPathComponent()) }
+    let block = "\(RecallMarker.open)\n1. [proj] 2026-01-01T00:00:00Z\n   ZQXJ-7731 只在這裡\n   ↳ session s  turn u\n\(RecallMarker.close)"
+    let turnText = "使用者真正說的話 記憶\n\(block)\n後續文字"
+    try workspace.writeSession(texts: [turnText, "第二段 記憶"])
+    let service = try workspace.service()
+    try service.build()
+    // 向量通道對任何查詢都會回最近的候選（fixture 的 FixedEmbedder 尤其如此），所以判準不是
+    // 「零命中」，而是**沒有任何回傳的文字含那個 token**——區塊真的沒進索引。
+    let hits = try service.query(text: "ZQXJ-7731", limit: 10, scope: .allProjects).hits
+    #expect(hits.allSatisfy { !$0.snippet.contains("ZQXJ-7731") }, "區塊內的 token 出現在回傳文字裡")
+    let kept = try service.query(text: "使用者真正說的話", limit: 10, scope: .allProjects).hits
+    let turn = try #require(kept.first { $0.snippet.contains("使用者真正說的話") })
+    #expect(turn.snippet == "使用者真正說的話 記憶\n\n後續文字")
+    #expect(!turn.snippet.contains(RecallMarker.openPrefix))
+}
