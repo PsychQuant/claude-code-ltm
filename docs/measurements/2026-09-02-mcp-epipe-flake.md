@@ -42,7 +42,9 @@ exit 0。連送 5 則時 W2–W6 全部成功，跨 4.4 ms（下界；上界未�
 | 版本 | 紅／總 | 備註 |
 |---|---|---|
 | 持續送請求（每 5 ms、≤2 s）、`try?` | 0/200 | **但** verify 實測：host SIGPIPE=SIG_DFL，server 退出後補寫會殺掉整個測試行程——負載下 5/270 exit 141 |
-| ＋`F_SETNOSIGPIPE`＋有界等待（10 s 逾時 terminate/kill） | 見 CHANGELOG／issue 的 verify-fix 輪 | |
+| ＋`F_SETNOSIGPIPE`＋有界等待（10 s 逾時 terminate/kill） | **0/100 紅、0/100 整輪 crash** | 全套件 ×100，全程 8 個 `yes > /dev/null` CPU spinner（重現第一版 5/270 host-kill 的負載條件）；exit code 逐輪檢查 |
+
+`F_SETNOSIGPIPE` 本身的效力（獨立探針，child 先 `waitUntilExit` 再對其 stdin write）：無旗標 → 行程被 SIGPIPE 殺、exit 141、無輸出；有旗標 → `write(contentsOf:)` 拋 `NSCocoaErrorDomain code=512`、行程存活、exit 0。
 
 ## 誠實邊界
 
