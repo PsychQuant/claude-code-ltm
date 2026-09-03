@@ -158,6 +158,9 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
   #56（`docs/measurements/2026-09-01-scan-parallelism.md`）把掃描並行化後查詢
   降到 ~1.2s，成本大宗**仍在**共享 refresh/build 路徑——「不上 ANN」的結論
   不變；那份新紀錄一樣沒有元件級計時，不改變本條的誠實邊界。
+  #58（`docs/measurements/2026-09-01-noop-build-attribution.md`）把那段成本進一步
+  歸因到 #44 的正確性閘 `sourcesWithoutCursor()`（逐列 b-tree 探查，隨索引總量成長）
+  ——仍與向量檢索無關；「不上 ANN」再一次不變。
 - **jsonl 不假設 append-only，但利用它**。`scan_state` 表記 `prefixHash`，對得上就從
   `processedBytes` 續讀，對不上就整份重解。**游標與內容在同一個交易裡**——先前
   游標在一個獨立的 `state.json`，而那讓它成為第三份真相來源：WAL 回滾帶走內容
