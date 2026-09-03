@@ -2,7 +2,7 @@
 
 ### Requirement: ltm query can bound the pre-query merge and reports the shortfall
 
-`ltm query` SHALL accept `--max-refresh-seconds <N>` where N is an integer ≥ 1. When given, the incremental merge that runs before retrieval SHALL stop at the first batch boundary reached after N seconds of wall-clock time, leaving every already-committed batch in place and committing nothing partial, and retrieval SHALL run on the index as it then stands. The refresh report SHALL carry the number of source files not yet merged and a flag that the budget was exhausted. Human-readable output SHALL print the shortfall on stderr as `索引落後 <count> 個來源（併入預算 <N> s 已用完）`; `--json` output SHALL expose `unmergedSources` and `budgetExhausted` inside the `refresh` object. Without the flag the merge SHALL run to completion as before, and the report SHALL show zero unmerged sources and `budgetExhausted` false.
+`ltm query` SHALL accept `--max-refresh-seconds <N>` where N is an integer ≥ 1. When given, the incremental merge that runs before retrieval SHALL stop at the first batch boundary reached after N seconds of wall-clock time, leaving every already-committed batch in place and committing nothing partial, and retrieval SHALL run on the index as it then stands. The refresh report SHALL carry the number of source files not yet merged and a flag that the budget was exhausted. In both human-readable and `--json` modes the shortfall SHALL be printed on **stderr** as `索引落後 <count> 個來源（併入預算 <N> s 已用完）`, leaving `--json` stdout a bare JSON array of hits as the existing output requirement demands. Without the flag the merge SHALL run to completion as before, the report SHALL show zero unmerged sources and `budgetExhausted` false, and no shortfall line SHALL be printed.
 
 #### Scenario: Large backlog is truncated at a batch boundary
 
@@ -12,7 +12,7 @@
 #### Scenario: Small backlog merges fully within the budget
 
 - **WHEN** the backlog merges in less than N seconds
-- **THEN** the report shows zero unmerged sources and `budgetExhausted` false, identical to a run without the flag
+- **THEN** the report shows zero unmerged sources and `budgetExhausted` false, stderr carries no shortfall line, and stdout is identical to a run without the flag
 
 #### Scenario: The next merge completes the truncated one
 

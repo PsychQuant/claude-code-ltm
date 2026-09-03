@@ -1214,3 +1214,83 @@ extension FileHandle {
         return String(data: buffer, encoding: .utf8) ?? ""
     }
 }
+
+// MARK: - proactive-recall-cued-hook：--max-refresh-seconds / --exclude-session / --format recall
+
+@Test("--max-refresh-seconds：預算用完時 stderr 報落後，stdout 的 --json 仍是純陣列；非正整數是用法錯誤")
+func maxRefreshSecondsReportsShortfallOnStderrAndKeepsJSONShape() throws {
+    let workspace = try CLIWorkspace.make(texts: ["第一段 內容", "第二段 內容"])
+    defer { workspace.cleanup() }
+    var env = workspace.environment
+    #expect(try runCLI(["build", "--quiet"], environment: env).code == 0)
+    // 新增一個來源檔，讓查詢前有東西要併入。
+    let projectDir = workspace.corpus.appendingPathComponent("proj-demo")
+    let object: [String: Any] = [
+        "type": "user", "uuid": "99999999-aaaa-bbbb-cccc-dddddddddddd",
+        "sessionId": "11111111-2222-3333-4444-555555555555",
+        "timestamp": "2026-08-17T06:00:00.000Z",
+        "message": ["role": "user", "content": "第三段 內容"],
+    ]
+    try (String(data: try JSONSerialization.data(withJSONObject: object), encoding: .utf8)! + "\n")
+        .write(to: projectDir.appendingPathComponent("t.jsonl"), atomically: true, encoding: .utf8)
+    // 測試時鐘每讀一次前進 1 s：預算 1 s 在第一個批次邊界就用完 → 併入 0 批、落後 1 個來源。
+    env["LTM_TEST_CLOCK_STEP_SECONDS"] = "1"
+    let bounded = try runCLI(
+        ["query", "內容", "--all-projects", "--json", "--max-refresh-seconds", "1"], environment: env)
+    #expect(bounded.code == 0, Comment(rawValue: bounded.err))
+    #expect(bounded.err.contains("索引落後 1 個來源（併入預算 1 s 已用完）"), Comment(rawValue: bounded.err))
+    let parsed = try JSONSerialization.jsonObject(with: Data(bounded.out.utf8))
+    #expect(parsed is [Any], "--json 的 stdout 必須仍是命中陣列，不得因為預算而變形")
+    // 沒有預算：照常併完、沒有落後行。
+    env["LTM_TEST_CLOCK_STEP_SECONDS"] = nil
+    let full = try runCLI(["query", "內容", "--all-projects"], environment: env)
+    #expect(full.code == 0)
+    #expect(!full.err.contains("索引落後"))
+    // 非正整數 → 用法錯誤，訊息指名旗標。
+    let bad = try runCLI(
+        ["query", "內容", "--all-projects", "--max-refresh-seconds", "0"], environment: env)
+    #expect(bad.code == LTMCommandLine.ExitCode.usageError.rawValue)
+    #expect(bad.err.contains("--max-refresh-seconds"))
+}
+
+@Test("--exclude-session 丟掉只屬於該 session 的命中；resume 副本保留且 sessions 集合完整")
+func excludeSessionFlagDropsOnlyOwnSessionHits() throws {
+    let sessionA = "aaaaaaaa-0000-0000-0000-000000000001"
+    let sessionB = "bbbbbbbb-0000-0000-0000-000000000002"
+    let workspace = try CLIWorkspace.makeWithResumeDuplicate(
+        shared: "共同關鍵字 甲", uniqueToA: "共同關鍵字 乙", sessionA: sessionA, sessionB: sessionB)
+    defer { workspace.cleanup() }
+    #expect(try runCLI(["build", "--quiet"], environment: workspace.environment).code == 0)
+    let result = try runCLI(
+        ["query", "共同關鍵字", "--all-projects", "--json", "--exclude-session", sessionA],
+        environment: workspace.environment)
+    #expect(result.code == 0, Comment(rawValue: result.err))
+    let hits = try #require(JSONSerialization.jsonObject(with: Data(result.out.utf8)) as? [[String: Any]])
+    let uuids = hits.compactMap { $0["uuid"] as? String }
+    #expect(uuids == ["11111111-aaaa-bbbb-cccc-dddddddddddd"], "只在 A 的 turn 要被丟掉")
+    let sessions = Set(hits.first?["sessions"] as? [String] ?? [])
+    #expect(sessions == [sessionA, sessionB])
+}
+
+@Test("--format recall：標記包頭尾、最多 k 筆、與 --json 互斥")
+func recallFormatIsMarkerDelimitedAndExclusiveWithJSON() throws {
+    let workspace = try CLIWorkspace.make(texts: ["召回 一", "召回 二", "召回 三", "召回 四"])
+    defer { workspace.cleanup() }
+    #expect(try runCLI(["build", "--quiet"], environment: workspace.environment).code == 0)
+    let result = try runCLI(
+        ["query", "召回", "--all-projects", "--format", "recall", "--k", "3"],
+        environment: workspace.environment)
+    #expect(result.code == 0, Comment(rawValue: result.err))
+    let lines = result.out.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    #expect(lines.first == "<!-- ltm:recall v1 -->")
+    #expect(lines.last { !$0.isEmpty } == "<!-- /ltm:recall -->")
+    #expect(lines.filter { $0.hasPrefix("1. ") || $0.hasPrefix("2. ") || $0.hasPrefix("3. ") }.count == 3)
+    #expect(!lines.contains { $0.hasPrefix("4. ") })
+    #expect(result.out.count <= 4_000)
+    let conflict = try runCLI(
+        ["query", "召回", "--all-projects", "--format", "recall", "--json"],
+        environment: workspace.environment)
+    #expect(conflict.code == LTMCommandLine.ExitCode.usageError.rawValue)
+    #expect(conflict.err.contains("--format recall") && conflict.err.contains("--json"))
+    #expect(conflict.out.isEmpty)
+}

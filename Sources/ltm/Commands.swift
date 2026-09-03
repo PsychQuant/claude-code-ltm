@@ -19,6 +19,25 @@ enum CommandSupport {
     ///   空投影、輸出卻照樣宣稱跑了那個策略——靜默失效。現在只要「要用策略」或
     ///   「要記錄」任一成立就開存放，`--record` 只決定事後要不要 append。
     /// - Parameter needsRecordStore: 這次呼叫是否需要呈現紀錄存放（只有比較模式要）。
+    /// 有界併入的時鐘。生產永遠是 `Date()`。`LTM_TEST_CLOCK_STEP_SECONDS=N` 是**測試專用**
+    /// 的縫：每讀一次前進 N 秒，讓「預算在第一個批次邊界就用完」能被 CLI 測試確定性地
+    /// 重現——真實時鐘下這件事取決於機器快慢，測不準。不寫進 usage，不是給使用者的。
+    static func serviceClock() -> @Sendable () -> Date {
+        guard let raw = ProcessInfo.processInfo.environment["LTM_TEST_CLOCK_STEP_SECONDS"],
+            let step = TimeInterval(raw), step > 0
+        else { return { Date() } }
+        final class Stepper: @unchecked Sendable {
+            let lock = NSLock(); var calls = 0; let origin = Date()
+            func now(step: TimeInterval) -> Date {
+                lock.lock(); defer { lock.unlock() }
+                calls += 1
+                return origin.addingTimeInterval(step * TimeInterval(calls - 1))
+            }
+        }
+        let stepper = Stepper()
+        return { stepper.now(step: step) }
+    }
+
     static func makeService(needsEventStore: Bool, needsRecordStore: Bool = false) throws
         -> LTMService
     {
@@ -43,7 +62,7 @@ enum CommandSupport {
         let probe = try LTMService.make(
             corpusRoot: corpusRoot, derivedRoot: derivedRoot,
             embedder: embedder, eventStore: nil, anchorKey: try anchorKey(),
-            memoryRoot: memoryRoot)
+            memoryRoot: memoryRoot, clock: serviceClock())
         guard needsEventStore else { return probe }
         let store = try FileEventStore(
             url: memoryEventsURL(validatedRoot: memoryRoot), policy: corpusPolicy())
@@ -476,6 +495,9 @@ enum QueryCommand {
           --record             把這次呈現寫成 shown 事件（預設不寫）
           --compare            兩個策略交錯呈現並記錄（隱含 --record，與 --strategy 互斥）
           --json               輸出 JSON
+          --format recall      給 hook 注入用的標記區塊（與 --json 互斥）
+          --max-refresh-seconds <N>  查詢前併入的牆鐘預算；預算到就用已提交的索引作答並報落後
+          --exclude-session <id>     丟掉只屬於該 session 的命中（resume 副本保留）
           -h, --help
 
         比較模式（--compare）用 \(ComparisonPair.aName) 與 \(ComparisonPair.bName) 排同一份
@@ -485,6 +507,7 @@ enum QueryCommand {
 
     static let knownOptions: Set<String> = [
         "k", "project", "all-projects", "strategy", "record", "compare", "json", "help", "h",
+        "format", "max-refresh-seconds", "exclude-session",
     ]
 
     /// 比較模式用哪一對策略。
@@ -514,7 +537,8 @@ enum QueryCommand {
     }
 
     static func run(arguments raw: [String]) -> Int32 {
-        let arguments = Arguments(raw, valueOptions: ["k", "project", "strategy"])
+        let arguments = Arguments(
+            raw, valueOptions: ["k", "project", "strategy", "format", "max-refresh-seconds", "exclude-session"])
         if arguments.has("help") || arguments.has("h") {
             print(usage)
             return LTMCommandLine.ExitCode.success.rawValue
@@ -560,6 +584,34 @@ enum QueryCommand {
 
         let compare = arguments.has("compare")
         let record = arguments.has("record")
+        // proactive-recall-cued-hook：三個給 hook 用、任何呼叫端都能用的旗標。
+        let recallFormat: Bool
+        switch arguments.value("format") {
+        case nil: recallFormat = false
+        case "recall"?: recallFormat = true
+        case let other?:
+            Output.error("✗ --format 只接受 recall（收到：\(other)）")
+            return LTMCommandLine.ExitCode.usageError.rawValue
+        }
+        if recallFormat, arguments.has("json") {
+            Output.error("--format recall 與 --json 互斥：前者是給 hook 注入的標記區塊，後者是命中陣列。")
+            return LTMCommandLine.ExitCode.usageError.rawValue
+        }
+        if compare, recallFormat || arguments.value("exclude-session") != nil {
+            Output.error("--compare 不支援 --format recall 與 --exclude-session：交錯記錄要的是未過濾的完整呈現。")
+            return LTMCommandLine.ExitCode.usageError.rawValue
+        }
+        let refreshBudgetSeconds: Int?
+        if let raw = arguments.value("max-refresh-seconds") {
+            guard let parsed = Int(raw), parsed >= 1 else {
+                Output.error("✗ --max-refresh-seconds 必須是 ≥ 1 的整數（收到：\(raw)）")
+                return LTMCommandLine.ExitCode.usageError.rawValue
+            }
+            refreshBudgetSeconds = parsed
+        } else {
+            refreshBudgetSeconds = nil
+        }
+        let excludeSessions: Set<String> = arguments.value("exclude-session").map { [$0] } ?? []
         do {
             if compare {
                 let service = try CommandSupport.makeService(
@@ -596,14 +648,24 @@ enum QueryCommand {
                 arguments: arguments, corpusRoot: service.corpusRoot)
             let outcome = try service.query(
                 text: queryText, limit: limit, scope: scope,
-                strategy: strategy, recordEvents: record)
+                strategy: strategy, recordEvents: record,
+                refreshBudget: refreshBudgetSeconds.map(TimeInterval.init),
+                excludeSessions: excludeSessions)
 
-            if arguments.has("json") {
+            if recallFormat {
+                print(RecallBlock.render(outcome: outcome, budgetSeconds: refreshBudgetSeconds))
+                printRefreshDiagnostics(outcome.refresh)
+            } else if arguments.has("json") {
                 try printJSON(outcome)
                 printUnattributableDiagnostics(outcome.unattributableResults)
             } else {
                 printHuman(outcome)
                 printUnattributableDiagnostics(outcome.unattributableResults)
+            }
+            // 落後行兩種模式都走 stderr：`--json` 的 stdout 是已發布的純陣列契約。
+            if let refreshBudgetSeconds, outcome.refresh.budgetExhausted {
+                Output.error(
+                    "  ⚠ 索引落後 \(outcome.refresh.unmergedSources) 個來源（併入預算 \(refreshBudgetSeconds) s 已用完）")
             }
             return LTMCommandLine.ExitCode.success.rawValue
         } catch let error as InterleavingViolation {

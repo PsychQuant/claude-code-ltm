@@ -406,6 +406,9 @@ public struct LTMService {
     /// **注入而不是每次讀 `ProcessInfo`**：測試要能餵值，而讓測試改行程環境會讓
     /// 平行測試互相污染。預設值仍然是環境變數，所以出貨行為不變。
     private let buildTuning: BuildTuning
+    /// 交給 `IndexBuilder` 做有界併入的預算判定；生產是 `Date()`，CLI 測試經
+    /// `LTM_TEST_CLOCK_STEP_SECONDS` 注入步進時鐘（見 `CommandSupport.serviceClock`）。
+    private let clock: @Sendable () -> Date
     /// 解析 `buildTuning` 時被拒絕的環境變數。**不吞掉**——見 `RefreshReport.tuningRejections`。
     private let tuningRejections: [String]
 
@@ -416,8 +419,10 @@ public struct LTMService {
         eventStore: (any EventStore)? = nil,
         anchorKey: AnchorKey,
         recordStore: (any PresentationRecordStore)? = nil,
-        buildTuning: BuildTuning? = nil
+        buildTuning: BuildTuning? = nil,
+        clock: @escaping @Sendable () -> Date = { Date() }
     ) {
+        self.clock = clock
         self.location = location
         self.corpusRoot = corpusRoot
         self.embedder = embedder
@@ -477,7 +482,8 @@ public struct LTMService {
         eventStore: (any EventStore)? = nil,
         anchorKey: AnchorKey,
         recordStore: (any PresentationRecordStore)? = nil,
-        memoryRoot: URL? = nil
+        memoryRoot: URL? = nil,
+        clock: @escaping @Sendable () -> Date = { Date() }
     ) throws -> LTMService {
         let policy = MemoryCorpusPolicy(corpusRoots: [corpusRoot])
         // **建立任何東西之前**先驗 memory root。`FileEventStore` 事後會拒絕語料內的
@@ -488,7 +494,7 @@ public struct LTMService {
         return LTMService(
             location: try DerivedLocation(root: derivedRoot, policy: policy),
             corpusRoot: corpusRoot, embedder: embedder, eventStore: eventStore,
-            anchorKey: anchorKey, recordStore: recordStore)
+            anchorKey: anchorKey, recordStore: recordStore, clock: clock)
     }
 
     // MARK: - 建置
@@ -937,7 +943,7 @@ public struct LTMService {
         let builder = IndexBuilder(
             location: location, scanner: CorpusScanner(corpusRoot: corpusRoot, anchorKey: anchorKey),
             embedder: embedder, batchChunkTarget: buildTuning.batchChunkTarget,
-            memoryBudgetBytes: buildTuning.memoryBudgetBytes)
+            memoryBudgetBytes: buildTuning.memoryBudgetBytes, clock: clock)
         do {
             // `refusingFullRebuild`：這條路徑上「整份重建」永遠是錯的答案——它會
             // 在查詢持有連線時刪掉 DB 與側車。先前這是註解裡的推理，現在是前置條件。

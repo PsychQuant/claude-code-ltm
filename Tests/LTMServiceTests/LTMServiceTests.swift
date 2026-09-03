@@ -1051,3 +1051,34 @@ func excludeSessionDropsOnlyFullyCoveredHits() throws {
     let kept = try #require(filtered.hits.first { $0.uuid == b })
     #expect(Set(kept.sessionSources) == [S, T], "resume 副本在別的 session 裡是真實的先前出現，要保留且集合不變")
 }
+
+// MARK: - recall 區塊渲染（proactive-recall-cued-hook 3.3）
+
+@Test("recall 區塊不超過 4,000 字元：先縮 snippet、再從尾端丟命中，結尾標記永遠在")
+func recallBlockNeverExceedsFourThousandCharacters() throws {
+    let long = String(repeating: "很長的片段", count: 600)  // 3,000 字元
+    let entries = (1...3).map { i in
+        RecallBlock.Entry(
+            project: "proj", timestamp: Date(timeIntervalSince1970: 0), snippet: long,
+            sessions: ["s-\(i)"], uuid: "0000000\(i)-aaaa-bbbb-cccc-dddddddddddd")
+    }
+    let block = RecallBlock.render(entries: entries, shortfall: nil)
+    #expect(block.count <= 4_000)
+    let lines = block.split(separator: "\n").map(String.init)
+    #expect(lines.first == RecallMarker.open)
+    #expect(lines.last == RecallMarker.close)
+    // 三筆都還在（縮 snippet 就夠了），且順序不變。
+    #expect(lines.filter { $0.hasPrefix("1. ") }.count == 1)
+    #expect(lines.filter { $0.hasPrefix("3. ") }.count == 1)
+    #expect(lines.firstIndex { $0.hasPrefix("1. ") }! < lines.firstIndex { $0.hasPrefix("3. ") }!)
+    // 每個 snippet 都被縮到上限以內。
+    for line in lines where line.hasPrefix("   很長") { #expect(line.count <= 203) }
+    // 極端：上限縮到連一筆都放不下 → 丟命中，但頭尾標記與 banner 仍在。
+    let tiny = RecallBlock.render(entries: entries, shortfall: nil, characterLimit: 300)
+    #expect(tiny.count <= 300 || tiny.split(separator: "\n").count <= 4)
+    #expect(tiny.hasSuffix(RecallMarker.close))
+    // 落後行在命中之後、結尾標記之前。
+    let withShortfall = RecallBlock.render(entries: Array(entries.prefix(1)), shortfall: (sources: 7, budgetSeconds: 15))
+    #expect(withShortfall.contains("索引落後 7 個來源（併入預算 15 s 已用完）"))
+    #expect(withShortfall.range(of: "索引落後")!.lowerBound > withShortfall.range(of: "1. [proj]")!.lowerBound)
+}
