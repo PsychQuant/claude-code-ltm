@@ -22,6 +22,12 @@ public struct BuildReport: Sendable, Equatable {
     public let wasFullRebuild: Bool
     public let embeddingRevision: String
     public let totalChunks: Int
+    /// 有界併入（`budget:`）下沒能併入的來源數：在預算用完時仍有 slice 落在未跑的批次裡的
+    /// 來源（含只併了一部分的）。沒有預算或預算夠用時為 0。
+    public let unmergedSources: Int
+    /// 預算在某個批次邊界被判定用完、迴圈提前停止。`unmergedSources > 0` 蘊含此旗標為真；
+    /// 反之不然（預算剛好在最後一批之後用完時，旗標可能為真而未併入為 0）。
+    public let budgetExhausted: Bool
 }
 
 /// 把掃描、索引、向量三件事串起來的建置流程。
@@ -113,6 +119,9 @@ public struct IndexBuilder: Sendable {
     public let progressChunkInterval: Int
     /// 嵌入期間至少每幾秒發一次心跳。
     public let progressTimeInterval: TimeInterval
+    /// 有界併入用的時鐘。生產用 `Date()`；測試注入可控時鐘，讓「預算用完」成為
+    /// 確定性事件而不是 sleep 出來的。只有預算判定讀它——心跳仍讀 `Date()`。
+    public let clock: @Sendable () -> Date
 
     public init(
         location: DerivedLocation, scanner: CorpusScanner, embedder: any EmbeddingProvider,
@@ -120,8 +129,10 @@ public struct IndexBuilder: Sendable {
         batchChunkTarget: Int = 2_000,
         memoryBudgetBytes: Int? = nil,
         progressChunkInterval: Int = 200,
-        progressTimeInterval: TimeInterval = 5
+        progressTimeInterval: TimeInterval = 5,
+        clock: @escaping @Sendable () -> Date = { Date() }
     ) {
+        self.clock = clock
         self.location = location
         self.scanner = scanner
         self.embedder = embedder
@@ -197,7 +208,13 @@ public struct IndexBuilder: Sendable {
     ///
     ///   規則叫呼叫端別走某條路，遠弱於把那條路拆掉。所以這裡不是把註解寫清楚，
     ///   是讓那個前提變成呼叫端可以強制的東西。
-    public func build(full: Bool = false, refusingFullRebuild: Bool = false) throws -> BuildReport {
+    /// - Parameter budget: 有界併入的牆鐘預算（秒）。`nil` 為不限。給定時，迴圈在**每個批次
+    ///   邊界**（含第一批之前）讀一次 `clock`，超過起點＋預算就停止：已提交的批次留著、
+    ///   不提交任何半批、未跑到的來源不寫游標（否則就是「游標超前內容」）。停下來的狀態
+    ///   與一次崩潰留下的完全相同，下一次 build 從那裡續完——不變式 2 因此不受影響。
+    public func build(
+        full: Bool = false, refusingFullRebuild: Bool = false, budget: TimeInterval? = nil
+    ) throws -> BuildReport {
         try location.createRootIfNeeded()
         // **#44 Expected ② 沒有被實作，而且它與 #44 實際交付的東西相衝突。**
         //
@@ -601,7 +618,16 @@ public struct IndexBuilder: Sendable {
         var lastBeat = started
         var lastBeatChunks = 0
 
+        let deadline = budget.map { clock().addingTimeInterval($0) }
+        var budgetExhausted = false
+        var unmergedSourceKeys = Set<String>()
         for (batchIndex, batch) in batches.enumerated() {
+            // 預算判定只在批次邊界：這裡是唯一一個「停下來不會留下半批」的位置。
+            if let deadline, clock() >= deadline {
+                budgetExhausted = true
+                unmergedSourceKeys = Set(batches[batchIndex...].flatMap { $0.map(\.sourceKey) })
+                break
+            }
             let batchChunks = batch.flatMap { slice in
                 (grouped[slice.sourceKey] ?? [])[slice.range]
             }
@@ -743,6 +769,8 @@ public struct IndexBuilder: Sendable {
         // 它們沒有內容要提交，所以不屬於任何批次，但游標仍要前進。
         try database.transaction {
             for (sourceKey, entry) in scan.state.files {
+                // 未併入（含只併了一部分）的來源不得在這裡拿到「整份已處理」的游標。
+                if unmergedSourceKeys.contains(sourceKey) { continue }
                 try database.upsertScanState(
                     sourceKey: sourceKey, prefixHash: entry.prefixHash,
                     processedBytes: entry.processedBytes)
@@ -755,13 +783,15 @@ public struct IndexBuilder: Sendable {
 
         return BuildReport(
             chunksIndexed: indexed,
-            sourcesRefreshed: refreshedSourceKeys.count,
+            sourcesRefreshed: refreshedSourceKeys.subtracting(unmergedSourceKeys).count,
             sourcesInvalidated: scan.invalidatedSources.count,
             sourcesUnreadable: scan.unreadableSources.sorted(),
             skipped: scan.skipped,
             wasFullRebuild: rebuildFromScratch,
             embeddingRevision: embedder.revision,
-            totalChunks: try database.chunkCount())
+            totalChunks: try database.chunkCount(),
+            unmergedSources: unmergedSourceKeys.count,
+            budgetExhausted: budgetExhausted)
     }
 
     // MARK: - 衍生產物

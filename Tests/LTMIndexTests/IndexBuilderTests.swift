@@ -2047,3 +2047,131 @@ func aMultiSliceRewriteKeepsEverySliceAfterASuccessfulBuild() throws {
         try IndexDatabase(path: derived.databaseURL.path).chunkCount() == 5,
         "每個 slice 都 delete 的話只會剩最後一個 slice 的份")
 }
+
+// MARK: - 有界併入（proactive-recall-cued-hook，ltm-cli spec「ltm query can bound the pre-query merge」）
+
+/// 每呼叫一次前進一秒的時鐘——測試不 sleep，讓「預算用完」成為確定性事件。
+private final class SteppingClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    let start = Date(timeIntervalSince1970: 1_000_000)
+    func now() -> Date {
+        lock.lock(); defer { lock.unlock() }
+        calls += 1
+        return start.addingTimeInterval(TimeInterval(calls - 1))
+    }
+}
+
+private func writeSixSources(in corpus: URL) throws {
+    for s in 0..<6 {
+        let session = String(format: "%08x-0000-0000-0000-000000000000", s)
+        let lines = (0..<2).map { t in
+            turnLine(
+                uuid: String(format: "%08x-aaaa-bbbb-cccc-%012x", s, t),
+                session: session, role: t == 0 ? "user" : "assistant",
+                text: "來源 \(s) 的第 \(t) 段內容")
+        }
+        _ = try writeSession(in: corpus, project: "proj-one", file: "s\(s).jsonl", lines: lines)
+    }
+}
+
+@Test("預算用完時併入停在批次邊界：不提交半批、報告未併入來源數、游標只覆蓋已提交的部分")
+func boundedRefreshStopsAtBatchBoundaryAndReportsShortfall() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeSixSources(in: corpus)
+    let clock = SteppingClock()
+    // batchChunkTarget 2 → 每個來源自成一批，六批。時鐘每次讀取前進 1 s，預算 1.5 s：
+    // 起點 t=0、第 1 批前 t=1（可）、第 2 批前 t=2（≥1.5，停）→ 剛好併入一批。
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 2, clock: clock.now)
+    let report = try builder.build(budget: 1.5)
+    #expect(report.budgetExhausted)
+    #expect(report.chunksIndexed == 2)
+    #expect(report.unmergedSources == 5)
+    #expect(report.sourcesRefreshed == 1)
+
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.chunkCount() == 2)
+    // 沒有任何來源「有 chunk 卻沒有游標」——#44 的閘在下一次 build 照常放行增量。
+    #expect(try database.sourcesWithoutCursor().isEmpty)
+    var cursors = 0
+    try database.query("SELECT COUNT(*) FROM scan_state") { statement in
+        cursors = Int(sqlite3_column_int64(statement, 0))
+    }
+    #expect(cursors == 1, "未併入的來源不得留下游標（那正是「游標超前內容」的形狀）")
+
+    // 沒有預算的下一次 build 把剩下的併完。
+    let completed = try IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 2
+    ).build()
+    #expect(!completed.budgetExhausted)
+    #expect(completed.unmergedSources == 0)
+    #expect(completed.totalChunks == 12)
+}
+
+@Test("被截斷的併入在下一次 build 完成後，與一次不中斷的 build 產出相同的索引內容")
+func aTruncatedMergeCompletedLaterEqualsAnUninterruptedBuild() throws {
+    // prefix_hash 不跨語料互比：fixture 的 `turnLine` 走 JSONSerialization，鍵序每次呼叫都可能
+    // 不同（實測同一 dict 六次呼叫出現三種鍵序），所以兩份「相同」語料的 bytes 不同、SHA-256
+    // 自然不同。要驗的性質是**每個游標對得上它自己的來源檔**，那才是不變式 2 在乎的。
+    func rows(_ derived: DerivedLocation, corpus: URL) throws -> [String] {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        var out: [String] = []
+        try database.query(
+            """
+            SELECT c.uuid, c.text, c.vector_row, cs.source_key FROM chunks c
+            JOIN chunk_sources cs ON cs.chunk_id = c.id ORDER BY c.uuid, cs.source_key
+            """
+        ) { statement in
+            out.append(
+                [0, 1, 2, 3].map { columnText(statement, $0) }.joined(separator: "|"))
+        }
+        try database.query("SELECT source_key, prefix_hash, processed_bytes FROM scan_state ORDER BY source_key") {
+            statement in
+            let key = columnText(statement, 0)
+            let processed = Int(columnText(statement, 2)) ?? -1
+            let data = (try? Data(contentsOf: corpus.appendingPathComponent(key))) ?? Data()
+            let prefix = data.prefix(max(processed, 0))
+            let digest = SHA256.hash(data: prefix).map { String(format: "%02x", $0) }.joined()
+            let verified = digest == columnText(statement, 1) && processed == data.count
+            out.append("state:\(key)|\(processed)|verified=\(verified)")
+        }
+        out.append("vector_count:" + (try database.meta("vector_count") ?? "nil"))
+        return out
+    }
+    let (corpusA, derivedA) = try makeWorkspace()
+    let (corpusB, derivedB) = try makeWorkspace()
+    defer {
+        for url in [corpusA, derivedA.root, corpusB, derivedB.root] {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+    try writeSixSources(in: corpusA)
+    try writeSixSources(in: corpusB)
+    let clock = SteppingClock()
+    _ = try IndexBuilder(
+        location: derivedA, scanner: CorpusScanner(corpusRoot: corpusA, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 2, clock: clock.now
+    ).build(budget: 1.5)
+    _ = try IndexBuilder(
+        location: derivedA, scanner: CorpusScanner(corpusRoot: corpusA, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 2
+    ).build()
+    _ = try IndexBuilder(
+        location: derivedB, scanner: CorpusScanner(corpusRoot: corpusB, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 2
+    ).build()
+    // source_key 含各自的 corpus 路徑；比較前正規化成相對鍵。
+    let a = try rows(derivedA, corpus: corpusA).map { $0.replacingOccurrences(of: corpusA.path, with: "<corpus>") }
+    let b = try rows(derivedB, corpus: corpusB).map { $0.replacingOccurrences(of: corpusB.path, with: "<corpus>") }
+    #expect(a == b)
+    #expect(a.filter { $0.hasPrefix("state:") }.allSatisfy { $0.hasSuffix("verified=true") })
+}

@@ -177,11 +177,19 @@ public struct RefreshReport: Sendable {
     /// 查詢照常運作（#46 R3 verify，codex + regression）。那是 F 那條修法的反面缺口。
     public let tuningRejections: [String]
 
+    /// 有界併入下沒能併入的來源數（見 `IndexBuilder.BuildReport.unmergedSources`）。
+    /// 與 `mergeDeferredForConcurrentBuild` 同一條原則：**不併入就必須說出來**。
+    public let unmergedSources: Int
+    /// 查詢前的併入是否因預算用完而在批次邊界提前停止。
+    public let budgetExhausted: Bool
+
     public init(
         sourcesRefreshed: Int, sourcesUnreadable: [String], sourcesInvalidated: Int,
         skipped: SkipTally, mergeDeferredForConcurrentBuild: Bool = false,
-        tuningRejections: [String] = []
+        tuningRejections: [String] = [], unmergedSources: Int = 0, budgetExhausted: Bool = false
     ) {
+        self.unmergedSources = unmergedSources
+        self.budgetExhausted = budgetExhausted
         self.tuningRejections = tuningRejections
         self.sourcesRefreshed = sourcesRefreshed
         self.sourcesUnreadable = sourcesUnreadable
@@ -524,9 +532,12 @@ public struct LTMService {
         scope: RetrievalEngine.Scope,
         strategy: (any MemoryStrategy)? = nil,
         recordEvents: Bool = false,
-        now: Date = Date()
+        now: Date = Date(),
+        refreshBudget: TimeInterval? = nil,
+        excludeSessions: Set<String> = []
     ) throws -> QueryOutcome {
-        try withRetrieval(text: text, limit: limit, scope: scope) { database, scored, refreshed in
+        try withRetrieval(text: text, limit: limit, scope: scope, refreshBudget: refreshBudget) {
+            database, scored, refreshed in
             let chosen = strategy ?? ArchivalStrategy()
 
             // 檢索**已經**以 band-major 順序回傳（`RetrievalEngine.search`），所以
@@ -559,6 +570,14 @@ public struct LTMService {
                     // 不允許回傳沒有指標的命中——但沉默的丟棄讓「排序多出了東西」
                     // 這件事沒有任何人會發現。
                     unattributable += 1
+                    continue
+                }
+                // session 排除在**排序之後**套用，只丟不重排。判準是集合包含：持有它的
+                // 每個 session 都在排除集合裡才丟；resume 副本若還活在別的 session，
+                // 那是一次真實的先前出現，保留且 `sessions` 集合不動（#62 的同-session 情形）。
+                if !excludeSessions.isEmpty,
+                    Set(source.sessionSources).isSubset(of: excludeSessions)
+                {
                     continue
                 }
                 hits.append(
@@ -787,6 +806,7 @@ public struct LTMService {
     /// 其中一條」。`defer { database.close() }` 也因此只有一個地方寫。
     private func withRetrieval<R>(
         text: String, limit: Int, scope: RetrievalEngine.Scope,
+        refreshBudget: TimeInterval? = nil,
         body: (IndexDatabase, [ScoredChunk], RefreshReport) throws -> R
     ) throws -> R {
         guard FileManager.default.fileExists(atPath: location.databaseURL.path) else {
@@ -816,7 +836,7 @@ public struct LTMService {
         // 查詢時的 staleness 檢查：語料前進了就先把尾巴讀進來再回答。
         // 這裡**只做增量**——需要整份重建的情況（版本／revision 不符）在上面
         // 已經拒答了，不會走到這裡。
-        let refreshed = try refreshIncrementally()
+        let refreshed = try refreshIncrementally(budget: refreshBudget)
 
         let dimension = try database.meta("vector_dimension").flatMap(Int.init) ?? embedder.dimension
         let declaredVectors = try database.meta("vector_count").flatMap(Int.init) ?? 0
@@ -905,7 +925,7 @@ public struct LTMService {
     /// - **不可能觸發整份重建**：`query` 在呼叫這裡之前已經檢查過 layout 版本、
     ///   embedding revision 與 anchor 定址規則，三者不符都已拒答。所以
     ///   `build()` 內的 `stampsMismatch` 分支在這條路徑上到不了。
-    private func refreshIncrementally() throws -> RefreshReport {
+    private func refreshIncrementally(budget: TimeInterval? = nil) throws -> RefreshReport {
         // **調校參數必須到得了這條路。** 先前這裡兩個參數都沒傳，而這條路正是
         // 增量併入實際發生的地方（每一次查詢前跑一次，含長駐的 `ltm mcp`）——
         // 所以 `--memory-budget-mb` 的環境變數形式從來沒在它最需要生效的地方
@@ -921,13 +941,15 @@ public struct LTMService {
         do {
             // `refusingFullRebuild`：這條路徑上「整份重建」永遠是錯的答案——它會
             // 在查詢持有連線時刪掉 DB 與側車。先前這是註解裡的推理，現在是前置條件。
-            let report = try builder.build(refusingFullRebuild: true)
+            let report = try builder.build(refusingFullRebuild: true, budget: budget)
             return RefreshReport(
                 sourcesRefreshed: report.sourcesRefreshed,
                 sourcesUnreadable: report.sourcesUnreadable,
                 sourcesInvalidated: report.sourcesInvalidated,
                 skipped: report.skipped,
-                tuningRejections: tuningRejections)
+                tuningRejections: tuningRejections,
+                unmergedSources: report.unmergedSources,
+                budgetExhausted: report.budgetExhausted)
         } catch IndexBuilder.BuildError.lockHeld {
             // 不拒答：既有索引仍然有效，為了「有人在建置」而讓查詢失敗是過度反應。
             // 但也不靜默：把它記進 report，由呈現層說出來。

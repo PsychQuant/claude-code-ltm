@@ -991,3 +991,63 @@ func theQueryPathHonoursTheMemoryBudget() throws {
         _ = try unconstrained.query(text: "第二段", scope: RetrievalEngine.Scope.allProjects)
     }
 }
+
+// MARK: - 有界併入與 session 排除（proactive-recall-cued-hook）
+
+@Test("沒有預算時查詢前的併入照常跑完：報告零未併入、預算未用完")
+func refreshWithoutBudgetReportsNoShortfall() throws {
+    let workspace = try Workspace.make()
+    defer { try? FileManager.default.removeItem(at: workspace.corpus.deletingLastPathComponent()) }
+    try workspace.writeSession(texts: ["第一段 記憶", "第二段 記憶", "第三段 記憶"])
+    let service = try workspace.service()
+    try service.build()
+    try workspace.writeSession(file: "t.jsonl", texts: ["第四段 記憶"])
+    let outcome = try service.query(text: "記憶", limit: 10, scope: .allProjects)
+    #expect(outcome.refresh.unmergedSources == 0)
+    #expect(!outcome.refresh.budgetExhausted)
+    #expect(outcome.refresh.sourcesRefreshed == 1)
+}
+
+private func resumeStyleTurn(uuid: String, session: String, text: String) -> String {
+    let object: [String: Any] = [
+        "type": "user", "uuid": uuid, "sessionId": session,
+        "timestamp": "2026-08-17T06:00:00.000Z",
+        "message": ["role": "user", "content": text],
+    ]
+    return String(data: try! JSONSerialization.data(withJSONObject: object), encoding: .utf8)!
+}
+
+@Test("--exclude-session 只丟掉 sessions 集合完全落在排除集合內的命中，其餘順序不變")
+func excludeSessionDropsOnlyFullyCoveredHits() throws {
+    let workspace = try Workspace.make()
+    defer { try? FileManager.default.removeItem(at: workspace.corpus.deletingLastPathComponent()) }
+    let S = "aaaaaaaa-0000-0000-0000-000000000001"
+    let T = "bbbbbbbb-0000-0000-0000-000000000002"
+    let U = "cccccccc-0000-0000-0000-000000000003"
+    let a = "00000001-aaaa-bbbb-cccc-dddddddddddd"
+    let b = "00000002-aaaa-bbbb-cccc-dddddddddddd"
+    let c = "00000003-aaaa-bbbb-cccc-dddddddddddd"
+    let dir = workspace.corpus.appendingPathComponent("proj-one")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    func write(_ file: String, _ lines: [String]) throws {
+        try (lines.joined(separator: "\n") + "\n")
+            .write(to: dir.appendingPathComponent(file), atomically: true, encoding: .utf8)
+    }
+    // turn a 只在 S；turn b 在 S 與 T（resume 副本，同 uuid 同文字）；turn c 只在 U。
+    try write("S.jsonl", [
+        resumeStyleTurn(uuid: a, session: S, text: "共同關鍵字 甲"),
+        resumeStyleTurn(uuid: b, session: S, text: "共同關鍵字 乙"),
+    ])
+    try write("T.jsonl", [resumeStyleTurn(uuid: b, session: T, text: "共同關鍵字 乙")])
+    try write("U.jsonl", [resumeStyleTurn(uuid: c, session: U, text: "共同關鍵字 丙")])
+    let service = try workspace.service()
+    try service.build()
+
+    let all = try service.query(text: "共同關鍵字", limit: 10, scope: .allProjects)
+    #expect(Set(all.hits.map(\.uuid)) == [a, b, c])
+    let filtered = try service.query(
+        text: "共同關鍵字", limit: 10, scope: .allProjects, excludeSessions: [S])
+    #expect(filtered.hits.map(\.uuid) == all.hits.map(\.uuid).filter { $0 != a })
+    let kept = try #require(filtered.hits.first { $0.uuid == b })
+    #expect(Set(kept.sessionSources) == [S, T], "resume 副本在別的 session 裡是真實的先前出現，要保留且集合不變")
+}
