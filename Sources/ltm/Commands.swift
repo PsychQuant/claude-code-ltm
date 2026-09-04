@@ -79,7 +79,7 @@ enum CommandSupport {
             corpusRoot: corpusRoot, derivedRoot: derivedRoot,
             embedder: embedder, eventStore: store, anchorKey: try anchorKey(),
             recordStore: records,
-            memoryRoot: memoryRoot)
+            memoryRoot: memoryRoot, clock: serviceClock())   // verify R2 N11：事件路徑也吃測試時鐘縫
     }
 
     /// 記憶層根，**經過語料 containment 驗證**。
@@ -668,9 +668,10 @@ enum QueryCommand {
                 printUnattributableDiagnostics(outcome.unattributableResults)
             }
             // 落後行兩種模式都走 stderr：`--json` 的 stdout 是已發布的純陣列契約。
-            if let refreshBudgetSeconds, outcome.refresh.budgetExhausted, !recallFormat {   // recall 區塊自己有落後行
+            if let refreshBudgetSeconds, outcome.refresh.unmergedSources > 0, !recallFormat {   // recall 區塊自己有落後行
+                _ = refreshBudgetSeconds
                 Output.error(
-                    "  ⚠ 索引落後 \(outcome.refresh.unmergedSources) 個來源（併入預算 \(refreshBudgetSeconds) s 已用完）")
+                    "  ⚠ 索引落後 \(outcome.refresh.unmergedSources) 個來源（有界併入未涵蓋，跑一次 ltm build 補齊）")
             }
             return LTMCommandLine.ExitCode.success.rawValue
         } catch let error as InterleavingViolation {

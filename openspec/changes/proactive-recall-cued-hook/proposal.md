@@ -25,6 +25,6 @@ Recall today depends entirely on Claude noticing a cue in the user's words and r
 
 - Affected specs: `proactive-recall-hook` (new), `ltm-cli` (modified), `corpus-indexing` (modified)
 - Affected code:
-  - New: `plugin/hooks/hooks.json`, `plugin/hooks/ltm-recall-gate.sh`, `plugin/hooks/ltm-session-start.sh`, `plugin/hooks/recall-cues.txt`, `Tests/LTMMCPTests/RecallHookShellTests.swift`, `docs/measurements/2026-09-proactive-recall.md`
+  - New: `plugin/hooks/hooks.json`, `plugin/hooks/ltm-recall-gate.sh`, `plugin/hooks/ltm-session-start.sh`, `plugin/hooks/recall-cues.txt`, `Tests/LTMMCPTests/RecallHookShellTests.swift`, `docs/measurements/2026-09-04-proactive-recall.md`
   - Modified: `Sources/ltm/Commands.swift`, `Sources/LTMService/LTMService.swift`, `Sources/LTMIndex/CorpusScanner.swift`, `Sources/LTMIndex/IndexBuilder.swift`, `Tests/LTMServiceTests/LTMServiceTests.swift`, `Tests/LTMIndexTests/CorpusScannerTests.swift`, `Tests/LTMMCPTests/PluginShellTests.swift`, `plugin/README.md`, `plugin/skills/ltm-recall/SKILL.md`, `CHANGELOG.md`
   - Removed: (none)

@@ -239,3 +239,44 @@ func statsFileRecordsOnlyClosedSetLabels() throws {
     #expect(lines.map { $0.split(separator: " ").last.map(String.init) ?? "" } == ["hit", "miss", "synthetic"], Comment(rawValue: lines.joined(separator: " | ")))
     #expect(!lines.joined().contains("秘密"))
 }
+
+// MARK: - verify R2 findings N2/N3/N7：便宜的 raw 閘門、未命中不通知、輸出驗證
+
+@Test("未命中的 prompt：python 缺席也不注入任何東西（N3），且根本不啟動 python（N2）")
+func gateMissNeitherNotifiesNorRunsPython() throws {
+    // python 缺席 + 未命中線索 → stdout 全空、exit 0（不是通知）。
+    let miss = try runHook("ltm-recall-gate.sh", prompt: "幫我改這個函式", env: ["LTM_RECALL_PYTHON": "/nonexistent/python3"])
+    #expect(miss.code == 0 && miss.out.isEmpty, Comment(rawValue: "out=[\(miss.out)]"))
+    // 命中候選 + python 缺席 → 通知（放行後不能查，必須可見）。
+    let hit = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_RECALL_PYTHON": "/nonexistent/python3"])
+    #expect(hit.code == 0 && hit.out.contains("python3"), Comment(rawValue: hit.out))
+}
+
+@Test("查詢 exit 0 但輸出不是區塊：通知，不靜默 cat 空檔（N7）")
+func emptyQueryOutputStillDegradesVisibly() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-hook-empty-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("ltm")
+    try "#!/bin/bash\nif [ \"$1 $2\" = \"query --help\" ]; then echo '--format recall'; exit 0; fi\nexit 0\n".write(to: url, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_BIN": url.path])
+    #expect(run.code == 0 && run.out.contains("回想區塊"), Comment(rawValue: "code=\(run.code) out=[\(run.out)] err=[\(run.err)]"))
+}
+
+@Test("LTM_RECALL_GUARD_SECONDS 被 clamp 在 manifest 的 28 s 以下：設 60 也不會晚於外層逾時")
+func guardIsClampedBelowManifestTimeout() throws {
+    // 用一個 query 睡很久的 stub，設 GUARD=60：若沒有 clamp，內部 deadline 會晚於 28 s。
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-hook-clamp-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("ltm")
+    try "#!/bin/bash\nif [ \"$1 $2\" = \"query --help\" ]; then echo '--format recall'; exit 0; fi\nsleep 60\n".write(to: url, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    // manifest=5、guard=60 → clamp 到 2 → 快速逾時（不必真的等 25 s）。
+    let t0 = Date()
+    let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock",
+        env: ["LTM_BIN": url.path, "LTM_RECALL_GUARD_SECONDS": "60", "LTM_RECALL_MANIFEST_TIMEOUT": "5"])
+    #expect(run.code == 0 && run.out.contains("逾時"), Comment(rawValue: run.out))
+    #expect(Date().timeIntervalSince(t0) < 5, "clamp 失效：跑了 \(Date().timeIntervalSince(t0)) s（應 clamp 到 2）")
+}

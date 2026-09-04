@@ -11,7 +11,7 @@
   可換）時跑 `ltm query` 並把 ≤3 筆指標注入 context；`SessionStart` hook 每個 session
   （含 resume）印一句提醒。模式開關 `LTM_RECALL_MODE=cued|always|off`，預設 `cued`。
   hook 保持薄：閘門、**整支腳本一個絕對 deadline**（`LTM_RECALL_GUARD_SECONDS`，預設 20 s，
-  含 JSON 解析、`--help` 版本探測與查詢本身，逾時殺整個 process group）、逾時／缺 binary／
+  含 JSON 解析、`--help` 版本探測與查詢本身，逾時殺子行程與它的子行程）、逾時／缺 binary／
   版本過舊／`cwd` 進不去／缺 python3 時**一行可見通知**而非靜默（Claude Code 對逾時 hook
   的輸出是靜默丟棄；版本過舊每 session 只通知一次）；prompt 放在 `--` 之後、`LTM_BIN` 必須
   絕對路徑、`session_id` 先驗格式；Claude Code 自己產生的 prompt（skill 本文、slash 展開、
@@ -46,6 +46,29 @@
 - 有界併入的預算只在批次邊界判定；預設 2,000 chunk 一批在本機約 25 s 才到邊界，所以 hook
   為自己的查詢設 `LTM_BUILD_BATCH_CHUNKS=200`（使用者設了就尊重）。量測：
   `docs/measurements/2026-09-04-proactive-recall.md`。
+
+### 修正（verify R2）
+
+- **有界併入不再碰被改寫的來源**（logic N1，CRITICAL）：R1-fix 的「推遲插入期間不截斷」會讓一個大的
+  改寫來源把 `--max-refresh-seconds` 撐破（實測 12.8×），hook 的守衛 KILL 落在推遲窗口 → 孤兒向量
+  累積、該來源永不前進（R1 finding 2 原樣重演）。改為有界模式**整批跳過改寫來源**、回報為未併入、
+  留給下一次無界 `ltm build` 補齊；預算 break 的未併入集合改用 union 保住被跳過的來源（否則它會拿到
+  完成游標卻沒插入 chunk、永遠恢復不了）。
+- **hook 未命中成本降到 ~21 ms**（logic N2）：cued 模式先用便宜的 raw grep 擋，未命中不啟動 python
+  （先前每輪都跑 python、被進位到 ~175 ms、越過規格 100 ms）。連帶修好「python 缺席時未命中的 prompt
+  也被注入通知」（N3）——現在只有命中候選才可能通知。
+- **落後行只在真的落後時印**（N5）：`unmergedSources > 0` 才印，措辭改成「有界併入未涵蓋，跑一次
+  ltm build 補齊」（先前 `budgetExhausted && 0 來源` 會印出「索引落後 0 個來源」）。
+- **hook 其餘硬化**：`LTM_RECALL_GUARD_SECONDS` clamp 在 manifest 28 s 以下；查詢 exit 0 但輸出不是
+  區塊時仍可見降級（N7）；once-per-session marker 改用 `mkdir`（原子、不跟隨 symlink）且檔名含最低
+  版本（N7/marker）；snippet 中的 recall 標記字面被中和，避免區塊提前閉合（N12）。
+- **`LTM_TEST_CLOCK_STEP_SECONDS` 的事件路徑也吃測試時鐘縫**（N11）。
+- **文件對齊實作**：design.md 的 Implementation Contract／Risks／Migration 不再描述已刪除的 chunker
+  排除機制；ltm-cli spec 補上「有界併入跳過改寫來源、掃描階段不計入預算」與 exclusion 的 1,000
+  候選上限（誠實邊界）；corpus-indexing spec 的查法改用可辨識的判準（`type: "attachment"`，並註明
+  少數引用該字串的真實 turn 正是不能剝標記的理由）；量測 §1 以重構後的 hook 重量。
+- **v0.5.0 release 之前不要發 plugin**：wrapper 釘 binary 版本，plugin 早於 binary 會讓每個 session
+  印一行「版本過舊，需 ≥ 0.5.0」且零回想——這是設計好的可見降級，但只在過渡期可接受。
 
 ## [0.4.0] - 2026-09-03
 

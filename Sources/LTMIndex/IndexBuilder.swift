@@ -521,9 +521,25 @@ public struct IndexBuilder: Sendable {
         var batches: [[BatchSlice]] = []
         var current: [BatchSlice] = []
         var currentCount = 0
-        // 已失效（被改寫）的來源排最後：它們的 chunk 插入推遲到最後一個 slice，體積大時會吃掉整個
-        // 預算窗口；讓全新內容先落地，重寫的來源等預算夠時再一次做完（verify R1 logic C1）。
-        let orderedKeys = grouped.keys.sorted { a, b in
+        // **有界併入不碰被改寫的來源**（verify R2 logic N1，CRITICAL）。一個被改寫的來源是
+        // 「刪舊 + 全量插新」，而 #47 的分批插入要求這個 delete+reinsert 在**同一次 build 內**
+        // 完成（中途停會留下刪了沒補的來源）。R1 的第一版讓它可以停在批次邊界 → 洩漏；
+        // R1-fix 改成推遲插入期間不准停 → 於是一個大的改寫來源會把預算窗口整個撐破（實測 12.8×），
+        // 而 hook 的守衛 KILL 落在推遲窗口裡，正是 R1 finding 2 的孤兒洩漏 + 永不前進原樣重演。
+        // 兩條路都錯，因為「被約束的工作」與「可中斷的工作」是不同種類：純新增（append）來源每批
+        // 各自提交、停在批次邊界安全；被改寫來源不是。所以有界併入**只處理 append 來源**，被改寫的
+        // 留給下一次無界 `ltm build`——它們照實回報為未併入，游標不動，舊內容暫時仍可查（stale
+        // 勝過 live-lock），不變式 2 不受影響（無界重建會完成它們）。純刪除（deleteOnly，上面已處理）
+        // 是單一原子交易、不受此限。
+        let bounded = deadline != nil
+        var rewrittenSkipped = Set<String>()
+        var mergeableKeys = grouped.keys.sorted()
+        if bounded {
+            rewrittenSkipped = Set(grouped.keys).intersection(scan.invalidatedSources)
+            mergeableKeys = mergeableKeys.filter { !rewrittenSkipped.contains($0) }
+        }
+        // append 來源之間順序不拘（無界時已失效來源也在內、排最後只為顯示確定性）。
+        let orderedKeys = mergeableKeys.sorted { a, b in
             let ia = scan.invalidatedSources.contains(a), ib = scan.invalidatedSources.contains(b)
             return ia == ib ? a < b : !ia
         }
@@ -628,15 +644,18 @@ public struct IndexBuilder: Sendable {
         var lastBeatChunks = 0
 
         var budgetExhausted = false
-        var unmergedSourceKeys = Set<String>()
+        var unmergedSourceKeys = rewrittenSkipped   // 有界模式跳過的改寫來源，一開始就算未併入
         for (batchIndex, batch) in batches.enumerated() {
             // 預算判定只在批次邊界：這裡是唯一一個「停下來不會留下半批」的位置。
-            // **有推遲中的插入時不停**：已失效來源的向量已經進側車、chunk 要等最後一個 slice 才落地，
-            // 中途停下＝孤兒向量被 `vector_count` 計入且下一輪重做（verify R1 logic C1 實測每輪 +2 MB）。
-            // 超出預算的量以該來源的剩餘 chunk 為界。
+            // `deferredInserts.isEmpty` 是防禦縱深：有界模式已把改寫來源整批排除（見上方 `bounded`），
+            // 所以有界時這裡永遠是空的、break 只落在 append 來源的批次邊界；無界時 `deadline` 為 nil、
+            // 整個條件不成立。留著這個子句是為了「萬一未來有別的路徑在有界下產生推遲插入」不會被截在中途。
             if let deadline, deferredInserts.isEmpty, clock() >= deadline {
                 budgetExhausted = true
-                unmergedSourceKeys = Set(batches[batchIndex...].flatMap { $0.map(\.sourceKey) })
+                // union、不覆寫：`rewrittenSkipped`（有界模式跳過的改寫來源）已在 seed 裡，覆寫會把它們
+                // 丟掉，於是它們在下方後迴圈拿到「整份已處理」的游標卻沒插入 chunk → 下一次 build 看游標
+                // 對得上、判它們未變、永遠停在舊內容（verify R2 logic N1 的恢復漏洞，實測）。
+                unmergedSourceKeys.formUnion(batches[batchIndex...].flatMap { $0.map(\.sourceKey) })
                 break
             }
             let batchChunks = batch.flatMap { slice in

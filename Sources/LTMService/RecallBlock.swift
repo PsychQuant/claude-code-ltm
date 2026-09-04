@@ -52,7 +52,7 @@ public enum RecallBlock {
                   sessions: $0.sessionSources, uuid: $0.uuid)
         }
         let shortfall: (sources: Int, budgetSeconds: Int)? =
-            (outcome.refresh.budgetExhausted && budgetSeconds != nil)
+            (outcome.refresh.unmergedSources > 0 && budgetSeconds != nil)
             ? (outcome.refresh.unmergedSources, budgetSeconds!) : nil
         return render(entries: entries, shortfall: shortfall, characterLimit: characterLimit)
     }
@@ -85,13 +85,18 @@ public enum RecallBlock {
         for (index, entry) in entries.enumerated() {
             let project = entry.project.replacingOccurrences(of: "\n", with: " ")
             lines.append("\(index + 1). [\(project)] \(formatter.string(from: entry.timestamp))")
-            lines.append("   " + clip(entry.snippet.replacingOccurrences(of: "\n", with: " "), to: snippetLimit))
+            // snippet 中和標記字面（verify R2 logic N12）：使用者 turn 若引用 `<!-- /ltm:recall -->`，
+            // 未中和會讓區塊在 snippet 中途被提前閉合、模型把後面的命中讀成區塊外的文字。零寬空格插進
+            // `<!--` 之後即破壞字面，人讀起來仍幾乎相同。
+            let safe = entry.snippet.replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "<!--", with: "<\u{200B}!--")
+            lines.append("   " + clip(safe, to: snippetLimit))
             let label = entry.sessions.count > 1 ? "sessions" : "session"
             let sources = entry.sessions.joined(separator: ", ").replacingOccurrences(of: "\n", with: " ")
             lines.append("   ↳ \(label) \(sources)  turn \(entry.uuid)")
         }
         if let shortfall {
-            lines.append("索引落後 \(shortfall.sources) 個來源（併入預算 \(shortfall.budgetSeconds) s 已用完）")
+            lines.append("索引落後 \(shortfall.sources) 個來源（有界併入未涵蓋，跑一次 ltm build 補齊）")
         }
         lines.append(RecallMarker.close)
         return lines.joined(separator: "\n")

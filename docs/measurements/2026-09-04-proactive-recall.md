@@ -4,31 +4,34 @@
 （release 建置，含 `--format recall`／`--exclude-session`／`--max-refresh-seconds`）。**索引**：
 真實的 `~/.claude-ltm/derived`（約 64 萬 chunk；本 session `3a2ceb7e…` 佔 19,945 個）。
 **anchor 密鑰**：由 `~/bin/ltm memory --export-key` 匯出到環境，不碰鑰匙圈
-（`.claude/rules/anchor-key-in-probes.md`）。所有數字都是 n=20 的單機樣本。
+（`.claude/rules/anchor-key-in-probes.md`）。樣本數逐節標示（§1 的 hook 計時 n=20–30，§3 的命中率
+每個 project 取最後 200 則），都是單機。
 
 **本紀錄不宣稱任何「回答變好」**——沒有評估集（#33），量得到的只有延遲、context 成本、
 命中率與落後次數。
 
-## 1. hook 每輪牆鐘時間
+## 1. hook 每輪牆鐘時間（R2 重構後）
+
+**這一節在 verify R2 之後重量。** R2 之前的 hook 對**每一則** prompt 都跑 python 抽欄位、且把它包進
+0.1 s 輪詢的守衛，未命中輪次因此被進位到 ~175 ms、越過規格的 100 ms（verify R2 logic N2）。重構後
+**cued 模式先用便宜的 raw grep 擋一次**，未命中就直接退出、不啟動 python；python（剝
+system-reminder、取 session/cwd/shape）只在 raw grep 命中的候選或 always 模式跑，守衛輪詢改 0.05 s。
 
 驅動：`printf '{"session_id":…,"cwd":…,"prompt":…}' | plugin/hooks/ltm-recall-gate.sh`，
-`LTM_BIN` 指向 release binary、`CLAUDE_PLUGIN_ROOT` 指向 `plugin/`，計時含 bash 啟動與 python 抽欄位。
+`CLAUDE_PLUGIN_ROOT` 指向 `plugin/`，計時含 bash 啟動；由 Python `subprocess` 連跑取 p50/max。
 
-| 情境 | n | p50 | p90 | max | 注入 bytes（平均） | 命中數（平均） | 落後行 | 通知行 |
-|---|---|---|---|---|---|---|---|---|
-| 閘門未命中（prompt「幫我改這個函式 N」） | 20 | 69 ms | 81 ms | 84 ms | 0 | — | — | — |
-| 閘門命中，cwd＝本 repo，排除本 session | 20 | 949 ms | 1,064 ms | 1,620 ms | 345 | **0.0** | 0 | 0 |
-| 閘門命中，cwd＝`Akashic-Library`，排除一個不存在的 session | 20 | 1,040 ms | 1,078 ms | 1,472 ms | 1,084 | 3.0 | 0 | 0 |
+| 情境 | n | p50 | max | 說明 |
+|---|---|---|---|---|
+| 閘門未命中（prompt「幫我改這個函式」，raw grep 擋下、不跑 python） | 30 | **21 ms** | 26 ms | 規格 100 ms 上限有大餘裕；比 R1 出貨版（48 ms）與 R1-fix 版（175 ms）都低 |
+| 命中候選（raw grep 命中 → python 抽欄位 → `LTM_BIN` 缺→通知） | 20 | **98 ms** | 104 ms | python 抽欄位的開銷約 77 ms，只在候選輪次付 |
+| 命中且真的查詢 | — | — | — | 未在此節重量；命中查詢 ≈ `ltm query` 穩態（2026-09-03 §另記 p50 1.12 s），hook 只多守衛輪詢 |
 
-- 未命中輪次的成本是 hook 本身（bash＋python＋grep），規格的 100 ms 上限有餘裕。
-- 命中輪次 ≈ 1 s，與 `ltm query` 穩態（2026-09-03：p50 1.12 s）同量級——hook 沒有加多少。
-- 第二列 0 命中**不是 bug**：本 repo 自 2026-08-26 起只有這一個 session id（一直 `--resume`），
-  19,945 個 chunk 全在它名下；把它排除後，這個查詢在前 200 名裡只剩 1 個別的 session 的候選
-  （`--k 50 --exclude-session` 直接跑也是 n=1）。「回想自己的 session」在單一長 session 的專案裡
-  本來就沒東西可想。這一列同時記錄了修法前的形狀：**k 若在排除前截斷**，前三名全是本 session
-  → 空區塊（345 bytes 只有 banner）；修法是排除後再截 k（多撈 4·k，上限 1,000）。
-- 第一次命中輪次的 max（2.4 s／1.6 s／1.5 s）都是 backlog 併入：hook 為自己的查詢設
-  `LTM_BUILD_BATCH_CHUNKS=200`，之後各輪回到 ~1 s。
+- 未命中是絕大多數輪次（§3 命中率 0–2%），所以每輪的**期望**成本接近 21 ms。
+- 命中候選裡還有一部分會被 python 對剝過的 prompt 再 grep 一次濾掉（system-reminder 內的線索），
+  那些輪次付了 ~98 ms 卻不查詢——這是 raw grep 過近似的代價，換來未命中路徑不碰 python。
+- **誠實邊界**：命中且真的跑查詢的那條路徑（含有界併入、排除後 refetch）沒有在交付版上重量；
+  它與 `ltm query` 穩態同量級，但「hook 為自己設 `LTM_BUILD_BATCH_CHUNKS=200`＋守衛輪詢」的精確
+  疊加成本沒有數字。要量的話設 `LTM_RECALL_STATS_FILE` 記結果標籤、再對 hit 輪次計時。
 
 ## 2. 併入預算的粒度（為什麼 hook 要設 200 一批）
 

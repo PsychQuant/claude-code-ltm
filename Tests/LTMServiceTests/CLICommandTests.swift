@@ -1238,7 +1238,7 @@ func maxRefreshSecondsReportsShortfallOnStderrAndKeepsJSONShape() throws {
     let bounded = try runCLI(
         ["query", "內容", "--all-projects", "--json", "--max-refresh-seconds", "1"], environment: env)
     #expect(bounded.code == 0, Comment(rawValue: bounded.err))
-    #expect(bounded.err.contains("索引落後 1 個來源（併入預算 1 s 已用完）"), Comment(rawValue: bounded.err))
+    #expect(bounded.err.contains("索引落後 1 個來源（有界併入未涵蓋，跑一次 ltm build 補齊）"), Comment(rawValue: bounded.err))
     let parsed = try JSONSerialization.jsonObject(with: Data(bounded.out.utf8))
     #expect(parsed is [Any], "--json 的 stdout 必須仍是命中陣列，不得因為預算而變形")
     // 沒有預算：照常併完、沒有落後行。

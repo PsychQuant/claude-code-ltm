@@ -2258,13 +2258,10 @@ func exhaustionAfterTheLastBatchIsReported() throws {
 
 // MARK: - verify-fix 變異測試補上的兩條驅動（M3／M5 原本零測試變紅）
 
-@Test("預算在已失效來源的批次中途用完：延後插入期間不截斷，該來源整份落地，預算用盡照報")
-func boundedMergeDoesNotTruncateInsideAnInvalidatedSource() throws {
+@Test("有界併入跳過被改寫的來源（不 delete、不 insert、不動游標），後續無界 build 補回它，且與不中斷 build 等價")
+func boundedMergeSkipsRewrittenSourcesAndRecoversLater() throws {
     let (corpus, derived) = try makeWorkspace()
-    defer {
-        try? FileManager.default.removeItem(at: corpus)
-        try? FileManager.default.removeItem(at: derived.root)
-    }
+    defer { try? FileManager.default.removeItem(at: corpus); try? FileManager.default.removeItem(at: derived.root) }
     func lines(_ s: Int, turns: Int, prefix: String = "") -> [String] {
         (0..<turns).map { t in
             turnLine(uuid: String(format: "%08x-aaaa-bbbb-cccc-%012x", s, t),
@@ -2272,24 +2269,45 @@ func boundedMergeDoesNotTruncateInsideAnInvalidatedSource() throws {
                      role: t.isMultiple(of: 2) ? "user" : "assistant", text: "\(prefix)來源 \(s) 的第 \(t) 段")
         }
     }
+    // 起點：s1 三段。改寫成六段（invalidated），加全新 s2 四段。
     _ = try writeSession(in: corpus, project: "proj-one", file: "s1.jsonl", lines: lines(1, turns: 3))
     _ = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
                          embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1).build()
     _ = try writeSession(in: corpus, project: "proj-one", file: "s1.jsonl", lines: lines(1, turns: 6, prefix: "改寫 "))
     _ = try writeSession(in: corpus, project: "proj-one", file: "s2.jsonl", lines: lines(2, turns: 4))
-    // 每批一個 chunk、每次讀時鐘 +1 s：s2 四批（t=1…4）先併，s1 六批從 t=5 起；預算 6.5 在 s1 第三批前（t=7）到期。
-    // 守衛：s1 的延後插入還沒落地就不截斷 → s1 六段全在；沒有守衛 → s1 在刪除之後被截在中途。
+    // **寬預算**（100 s，SteppingClock 遠不到）：時間絕對夠把所有東西併完，所以唯一讓 s1 不被處理的
+    // 只能是「有界模式跳過改寫來源」這條規則本身——若拿掉它，s1 會被完整處理成六段（變異驅動點）。
     let clock = SteppingClock()
-    let report = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
-                                  embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1, clock: clock.now).build(budget: 6.5)
-    let database = try IndexDatabase(path: derived.databaseURL.path)
-    defer { database.close() }
-    var s1Texts: [String] = []
-    try database.query("SELECT c.text FROM chunks c JOIN chunk_sources cs ON cs.chunk_id = c.id WHERE cs.source_key LIKE '%s1.jsonl' ORDER BY c.uuid") { s1Texts.append(columnText($0, 0)) }
-    #expect(s1Texts.count == 6 && s1Texts.allSatisfy { $0.hasPrefix("改寫 ") }, "s1 被截在中途：\(s1Texts.count) 段")
-    #expect(report.unmergedSources == 0)
-    // 不斷言 budgetExhausted：守衛在延後插入期間連時鐘都不讀（短路），stepping clock 在迴圈後只到 t=6 < 6.5。
-    // 這條測試守的是「不截在中途」；「時間越過就照報」由 exhaustionAfterTheLastBatch 守。
+    let r1 = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                              embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1, clock: clock.now).build(budget: 100)
+    #expect(r1.unmergedSources >= 1, "被跳過的改寫來源要算未併入")
+    do {
+        let db = try IndexDatabase(path: derived.databaseURL.path); defer { db.close() }
+        // s1 原封不動（三段舊內容，沒有半新半舊、沒有被刪）。
+        var s1: [String] = []
+        try db.query("SELECT c.text FROM chunks c JOIN chunk_sources cs ON cs.chunk_id = c.id WHERE cs.source_key LIKE '%s1.jsonl' ORDER BY c.uuid") { s1.append(columnText($0, 0)) }
+        #expect(s1.count == 3 && s1.allSatisfy { !$0.hasPrefix("改寫 ") }, "s1 不該被有界併入動到：\(s1)")
+        // 無孤兒：側車宣稱的向量數 == 有 vector_row 的 chunk 數（有界模式沒有推遲窗口）。
+        var referenced = 0; try db.query("SELECT COUNT(*) FROM chunks WHERE vector_row IS NOT NULL") { referenced = Int(sqlite3_column_int64($0, 0)) }
+        let declared = try db.meta("vector_count").flatMap(Int.init) ?? -1
+        #expect(declared == referenced, "vector_count=\(declared) 但引用=\(referenced)：孤兒向量")
+    }
+    // 後續無界 build 補回 s1（這一步守住 union fix：若 break 覆寫掉 seed，s1 會拿到 6-turn 游標卻沒插入 → 這裡補不回）。
+    _ = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                         embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1).build()
+    // 與一次不中斷的 build 對照等價（不變式 2）。
+    let (corpusB, derivedB) = try makeWorkspace()
+    defer { try? FileManager.default.removeItem(at: corpusB); try? FileManager.default.removeItem(at: derivedB.root) }
+    _ = try writeSession(in: corpusB, project: "proj-one", file: "s1.jsonl", lines: lines(1, turns: 6, prefix: "改寫 "))
+    _ = try writeSession(in: corpusB, project: "proj-one", file: "s2.jsonl", lines: lines(2, turns: 4))
+    _ = try IndexBuilder(location: derivedB, scanner: CorpusScanner(corpusRoot: corpusB, anchorKey: .forTesting),
+                         embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1).build()
+    func texts(_ loc: DerivedLocation) throws -> [String] {
+        let db = try IndexDatabase(path: loc.databaseURL.path); defer { db.close() }
+        var t: [String] = []; try db.query("SELECT text FROM chunks ORDER BY uuid") { t.append(columnText($0, 0)) }
+        return t
+    }
+    #expect(try texts(derived) == texts(derivedB), "補回後與不中斷 build 不等價（不變式 2）")
 }
 
 @Test("預算從掃描階段就開始算：掃描本身就吃完預算時，第一個批次邊界即停、零批併入")

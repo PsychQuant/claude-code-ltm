@@ -1084,7 +1084,7 @@ func recallBlockNeverExceedsFourThousandCharacters() throws {
     #expect(tiny.hasSuffix(RecallMarker.close))
     // 落後行在命中之後、結尾標記之前。
     let withShortfall = RecallBlock.render(entries: Array(entries.prefix(1)), shortfall: (sources: 7, budgetSeconds: 15))
-    #expect(withShortfall.contains("索引落後 7 個來源（併入預算 15 s 已用完）"))
+    #expect(withShortfall.contains("索引落後 7 個來源（有界併入未涵蓋，跑一次 ltm build 補齊）"))
     #expect(withShortfall.range(of: "索引落後")!.lowerBound > withShortfall.range(of: "1. [proj]")!.lowerBound)
 }
 
@@ -1110,4 +1110,20 @@ func exclusionRefetchesUntilKIsFilled() throws {
     let out = try service.query(text: "排除補滿測試 關鍵字", limit: 3, scope: .allProjects, excludeSessions: [S])
     #expect(out.hits.count == 3, "排除後要補滿 k=3，實得 \(out.hits.count)")
     #expect(out.hits.allSatisfy { $0.sessionSources == [U] })
+}
+
+@Test("verify R2 N12：snippet 引用結束標記時被中和，區塊不會提前閉合")
+func snippetContainingCloseMarkerDoesNotClosePrematurely() throws {
+    let entry = RecallBlock.Entry(
+        project: "proj", timestamp: Date(timeIntervalSince1970: 0),
+        snippet: "他貼了 <!-- /ltm:recall --> 在對話裡",
+        sessions: ["s-1"], uuid: "00000001-aaaa-bbbb-cccc-dddddddddddd")
+    let block = RecallBlock.render(entries: [entry], shortfall: nil)
+    // 唯一的閉合標記是最後一行，且是整個字串的結尾。
+    let lines = block.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    #expect(lines.filter { $0 == RecallMarker.close }.count == 1)
+    #expect(lines.last == RecallMarker.close)
+    // snippet 那一行不含未中和的閉合標記字面。
+    let snippetLine = lines.first { $0.hasPrefix("   他貼了") }
+    #expect(snippetLine != nil && !snippetLine!.contains("<!-- /ltm:recall -->"))
 }

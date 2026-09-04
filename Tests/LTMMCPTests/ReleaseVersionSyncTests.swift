@@ -75,6 +75,9 @@ private func releaseRepositoryRoot(file: StaticString = #filePath) throws -> URL
 /// - 該旗標仍在 `## Unreleased` 下 → X 必須**大於** `LTMVersion.current`（任何已出貨版本都沒有它）；
 /// - 已落在 `## [X.Y.Z]` 下 → X 必須**等於** X.Y.Z。
 /// 兩個方向都會漂移：release 時把 Unreleased 改成版本號卻忘了腳本，或腳本先改了而 CHANGELOG 沒跟上。
+/// **誠實邊界（verify R2 logic N9）**：判準是「最舊**提到** `--format recall` 的段落」，不是「首次**出貨**」——
+/// 若日後某個舊版段落只是**提及**這個旗標（如「為 --format recall 預作準備」），這條會誤要求那個舊版本。
+/// 目前唯一的提及就是出貨段落，兩者一致；出現非出貨提及時要改判準（例如只掃 `### Added`）。
 @Test("閘門的 LTM_RECALL_MIN_VERSION 與 CHANGELOG 裡 --format recall 首次出貨的版本一致")
 func recallGateMinimumVersionTracksTheChangelog() throws {
     let root = try releaseRepositoryRoot()
