@@ -16,11 +16,11 @@
 - [x] 3.2 Requirement 'ltm query offers a marker-wrapped recall format sized for hook injection': `ltm query --format recall` renders the marker-delimited block (banner, ≤ k ranked hits with project/timestamp/snippet ≤ 200 chars/sessions/uuid, optional shortfall line, closing marker) and refuses `--json` together with it. Verification: CLI tests asserting first/last line equality, hit count, snippet length bound, and the non-zero exit naming both flags for the conflict.
 - [x] 3.3 The recall block never exceeds 4,000 characters: snippets truncate first, then hits drop from the tail, and the closing marker is always last. Verification: unit test on the renderer with 3 hits of 3,000-character snippets asserting length ≤ 4,000, closing marker present, and rank order preserved.
 
-## 4. Chunker exclusion
+## 4. Feedback loop (verified closed by the transcript format — the chunker exclusion was built, then removed after verify R1)
 
-- [x] 4.1 Requirement 'Recall-marked spans are excluded from indexable text': `CorpusScanner.indexableText(from:)` removes every `<!-- ltm:recall` … `<!-- /ltm:recall -->` span (inclusive, across lines, unterminated span to end of block) before concatenation. Verification: table test in `Tests/LTMIndexTests/CorpusScannerTests.swift` with the four rows from the spec example (`A  B`, empty, `A `, `A B`).
-- [x] 4.2 A user turn containing an injected block indexes without the block's text and a distinctive token inside the block is not retrievable. Verification: end-to-end test building a fixture jsonl with the token `ZQXJ-7731` only inside a marked span and asserting no returned snippet contains `ZQXJ-7731` and the turn's chunk text equals the text with the span removed (hit count is not the criterion — the semantic channel always ranks nearest neighbours).
-- [x] 4.3 Existing indexes need no rebuild: an unmarked fixture corpus produces identical `chunks` rows before and after the change. Verification: the existing equivalence test extended with an assertion that the row set for the unmarked fixture is unchanged (guarded by a checked-in expected hash of the fixture's chunk texts).
+- [x] 4.1 Verified that hook-injected text is stored as `type: "attachment"` records (`hook_additional_context`), never as `user`/`assistant` turns, and that `CorpusScanner.chunk(from:)` already skips them. Verification: `attachmentRecordsAreNeverTurns` (LTMIndexTests) — a marked block, an unmarked injection, and a SessionStart attachment yield zero chunks and `skipped.notATurn == 3`; corpus check recorded in `specs/corpus-indexing/spec.md`.
+- [-] 4.2 Marker-based span removal in `indexableText` — removed: it could only act on real turns that quote the marker, and an unterminated marker deleted to the end of the block. `RecallMarker` keeps the constants for the writer; `RecallMarkerSyncTests` unchanged.
+- [x] 4.3 Existing indexes need no rebuild: `unmarkedInputIsIndexedExactlyAsBefore` keeps its pre-change digest, now guarding that `indexableText` neither strips nor otherwise alters input.
 
 ## 5. Plugin hooks and cue file
 

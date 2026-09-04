@@ -61,8 +61,8 @@ description: Use when the user refers to something from a past Claude Code conve
 
 - 區塊只有 banner 沒有命中 → 這個 project 裡沒有相關的過去；需要跨 project 才自己呼叫
   `ltm_query`（`all_projects: true`，先想清楚範圍）。
-- 看到 `ltm：本輪回想未完成（…）` 一行 → hook 放行了但沒查成（逾時／binary／版本）；要回想就
-  自己呼叫 `ltm_query`。
+- 看到 `ltm：本輪回想未完成（…）` 一行 → hook 放行了但沒查成（逾時／binary／版本／工作目錄）；
+  要回想就自己呼叫 `ltm_query`。版本過舊的那一行每個 session 只出現一次，之後同樣原因會靜默。
 - 線索表會漏。使用者明顯在指過去而沒有區塊出現，照常呼叫 `ltm_query`。
 
 ## 需要先建索引

@@ -1294,3 +1294,19 @@ func recallFormatIsMarkerDelimitedAndExclusiveWithJSON() throws {
     #expect(conflict.err.contains("--format recall") && conflict.err.contains("--json"))
     #expect(conflict.out.isEmpty)
 }
+
+// MARK: - verify R1 findings 9 / 10：--compare 拒絕預算旗標；`--` 之後全是查詢文字
+
+@Test("--compare 與 --max-refresh-seconds 互斥（不再靜默忽略）；`--` 之後以 - 開頭的文字是查詢不是選項")
+func compareRefusesBudgetAndDoubleDashTerminatesOptions() throws {
+    let workspace = try CLIWorkspace.make(texts: ["- 上次 flock 的決定", "第二段"])
+    defer { workspace.cleanup() }
+    #expect(try runCLI(["build", "--quiet"], environment: workspace.environment).code == 0)
+    let conflict = try runCLI(["query", "內容", "--all-projects", "--compare", "--max-refresh-seconds", "5"], environment: workspace.environment)
+    #expect(conflict.code == LTMCommandLine.ExitCode.usageError.rawValue)
+    #expect(conflict.err.contains("--compare") && conflict.err.contains("--max-refresh-seconds"))
+    let dashed = try runCLI(["query", "--all-projects", "--format", "recall", "--", "- 上次 flock 的決定"], environment: workspace.environment)
+    #expect(dashed.code == 0, Comment(rawValue: dashed.err))
+    #expect(dashed.out.hasPrefix("<!-- ltm:recall v1 -->"))
+    #expect(dashed.out.contains("上次 flock"))
+}

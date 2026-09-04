@@ -2175,3 +2175,147 @@ func aTruncatedMergeCompletedLaterEqualsAnUninterruptedBuild() throws {
     #expect(a == b)
     #expect(a.filter { $0.hasPrefix("state:") }.allSatisfy { $0.hasSuffix("verified=true") })
 }
+
+// MARK: - verify R1 finding 2：有界併入遇到已失效來源，不漏向量、不餓死後面的來源
+
+@Test("已失效來源在預算中途不會留下孤兒向量，且新來源先併入；完成後與不中斷 build 等價")
+func boundedMergeWithAnInvalidatedSourceLeaksNothingAndDoesNotStarveOthers() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    func lines(_ s: Int, turns: Int, prefix: String = "") -> [String] {
+        (0..<turns).map { t in
+            turnLine(uuid: String(format: "%08x-aaaa-bbbb-cccc-%012x", s, t),
+                     session: String(format: "%08x-0000-0000-0000-000000000000", s),
+                     role: t.isMultiple(of: 2) ? "user" : "assistant", text: "\(prefix)來源 \(s) 的第 \(t) 段")
+        }
+    }
+    // 起點：s1 三段，已索引。
+    _ = try writeSession(in: corpus, project: "proj-one", file: "s1.jsonl", lines: lines(1, turns: 3))
+    _ = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                         embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1).build()
+    // 改寫 s1（前綴變 → invalidated，六段），並新增 s2（四段，全新）。
+    _ = try writeSession(in: corpus, project: "proj-one", file: "s1.jsonl", lines: lines(1, turns: 6, prefix: "改寫 "))
+    _ = try writeSession(in: corpus, project: "proj-one", file: "s2.jsonl", lines: lines(2, turns: 4))
+    // 預算只夠幾批（每次讀時鐘 +1 s，預算 2.5 s）。
+    let clock = SteppingClock()
+    let report = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                                  embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1, clock: clock.now).build(budget: 2.5)
+    #expect(report.budgetExhausted)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    // 不變式：側車宣稱的向量數 == 有 vector_row 的 chunk 數（沒有孤兒）。
+    var referenced = 0
+    try database.query("SELECT COUNT(*) FROM chunks WHERE vector_row IS NOT NULL") { referenced = Int(sqlite3_column_int64($0, 0)) }
+    let declared = try database.meta("vector_count").flatMap(Int.init) ?? -1
+    #expect(declared == referenced, "vector_count=\(declared) 但有 vector_row 的 chunk=\(referenced)：孤兒向量")
+    // 新來源 s2 先於已失效的 s1 併入：預算內至少有 s2 的 chunk 落地。
+    var s2 = 0
+    try database.query("SELECT COUNT(*) FROM chunk_sources WHERE source_key LIKE '%s2.jsonl'") { s2 = Int(sqlite3_column_int64($0, 0)) }
+    #expect(s2 > 0, "全新來源 s2 被已失效的 s1 餓死了")
+    // 而 s1 要嘛還是舊的三段（整份推遲），要嘛已是新的六段——絕不能半新半舊。
+    var s1Texts: [String] = []
+    try database.query("SELECT c.text FROM chunks c JOIN chunk_sources cs ON cs.chunk_id = c.id WHERE cs.source_key LIKE '%s1.jsonl' ORDER BY c.uuid") { s1Texts.append(columnText($0, 0)) }
+    #expect(s1Texts.count == 3 || s1Texts.count == 6, "s1 半新半舊：\(s1Texts.count) 段")
+    #expect(s1Texts.allSatisfy { $0.hasPrefix("改寫 ") } || s1Texts.allSatisfy { !$0.hasPrefix("改寫 ") })
+    database.close()
+    // 完成併入後與一次不中斷的 build 等價（同一份語料另建一份對照）。
+    _ = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                         embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1).build()
+    let (corpusB, derivedB) = try makeWorkspace()
+    defer { try? FileManager.default.removeItem(at: corpusB); try? FileManager.default.removeItem(at: derivedB.root) }
+    _ = try writeSession(in: corpusB, project: "proj-one", file: "s1.jsonl", lines: lines(1, turns: 6, prefix: "改寫 "))
+    _ = try writeSession(in: corpusB, project: "proj-one", file: "s2.jsonl", lines: lines(2, turns: 4))
+    _ = try IndexBuilder(location: derivedB, scanner: CorpusScanner(corpusRoot: corpusB, anchorKey: .forTesting),
+                         embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1).build()
+    func summary(_ loc: DerivedLocation) throws -> (chunks: [String], vectors: Int, declared: Int) {
+        let db = try IndexDatabase(path: loc.databaseURL.path); defer { db.close() }
+        var texts: [String] = []; try db.query("SELECT text FROM chunks ORDER BY uuid") { texts.append(columnText($0, 0)) }
+        var v = 0; try db.query("SELECT COUNT(*) FROM chunks WHERE vector_row IS NOT NULL") { v = Int(sqlite3_column_int64($0, 0)) }
+        return (texts, v, try db.meta("vector_count").flatMap(Int.init) ?? -1)
+    }
+    let a = try summary(derived), b = try summary(derivedB)
+    #expect(a.chunks == b.chunks)
+    #expect(a.vectors == b.vectors)
+    // 註：完成後 A 的 `vector_count` 會比 B 多 3——那是「作廢來源的舊 chunk 被刪、其向量列留在側車」
+    // 這個**既有**的失效語意（`--full` 回收），不是有界併入新增的孤兒；有界那一步的無孤兒已在上面斷言。
+}
+
+@Test("最後一批之後才超時：budgetExhausted 為真而未併入為 0")
+func exhaustionAfterTheLastBatchIsReported() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer { try? FileManager.default.removeItem(at: corpus); try? FileManager.default.removeItem(at: derived.root) }
+    _ = try writeSession(in: corpus, project: "proj-one", file: "only.jsonl", lines: [
+        turnLine(uuid: "00000000-aaaa-bbbb-cccc-000000000001", session: "s", role: "user", text: "唯一一批"),
+    ])
+    let clock = SteppingClock()   // 起點 t=0、第一批前 t=1（≤ 1.5 可）、批後 t=2（> 1.5）
+    let report = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                                  embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 10, clock: clock.now).build(budget: 1.5)
+    #expect(report.chunksIndexed == 1 && report.unmergedSources == 0 && report.budgetExhausted)
+}
+
+// MARK: - verify-fix 變異測試補上的兩條驅動（M3／M5 原本零測試變紅）
+
+@Test("預算在已失效來源的批次中途用完：延後插入期間不截斷，該來源整份落地，預算用盡照報")
+func boundedMergeDoesNotTruncateInsideAnInvalidatedSource() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    func lines(_ s: Int, turns: Int, prefix: String = "") -> [String] {
+        (0..<turns).map { t in
+            turnLine(uuid: String(format: "%08x-aaaa-bbbb-cccc-%012x", s, t),
+                     session: String(format: "%08x-0000-0000-0000-000000000000", s),
+                     role: t.isMultiple(of: 2) ? "user" : "assistant", text: "\(prefix)來源 \(s) 的第 \(t) 段")
+        }
+    }
+    _ = try writeSession(in: corpus, project: "proj-one", file: "s1.jsonl", lines: lines(1, turns: 3))
+    _ = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                         embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1).build()
+    _ = try writeSession(in: corpus, project: "proj-one", file: "s1.jsonl", lines: lines(1, turns: 6, prefix: "改寫 "))
+    _ = try writeSession(in: corpus, project: "proj-one", file: "s2.jsonl", lines: lines(2, turns: 4))
+    // 每批一個 chunk、每次讀時鐘 +1 s：s2 四批（t=1…4）先併，s1 六批從 t=5 起；預算 6.5 在 s1 第三批前（t=7）到期。
+    // 守衛：s1 的延後插入還沒落地就不截斷 → s1 六段全在；沒有守衛 → s1 在刪除之後被截在中途。
+    let clock = SteppingClock()
+    let report = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                                  embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1, clock: clock.now).build(budget: 6.5)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    var s1Texts: [String] = []
+    try database.query("SELECT c.text FROM chunks c JOIN chunk_sources cs ON cs.chunk_id = c.id WHERE cs.source_key LIKE '%s1.jsonl' ORDER BY c.uuid") { s1Texts.append(columnText($0, 0)) }
+    #expect(s1Texts.count == 6 && s1Texts.allSatisfy { $0.hasPrefix("改寫 ") }, "s1 被截在中途：\(s1Texts.count) 段")
+    #expect(report.unmergedSources == 0)
+    // 不斷言 budgetExhausted：守衛在延後插入期間連時鐘都不讀（短路），stepping clock 在迴圈後只到 t=6 < 6.5。
+    // 這條測試守的是「不截在中途」；「時間越過就照報」由 exhaustionAfterTheLastBatch 守。
+}
+
+@Test("預算從掃描階段就開始算：掃描本身就吃完預算時，第一個批次邊界即停、零批併入")
+func budgetDeadlineIsFixedBeforeTheScan() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeSixSources(in: corpus)
+    // 時鐘由掃描完成事件驅動：掃描前 t=0、掃描後 t=100。deadline 若在掃描前算 → 0+10，第一次檢查 100 ≥ 10 → 停；
+    // 若在掃描後才算（第一版的形狀）→ 100+10，每次檢查都過 → 全部併入，這條測試變紅。
+    final class Flag: @unchecked Sendable { var scanDone = false; let lock = NSLock() }
+    let flag = Flag()
+    let report = try IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"),
+        progress: { event in if case .scanCompleted = event { flag.lock.lock(); flag.scanDone = true; flag.lock.unlock() } },
+        batchChunkTarget: 1,
+        clock: { flag.lock.lock(); defer { flag.lock.unlock() }; return Date(timeIntervalSinceReferenceDate: flag.scanDone ? 100 : 0) }
+    ).build(budget: 10)
+    #expect(report.budgetExhausted)
+    #expect(report.unmergedSources == 6, "掃描已吃完預算卻仍併入了：未併入 \(report.unmergedSources)")
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    var chunks = 0
+    try database.query("SELECT COUNT(*) FROM chunks") { chunks = Int(sqlite3_column_int64($0, 0)) }
+    #expect(chunks == 0)
+}

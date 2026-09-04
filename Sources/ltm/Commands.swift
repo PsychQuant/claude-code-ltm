@@ -23,6 +23,7 @@ enum CommandSupport {
     /// 的縫：每讀一次前進 N 秒，讓「預算在第一個批次邊界就用完」能被 CLI 測試確定性地
     /// 重現——真實時鐘下這件事取決於機器快慢，測不準。不寫進 usage，不是給使用者的。
     static func serviceClock() -> @Sendable () -> Date {
+        #if DEBUG
         guard let raw = ProcessInfo.processInfo.environment["LTM_TEST_CLOCK_STEP_SECONDS"],
             let step = TimeInterval(raw), step > 0
         else { return { Date() } }
@@ -36,6 +37,9 @@ enum CommandSupport {
         }
         let stepper = Stepper()
         return { stepper.now(step: step) }
+        #else
+        return { Date() }   // release binary 不讀測試縫（verify R1 security S6）
+        #endif
     }
 
     static func makeService(needsEventStore: Bool, needsRecordStore: Bool = false) throws
@@ -597,8 +601,8 @@ enum QueryCommand {
             Output.error("--format recall 與 --json 互斥：前者是給 hook 注入的標記區塊，後者是命中陣列。")
             return LTMCommandLine.ExitCode.usageError.rawValue
         }
-        if compare, recallFormat || arguments.value("exclude-session") != nil {
-            Output.error("--compare 不支援 --format recall 與 --exclude-session：交錯記錄要的是未過濾的完整呈現。")
+        if compare, recallFormat || arguments.value("exclude-session") != nil || arguments.value("max-refresh-seconds") != nil {
+            Output.error("--compare 不支援 --format recall、--exclude-session 與 --max-refresh-seconds：交錯記錄要的是未過濾、併入完整的呈現。")
             return LTMCommandLine.ExitCode.usageError.rawValue
         }
         let refreshBudgetSeconds: Int?
@@ -653,7 +657,8 @@ enum QueryCommand {
                 excludeSessions: excludeSessions)
 
             if recallFormat {
-                print(RecallBlock.render(outcome: outcome, budgetSeconds: refreshBudgetSeconds))
+                // 上限 4,000 含 print 的換行（verify R1 codex #10）。
+                print(RecallBlock.render(outcome: outcome, budgetSeconds: refreshBudgetSeconds, characterLimit: RecallBlock.defaultCharacterLimit - 1))
                 printRefreshDiagnostics(outcome.refresh)
             } else if arguments.has("json") {
                 try printJSON(outcome)
@@ -663,7 +668,7 @@ enum QueryCommand {
                 printUnattributableDiagnostics(outcome.unattributableResults)
             }
             // 落後行兩種模式都走 stderr：`--json` 的 stdout 是已發布的純陣列契約。
-            if let refreshBudgetSeconds, outcome.refresh.budgetExhausted {
+            if let refreshBudgetSeconds, outcome.refresh.budgetExhausted, !recallFormat {   // recall 區塊自己有落後行
                 Output.error(
                     "  ⚠ 索引落後 \(outcome.refresh.unmergedSources) 個來源（併入預算 \(refreshBudgetSeconds) s 已用完）")
             }

@@ -908,22 +908,22 @@ public struct CorpusScanner: Sendable {
     /// **payload 沒有被收，理由不是它沒價值，是還沒有東西能判斷它有多少價值**
     /// ——那需要一組 `(查詢, 應命中的 turn)` 的評估集（#33）。而它含檔案內容與
     /// 命令輸出，也就是可能含第三方逐字內容，所以在能判斷之前不收是安全的一側。
-    /// **recall 標記區塊在這裡被移除**（proactive-recall-cued-hook）：hook 注入的回想區塊會
-    /// 存進 transcript、進 jsonl，若照常索引，下一次查詢就把自己的輸出召回來。移除的判準是
-    /// `RecallMarker.openPrefix … close`（含未閉合到 block 結尾）；未標記的輸入逐 byte 不變
-    /// （`unmarkedInputIsIndexedExactlyAsBefore` 用改動前算的雜湊釘住），所以既有索引不必重建。
+    /// **hook 注入的回想區塊不在這裡處理，因為它根本到不了這裡。** Claude Code 把 hook 的
+    /// additionalContext 存成 `type: "attachment"` 紀錄（本機語料實測：UserPromptSubmit 23、
+    /// SessionStart 181、PostToolUse 706 筆，零筆落在 user/assistant），而 `chunk(from:)` 第一道
+    /// guard 就把非 user/assistant 紀錄跳過。第一版在這裡依 `RecallMarker` 剝標記區塊——verify R1
+    /// 的 DA 證明那個機制收益為零、成本為正（會刪掉**談論**這個功能的真實對話，未閉合時刪到
+    /// block 結尾），所以拿掉了。查法：`python3` 掃 `~/.claude/projects/**/*.jsonl` 含
+    /// `hook_additional_context` 的行，統計頂層 `type`；`attachmentRecordsAreNeverTurns` 釘住。
     static func indexableText(from content: Any?) -> String {
-        if let text = content as? String { return RecallMarker.strippingRecallSpans(from: text) }
+        if let text = content as? String { return text }
         guard let blocks = content as? [[String: Any]] else { return "" }
         var parts: [String] = []
         for block in blocks {
             guard let kind = block["type"] as? String else { continue }
             switch kind {
             case "text":
-                if let raw = block["text"] as? String, !raw.isEmpty {
-                    let text = RecallMarker.strippingRecallSpans(from: raw)
-                    if !text.isEmpty { parts.append(text) }
-                }
+                if let text = block["text"] as? String, !text.isEmpty { parts.append(text) }
             case "tool_use":
                 parts.append(toolUseMetadata(from: block))
             case "tool_result":

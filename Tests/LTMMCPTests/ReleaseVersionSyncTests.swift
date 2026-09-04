@@ -84,11 +84,14 @@ func recallGateMinimumVersionTracksTheChangelog() throws {
         gate.firstMatch(of: #/LTM_RECALL_MIN_VERSION="([^"]+)"/#).map { String($0.1) },
         "閘門腳本裡找不到 LTM_RECALL_MIN_VERSION")
     let changelog = try String(contentsOf: root.appendingPathComponent("CHANGELOG.md"), encoding: .utf8)
+    // CHANGELOG 由新到舊；要的是**首次**出貨的段落，所以掃到最後一個命中而不是第一個
+    // （verify R1 logic L2／regression R6：第一版 break 在第一個命中，抓到的是最新提到它的版本）。
     var section = "(none)"
     var found = false
+    var current = "(none)"
     for line in changelog.components(separatedBy: "\n") {
-        if line.hasPrefix("## ") { section = line }
-        if line.contains("--format recall") { found = true; break }
+        if line.hasPrefix("## ") { current = line }
+        if line.contains("--format recall") { found = true; section = current }
     }
     #expect(found, "CHANGELOG 沒有任何一段提到 --format recall")
     func parts(_ v: String) -> [Int] { v.split(separator: ".").compactMap { Int($0) } }

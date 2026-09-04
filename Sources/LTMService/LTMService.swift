@@ -542,11 +542,21 @@ public struct LTMService {
         refreshBudget: TimeInterval? = nil,
         excludeSessions: Set<String> = []
     ) throws -> QueryOutcome {
-        // 排除要在 k 之後才截斷：被排除的命中不佔名額。否則「前 k 名全是本 session」時回傳
-        // 空集合——實測 hook 第一次量測就是這個形狀。多撈 4 倍再過濾，上限 1000（--k 的上限）。
-        let fetchLimit = excludeSessions.isEmpty ? limit : min(limit * 4, 1_000)
-        return try withRetrieval(text: text, limit: fetchLimit, scope: scope, refreshBudget: refreshBudget) {
-            database, scored, refreshed in
+        // 排除要在 k 之後才截斷：被排除的命中不佔名額。第一版只多撈 4·k（啟發式），verify R1
+        // 指出那不是保證——前 4·k 名全被排除時仍回空。現在**反覆擴大**到 k 筆補滿或撞到 1,000
+        // （`--k` 的上限）或候選耗盡為止。每次擴大重跑檢索但不重跑併入（併入在 `withEngine` 只做一次）。
+        return try withEngine(refreshBudget: refreshBudget) { database, engine, refreshed in
+            var fetchLimit = excludeSessions.isEmpty ? limit : min(limit * 4, 1_000)
+            var scored = try engine.search(query: text, limit: fetchLimit, scope: scope)
+            if !excludeSessions.isEmpty {
+                func survivors(_ list: [ScoredChunk]) -> Int {
+                    list.filter { !Set($0.sessionSources).isSubset(of: excludeSessions) }.count
+                }
+                while survivors(scored) < limit, scored.count >= fetchLimit, fetchLimit < 1_000 {
+                    fetchLimit = min(fetchLimit * 4, 1_000)
+                    scored = try engine.search(query: text, limit: fetchLimit, scope: scope)
+                }
+            }
             let chosen = strategy ?? ArchivalStrategy()
 
             // 檢索**已經**以 band-major 順序回傳（`RetrievalEngine.search`），所以
@@ -819,6 +829,17 @@ public struct LTMService {
         refreshBudget: TimeInterval? = nil,
         body: (IndexDatabase, [ScoredChunk], RefreshReport) throws -> R
     ) throws -> R {
+        try withEngine(refreshBudget: refreshBudget) { database, engine, refreshed in
+            try body(database, try engine.search(query: text, limit: limit, scope: scope), refreshed)
+        }
+    }
+
+    /// 開索引、驗戳記、做一次（可有界的）併入、開側車、建引擎——然後把引擎交給 body 自己搜。
+    /// `query` 用它做「排除後補滿 k」的反覆擴大搜尋；`withRetrieval` 是單次搜尋的包裝。
+    private func withEngine<R>(
+        refreshBudget: TimeInterval? = nil,
+        body: (IndexDatabase, RetrievalEngine, RefreshReport) throws -> R
+    ) throws -> R {
         guard FileManager.default.fileExists(atPath: location.databaseURL.path) else {
             throw ServiceError.indexMissing(path: location.databaseURL.path)
         }
@@ -869,9 +890,7 @@ public struct LTMService {
             vectors = opened
         }
         let engine = RetrievalEngine(database: database, vectors: vectors, embedder: embedder)
-        let scored = try engine.search(query: text, limit: limit, scope: scope)
-
-        return try body(database, scored, refreshed)
+        return try body(database, engine, refreshed)
     }
 
     /// 檢索結果 → seam 的候選。**`query` 與 `compare` 共用**。

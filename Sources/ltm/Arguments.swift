@@ -14,8 +14,11 @@ struct Arguments {
     /// 參數吞掉。
     init(_ raw: [String], valueOptions: Set<String>) {
         var index = 0
+        var terminated = false   // `--` 之後全部是位置參數（hook 把使用者 prompt 放在它後面）
         while index < raw.count {
             let token = raw[index]
+            if terminated { positional.append(token); index += 1; continue }
+            if token == "--" { terminated = true; index += 1; continue }
             if token.hasPrefix("--"), let equals = token.firstIndex(of: "=") {
                 let key = String(token[token.index(token.startIndex, offsetBy: 2)..<equals])
                 values[key] = String(token[token.index(after: equals)...])

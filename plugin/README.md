@@ -67,13 +67,17 @@ ltm build
   說法提過去的輸入不會觸發；漏的代價是沒有自動回想，跟沒裝 hook 一樣，可手動呼叫
   `ltm_query`。要擴充直接加一行；要換整份設 `LTM_RECALL_CUES=<路徑>`。
 - **模式** `LTM_RECALL_MODE=cued`（預設）｜`always`（每輪都查）｜`off`。
-- **不會靜默**：閘門放行後若逾時（20 s）、`ltm` 不在、版本過舊、查詢失敗，注入的是一行
-  `ltm：本輪回想未完成（原因）；可手動呼叫 ltm_query`，prompt 永遠不會被擋。
+- **不會靜默**：閘門放行後若逾時（整支腳本 20 s，`LTM_RECALL_GUARD_SECONDS` 可調）、`ltm` 不在、
+  版本過舊（每 session 提醒一次）、`cwd` 進不去、查詢失敗，注入的是一行
+  `ltm：本輪回想未完成（原因）；可手動呼叫 ltm_query`，prompt 永遠不會被擋。`LTM_BIN` 若要自訂
+  必須是絕對路徑。設 `LTM_RECALL_STATS_FILE=<路徑>` 會逐輪記一個結果標籤（`off|synthetic|miss|hit|notice`，
+  不記文字），拿來量實際放行率。
 - **成本**（本機量測，`docs/measurements/2026-09-04-proactive-recall.md`）：未命中線索的
   輪次約 70 ms；命中的輪次約 1 s。
 - **第一次要按一次鑰匙圈的「永遠允許」**：hook 用 `~/bin/ltm` 讀 anchor 密鑰；沒允許的話
-  每輪都會跳密碼視窗，30 s 後被 Claude Code 靜默丟棄。
-- 注入的區塊帶 `<!-- ltm:recall v1 -->` 標記，索引時會被排除——它不會變成下一次查詢的命中。
+  每輪都會跳密碼視窗，script 自己的 20 s deadline 先到、印一行逾時通知。
+- 注入的區塊帶 `<!-- ltm:recall v1 -->` 標記給模型看邊界；它不會變成下一次查詢的命中，因為
+  Claude Code 把 hook 注入存成 `attachment` 紀錄、索引本來就不把它當 turn（驗證過，不是新機制）。
 
 ## 範圍
 

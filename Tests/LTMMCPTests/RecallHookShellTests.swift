@@ -62,6 +62,8 @@ private func runHook(
     environment["CLAUDE_PLUGIN_ROOT"] = repoRoot().appendingPathComponent("plugin").path
     environment["LTM_RECALL_MODE"] = nil
     environment["LTM_RECALL_CUES"] = nil
+    environment["LTM_RECALL_GUARD_SECONDS"] = "2"
+    environment["LTM_RECALL_STATS_FILE"] = dir.appendingPathComponent("stats").path
     if let stub { environment["LTM_BIN"] = try makeStub(kind: stub, in: dir).path }
     else { environment["LTM_BIN"] = dir.appendingPathComponent("absent-ltm").path }
     for (k, v) in extra { environment[k] = v }
@@ -123,7 +125,7 @@ func systemReminderSpansDoNotTriggerAndArgumentsAreWired() throws {
         "ltm-recall-gate.sh", prompt: "幫我改這個函式 <system-reminder>earlier we said</system-reminder>")
     #expect(injected.code == 0 && !injected.stubInvoked && injected.out.isEmpty)
     // Claude Code 自己產生的 prompt（skill 本文／slash 展開／compaction 續接）即使含線索也不放行。
-    for synthetic in ["Base directory for this skill: /x\n\n之前", "<command-message>idd</command-message>\n上次", "This session is being continued from a previous conversation. earlier"] {
+    for synthetic in ["Base directory for this skill: /x\n\n之前", "<command-message>idd</command-message>\n上次", "This session is being continued from a previous conversation. earlier", "(Re-invocation of /idd-verify — the previously loaded copy", "Stop hook feedback:\n上次 flock"] {
         let run = try runHook("ltm-recall-gate.sh", prompt: synthetic, env: ["LTM_RECALL_MODE": "always"])
         #expect(run.code == 0 && !run.stubInvoked && run.out.isEmpty, Comment(rawValue: synthetic))
     }
@@ -137,19 +139,22 @@ func systemReminderSpansDoNotTriggerAndArgumentsAreWired() throws {
     #expect(args.contains("--exclude-session") && args.contains("sess-42"))
     #expect(args.contains("--format") && args.contains("recall") && args.contains("--max-refresh-seconds"))
     #expect(args.contains("--k") && args.contains("3"))
+    // prompt 在 `--` 之後，且是最後一個引數（verify R1 logic M3／security S4）。
+    let dd = try #require(args.firstIndex(of: "--"))
+    #expect(args[dd + 1] == "上次 flock" && dd + 2 >= args.count - 1)
 }
 
 @Test("降級可見：逾時／非零結束／binary 缺席／不支援 --format，各印一行通知、exit 0")
 func degradationIsOneVisibleLineAndNeverBlocks() throws {
     for (kind, reason) in [("sleep", "逾時"), ("exit2", "結束碼 2"), ("nofmt", "版本過舊")] {
-        let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", stub: kind)
+        let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", session: "sess-\(kind)-\(UUID().uuidString)", stub: kind)
         #expect(run.code == 0, Comment(rawValue: kind))
         let lines = run.out.split(separator: "\n")
         #expect(lines.count == 1, Comment(rawValue: "\(kind): \(run.out)"))
         #expect(run.out.hasPrefix("ltm：本輪回想未完成（") && run.out.contains(reason) && run.out.contains("ltm_query"), Comment(rawValue: "\(kind): \(run.out)"))
     }
     let absent = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", stub: nil)
-    #expect(absent.code == 0 && absent.out.split(separator: "\n").count == 1 && absent.out.contains("未安裝"))
+    #expect(absent.code == 0 && absent.out.split(separator: "\n").count == 1 && absent.out.contains("未安裝"), Comment(rawValue: "code=\(absent.code) out=[\(absent.out)] err=[\(absent.err)]"))
 }
 
 @Test("線索表讀不到就整個 fail closed：不回想、stdout 空、stderr 指名路徑一次")
@@ -174,4 +179,63 @@ func sessionStartRemindsForEverySource() throws {
         #expect(run.code == 0 && run.out.split(separator: "\n").count == 1 && run.out.contains("ltm_query"), Comment(rawValue: source))
         #expect(!run.stubInvoked)
     }
+}
+
+// MARK: - verify R1 findings 5／7／10／13：整支腳本的 deadline、輸入驗證、每 session 一次的版本通知
+
+@Test("LTM_BIN 是相對路徑／cwd 進不去／python3 缺席／session_id 含換行，各是一行通知、exit 0、不執行 stub")
+func inputValidationDegradesVisibly() throws {
+    let rel = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_BIN": "./ltm"])
+    #expect(rel.code == 0 && !rel.stubInvoked && rel.out.contains("絕對路徑"), Comment(rawValue: rel.out))
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-hook-cwd-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let stub = try makeStub(kind: "block", in: dir)
+    let badCwd = "{\"session_id\":\"s\",\"cwd\":\"/nonexistent/dir/\(UUID().uuidString)\",\"prompt\":\"上次 flock\"}"
+    let cwd = try runHook("ltm-recall-gate.sh", prompt: "", env: ["LTM_BIN": stub.path], input: badCwd)
+    #expect(cwd.code == 0 && cwd.out.contains("工作目錄") && !FileManager.default.fileExists(atPath: dir.appendingPathComponent("invoked").path), Comment(rawValue: cwd.out))
+    let nopy = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_RECALL_PYTHON": "/nonexistent/python3"])
+    #expect(nopy.code == 0 && !nopy.stubInvoked && nopy.out.contains("python3"), Comment(rawValue: nopy.out))
+    let nl = "{\"session_id\":\"S1\\n/etc\",\"cwd\":\"/tmp\",\"prompt\":\"上次 flock\"}"
+    let injected = try runHook("ltm-recall-gate.sh", prompt: "", env: ["LTM_BIN": stub.path], input: nl)
+    // session_id 不合法 → 當作沒有 session（不傳 --exclude-session），cwd 仍是 /tmp、照常查詢。
+    #expect(injected.code == 0 && injected.out.hasPrefix("<!-- ltm:recall"), Comment(rawValue: injected.out))
+    let args = try String(contentsOf: dir.appendingPathComponent("invoked"), encoding: .utf8).components(separatedBy: "\n")
+    #expect(!args.contains("--exclude-session"))
+}
+
+@Test("版本過舊只在每個 session 第一次通知，之後同 session 靜默；不同 session 再通知")
+func oldBinaryNoticeIsOncePerSession() throws {
+    let session = "sess-old-\(UUID().uuidString)"
+    let first = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", session: session, stub: "nofmt")
+    #expect(first.out.contains("版本過舊") && first.out.contains("只提醒一次"))
+    let second = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", session: session, stub: "nofmt")
+    #expect(second.code == 0 && second.out.isEmpty, Comment(rawValue: second.out))
+    let other = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", session: "sess-other-\(UUID().uuidString)", stub: "nofmt")
+    #expect(other.out.contains("版本過舊"))
+}
+
+@Test("--help 探測卡住也在 deadline 內：一行「版本探測逾時」通知，不撞外層 timeout")
+func helpProbeIsBounded() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-hook-help-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("ltm")
+    try "#!/bin/bash\nif [ \"$1\" = query ] && [ \"$2\" = --help ]; then sleep 25; fi\n".write(to: url, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    let t0 = Date()
+    let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_BIN": url.path])
+    #expect(run.code == 0 && run.out.contains("版本探測逾時"), Comment(rawValue: run.out))
+    #expect(Date().timeIntervalSince(t0) < 6)
+}
+
+@Test("統計檔只記封閉集合的類別標籤，不含 prompt 文字")
+func statsFileRecordsOnlyClosedSetLabels() throws {
+    let stats = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-stats-\(UUID().uuidString)")
+    _ = try runHook("ltm-recall-gate.sh", prompt: "上次 flock 秘密字串", env: ["LTM_RECALL_STATS_FILE": stats.path])
+    _ = try runHook("ltm-recall-gate.sh", prompt: "幫我改函式 秘密字串", env: ["LTM_RECALL_STATS_FILE": stats.path])
+    _ = try runHook("ltm-recall-gate.sh", prompt: "Stop hook feedback: 上次", env: ["LTM_RECALL_STATS_FILE": stats.path])
+    let lines = try String(contentsOf: stats, encoding: .utf8).split(separator: "\n").map(String.init)
+    #expect(lines.map { $0.split(separator: " ").last.map(String.init) ?? "" } == ["hit", "miss", "synthetic"], Comment(rawValue: lines.joined(separator: " | ")))
+    #expect(!lines.joined().contains("秘密"))
 }

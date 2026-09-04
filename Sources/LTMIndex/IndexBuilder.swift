@@ -215,6 +215,9 @@ public struct IndexBuilder: Sendable {
     public func build(
         full: Bool = false, refusingFullRebuild: Bool = false, budget: TimeInterval? = nil
     ) throws -> BuildReport {
+        // 預算從**這裡**起算——含取鎖、掃描、`sourcesWithoutCursor()` 閘，不只是批次迴圈。
+        // verify R1 抓到第一版把起點放在批次組裝之後，掃描時間完全在預算外。
+        let deadline = budget.map { clock().addingTimeInterval($0) }
         try location.createRootIfNeeded()
         // **#44 Expected ② 沒有被實作，而且它與 #44 實際交付的東西相衝突。**
         //
@@ -518,7 +521,13 @@ public struct IndexBuilder: Sendable {
         var batches: [[BatchSlice]] = []
         var current: [BatchSlice] = []
         var currentCount = 0
-        for sourceKey in grouped.keys.sorted() {
+        // 已失效（被改寫）的來源排最後：它們的 chunk 插入推遲到最後一個 slice，體積大時會吃掉整個
+        // 預算窗口；讓全新內容先落地，重寫的來源等預算夠時再一次做完（verify R1 logic C1）。
+        let orderedKeys = grouped.keys.sorted { a, b in
+            let ia = scan.invalidatedSources.contains(a), ib = scan.invalidatedSources.contains(b)
+            return ia == ib ? a < b : !ia
+        }
+        for sourceKey in orderedKeys {
             let total = grouped[sourceKey]?.count ?? 0
             var taken = 0
             while taken < total {
@@ -618,12 +627,14 @@ public struct IndexBuilder: Sendable {
         var lastBeat = started
         var lastBeatChunks = 0
 
-        let deadline = budget.map { clock().addingTimeInterval($0) }
         var budgetExhausted = false
         var unmergedSourceKeys = Set<String>()
         for (batchIndex, batch) in batches.enumerated() {
             // 預算判定只在批次邊界：這裡是唯一一個「停下來不會留下半批」的位置。
-            if let deadline, clock() >= deadline {
+            // **有推遲中的插入時不停**：已失效來源的向量已經進側車、chunk 要等最後一個 slice 才落地，
+            // 中途停下＝孤兒向量被 `vector_count` 計入且下一輪重做（verify R1 logic C1 實測每輪 +2 MB）。
+            // 超出預算的量以該來源的剩餘 chunk 為界。
+            if let deadline, deferredInserts.isEmpty, clock() >= deadline {
                 budgetExhausted = true
                 unmergedSourceKeys = Set(batches[batchIndex...].flatMap { $0.map(\.sourceKey) })
                 break
@@ -767,6 +778,8 @@ public struct IndexBuilder: Sendable {
 
         // 全部批次成功之後補上剩下的來源——沒有新 chunk 但 metadata 有變的那些。
         // 它們沒有內容要提交，所以不屬於任何批次，但游標仍要前進。
+        // 最後一批做完才超時：沒有東西未併入，但旗標要說實話（BuildReport 註解允許此組合）。
+        if let deadline, !budgetExhausted, clock() >= deadline { budgetExhausted = true }
         try database.transaction {
             for (sourceKey, entry) in scan.state.files {
                 // 未併入（含只併了一部分）的來源不得在這裡拿到「整份已處理」的游標。

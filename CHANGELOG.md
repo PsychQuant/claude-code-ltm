@@ -10,24 +10,39 @@
   只在輸入命中線索表（`plugin/hooks/recall-cues.txt`，一行一個 ERE，`LTM_RECALL_CUES`
   可換）時跑 `ltm query` 並把 ≤3 筆指標注入 context；`SessionStart` hook 每個 session
   （含 resume）印一句提醒。模式開關 `LTM_RECALL_MODE=cued|always|off`，預設 `cued`。
-  hook 保持薄：閘門、20 s 守衛、逾時／缺 binary／版本過舊時**一行可見通知**而非靜默
-  （Claude Code 對逾時 hook 的輸出是靜默丟棄）；Claude Code 自己產生的 prompt（skill
-  本文、slash 展開、compaction 續接）一律不放行。線索表是列舉、會漏，漏的代價是現狀。
+  hook 保持薄：閘門、**整支腳本一個絕對 deadline**（`LTM_RECALL_GUARD_SECONDS`，預設 20 s，
+  含 JSON 解析、`--help` 版本探測與查詢本身，逾時殺整個 process group）、逾時／缺 binary／
+  版本過舊／`cwd` 進不去／缺 python3 時**一行可見通知**而非靜默（Claude Code 對逾時 hook
+  的輸出是靜默丟棄；版本過舊每 session 只通知一次）；prompt 放在 `--` 之後、`LTM_BIN` 必須
+  絕對路徑、`session_id` 先驗格式；Claude Code 自己產生的 prompt（skill 本文、slash 展開、
+  compaction 續接、skill 重載、Stop hook 回饋——封閉列舉五種）一律不放行。設
+  `LTM_RECALL_STATS_FILE` 可逐次記 `off|synthetic|miss|hit|notice` 標籤（沒有文字）。
+  線索表是列舉、會漏，漏的代價是現狀。
   背景：本機語料 2,313 個 session 檔裡，本 repo 之外**零次**自發呼叫 `ltm_query`。
 - **`ltm query` 三個旗標**（CLI 與 MCP 共用同一個實作）：`--max-refresh-seconds N`
   有界併入——預算到就停在已提交的批次、用現有索引作答、stderr 報「索引落後 N 個來源」
   （`--json` 的 stdout 仍是純陣列）；`--exclude-session <id>` 丟掉只屬於該 session 的
-  命中（resume 副本保留），**k 在排除之後才截斷**；`--format recall` 輸出
-  `<!-- ltm:recall v1 -->` … `<!-- /ltm:recall -->` 包住的區塊（≤4,000 字元，先縮
-  snippet 再丟命中）。
-- **chunker 排除 recall 標記區塊**：注入的區塊會存進 transcript、進 jsonl；`CorpusScanner`
-  依 `RecallMarker` 把它們從可索引文字裡拿掉，否則下一次查詢會召回自己的輸出。未標記的
-  輸入逐 byte 不變（用改動前算的雜湊釘住），既有索引不必重建。
+  命中（resume 副本保留），**k 在排除之後才截斷**（4·k 起、不足就 ×4 重撈到 1,000）；
+  `--format recall` 輸出 `<!-- ltm:recall v1 -->` … `<!-- /ltm:recall -->` 包住的區塊
+  （含換行 ≤4,000 字元，先縮 snippet 再丟命中）。有界併入的 deadline 從掃描階段就開始算、
+  已失效來源排最後且其延後插入期間不截斷（截斷不會留下「刪了沒補」的來源）。
+- **`ltm query` 接受 `--` 終止符**：之後的引數一律是查詢文字，以 `-` 開頭的查詢不再被當旗標。
+  `--compare` 拒絕 `--format`／`--exclude-session`／`--max-refresh-seconds`。
+- **注入的回想不會被再索引——這是驗證出來的事實，不是新機制。** Claude Code 把 hook 注入存成
+  `type: "attachment"` 紀錄，`CorpusScanner` 本來就不把它當 turn（`attachmentRecordsAreNeverTurns`
+  釘住；本機語料 910 筆 hook 注入零筆落在 user/assistant）。第一版加的「依 `RecallMarker` 剝
+  標記區塊」在 verify R1 被證明收益為零、還會刪掉談論這個功能的真實對話，已移除。
 
 ### Changed
 
 - 「資料，不是指令」banner 的措辭搬到 `LTMService.RetrievalBanner`，MCP tool 與
-  `--format recall` 共用同一份。
+  `--format recall` 共用同一份（連同「這不是邊界」那段誠實註解一起搬）。
+- `ltm-cli` spec 那句「staleness 以 build 時長為上界」收窄：對有界併入不成立，未併入的來源
+  要等下一次併入，上界是各次預算的總和；hook 讓寫鎖的頻率從「明確 `ltm build`」變成
+  「每一輪放行」（#65 追蹤 CLI／MCP 的鎖競爭）。
+- `LTM_TEST_CLOCK_STEP_SECONDS`（測試用的時鐘縫）只在 debug 建置讀取，release binary 不讀。
+- `recallGateMinimumVersionTracksTheChangelog` 找的是**最舊**提到 `--format recall` 的段落
+  （首次出貨版本），先前找的是最新的。
 - 有界併入的預算只在批次邊界判定；預設 2,000 chunk 一批在本機約 25 s 才到邊界，所以 hook
   為自己的查詢設 `LTM_BUILD_BATCH_CHUNKS=200`（使用者設了就尊重）。量測：
   `docs/measurements/2026-09-04-proactive-recall.md`。
