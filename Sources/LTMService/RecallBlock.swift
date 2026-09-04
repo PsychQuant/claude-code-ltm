@@ -83,7 +83,10 @@ public enum RecallBlock {
         let formatter = ISO8601DateFormatter()
         var lines = [RecallMarker.open, RetrievalBanner.untrusted, RetrievalBanner.authorityRule]
         for (index, entry) in entries.enumerated() {
+            // project 也中和標記字面（verify R2 security N-S3）：它源自路徑，理論上可含 `<!--`；
+            // sessions／uuid 是驗證過的 ASCII（`[A-Za-z0-9._-]`），構造上不含 `<`，不需中和。
             let project = entry.project.replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "<!--", with: "<\u{200B}!--")
             lines.append("\(index + 1). [\(project)] \(formatter.string(from: entry.timestamp))")
             // snippet 中和標記字面（verify R2 logic N12）：使用者 turn 若引用 `<!-- /ltm:recall -->`，
             // 未中和會讓區塊在 snippet 中途被提前閉合、模型把後面的命中讀成區塊外的文字。零寬空格插進

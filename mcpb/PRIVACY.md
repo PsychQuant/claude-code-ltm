@@ -25,6 +25,14 @@ treated as **strictly read-only**; any write path into it is a bug, not a featur
   **The honest limit**: that check stops content from being written *accidentally*.
   It cannot stop someone who deliberately encodes text into a field the schema allows.
 
+**The proactive-recall hook** additionally writes the current prompt, verbatim, to a
+private temp directory (`mktemp -d` under `$TMPDIR`, mode 0700) while it decides whether
+to recall — the same transient handling any shell hook does with its stdin. It is deleted
+when the hook exits. The one gap: if Claude Code hard-kills the hook at its own timeout
+(SIGKILL), the cleanup trap does not run and those files persist until the OS clears the
+temp directory. So the accurate statement is: the durable stores are under `~/.claude-ltm/`;
+the hook additionally leaves short-lived prompt text under your own `$TMPDIR`.
+
 ## Network
 
 **This tool opens no outbound connection.** Semantic vectors come from Apple's

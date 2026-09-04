@@ -22,11 +22,14 @@ public struct BuildReport: Sendable, Equatable {
     public let wasFullRebuild: Bool
     public let embeddingRevision: String
     public let totalChunks: Int
-    /// 有界併入（`budget:`）下沒能併入的來源數：在預算用完時仍有 slice 落在未跑的批次裡的
-    /// 來源（含只併了一部分的）。沒有預算或預算夠用時為 0。
+    /// 有界併入（`budget:`）下沒能併入的來源數。**兩個來源**（verify R2 logic N1）：預算在批次
+    /// 邊界用完時仍落在未跑批次裡的來源（含只併一部分的），**以及**有界模式一律跳過的被改寫來源
+    /// （不論預算是否用完）。無預算時恆為 0。
     public let unmergedSources: Int
-    /// 預算在某個批次邊界被判定用完、迴圈提前停止。`unmergedSources > 0` 蘊含此旗標為真；
-    /// 反之不然（預算剛好在最後一批之後用完時，旗標可能為真而未併入為 0）。
+    /// 預算在某個批次邊界（或最後一批之後）被判定用完。**與 `unmergedSources` 相互獨立**：
+    /// 有界模式跳過一個被改寫來源時 `unmergedSources > 0` 但預算可能根本沒用完（此旗標為 false）；
+    /// 反過來預算剛好在最後一批之後用完時，此旗標為 true 而 `unmergedSources` 可能為 0。
+    /// 消費端要判斷「索引是否落後」一律看 `unmergedSources > 0`，不要看這個旗標（`RecallBlock`／CLI 都如此）。
     public let budgetExhausted: Bool
 }
 

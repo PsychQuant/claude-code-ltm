@@ -53,7 +53,7 @@ private func makeStub(kind: String, in dir: URL) throws -> URL {
 
 private func runHook(
     _ script: String, prompt: String, session: String = "sess-1", stub: String? = "block",
-    env extra: [String: String] = [:], input override: String? = nil
+    env extra: [String: String] = [:], input override: String? = nil, guard guardSeconds: String = "8"
 ) throws -> HookRun {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-hook-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -62,7 +62,7 @@ private func runHook(
     environment["CLAUDE_PLUGIN_ROOT"] = repoRoot().appendingPathComponent("plugin").path
     environment["LTM_RECALL_MODE"] = nil
     environment["LTM_RECALL_CUES"] = nil
-    environment["LTM_RECALL_GUARD_SECONDS"] = "2"
+    environment["LTM_RECALL_GUARD_SECONDS"] = guardSeconds   // 預設 8 s：負載餘裕，瞬時 stub 不受影響；測逾時者自設小值
     environment["LTM_RECALL_STATS_FILE"] = dir.appendingPathComponent("stats").path
     if let stub { environment["LTM_BIN"] = try makeStub(kind: stub, in: dir).path }
     else { environment["LTM_BIN"] = dir.appendingPathComponent("absent-ltm").path }
@@ -147,7 +147,7 @@ func systemReminderSpansDoNotTriggerAndArgumentsAreWired() throws {
 @Test("降級可見：逾時／非零結束／binary 缺席／不支援 --format，各印一行通知、exit 0")
 func degradationIsOneVisibleLineAndNeverBlocks() throws {
     for (kind, reason) in [("sleep", "逾時"), ("exit2", "結束碼 2"), ("nofmt", "版本過舊")] {
-        let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", session: "sess-\(kind)-\(UUID().uuidString)", stub: kind)
+        let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", session: "sess-\(kind)-\(UUID().uuidString)", stub: kind, guard: kind == "sleep" ? "2" : "8")
         #expect(run.code == 0, Comment(rawValue: kind))
         let lines = run.out.split(separator: "\n")
         #expect(lines.count == 1, Comment(rawValue: "\(kind): \(run.out)"))
@@ -224,7 +224,7 @@ func helpProbeIsBounded() throws {
     try "#!/bin/bash\nif [ \"$1\" = query ] && [ \"$2\" = --help ]; then sleep 25; fi\n".write(to: url, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
     let t0 = Date()
-    let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_BIN": url.path])
+    let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_BIN": url.path], guard: "2")
     #expect(run.code == 0 && run.out.contains("版本探測逾時"), Comment(rawValue: run.out))
     #expect(Date().timeIntervalSince(t0) < 6)
 }
@@ -279,4 +279,38 @@ func guardIsClampedBelowManifestTimeout() throws {
         env: ["LTM_BIN": url.path, "LTM_RECALL_GUARD_SECONDS": "60", "LTM_RECALL_MANIFEST_TIMEOUT": "5"])
     #expect(run.code == 0 && run.out.contains("逾時"), Comment(rawValue: run.out))
     #expect(Date().timeIntervalSince(t0) < 5, "clamp 失效：跑了 \(Date().timeIntervalSince(t0)) s（應 clamp 到 2）")
+}
+
+@Test("verify R2 security N-S1：cue 檔是 fifo（非一般檔案）→ fail closed，不阻塞、不通知")
+func nonRegularCueFileFailsClosedFast() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-hook-fifo-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let fifo = dir.appendingPathComponent("cuefifo")
+    #expect(mkfifo(fifo.path, 0o600) == 0)
+    let t0 = Date()
+    // 無人寫 fifo：若 grep 直接讀它會永久阻塞。regular-file 檢查要在讀之前擋掉。
+    let run = try runHook("ltm-recall-gate.sh", prompt: "之前討論過的事", env: ["LTM_RECALL_CUES": fifo.path])
+    #expect(run.code == 0 && run.out.isEmpty, Comment(rawValue: "out=[\(run.out)]"))
+    #expect(Date().timeIntervalSince(t0) < 3, "非一般 cue 檔應立即 fail closed，卻跑了 \(Date().timeIntervalSince(t0)) s")
+    #expect(run.err.contains("不是可讀的一般檔案"), Comment(rawValue: run.err))
+}
+
+@Test("verify R2 logic finding 2：\\uXXXX 逃脫的 JSON 裡的中文線索仍會觸發（raw grep 未命中但含 \\u → 落到 python）")
+func escapedUnicodeCueStillTriggers() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-hook-esc-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let url = dir.appendingPathComponent("ltm")
+    try "#!/bin/bash\nif [ \"$1 $2\" = \"query --help\" ]; then echo '--format recall'; exit 0; fi\nprintf '<!-- ltm:recall v1 -->\\nB\\n1. [p] t\\n   s\\n   ↳ session x  turn u\\n<!-- /ltm:recall -->\\n'\n".write(to: url, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    // \uXXXX 逃脫的 JSON（Python json.dumps ensure_ascii=True 的形狀）——中文線索的 bytes 是 之前，
+    // stage-1 raw grep 對不上，但輸入含 \u → fallback 到 python → stage-2 對解碼後的 prompt 命中。
+    let escaped = "{\"prompt\":\"\\u4e4b\\u524d\\u90a3\\u500b\\u6c7a\\u5b9a\",\"session_id\":\"s1\",\"cwd\":\"\(dir.path)\"}"
+    let run = try runHook("ltm-recall-gate.sh", prompt: "", env: ["LTM_BIN": url.path], input: escaped)
+    #expect(run.code == 0 && run.out.hasPrefix("<!-- ltm:recall"), Comment(rawValue: "out=[\(run.out)] err=[\(run.err)]"))
+    // 對照：全 ASCII、無 \u、無線索 → 終止未命中（快退、空）。
+    let ascii = "{\"prompt\":\"just fix this function\",\"session_id\":\"s1\",\"cwd\":\"\(dir.path)\"}"
+    let miss = try runHook("ltm-recall-gate.sh", prompt: "", env: ["LTM_BIN": url.path], input: ascii)
+    #expect(miss.code == 0 && miss.out.isEmpty, Comment(rawValue: miss.out))
 }

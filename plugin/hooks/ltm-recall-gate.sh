@@ -68,17 +68,32 @@ cat > "$TMP/input"
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 # ── 便宜的 raw 閘門（cued 模式）──────────────────────────────────────────────
-# 對整份 hook 輸入（JSON）grep 線索。命中是過近似（可能 match 到 prompt 以外的欄位、
-# 或 system-reminder 內），未命中則一定不含線索——所以未命中直接退出、不碰 python。
+# 對整份 hook 輸入（**原始 JSON bytes**）grep 線索。命中是過近似（可能 match 到 prompt 以外的
+# 欄位、或 system-reminder 內），由後面對剝過的 prompt 再 grep 收斂。這一段的成本讓絕大多數
+# 未命中輪次不必啟動 python（verify R2 logic N2）。
+#
+# **編碼假設（verify R2 logic finding 2）**：raw grep 比對的是 bytes。Claude Code 是 Node app、
+# hook JSON 走 `JSON.stringify`，對 BMP 內的非 ASCII（含中日文線索）輸出**字面 UTF-8**、不逃脫，
+# 所以中文線索的 bytes 直接對得上。這個假設沒有文件保證，所以萬一某個 build 改成輸出 `\uXXXX`
+# 逃脫，中文線索在 bytes 層會對不上——為此加一條 fallback：raw grep 未命中**但輸入含 `\u` 逃脫**
+# 時，不當終止未命中，改讓 python 解碼後由 stage-2 判定（全 ASCII 且無 `\u` 的未命中才是終止的，
+# 那條路徑不含任何線索、可安全快退）。純 ASCII 線索（earlier／last time…）在逃脫 JSON 裡仍是字面，
+# stage-1 照樣命中。
 CUES=""
 if [ "$MODE" = cued ]; then
     CUES="${LTM_RECALL_CUES:-$ROOT/hooks/recall-cues.txt}"
-    if [ ! -r "$CUES" ]; then
-        echo "ltm: 線索表讀不到：${CUES}（本輪不回想）" >&2; stat miss; exit 0
+    # 必須是**一般檔案**（verify R2 security N-S1）：raw grep 在 deadline 之外，若 `LTM_RECALL_CUES`
+    # 指到 fifo／device／慢速掛載，grep 會阻塞到超過腳本 deadline、撞外層逾時、輸出被丟棄。
+    # 一般檔案的 grep 有界；非一般檔案一律當讀不到、fail closed（不回想）。
+    if [ ! -f "$CUES" ] || [ ! -r "$CUES" ]; then
+        echo "ltm: 線索表不是可讀的一般檔案：${CUES}（本輪不回想）" >&2; stat miss; exit 0
     fi
     grep -vE '^[[:space:]]*(#|$)' "$CUES" > "$TMP/cues" || true
     [ -s "$TMP/cues" ] || { stat miss; exit 0; }
-    LC_ALL=C grep -E -q -f "$TMP/cues" "$TMP/input" || { stat miss; exit 0; }
+    if ! LC_ALL=C grep -E -q -f "$TMP/cues" "$TMP/input"; then
+        # 未命中：只有「不含 \u 逃脫」才是終止未命中；含 \u 時可能是被逃脫的中文線索，落到 python。
+        LC_ALL=C grep -q '\\u[0-9a-fA-F]' "$TMP/input" || { stat miss; exit 0; }
+    fi
 fi
 
 # ── 到這裡：cued 命中候選，或 always 模式。才啟動 python 抽欄位。────────────────
