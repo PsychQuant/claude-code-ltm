@@ -2258,6 +2258,49 @@ func exhaustionAfterTheLastBatchIsReported() throws {
 
 // MARK: - verify-fix 變異測試補上的兩條驅動（M3／M5 原本零測試變紅）
 
+@Test("預算在 append 中途 break 且同時有被跳過的改寫來源：union 保住兩者，後續無界 build 都補回（守住 formUnion，非覆寫）")
+func budgetBreakUnionsSkippedRewriteWithRemainingAppend() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer { try? FileManager.default.removeItem(at: corpus); try? FileManager.default.removeItem(at: derived.root) }
+    func lines(_ s: Int, turns: Int, prefix: String = "") -> [String] {
+        (0..<turns).map { t in
+            turnLine(uuid: String(format: "%08x-aaaa-bbbb-cccc-%012x", s, t),
+                     session: String(format: "%08x-0000-0000-0000-000000000000", s),
+                     role: t.isMultiple(of: 2) ? "user" : "assistant", text: "\(prefix)來源 \(s) 的第 \(t) 段")
+        }
+    }
+    // 起點：s1 三段（之後改寫成 invalidated）。
+    _ = try writeSession(in: corpus, project: "proj-one", file: "s1.jsonl", lines: lines(1, turns: 3))
+    _ = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                         embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1).build()
+    _ = try writeSession(in: corpus, project: "proj-one", file: "s1.jsonl", lines: lines(1, turns: 6, prefix: "改寫 "))   // invalidated
+    _ = try writeSession(in: corpus, project: "proj-one", file: "s2.jsonl", lines: lines(2, turns: 3))                    // append
+    _ = try writeSession(in: corpus, project: "proj-one", file: "s3.jsonl", lines: lines(3, turns: 3))                    // append
+    // 小預算 2.5 s、每讀時鐘 +1 s、每批 1 chunk：orderedKeys = [s2, s3]（s1 改寫被跳過），
+    // 併到 s2 幾批後 break，s3 的剩餘批次落在未併入——union 必須同時含 s1（跳過的改寫）與 s3（break 剩餘）。
+    let clock = SteppingClock()
+    let r1 = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                              embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1, clock: clock.now).build(budget: 2.5)
+    #expect(r1.budgetExhausted, "小預算應在批次邊界 break")
+    #expect(r1.unmergedSources >= 2, "被跳過的改寫來源(s1) 與 break 剩餘(s3) 都要算未併入，得 \(r1.unmergedSources)")
+    // 後續無界 build 補回全部——覆寫 bug 會讓 s1 拿到完成游標卻沒插入 chunk、永遠補不回。
+    _ = try IndexBuilder(location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+                         embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1).build()
+    let (corpusB, derivedB) = try makeWorkspace()
+    defer { try? FileManager.default.removeItem(at: corpusB); try? FileManager.default.removeItem(at: derivedB.root) }
+    _ = try writeSession(in: corpusB, project: "proj-one", file: "s1.jsonl", lines: lines(1, turns: 6, prefix: "改寫 "))
+    _ = try writeSession(in: corpusB, project: "proj-one", file: "s2.jsonl", lines: lines(2, turns: 3))
+    _ = try writeSession(in: corpusB, project: "proj-one", file: "s3.jsonl", lines: lines(3, turns: 3))
+    _ = try IndexBuilder(location: derivedB, scanner: CorpusScanner(corpusRoot: corpusB, anchorKey: .forTesting),
+                         embedder: StubEmbedder(revision: "rev-A"), batchChunkTarget: 1).build()
+    func texts(_ loc: DerivedLocation) throws -> [String] {
+        let db = try IndexDatabase(path: loc.databaseURL.path); defer { db.close() }
+        var t: [String] = []; try db.query("SELECT text FROM chunks ORDER BY uuid") { t.append(columnText($0, 0)) }
+        return t
+    }
+    #expect(try texts(derived) == texts(derivedB), "union break 後補回與不中斷 build 不等價（formUnion 被改成覆寫時會壞）")
+}
+
 @Test("有界併入跳過被改寫的來源（不 delete、不 insert、不動游標），後續無界 build 補回它，且與不中斷 build 等價")
 func boundedMergeSkipsRewrittenSourcesAndRecoversLater() throws {
     let (corpus, derived) = try makeWorkspace()

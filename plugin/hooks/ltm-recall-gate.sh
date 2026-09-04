@@ -8,24 +8,32 @@
 # （失敗一律印一行通知——Claude Code 對逾時的 hook 是靜默丟棄輸出，我們得在那之前
 # 自己說話）；閘門未命中、off 模式、系統產生的 prompt 才是空輸出。
 #
-# 成本形狀（verify R2 logic N2）：cued 模式下**先用便宜的 raw grep 擋一次**，未命中就
-# 直接退出、不啟動 python——絕大多數 prompt（實測命中率 0–2%）因此只花 bash+grep 的
-# 開銷。python（剝 system-reminder、取 session/cwd/shape）只在「raw grep 命中的候選」
-# 或 always 模式跑。raw grep 是過近似（會match 到 JSON 其他欄位或 system-reminder 內），
-# 由 python 之後對**剝過的 prompt** 再 grep 一次收斂。
+# 閘門形狀（verify R3 codex）：python **直接**解碼 hook JSON（~22 ms），閘門比對**解碼後的**
+# prompt。先前為省 python 而先對原始 JSON bytes 做 raw grep——被 codex 推翻為不可靠的過近似
+# （錨點、`\uXXXX` 逃脫、跨 system-reminder 的線索都會讓 raw grep 漏而 stage-2 命中 → 安靜漏回想）。
+# python 直接跑仍讓未命中輪次 ~37 ms、遠低於規格 100 ms，且閘門變 sound。python 缺席＝無法閘門
+# ＝安靜未命中（一次 stderr 提醒），不對每輪注入通知。
 #
-# 其餘形狀（verify R1/R2）：整支腳本共用一個絕對 deadline，clamp 在 manifest 的 28 s 以下；
-# `LTM_BIN` 必須絕對路徑；prompt 放 `--` 之後；通知不夾 CLI stderr；版本過舊每 session 一次；
-# 查詢成功後驗證輸出真的是區塊。注意：變數後接全形標點要寫 ${VAR}——非 UTF-8 locale 下
-# bash 會把高位元組併進變數名。
+# 其餘形狀（verify R1/R2/R3）：`--help` 探測與查詢共用一個絕對 deadline，clamp 在 manifest 28 s
+# − 3 以下（env 只能降不能抬真上限）；`LTM_BIN` 必須絕對路徑；prompt 放 `--` 之後；通知不夾 CLI
+# stderr；版本過舊每 session 一次；查詢成功後驗證輸出首行正好是開標記、末行正好是閉標記。
+# 注意：變數後接全形標點要寫 ${VAR}——非 UTF-8 locale 下 bash 會把高位元組併進變數名。
 set -u
 LTM_RECALL_MIN_VERSION="0.5.0"   # 第一個有 --format recall 的 ltm；ReleaseVersionSyncTests 釘住
-MANIFEST_TIMEOUT="${LTM_RECALL_MANIFEST_TIMEOUT:-28}"   # hooks.json 宣告的 timeout；腳本 deadline 必須小於它（測試可覆寫）
+RECALL_OPEN="<!-- ltm:recall v1 -->"    # 與 RecallMarker.open 一致（RecallMarkerSyncTests 掃此檔）
+RECALL_CLOSE="<!-- /ltm:recall -->"    # 與 RecallMarker.close 一致
+HARD_MANIFEST_TIMEOUT=28                # hooks.json 實際宣告的 timeout（真上限，env 不能抬高）
+MANIFEST_TIMEOUT="${LTM_RECALL_MANIFEST_TIMEOUT:-$HARD_MANIFEST_TIMEOUT}"
+case "$MANIFEST_TIMEOUT" in ''|*[!0-9]*) MANIFEST_TIMEOUT="$HARD_MANIFEST_TIMEOUT" ;; esac   # 非數字→真上限（verify R3 codex #3）
+# env 只能**降低** manifest（測試用），不能抬高真正的 28 s ceiling。
+[ "$MANIFEST_TIMEOUT" -gt "$HARD_MANIFEST_TIMEOUT" ] && MANIFEST_TIMEOUT="$HARD_MANIFEST_TIMEOUT"
 GUARD="${LTM_RECALL_GUARD_SECONDS:-20}"
 case "$GUARD" in ''|*[!0-9]*) GUARD=20 ;; esac
-# clamp 在 manifest 之下（verify R2 logic/req）：GUARD ≥ 28 會讓內部 deadline 晚於外層逾時，
-# Claude Code 先把輸出丟掉、腳本沒機會印通知。留 3 s 給 kill/wait 的收尾。
-[ "$GUARD" -ge "$MANIFEST_TIMEOUT" ] && GUARD=$((MANIFEST_TIMEOUT - 3))
+# clamp 到 manifest − 3 以下（verify R2/R3）：留 3 s 給 kill/wait/通知輸出的收尾。用 `>`（不是 `>=`）
+# 對 `MANIFEST−3`，所以 GUARD=27、manifest=28 也會被壓到 25，而非留在 27 貼著 28（codex R3 #3）。
+CEILING=$((MANIFEST_TIMEOUT - 3))
+[ "$GUARD" -gt "$CEILING" ] && GUARD="$CEILING"
+[ "$GUARD" -lt 1 ] && GUARD=1
 START=$(date +%s); DEADLINE=$((START + GUARD))
 remaining() { echo $((DEADLINE - $(date +%s))); }
 
@@ -67,38 +75,32 @@ cat > "$TMP/input"
 
 ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
-# ── 便宜的 raw 閘門（cued 模式）──────────────────────────────────────────────
-# 對整份 hook 輸入（**原始 JSON bytes**）grep 線索。命中是過近似（可能 match 到 prompt 以外的
-# 欄位、或 system-reminder 內），由後面對剝過的 prompt 再 grep 收斂。這一段的成本讓絕大多數
-# 未命中輪次不必啟動 python（verify R2 logic N2）。
-#
-# **編碼假設（verify R2 logic finding 2）**：raw grep 比對的是 bytes。Claude Code 是 Node app、
-# hook JSON 走 `JSON.stringify`，對 BMP 內的非 ASCII（含中日文線索）輸出**字面 UTF-8**、不逃脫，
-# 所以中文線索的 bytes 直接對得上。這個假設沒有文件保證，所以萬一某個 build 改成輸出 `\uXXXX`
-# 逃脫，中文線索在 bytes 層會對不上——為此加一條 fallback：raw grep 未命中**但輸入含 `\u` 逃脫**
-# 時，不當終止未命中，改讓 python 解碼後由 stage-2 判定（全 ASCII 且無 `\u` 的未命中才是終止的，
-# 那條路徑不含任何線索、可安全快退）。純 ASCII 線索（earlier／last time…）在逃脫 JSON 裡仍是字面，
-# stage-1 照樣命中。
-CUES=""
-if [ "$MODE" = cued ]; then
-    CUES="${LTM_RECALL_CUES:-$ROOT/hooks/recall-cues.txt}"
-    # 必須是**一般檔案**（verify R2 security N-S1）：raw grep 在 deadline 之外，若 `LTM_RECALL_CUES`
-    # 指到 fifo／device／慢速掛載，grep 會阻塞到超過腳本 deadline、撞外層逾時、輸出被丟棄。
-    # 一般檔案的 grep 有界；非一般檔案一律當讀不到、fail closed（不回想）。
-    if [ ! -f "$CUES" ] || [ ! -r "$CUES" ]; then
-        echo "ltm: 線索表不是可讀的一般檔案：${CUES}（本輪不回想）" >&2; stat miss; exit 0
-    fi
-    grep -vE '^[[:space:]]*(#|$)' "$CUES" > "$TMP/cues" || true
-    [ -s "$TMP/cues" ] || { stat miss; exit 0; }
-    if ! LC_ALL=C grep -E -q -f "$TMP/cues" "$TMP/input"; then
-        # 未命中：只有「不含 \u 逃脫」才是終止未命中；含 \u 時可能是被逃脫的中文線索，落到 python。
-        LC_ALL=C grep -q '\\u[0-9a-fA-F]' "$TMP/input" || { stat miss; exit 0; }
-    fi
-fi
+# once-per-session marker：用 mkdir（原子、不跟隨 symlink）而非 `: >`（會截斷 symlink 目標）。
+# 檔名含最低版本，未來 min-version 升級時舊 marker 不會誤抑制新通知（verify R2 N7）。
+# `$SESSION` 在 python 抽欄位前是空的（用 nosession），那只影響 python 缺席這一條的去重粒度。
+SESSION=""
+mark_once() {   # $1 = kind；回 0＝第一次（要通知），非 0＝已通知過
+    local dir="${TMPDIR:-/tmp}/ltm-recall-$1-${LTM_RECALL_MIN_VERSION}-${SESSION:-nosession}"
+    mkdir "$dir" 2>/dev/null
+}
 
-# ── 到這裡：cued 命中候選，或 always 模式。才啟動 python 抽欄位。────────────────
+# ── 抽欄位（解碼後才閘門）──────────────────────────────────────────────────────
+# **直接**跑 python 解碼 hook JSON，取剝過 system-reminder 的 prompt、session、cwd、shape，
+# 然後對**解碼後的 prompt** 比對線索。verify R3 (codex) 推翻了先前「先對原始 JSON bytes 做便宜
+# raw grep」的做法：對整份 JSON 套使用者的 ERE **不是**「對解碼後 prompt 比對」的可靠過近似——
+# 錨點（`^上次`）、`\uXXXX` 逃脫、跨 system-reminder 邊界的線索都會讓 raw grep 漏而 stage-2 命中，
+# 於是安靜地不回想。python 直接抽（實測 ~22 ms，全 hook 未命中 ~37 ms、仍遠低於規格 100 ms）就
+# 沒有這個過近似問題。python 讀的是我們剛用 `cat` 寫下的本地一般檔案，json.load 有界、不會卡，
+# 所以**不經 `run_bounded`**（省掉輪詢開銷）。
 PY="${LTM_RECALL_PYTHON:-python3}"
-command -v "$PY" > /dev/null 2>&1 || notice "找不到 python3，無法解析 hook 輸入"
+if ! command -v "$PY" > /dev/null 2>&1; then
+    # python 缺席就無法解碼、無法閘門——不能判斷這則 prompt 有沒有線索，所以**安靜未命中**
+    # （不是每輪注入通知：那會對「幫我改函式」這種完全無關的輪次也吐一行，見 codex R3 #2）。
+    # 一次 stderr 提醒（去重粒度是 $TMPDIR，非 session——session_id 要 python 解碼才拿得到，
+    # 而這正是 python 缺席的那條路；python 缺席是機器層條件，per-$TMPDIR 去重已足夠）。
+    mark_once nopython && echo "ltm: 找不到 python3，proactive recall 停用（可手動呼叫 ltm_query）" >&2
+    stat miss; exit 0
+fi
 cat > "$TMP/extract.py" <<'PY'
 import json, re, sys
 tmp = sys.argv[1]
@@ -121,24 +123,24 @@ open(tmp + "/prompt", "w", encoding="utf-8").write(prompt)
 open(tmp + "/query", "w", encoding="utf-8").write(prompt[:4000])   # 以字元不以 byte 截
 open(tmp + "/meta", "w", encoding="utf-8").write(f"{session}\n{cwd}\n{'synthetic' if synthetic else 'typed'}\n")
 PY
-run_bounded "$TMP/py.out" "$TMP/py.err" "$PY" "$TMP/extract.py" "$TMP"; RC=$?
+"$PY" "$TMP/extract.py" "$TMP"; RC=$?
 [ "$RC" -eq 0 ] || notice "解析 hook 輸入失敗（結束碼 ${RC}）"
 SESSION=$(sed -n 1p "$TMP/meta"); CWD=$(sed -n 2p "$TMP/meta"); SHAPE=$(sed -n 3p "$TMP/meta")
 
-# once-per-session marker：用 mkdir（原子、不跟隨 symlink）而非 `: >`（會截斷 symlink 目標）。
-# 檔名含最低版本，未來 min-version 升級時舊 marker 不會誤抑制新通知（verify R2 N7）。
-mark_once() {   # $1 = kind；回 0＝第一次（要通知），非 0＝已通知過
-    local dir="${TMPDIR:-/tmp}/ltm-recall-$1-${LTM_RECALL_MIN_VERSION}-${SESSION:-nosession}"
-    mkdir "$dir" 2>/dev/null
-}
 if [ -n "$MODE_WARN" ] && mark_once modewarn; then
     echo "ltm: LTM_RECALL_MODE=\"$MODE_WARN\" 不認得，當作 cued（本 session 只提醒一次）" >&2
 fi
 if [ "$SHAPE" = synthetic ]; then stat synthetic; exit 0; fi
 
-# cued：對**剝過 system-reminder 的 prompt** 再 grep 一次，收斂 raw 閘門的過近似
-# （system-reminder 內的線索、或 prompt 以外欄位的命中都在這裡被濾掉）。
+# cued：對**解碼後**的 prompt 比對線索（唯一的閘門，sound）。
 if [ "$MODE" = cued ]; then
+    CUES="${LTM_RECALL_CUES:-$ROOT/hooks/recall-cues.txt}"
+    # cue 檔必須是**一般檔案**（verify R2 security N-S1）：fifo／device／慢速掛載會讓 grep 阻塞。
+    if [ ! -f "$CUES" ] || [ ! -r "$CUES" ]; then
+        echo "ltm: 線索表不是可讀的一般檔案：${CUES}（本輪不回想）" >&2; stat miss; exit 0
+    fi
+    grep -vE '^[[:space:]]*(#|$)' "$CUES" > "$TMP/cues" || true
+    [ -s "$TMP/cues" ] || { stat miss; exit 0; }
     LC_ALL=C grep -E -q -f "$TMP/cues" "$TMP/prompt" || { stat miss; exit 0; }
 fi
 
@@ -167,10 +169,13 @@ set -- "$@" -- "$QUERY"
 run_bounded "$TMP/out" "$TMP/err" "$LTM" "$@"; RC=$?
 [ "$RC" -eq 124 ] && notice "逾時 ${GUARD} s"
 [ "$RC" -eq 0 ] || notice "ltm query 結束碼 ${RC}"
-# 驗證輸出真的是區塊（verify R2 N7/codex R2-7）：exit 0 但空／不是區塊時仍要可見降級，
-# 不能靜默 cat 一個空檔——那違反「放行後不靜默」。
-if [ ! -s "$TMP/out" ] || ! head -1 "$TMP/out" | grep -q '<!-- ltm:recall'; then
-    notice "ltm query 沒有回傳可用的回想區塊"
+# 驗證輸出真的是**完整**區塊（verify R2 N7／R3 codex #4）：第一行必須**正好**是開標記、
+# 最後一行必須**正好**是閉標記。先前只查「第一行含開標記子字串」，會放行未閉合或首行帶垃圾的
+# 輸出——而缺閉標記正好破壞這個區塊要給模型的資料邊界。exit 0 但輸出不合格 → 可見降級，不靜默。
+if [ ! -s "$TMP/out" ] \
+    || [ "$(head -1 "$TMP/out")" != "$RECALL_OPEN" ] \
+    || [ "$(tail -1 "$TMP/out")" != "$RECALL_CLOSE" ]; then
+    notice "ltm query 沒有回傳完整的回想區塊"
 fi
 cat "$TMP/out"; stat hit
 exit 0

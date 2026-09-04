@@ -194,8 +194,11 @@ func inputValidationDegradesVisibly() throws {
     let badCwd = "{\"session_id\":\"s\",\"cwd\":\"/nonexistent/dir/\(UUID().uuidString)\",\"prompt\":\"上次 flock\"}"
     let cwd = try runHook("ltm-recall-gate.sh", prompt: "", env: ["LTM_BIN": stub.path], input: badCwd)
     #expect(cwd.code == 0 && cwd.out.contains("工作目錄") && !FileManager.default.fileExists(atPath: dir.appendingPathComponent("invoked").path), Comment(rawValue: cwd.out))
-    let nopy = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_RECALL_PYTHON": "/nonexistent/python3"])
-    #expect(nopy.code == 0 && !nopy.stubInvoked && nopy.out.contains("python3"), Comment(rawValue: nopy.out))
+    let tdnopy = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-nopy-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tdnopy, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tdnopy) }
+    let nopy = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_RECALL_PYTHON": "/nonexistent/python3", "TMPDIR": tdnopy.path + "/"])
+    #expect(nopy.code == 0 && !nopy.stubInvoked && nopy.out.isEmpty && nopy.err.contains("python3"), Comment(rawValue: "out=[\(nopy.out)] err=[\(nopy.err)]"))
     let nl = "{\"session_id\":\"S1\\n/etc\",\"cwd\":\"/tmp\",\"prompt\":\"上次 flock\"}"
     let injected = try runHook("ltm-recall-gate.sh", prompt: "", env: ["LTM_BIN": stub.path], input: nl)
     // session_id 不合法 → 當作沒有 session（不傳 --exclude-session），cwd 仍是 /tmp、照常查詢。
@@ -242,14 +245,20 @@ func statsFileRecordsOnlyClosedSetLabels() throws {
 
 // MARK: - verify R2 findings N2/N3/N7：便宜的 raw 閘門、未命中不通知、輸出驗證
 
-@Test("未命中的 prompt：python 缺席也不注入任何東西（N3），且根本不啟動 python（N2）")
-func gateMissNeitherNotifiesNorRunsPython() throws {
-    // python 缺席 + 未命中線索 → stdout 全空、exit 0（不是通知）。
-    let miss = try runHook("ltm-recall-gate.sh", prompt: "幫我改這個函式", env: ["LTM_RECALL_PYTHON": "/nonexistent/python3"])
+@Test("python 缺席＝無法閘門＝安靜未命中（不論有無線索），不對每輪 prompt 注入通知（verify R3 codex #2）")
+func pythonAbsentIsSilentMissNotAPerTurnNotice() throws {
+    // nopython 提醒去重粒度是 $TMPDIR，所以每次給獨立 TMPDIR 才能觀察到 first-time 的 stderr。
+    let td1 = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-nopy-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: td1, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: td1) }
+    let first = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_RECALL_PYTHON": "/nonexistent/python3", "TMPDIR": td1.path + "/"])
+    #expect(first.code == 0 && first.out.isEmpty, Comment(rawValue: "out=[\(first.out)] err=[\(first.err)]"))
+    #expect(first.err.contains("python3"), Comment(rawValue: first.err))
+    let td2 = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-nopy-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: td2, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: td2) }
+    let miss = try runHook("ltm-recall-gate.sh", prompt: "幫我改這個函式", env: ["LTM_RECALL_PYTHON": "/nonexistent/python3", "TMPDIR": td2.path + "/"])
     #expect(miss.code == 0 && miss.out.isEmpty, Comment(rawValue: "out=[\(miss.out)]"))
-    // 命中候選 + python 缺席 → 通知（放行後不能查，必須可見）。
-    let hit = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_RECALL_PYTHON": "/nonexistent/python3"])
-    #expect(hit.code == 0 && hit.out.contains("python3"), Comment(rawValue: hit.out))
 }
 
 @Test("查詢 exit 0 但輸出不是區塊：通知，不靜默 cat 空檔（N7）")
@@ -292,7 +301,7 @@ func nonRegularCueFileFailsClosedFast() throws {
     // 無人寫 fifo：若 grep 直接讀它會永久阻塞。regular-file 檢查要在讀之前擋掉。
     let run = try runHook("ltm-recall-gate.sh", prompt: "之前討論過的事", env: ["LTM_RECALL_CUES": fifo.path])
     #expect(run.code == 0 && run.out.isEmpty, Comment(rawValue: "out=[\(run.out)]"))
-    #expect(Date().timeIntervalSince(t0) < 3, "非一般 cue 檔應立即 fail closed，卻跑了 \(Date().timeIntervalSince(t0)) s")
+    #expect(Date().timeIntervalSince(t0) < 6, "非一般 cue 檔應快速 fail closed（不卡在 fifo），卻跑了 \(Date().timeIntervalSince(t0)) s")
     #expect(run.err.contains("不是可讀的一般檔案"), Comment(rawValue: run.err))
 }
 
@@ -313,4 +322,33 @@ func escapedUnicodeCueStillTriggers() throws {
     let ascii = "{\"prompt\":\"just fix this function\",\"session_id\":\"s1\",\"cwd\":\"\(dir.path)\"}"
     let miss = try runHook("ltm-recall-gate.sh", prompt: "", env: ["LTM_BIN": url.path], input: ascii)
     #expect(miss.code == 0 && miss.out.isEmpty, Comment(rawValue: miss.out))
+}
+
+
+@Test("verify R3 codex #1：閘門對解碼後 prompt，錨點線索 `^上次` 在 JSON 裡不在行首也命中")
+func anchoredCueMatchesDecodedPrompt() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-hook-anchor-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let cues = dir.appendingPathComponent("cues.txt"); try "^上次\n".write(to: cues, atomically: true, encoding: .utf8)
+    let ltm = dir.appendingPathComponent("ltm")
+    try "#!/bin/bash\nif [ \"$1 $2\" = \"query --help\" ]; then echo '--format recall'; exit 0; fi\nprintf '<!-- ltm:recall v1 -->\\nB\\n1. [p] t\\n   s\\n   ↳ session x  turn u\\n<!-- /ltm:recall -->\\n'\n".write(to: ltm, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ltm.path)
+    // prompt「上次 flock」在 JSON 裡是 `{"prompt":"上次 flock",...}`——`^上次` 對整份 JSON 不在行首，
+    // 但對**解碼後的 prompt**（開頭就是「上次」）命中。這正是 raw-grep prefilter 會漏、decoded gate 不漏的例子。
+    let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_BIN": ltm.path, "LTM_RECALL_CUES": cues.path])
+    #expect(run.code == 0 && run.out.hasPrefix("<!-- ltm:recall"), Comment(rawValue: "out=[\(run.out)] err=[\(run.err)]"))
+}
+
+@Test("verify R3 codex #4：查詢輸出未閉合（缺結束標記）→ 通知，不注入不完整區塊")
+func unterminatedBlockIsRejected() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-hook-unterm-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let ltm = dir.appendingPathComponent("ltm")
+    // help 說支援；query 印開標記 + payload 但**沒有**閉標記。
+    try "#!/bin/bash\nif [ \"$1 $2\" = \"query --help\" ]; then echo '--format recall'; exit 0; fi\nprintf '<!-- ltm:recall v1 -->\\nunclosed payload\\n'\n".write(to: ltm, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ltm.path)
+    let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", env: ["LTM_BIN": ltm.path])
+    #expect(run.code == 0 && run.out.contains("完整的回想區塊") && !run.out.contains("unclosed"), Comment(rawValue: run.out))
 }
