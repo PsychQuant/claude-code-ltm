@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+（無）
+
+## [0.5.0] - 2026-09-05
+
 ### Added
 
 - **主動回想（proactive recall，#64）**：plugin 新增兩個 hook。`UserPromptSubmit` hook
