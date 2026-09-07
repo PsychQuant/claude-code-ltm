@@ -59,10 +59,15 @@
   自己。量測命令列、`ltm_query query=…`、被引述進散文的那句，都是這個形狀。self 那一列的命中品質
   這一輪不可比；耗時仍可比。**`clean` 不是「乾淨」的證明**：它只說前 k 名沒有 snippet 含原文——
   排在前面但不含原文的殘影，它看不見。`empty` 是零命中——查詢已經對不到任何東西，這不是 clean。
-- **`tool=<n>`** = 前 k 名裡含 `⟨tool ` 的 snippet 數。**它不是污染訊號**：工具 metadata chunk
-  佔語料的比例高到「前 k 名裡有一個」幾乎恆真（#67 的診斷有數字，本目錄沒有紀錄，這裡不複述），
-  拿它當 dirty 會讓每一列都不可比。它是 #62（self-hit 的檢索層排除）要移動的那個量，印出來給
-  #62 的前後比較看——**所以 #62 前後 `self`／`tool` 的變化量的是 #62 的效果，不是語料變乾淨了**。
+- **`tool=<n>`** = 前 k 名裡含 `⟨tool ` 的 snippet 數。**它不是污染訊號**，理由是它量的不是「這條
+  查詢」而是「前 k 名裡有沒有工具 chunk」——而後者的預期是常見的：工具 metadata chunk 佔 chunk 表
+  的四成（#67 的診斷有數字，**那是 chunk 表的份額、不是前 k 名的出現率**——檢索不是均勻抽樣，
+  兩者不相等，實際的前 k 名出現率要在真索引上跑一次才知道，而那一次還沒跑），拿它當 dirty 會讓
+  多數列不可比。它是 #62（self-hit 的檢索層排除）要移動的那個量，印出來給 #62 的前後比較看
+  ——**所以 #62 前後 `self`／`tool` 的變化量的是 #62 的效果加上兩次量測之間語料的成長，不是語料
+  變乾淨了**（#62 自己的實作 session 就在談 self-hit 與工具 chunk，特別容易排進這些查詢的前 k 名）。
+  另外，`tool=<n>` 也會數到**談論**這個標記的散文——純字串 `message.content` 不截斷、整段進索引，
+  DA R2 在全語料數到 7 筆這種紀錄、6 筆是 #63 自己的 session 寫的；量會隨討論儀器的 session 增加。
   第一版的判準是「含 `⟨tool ` 或含 `ltm query`」就 dirty；#63 verify 的 devil's-advocate 指出那量的是
   「有沒有工具 chunk」不是「這條查詢被自己污染了沒有」，於是改成把命中拿去跟查詢比對。
 - `<ms>` 是 `ltm` 行程 fork→exit 的 monotonic 牆鐘（含 process 啟動、查詢前的增量併入、檢索、
@@ -74,14 +79,26 @@
    不在 Bash 命令列上帶查詢、不放進 `Grep` 工具的 `pattern`、不餵給 `ltm_query` MCP 工具、不寫進
    任何工具的 `description`、不貼進對話、不在回覆裡引述——連「第 N 條是『…』」這種半句都不行。
    `cat`／`Read`／`git blame` 查詢檔也不做（理由見上表下方那一段）。
-   編輯查詢檔用 Write／Edit 工具（`content`／`old_string`／`new_string` 不在那七個欄位裡）或在
-   Claude Code 之外的編輯器。要把 diff 交給 review agent，**給檔案路徑讓它自己 Read**，不要把
-   diff 內嵌進 prompt——agent 的 prompt 是它逐字稿裡的 `text` block；唯獨查詢檔本身，review agent
+   **編輯查詢檔在 Claude Code 之外的編輯器做**。在 session 裡用 Write／Edit 工具是**今天**索引安全
+   的（`content`／`old_string`／`new_string` 不在那七個欄位裡），但它不守本規則劃的 jsonl 邊界：
+   Write 的 `content`、Edit 的 `toolUseResult.originalFile`（**整份檔案**，不是改到的那幾行）、Read／
+   Edit 之後的 `attachment` 紀錄，每一次都把完整查詢集存進 jsonl 一份。#63 實作與 verify 期間就這樣
+   存了六份（DA R2 逐筆數過：Write 1、`toolUseResult` 2、attachment 1、Edit originalFile 3，另有
+   R1 verify 的 `diff.patch` 被一個 reviewer 讀進逐字稿），所以 **#6 一旦把 tool payload 收進索引，
+   這一組查詢集就整份作廢**——這是已經發生的曝險，不是 if。第一版把 Write／Edit 與外部編輯器並列，
+   理由是索引層的；本規則的邊界在 jsonl，兩者不等價。
+   要把 diff 交給 review agent，**給檔案路徑讓它自己 Read**，不要把 diff 內嵌進 prompt——agent 的
+   prompt 是它逐字稿裡的 `text` block；而且 diff 要在設了 `-diff` 的 commit 之後產生（R1 verify 的
+   `diff.patch` 產生於 `.gitattributes` 存在之前，查詢檔在裡面是明文）。唯獨查詢檔本身，review agent
    只准讀檔頭（`grep '^#'`）與統計非註解行（條數、長度、重複），不准讀內容。
 2. **量測輸出只印編號。** 命中內容、snippet、查詢文字一律不印；要看命中內容，在 Claude Code
    **之外**的 shell 跑（那個 shell 的逐字稿不在語料裡）。
-3. **每次量測前重驗。** 選定當下乾淨不代表永遠乾淨——跑一次 `measure-baseline.sh`，非 `clean`
-   的條目在那一輪的命中品質欄標記為不可比。
+3. **每次量測前重驗，`self` 要分辨成因。** 選定當下乾淨不代表永遠乾淨——跑一次 `measure-baseline.sh`。
+   `self` 的條目先在 Claude Code **之外**讀它的命中：若含查詢原文的是量測命令、`ltm_query`、被引述的
+   散文——那是儀器自己的殘影，語料不可變、它永遠不會走，該條**退役**（補進退役清單、換一條），不是
+   標記那一輪；若是語料裡本來就逐字含這串字的實質 turn，那是正常召回，該條照用、在紀錄裡註明。
+   `empty`／`error` 的條目那一輪不可比。第一版只寫「標記那一輪不可比」——對儀器自己造成的 `self`
+   那是永遠標記，等於讓查詢集安靜地縮水而沒有退役紀錄（DA R2 D2）。
 
 ### 它擋不住什麼（誠實寫下；這一節必然不完整——它列的是想到的，不是全部）
 
@@ -91,17 +108,20 @@
 - 語料裡本來就有恰好逐字含該字串的**實質** turn（例如退役查詢裡的「資格考」有一則真的使用者 turn）——
   那不是污染，是正常召回；`self` 會把它標成 self，分不出來，讀結果時要在 session 之外看命中。
   反過來，空白與大小寫以外的改寫（全形／半形、標點、換序）`self` 看不到。
-- 查詢原文落在 metadata 欄位 200 字元截斷**之後**的那種命令——那段文字不在索引裡，`self` 看不到，
-  但它也不會靠那段文字排名；會排上來的是同一則命令的前 200 字元（`tool=<n>` 會算到它）。
-- #6 若把 tool payload 收進索引——那會**回溯**索引過去每一次 Write 查詢檔的 `content`。
-  到時候查詢集要整份換掉。
-- **同目錄另一組儀器沒有這套紀律**：`scripts/rrf-tie-queries.txt`（104 條）、
-  `scripts/rrf-tie-mechanism.sh`（查詢走 argv、預設查詢寫死在命令列、輸出表第一欄就是查詢）、
-  `scripts/measure-rrf-ties.swift`（失敗路徑印查詢）。它們支撐 `2026-08-22-rrf-tie-rate.md`，量的是
-  104 條的**聚合**平手率而不是「前 1 名是誰」，所以污染的傷害形狀不同——但在 session 裡跑一次，
-  那 104 條就帶著自己的殘影了；`rrf-tie-mechanism.sh` 第 20 行還有八條預設查詢寫死在腳本裡，
-  **打開那支腳本看**就會把它們帶進 `text` block。所以：**不要在 session 裡跑、顯示、或引述它們**
-  （`rrf-tie-queries.txt` 已一併設 `-diff`）；把它們收進同一套紀律是獨立工作，追蹤於 #68。
+- 查詢原文**跨過**或落在 metadata 欄位 200 字元截斷之後的那種命令。完全落在之後：那段文字不在索引裡，
+  `self` 看不到、它也不會靠那段文字排名。**跨過邊界**：查詢的前綴進了索引、會靠它排名，`self` 卻判
+  `clean`（DA R2 實測：19 字元的佔位查詢前面填 185 字元，14 個字元進索引、判 clean）。#63 的 root
+  cause 那種 `for q in …` 一行多條查詢的命令，後面的查詢正好容易落在這個帶。
+- #6 若把 tool payload 收進索引——現在 jsonl 裡的六份完整副本（規則 1 列的那些）**回溯**進索引，
+  查詢集整份換掉，而且換的那一組要從第一天就只在 Claude Code 之外編輯。
+- **同目錄另一組儀器沒有這套紀律**（兩支腳本、兩組查詢，不要混）：
+  `scripts/measure-rrf-ties.swift` 讀 `scripts/rrf-tie-queries.txt`（104 條），失敗路徑會印出失敗的
+  查詢字串；`scripts/rrf-tie-mechanism.sh` **不讀那個檔**——查詢走 argv、第 20 行寫死八條自己的預設
+  查詢、輸出表第一欄就是查詢。兩者支撐 `2026-08-22-rrf-tie-rate.md`，量的是**聚合**平手率而不是
+  「前 1 名是誰」，所以污染的傷害形狀不同——但 `measure-rrf-ties.swift` 在 session 裡跑到失敗就把
+  失敗的那幾條印進 tool_result，`rrf-tie-mechanism.sh` 的八條則是**打開那支腳本看**就進 `text` block
+  （R2 verify 有兩個 reviewer 為了核對這一段而讀了它）。所以：**不要在 session 裡跑、顯示、或引述
+  它們**（`rrf-tie-queries.txt` 已一併設 `-diff`）；把它們收進同一套紀律是獨立工作，追蹤於 #68。
 - **目前的八條尚未在真實索引上驗過前 5 名**（檔頭第 1 條寫明了原因與補驗方式）。在那之前，
   「乾淨」是宣稱不是量測。
 
