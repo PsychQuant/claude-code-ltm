@@ -13,7 +13,8 @@
   大小寫摺疊），`tool=<n>` 只是觀察值不是污染訊號；查詢文字不進 stdout／stderr、含 `bash -x`／
   `SHELLOPTS`／`BASH_ENV` 的 `set -x`（PS4 命令替換除外，檔頭寫明）；任一 error 以 1 離開；
   行定義只認 ASCII 空白、不隨 locale 變）＋ `docs/measurements/README.md` 的規則段
-  與「什麼會進索引」的表（`text` block 與七個 tool metadata 欄位會，tool_result 內容今天不會）。
+  與「什麼會進索引」的表（純字串 `message.content`、`text` block 與七個 tool metadata 欄位會，
+  tool_result 內容今天不會）。
   2026-09-01 那次量測命令列上的六條查詢退役（前三條實測第一名是那則命令，後三條依同一機制推定）；
   `2026-09-01-scan-parallelism.md` 補可比性註記（耗時可比、命中未記、新舊儀器不可對齊）。
 

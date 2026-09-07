@@ -19,7 +19,7 @@
 
 | 逐字稿裡的位置 | 進索引？ | 查法 |
 |---|---|---|
-| `message.content` 是**純字串**（使用者鍵入的 prompt 常是這一種） | **會**，整段、不截斷 | `Sources/LTMIndex/CorpusScanner.swift` 的 `indexableText` 第一行 `if let text = content as? String`。結構普查（只印計數）：user 紀錄裡約一成走這條路 |
+| `message.content` 是**純字串**（使用者鍵入的 prompt 常是這一種） | **會**，整段、不截斷 | `Sources/LTMIndex/CorpusScanner.swift` 的 `indexableText` 第一行 `if let text = content as? String`。結構普查（只印計數；掃 `~/.claude/projects/**/*.jsonl`，留頂層 `type` 為 user／assistant 的紀錄，統計 `message.content` 是字串還是陣列）：2026-09-07 全語料 user 紀錄約 8% 走這條路 |
 | `text` block（使用者輸入、Claude 的散文、compaction 摘要） | **會**，全文 | 同檔 `indexableText`，`case "text"`。compaction 摘要那句的查法：掃 `~/.claude/projects/**/*.jsonl` 含 `isCompactSummary` 的行、統計頂層 `type`——全部是 `user`，所以通得過 `chunk(from:)` 的 user/assistant 守衛（只印計數，不讀內容） |
 | `tool_use` 的工具名＋七個 metadata 欄位：`command` / `file_path` / `path` / `pattern` / `query` / `url` / `description`，各取前 200 字元 | **會** | 同檔 `toolMetadataFields`（封閉列舉，隨該常數變動；改它就要回來改這段）與 `toolUseMetadata`（工具名先進 `pieces`） |
 | `tool_result` 的內容（Bash 的 stdout、`Read` 讀到的檔案） | 今天**不會**，只記 `⟨tool_result ok\|error⟩` 標記 | 同檔 `case "tool_result"`；`Tests/LTMIndexTests/CorpusScannerTests.swift` 的「tool_result 只記成敗，不記內容」。**這是 #6 追蹤中的決定，可能改變** |
@@ -36,10 +36,11 @@
 
 - 查詢集：`scripts/baseline-queries.txt`（一行一條、`#` 註解）。它的檔頭寫著同樣的規則——兩處要一起改。
   `.gitattributes` 對它設了 `-diff`（`scripts/rrf-tie-queries.txt` 同）。它**只**改變 diff 生成：
-  `git diff`／`git show <rev>`／`git log -p`／`git grep` 只印「Binary files differ」；凡是把 blob 原樣
-  吐出來的命令照樣帶全文——`git show <rev>:<path>`、`git blame`、`git cat-file -p`、`git archive`、
-  `git diff --no-index`、`git diff --text`、`git format-patch`（base85 binary literal，撿不回明文但
-  bytes 都在）。**這份例外清單會漏，判準是「它會不會把 blob 原樣吐出來」**；要看內容在 session
+  `git diff`／`git show <rev>`／`git log -p` 只印「Binary files differ」、`git grep` 只印
+  「Binary file … matches」；凡是把 blob 原樣吐出來的命令照樣帶全文——`git show <rev>:<path>`、
+  `git blame`、`git cat-file -p`、`git archive`、`git diff --text`、`git diff --no-index`（對 **repo 外**
+  的路徑；屬性跟著 repo，複製出去就裸露）、`git format-patch`（base85 blob，肉眼讀不到，但 `git apply`
+  一步還原，等同全文）。**這份例外清單會漏，判準是「它會不會把 blob 原樣吐出來」**；要看內容在 session
   **之外**做。GitHub 網頁的檔案檢視與 raw 也不受影響。
 - 量測：`scripts/measure-baseline.sh [k]`——讀檔、逐條跑
   `ltm query --all-projects --k <k> --json -- <查詢>`（旗標以腳本為準；注意 `--all-projects`
@@ -50,10 +51,13 @@
   密鑰用命令替換餵進環境（`LTM_ANCHOR_KEY="$(~/bin/ltm memory --export-key)" scripts/measure-baseline.sh`），
   不落地；查詢檔的解析不依賴 cwd（腳本用自己所在的目錄）。
 - verdict 是**封閉字母表**：`clean tool=<n>`／`self tool=<n>`／`empty tool=0`／
-  `error(<rc>|sig<N>|exec|json|shape|judge)`。「封閉」由 `Tests/LTMMCPTests/BaselineQueryFileTests.swift`
+  `error(<rc>|sig<N>|blank|exec|json|shape|judge)`。「封閉」由 `Tests/LTMMCPTests/BaselineQueryFileTests.swift`
   的**同步測試**執行：它把腳本檔頭的 token 列、本行的 token 列、測試自己的 `errorTokens`、腳本程式碼
   裡實際的 `error(...)` 輸出點四個集合逐一比對，任一處多一個少一個都紅；六個 error token 每一個
   也各有一條測試實際產生它。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。
+  `blank` 是那一行在 Unicode 空白摺疊後是空的（只有 U+3000 這類非 ASCII 空白）——行定義把它算成條目、
+  judge 卻會得到空針，空針對任何命中都算 self，所以不跑 ltm、直接報 error；測試同時斷言查詢檔裡沒有
+  這類字元。
   離開碼全表在腳本檔頭。
 - **`self`** = 前 k 名至少一個 snippet **含這條查詢的原文**（空白摺疊、大小寫摺疊後的子字串比對）——儀器看見了
   自己。量測命令列、`ltm_query query=…`、被引述進散文的那句，都是這個形狀。self 那一列的命中品質
@@ -82,15 +86,21 @@
    **編輯查詢檔在 Claude Code 之外的編輯器做**。在 session 裡用 Write／Edit 工具是**今天**索引安全
    的（`content`／`old_string`／`new_string` 不在那七個欄位裡），但它不守本規則劃的 jsonl 邊界：
    Write 的 `content`、Edit 的 `toolUseResult.originalFile`（**整份檔案**，不是改到的那幾行）、Read／
-   Edit 之後的 `attachment` 紀錄，每一次都把完整查詢集存進 jsonl 一份。#63 實作與 verify 期間就這樣
-   存了六份（DA R2 逐筆數過：Write 1、`toolUseResult` 2、attachment 1、Edit originalFile 3，另有
-   R1 verify 的 `diff.patch` 被一個 reviewer 讀進逐字稿），所以 **#6 一旦把 tool payload 收進索引，
-   這一組查詢集就整份作廢**——這是已經發生的曝險，不是 if。第一版把 Write／Edit 與外部編輯器並列，
-   理由是索引層的；本規則的邊界在 jsonl，兩者不等價。
+   Edit 之後的 `attachment` 紀錄，每一次都把完整查詢集存進 jsonl 一份——而**印**也會：一個 Bash 命令把
+   整份檔案印進 stdout，就是一筆 `toolUseResult.stdout`。判準是「這個動作會不會把整份檔案送進 jsonl」，
+   上面是例子不是清單。#63 實作與 verify 期間就這樣存了**至少 8 筆**含全部查詢的紀錄（2026-09-07
+   R3 verify 的 security lens 全語料數的，含一筆 Bash stdout 落在 `subagents` project；R1 verify 的
+   `diff.patch` 另被一個 reviewer 讀進逐字稿）。查法（只印計數、執行期讀查詢檔、不上命令列）：掃
+   `~/.claude/projects/**/*.jsonl`，對每筆遞迴走訪所有字串葉節點，數「同時含全部 N 條查詢」的紀錄與其
+   json 路徑。所以 **#6 一旦把 tool payload 收進索引，這一組查詢集就整份作廢**——這是已經發生的曝險，
+   不是 if。第一版把 Write／Edit 與外部編輯器並列，理由是索引層的；本規則的邊界在 jsonl，兩者不等價。
+   （本段與檔頭的第二版是在 session 內用 Bash 跑一支只改註解行的 python 改的——檔案內容沒有經過任何
+   工具的 input 或 result，所以沒有再多一筆。）
    要把 diff 交給 review agent，**給檔案路徑讓它自己 Read**，不要把 diff 內嵌進 prompt——agent 的
    prompt 是它逐字稿裡的 `text` block；而且 diff 要在設了 `-diff` 的 commit 之後產生（R1 verify 的
-   `diff.patch` 產生於 `.gitattributes` 存在之前，查詢檔在裡面是明文）。唯獨查詢檔本身，review agent
-   只准讀檔頭（`grep '^#'`）與統計非註解行（條數、長度、重複），不准讀內容。
+   `diff.patch` 產生於 `.gitattributes` 存在之前，查詢檔在裡面是明文）。唯獨查詢檔——**以及它的任何副本或備份**
+   （變異測試 `cp` 出來的 `.good`、job tmp 裡的中間檔；判準是內容不是路徑）——review agent 只准讀檔頭
+   （`grep '^#'`）與統計非註解行（條數、長度、重複），不准讀內容；含查詢的備份還原後立刻刪。
 2. **量測輸出只印編號。** 命中內容、snippet、查詢文字一律不印；要看命中內容，在 Claude Code
    **之外**的 shell 跑（那個 shell 的逐字稿不在語料裡）。
 3. **每次量測前重驗，`self` 要分辨成因。** 選定當下乾淨不代表永遠乾淨——跑一次 `measure-baseline.sh`。
@@ -112,7 +122,7 @@
   `self` 看不到、它也不會靠那段文字排名。**跨過邊界**：查詢的前綴進了索引、會靠它排名，`self` 卻判
   `clean`（DA R2 實測：19 字元的佔位查詢前面填 185 字元，14 個字元進索引、判 clean）。#63 的 root
   cause 那種 `for q in …` 一行多條查詢的命令，後面的查詢正好容易落在這個帶。
-- #6 若把 tool payload 收進索引——現在 jsonl 裡的六份完整副本（規則 1 列的那些）**回溯**進索引，
+- #6 若把 tool payload 收進索引——現在 jsonl 裡至少 8 筆完整副本（規則 1 的計數與查法）**回溯**進索引，
   查詢集整份換掉，而且換的那一組要從第一天就只在 Claude Code 之外編輯。
 - **同目錄另一組儀器沒有這套紀律**（兩支腳本、兩組查詢，不要混）：
   `scripts/measure-rrf-ties.swift` 讀 `scripts/rrf-tie-queries.txt`（104 條），失敗路徑會印出失敗的

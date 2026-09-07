@@ -6,22 +6,25 @@
 # 擋不住的：`BASH_ENV`／`PS4` 裡刻意放一個會讀查詢檔的命令替換——trace 第一行 `set +x` 時 PS4 先展開。
 # 那等同直接 cat 查詢檔，是操作者的動作不是本腳本的洩漏面；寫在這裡是因為上一句是全稱。
 #
-# 為什麼這麼小氣：這支腳本會在 Claude Code session 裡被跑。今天會進索引的是逐字稿裡的 `text` block
-# （使用者輸入、Claude 的散文）與 tool_use 的七個 metadata 欄位（`CorpusScanner.toolMetadataFields`，
-# 含 Bash 的 `command=`／`description=`、`ltm_query` MCP 工具的 `query=`）。Bash 的 stdout 是 tool_result、
+# 為什麼這麼小氣：這支腳本會在 Claude Code session 裡被跑。今天會進索引的是逐字稿裡的純字串
+# `message.content`（使用者鍵入的 prompt 常是這一種，整段）、`text` block（使用者輸入、Claude 的散文）
+# 與 tool_use 的七個 metadata 欄位（`CorpusScanner.toolMetadataFields`，含 Bash 的 `command=`／
+# `description=`、`ltm_query` MCP 工具的 `query=`）。Bash 的 stdout 是 tool_result、
 # 今天不被索引——但 Claude 引述輸出的那句散文一定被索引。印了查詢字串，就等著被引述（#63 的 root cause）。
 #
-# verdict（封閉字母表；只有這幾個，不得類推。三處列舉——本檔頭、docs/measurements/README.md、
-# 測試的 errorTokens——與程式碼的實際輸出點由 Tests/LTMMCPTests/BaselineQueryFileTests.swift 的
-# 同步測試逐一對應，改任何一處都會變紅）：
+# verdict（封閉字母表；只有這幾個，不得類推。四處列舉——本檔頭的「error tokens」行、`ERROR_TOKENS`
+# 變數、docs/measurements/README.md、測試的 errorTokens——與程式碼裡實際的 `error(...)` 輸出點由
+# Tests/LTMMCPTests/BaselineQueryFileTests.swift 的同步測試逐一對應；輸出點若寫成它認不出的形狀
+# （字面 token、`{rc}`、`sig{-rc}` 以外）測試直接紅，不是略過）：
 #   clean tool=<n>   前 k 名沒有任何一個 snippet 含**這條查詢的原文**（空白摺疊、大小寫摺疊後的子字串比對）。
 #   self  tool=<n>   前 k 名至少一個 snippet 含這條查詢的原文——儀器看見了自己（量測命令列、
 #                    `ltm_query query=…`、被引述的那句散文，都是這個形狀）。這一輪該條的命中品質不可比；
 #                    耗時仍可比。
 #   empty tool=0     零命中。查詢已經對不到任何東西——這不是 clean，但也不計入離開碼。
 #   error(<token>)   這一列沒量到。token 是下面這一行的封閉集合：
-#   error tokens：<rc> sig<N> exec json shape judge
-#                    <rc>＝ltm 非零離開碼；sig<N>＝ltm 被訊號 N 殺掉；exec＝ltm 起不來；
+#   error tokens：<rc> sig<N> blank exec json shape judge
+#                    <rc>＝ltm 非零離開碼；sig<N>＝ltm 被訊號 N 殺掉；blank＝這一行在 Unicode 空白摺疊
+#                    後是空的（例如只有 U+3000；不跑 ltm，因為空針對任何命中都算 self）；exec＝ltm 起不來；
 #                    json＝輸出不是 JSON；shape＝JSON 不是「每個都帶字串 snippet 的物件陣列」；
 #                    judge＝judge 自己掛了或印了不合形狀的東西。
 # `tool=<n>` 是前 k 名裡含 `⟨tool ` 的 snippet 數（工具 metadata chunk，加上引述這個標記的散文）。
@@ -46,9 +49,10 @@
 # 離開碼：0 全部量到（含 empty）；1 任一列 error(…)（每列照印完才離開）；64 k 不是 1–1000 的整數；
 # 65 查詢檔沒有任何非註解行；66 查詢檔不是可讀的一般檔案；69 ltm 不是可執行的一般檔案；70 沒有 python3。
 #
-# 「第 N 條非註解行」：去掉行首行尾的 **ASCII** 空白（空格、tab、CR、VT、FF；刻意不用 [:space:]，
-# 它隨 locale 變、Swift 的不變）之後，空行與 `#` 開頭的行不算。全形空白（U+3000）與 NBSP 不是空白
-# ——測試同時斷言查詢檔裡沒有這類字元，所以這條定義在腳本、測試、檔案三邊一致。
+# 「第 N 條非註解行」：去掉行首行尾的 **ASCII** 空白（空格、tab、CR、VT、FF；`read` 已吃掉 LF；刻意不用
+# [:space:]，它隨 locale 變、Swift 的不變）之後，空行與 `#` 開頭的行不算。全形空白（U+3000）與 NBSP 不是
+# 空白——測試同時斷言查詢檔裡沒有這類字元，所以這條定義在腳本、測試、檔案三邊一致（含 CRLF：測試用
+# `components(separatedBy: "\n")` 切行，CR 留在行尾由同一個 ASCII 集剝掉）。
 #
 # 用法：LTM_ANCHOR_KEY="$(~/bin/ltm memory --export-key)" scripts/measure-baseline.sh [k]
 #   LTM_BIN（預設 ~/bin/ltm）、LTM_BASELINE_QUERIES（預設本腳本旁的 baseline-queries.txt，不依賴 cwd）、
@@ -70,6 +74,11 @@ command -v python3 >/dev/null 2>&1 || { echo "需要 python3 計時與解析 --j
 RUN='
 import json, subprocess, sys, time
 ltm, k, query = sys.argv[1], sys.argv[2], sys.argv[3]
+def norm(s):
+    return " ".join(s.split()).casefold()
+q = norm(query)
+if not q:
+    print("0 error(blank)"); sys.exit(0)
 t0 = time.monotonic_ns()
 try:
     p = subprocess.run([ltm, "query", "--all-projects", "--k", k, "--json", "--", query],
@@ -88,24 +97,28 @@ if not isinstance(hits, list) or not all(isinstance(h, dict) and isinstance(h.ge
     print(f"{ms} error(shape)"); sys.exit(0)
 if not hits:
     print(f"{ms} empty tool=0"); sys.exit(0)
-def norm(s):
-    return " ".join(s.split()).casefold()
 tool = sum(1 for h in hits if "⟨tool " in h["snippet"])
-q = norm(query)
 selfhit = any(q in norm(h["snippet"]) for h in hits)
 print(f"{ms} " + ("self" if selfhit else "clean") + f" tool={tool}")
 '
-# judge 印出來的那一列在執行期也要合形狀（不只靠測試釘）：一行、<ms> 全數字、verdict 在字母表內。
-# 不合就整列換成 error(judge)——寧可少一列量測，也不讓不明字串上 stdout。
+# judge 印出來的那一列在執行期也要合形狀（不只靠測試釘）：<ms> 全數字、verdict 在字母表內、
+# error token 只能是數字、sig＋數字、或 ERROR_TOKENS 裡的字面（不是「像 token 的字元」——bash 3.2 的
+# [a-z] 隨 locale 排序而變，字面比對不會）。不合就整列換成 error(judge)——寧可少一列量測，也不讓不明
+# 字串上 stdout。多行的列不必另外擋：每個位元組都落在 ms（只准數字）或 rest（各臂完整限制到結尾）裡。
+ERROR_TOKENS="blank exec json shape judge"
 valid_row() {
-    case "$1" in *$'\n'*) return 1 ;; esac
     local ms="${1%% *}" rest="${1#* }"
     case "$ms" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$ms" != "$1" ] || return 1
     case "$rest" in
         'clean tool='*|'self tool='*) case "${rest#* tool=}" in ''|*[!0-9]*) return 1 ;; esac ;;
         'empty tool=0') ;;
-        'error('*')') local tok="${rest#error(}"; tok="${tok%)}"; case "$tok" in ''|*[!0-9a-z]*) return 1 ;; esac ;;
+        'error('*')')
+            local tok="${rest#error(}"; tok="${tok%)}"
+            case "$tok" in
+                '') return 1 ;;
+                sig*) case "${tok#sig}" in ''|*[!0-9]*) return 1 ;; esac ;;
+                *[!0-9]*) case " $ERROR_TOKENS " in *" $tok "*) ;; *) return 1 ;; esac ;;
+            esac ;;
         *) return 1 ;;
     esac
     return 0
@@ -119,7 +132,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     n=$((n + 1))
     row=$(python3 -c "$RUN" "$LTM" "$K" "$line" 2>/dev/null) || row=""
     valid_row "$row" || row="0 error(judge)"
-    case "$row" in *' error('*) bad=$((bad + 1)) ;; esac
+    case "${row#* }" in error*) bad=$((bad + 1)) ;; esac
     printf '#%d %sms %s\n' "$n" "${row%% *}" "${row#* }"
 done < "$QF"
 [ "$n" -gt 0 ] || { echo "查詢檔沒有任何非註解行" >&2; exit 65; }

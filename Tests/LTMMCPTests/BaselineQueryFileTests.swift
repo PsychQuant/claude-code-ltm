@@ -6,10 +6,11 @@ import Testing
 /// 量測腳本的守衛各有一條測試扛。
 ///
 /// 「各有一條測試扛」的查法就是變異測試：把腳本裡的一條守衛退掉、跑本檔、必須變紅。#63 verify
-/// R2 的 logic lens 逐條退過 30 處，11 處綠——那 11 處在 R2 verify-fix 裡不是補上驅動它的測試
-/// （error(exec)、error(sig<N>)、snippet 非字串、66、`-r`、`-x`、70、最後一行沒換行、k 非數字
-/// 的訊息、執行期列形狀）就是拆掉（`bool(q)`、python 端的 stderr=DEVNULL、獨立的 CR 剝除）。
-/// 這句話**只涵蓋那一輪列出的守衛**；新加的守衛要自己再退一次。
+/// R2 的 logic lens 逐條退過 30 處，11 處綠——那 11 處在 R2 verify-fix 裡 9 處補上驅動它的測試
+/// （error(exec)、error(sig<N>)、66 整行、`-r` 臂、`-x` 臂、70、最後一行沒換行、k 非數字的訊息、
+/// snippet 非字串→shape）、2 處拆掉（`bool(q)`、python 端的 stderr=DEVNULL）。同一輪新加了執行期列
+/// 形狀的守衛 `valid_row`，R3 再退一次後留下的每個分支各有一個假 python3 驅動（見 judge 測試）。
+/// 這句話**只涵蓋那兩輪列出的守衛**；新加的守衛要自己再退一次。
 ///
 /// 退役查詢以字面寫在這裡是刻意的：它們已經在語料裡（#63 的 root cause），再多出現一次不改變
 /// 什麼；而新查詢**不**出現在任何測試或訊息裡——測試只讀檔、只斷言性質，而且對真檔的每一個
@@ -23,14 +24,16 @@ private func repoRoot(file: StaticString = #filePath) -> URL {
 /// 六條全部來自 `docs/measurements/2026-09-01-scan-parallelism.md` 的 after 輪命令列（#63）。
 private let retired = ["tokenizer 討論", "flock inode 鎖", "資格考", "band 相關度", "memory strategy", "並行雜湊"]
 
-/// 腳本只剝 ASCII 空白（空格、tab、CR、LF、VT、FF）——刻意不用 `.whitespacesAndNewlines`，
-/// 它含 U+3000／NBSP 等 Zs，而 bash 的 `[:space:]` 對那些字元隨 locale 變。兩邊都只認 ASCII，
-/// 再加上下面對真檔「沒有非 ASCII 空白」的斷言，三邊就對得上。
+/// 腳本只剝 ASCII 空白（空格、tab、CR、VT、FF；LF 由 `read` 吃掉、這裡由切行吃掉，所以兩個集合
+/// 差一個 LF 而行為相同）——刻意不用 `.whitespacesAndNewlines`，它含 U+3000／NBSP 等 Zs，而 bash 的
+/// `[:space:]` 對那些字元隨 locale 變。兩邊都只認 ASCII，再加上下面對真檔「沒有非 ASCII 空白」的
+/// 斷言，三邊就對得上。切行用 `components(separatedBy: "\n")`（UTF-16 層級）而不是
+/// `split(separator: "\n")`：後者把 CRLF 當一個 grapheme、不在它中間切，CRLF 檔會被算成一行。
 private let asciiWhitespace = CharacterSet(charactersIn: " \t\r\n\u{0B}\u{0C}")
 
 /// 與 `measure-baseline.sh` 同一個「第 N 條非註解行」定義。
 private func nonCommentLines(_ text: String) -> [String] {
-    text.split(separator: "\n", omittingEmptySubsequences: false)
+    text.components(separatedBy: "\n")
         .map { $0.trimmingCharacters(in: asciiWhitespace) }
         .filter { !$0.isEmpty && !$0.hasPrefix("#") }
 }
@@ -65,38 +68,64 @@ func baselineQueryFileDocumentsItsContractAndRetiresThePollutedQueries() throws 
 // MARK: - measure-baseline.sh
 
 /// verdict 字母表的 error token（封閉集合）。同步測試把它與腳本檔頭、README、腳本的輸出點對照。
-private let errorTokens = ["<rc>", "sig<N>", "exec", "json", "shape", "judge"]
+private let errorTokens = ["<rc>", "sig<N>", "blank", "exec", "json", "shape", "judge"]
 private let errorTokenRegex = errorTokens.map { $0 == "<rc>" ? "[0-9]+" : $0 == "sig<N>" ? "sig[0-9]+" : $0 }.joined(separator: "|")
 private let verdictLine = "^#[0-9]+ [0-9]+ms ((clean|self|empty) tool=[0-9]+|error\\((\(errorTokenRegex))\\))$"
 
-@Test("字母表同步：腳本檔頭、README、測試的 errorTokens、腳本輸出點四處的 error token 集合逐一相等；CHANGELOG 三個 verdict 詞在")
+@Test("字母表同步：腳本檔頭、ERROR_TOKENS、README、測試的 errorTokens、腳本輸出點五處逐一相等（認不出的輸出形狀直接紅）；CHANGELOG 三個 verdict 詞在；退役清單 README 與測試一致")
 func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     let root = repoRoot()
     let script = try String(contentsOf: root.appendingPathComponent("scripts/measure-baseline.sh"), encoding: .utf8)
     let readme = try String(contentsOf: root.appendingPathComponent("docs/measurements/README.md"), encoding: .utf8)
     let changelog = try String(contentsOf: root.appendingPathComponent("CHANGELOG.md"), encoding: .utf8)
+    let scriptLines = script.components(separatedBy: "\n")
 
     // 1. 腳本檔頭的「error tokens：」那一行。
-    let headerLine = script.split(separator: "\n").first { $0.hasPrefix("#   error tokens：") }
-    let headerTokens = Set((headerLine.map(String.init) ?? "").replacingOccurrences(of: "#   error tokens：", with: "")
+    let headerLine = scriptLines.first { $0.hasPrefix("#   error tokens：") }
+    let headerTokens = Set((headerLine ?? "").replacingOccurrences(of: "#   error tokens：", with: "")
         .split(separator: " ").map(String.init))
-    // 2. 腳本程式碼裡實際會印出的 error(...)（非 # 開頭的行）。
-    let codeLines = script.split(separator: "\n").filter { !$0.hasPrefix("#") }.joined(separator: "\n")
-    let emitted = Set(matches(#"error\(([^)]*)\)"#, in: codeLines).map { raw -> String in
+    // 2. 腳本裡的 ERROR_TOKENS（valid_row 執行期用的字面集合）＝ errorTokens 扣掉兩個樣式 token。
+    let errorTokensLine = scriptLines.first { $0.hasPrefix("ERROR_TOKENS=\"") }
+    let runtimeLiterals = Set((errorTokensLine ?? "").dropFirst("ERROR_TOKENS=\"".count).dropLast()
+        .split(separator: " ").map(String.init))
+    // 3. 腳本程式碼裡實際會印出的 error(...)：跳過註解行（去前導空白後以 # 開頭）與 valid_row 的
+    //    函式本體（那裡是比對不是輸出）。每一個輸出點必須是字面 token、{rc} 或 sig{-rc}——別的形狀
+    //    （例如 $var）不是「略過」而是失敗：略過就是 R2 的漏洞（用字元形狀當排除鍵）。
+    var inValidRow = false
+    var codeLines: [String] = []
+    for line in scriptLines {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("#") { continue }
+        if t.hasPrefix("valid_row()") { inValidRow = true; continue }
+        if inValidRow { if t == "}" { inValidRow = false }; continue }
+        codeLines.append(line)
+    }
+    var emitted = Set<String>()
+    var unrecognised: [String] = []
+    for raw in matches(#"error\(([^)]*)\)"#, in: codeLines.joined(separator: "\n")) {
         switch raw {
-        case "{rc}": return "<rc>"
-        case "sig{-rc}": return "sig<N>"
-        default: return raw
+        case "{rc}": emitted.insert("<rc>")
+        case "sig{-rc}": emitted.insert("sig<N>")
+        default:
+            if raw.range(of: "^[a-z]+$", options: .regularExpression) != nil { emitted.insert(raw) } else { unrecognised.append(raw) }
         }
-    }.filter { !$0.contains("*") && !$0.contains("$") })   // 排除 valid_row 裡的 glob 樣式
-    // 3. README 的字母表行：`error(<rc>|sig<N>|…)`。
+    }
+    // 4. README 的字母表行：`error(<rc>|sig<N>|…)`。
     let readmeTokens = Set(matches(#"error\(([^)]*\|[^)]*)\)"#, in: readme).flatMap { $0.split(separator: "|").map(String.init) })
-    // 4. 測試自己的 errorTokens。
+    // 5. 測試自己的 errorTokens。
     let expected = Set(errorTokens)
+    let expectedLiterals = expected.subtracting(["<rc>", "sig<N>"])
 
+    #expect(unrecognised.isEmpty, Comment(rawValue: "腳本裡認不出的 error(...) 輸出形狀（只准字面 token、{rc}、sig{-rc}）：\(unrecognised)"))
     #expect(headerTokens == expected, Comment(rawValue: "腳本檔頭：\(headerTokens.sorted())"))
+    #expect(runtimeLiterals == expectedLiterals, Comment(rawValue: "ERROR_TOKENS：\(runtimeLiterals.sorted())"))
     #expect(emitted == expected, Comment(rawValue: "腳本輸出點：\(emitted.sorted())"))
     #expect(readmeTokens == expected, Comment(rawValue: "README：\(readmeTokens.sorted())"))
+
+    // 退役清單：README 的「…」列與測試的 retired 陣列是同一份，不能各自漂移。
+    let readmeRetiredLine = readme.components(separatedBy: "\n").first { $0.hasPrefix("「") && $0.contains("」「") } ?? ""
+    let readmeRetired = Set(matches(#"「([^」]+)」"#, in: readmeRetiredLine))
+    #expect(readmeRetired == Set(retired), Comment(rawValue: "README 退役清單：\(readmeRetired.sorted())"))
     // 先算成 Bool 再 #expect：失敗時不把整份檔案展開進測試輸出（同檔對真查詢檔的紀律）。
     let scriptNormalised = script.replacingOccurrences(of: "[ \t]+", with: " ", options: .regularExpression)
     for word in ["clean tool=<n>", "self tool=<n>", "empty tool=0"] {
@@ -247,20 +276,25 @@ func measureBaselinePrintsOnlyIndicesAndVerdicts() throws {
     #expect(calls == expected, Comment(rawValue: log))
 }
 
-@Test("measure-baseline.sh：行定義只認 ASCII 空白，LC_ALL=C 與 UTF-8 下列數相同，且與測試的 nonCommentLines 一致")
+@Test("measure-baseline.sh：行定義只認 ASCII 空白，LC_ALL=C 與 UTF-8 下列數相同、與測試的 nonCommentLines 一致；只含 U+3000 的條目報 error(blank) 而不是 self")
 func measureBaselineLineDefinitionIsLocaleIndependent() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
     // 一個只有 U+3000 的行，與一個以 U+3000 縮排的「註解」：兩者對腳本與測試都**是**條目（都不剝 U+3000）。
-    let text = "# header\nZQXJ-A\n\u{3000}\n\u{3000}# not a comment\nZQXJ-B\n"
+    // 最後兩行是 CRLF：Swift 端若用 split(separator: "\n") 會把 CRLF 當一個 grapheme、不切，兩邊就分岔。
+    let text = "# header\nZQXJ-A\n\u{3000}\n\u{3000}# not a comment\nZQXJ-B\nZQXJ-C\r\nZQXJ-D\r\n"
     let queries = dir.appendingPathComponent("q.txt")
     try text.write(to: queries, atomically: true, encoding: .utf8)
     let stub = try makeStub(in: dir, responses: [:])
     let swiftCount = nonCommentLines(text).count
-    #expect(swiftCount == 4)
+    #expect(swiftCount == 6)
     for locale in ["C", "en_US.UTF-8"] {
         let run = try runScript(queries: queries, stub: stub, extraEnv: ["LC_ALL": locale, "LANG": locale])
         #expect(run.lines.count == swiftCount, Comment(rawValue: "LC_ALL=\(locale): \(run.stdout)"))
+        // 只有 U+3000 的那一行：行定義算條目，但 judge 的 Unicode 空白摺疊會得到空針——那是 error(blank)，
+        // 不能是 self。U+3000 縮排的「# not a comment」摺疊後不是空的，照常量（clean）。
+        #expect(run.lines.map(tail) == ["clean tool=0", "error(blank)", "clean tool=0", "clean tool=0", "clean tool=0", "clean tool=0"], Comment(rawValue: "LC_ALL=\(locale): \(run.stdout)"))
+        #expect(run.status == 1, Comment(rawValue: "LC_ALL=\(locale): rc=\(run.status)"))
     }
 }
 
@@ -309,6 +343,14 @@ func measureBaselineContainsAJudgeCrash() throws {
         ("badms", "#!/bin/bash\nprintf 'fast clean tool=0\\n'\n"),
         // 一行，verdict 不在字母表。
         ("badword", "#!/bin/bash\nprintf '42 dirty tool=0\\n'\n"),
+        // tool= 後面不是數字。
+        ("toolx", "#!/bin/bash\nprintf '42 clean tool=x\\n'\n"),
+        // sig 後面不是數字。
+        ("sigx", "#!/bin/bash\nprintf '42 error(sigx)\\n'\n"),
+        // 字面 token 不在 ERROR_TOKENS（字元都合法——這條釘的是「字面比對」而不是「字元類別」）。
+        ("badtoken", "#!/bin/bash\nprintf '42 error(timeout)\\n'\n"),
+        // 空 token。
+        ("emptytok", "#!/bin/bash\nprintf '42 error()\\n'\n"),
     ]
     for (label, body) in fakes {
         let bin = try makeBinDir(in: dir, fakes: ["python3": body])
@@ -319,7 +361,7 @@ func measureBaselineContainsAJudgeCrash() throws {
     }
 }
 
-@Test("measure-baseline.sh：前置守衛各自有離開碼——k 越界或非數字 64（且 stderr 只有那一句）、只有註解 65、查詢檔缺／不可讀 66、ltm 是目錄或不可執行 69、沒有 python3 70")
+@Test("measure-baseline.sh：前置守衛各自有離開碼——k 越界或非數字 64（且 stderr 只有那一句）、只有註解 65、查詢檔缺／是目錄／不可讀 66、ltm 是目錄或不可執行 69、沒有 python3 70")
 func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
@@ -333,6 +375,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     #expect(nonDigit.status == 64 && nonDigit.stderr == "k 必須是 1–1000 的整數\n", Comment(rawValue: nonDigit.stderr))
 
     #expect(try runScript(queries: dir.appendingPathComponent("missing.txt"), stub: stub).status == 66)
+    #expect(try runScript(queries: dir, stub: stub).status == 66)
     let unreadable = dir.appendingPathComponent("unreadable.txt")
     try "ZQXJ-ONE\n".write(to: unreadable, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: unreadable.path)

@@ -315,7 +315,9 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 到了**上一版的實作**——測試照樣全綠，因為綠燈來自舊版而不是新版。
 
 正確做法：`cp <file> /tmp/x.good` → 改 → 跑 → `cp /tmp/x.good <file>`。判準不是
-「有沒有 commit」，是**還原的目標是不是我手上這一份**。
+「有沒有 commit」，是**還原的目標是不是我手上這一份**。**備份含受限內容（基準查詢檔、任何
+第三方逐字內容）時，還原後立刻刪**——#63 verify R3 在 job tmp 找到一份忘了刪的 `bq.good`，
+它與原檔同樣受「不得在 session 內顯示」的規則管，但檔名看不出來。
 
 **變異測試要驗的是「這條測試由誰扛」，不只是「它會不會紅」。** #40 的第一版修法
 加了一個守衛、測試也綠，但退掉那個守衛**零測試變紅**——真正在扛的是同一次改動裡
@@ -346,7 +348,8 @@ codex leg 失敗那幾輪，結論要以「同一家族的 N 個視角都沒看�
 ## 誠實邊界
 
 **量測儀器自己會污染語料（#63）**：session 逐字稿裡落進**被索引欄位**的字串都會進索引——
-`text` block（輸入、Claude 的散文）與 tool_use 的七個 metadata 欄位（`CorpusScanner.toolMetadataFields`，
+純字串 `message.content`（使用者鍵入的 prompt 常是這一種，整段）、`text` block（輸入、Claude 的
+散文）與 tool_use 的七個 metadata 欄位（`CorpusScanner.toolMetadataFields`，
 含 Bash `command=`、`ltm_query` 的 `query=`、任何工具的 `description=`）；tool_result 的內容今天
 不進（#6 追蹤中）。所以基準查詢只能活在 `scripts/baseline-queries.txt`、量測只能印編號
 （`scripts/measure-baseline.sh`），規則與那張「什麼會進索引」的表在 `docs/measurements/README.md`

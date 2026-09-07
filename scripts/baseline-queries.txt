@@ -20,13 +20,15 @@
 #    `description=`、或被貼進／引述進對話——就進索引，下一次量測的前幾名就是「顯示它的那一刻」
 #    （退役的前三條實測第一名全是那則量測命令）。`cat`／`Read` 本檔的**輸出**是 tool_result、今天
 #    不被索引（#6 追蹤中、可能改變），但 Claude 看到之後引述它的那句散文一定被索引——所以一樣不做。
-#    編輯本檔請用 Write／Edit 工具（`content`／`old_string`／`new_string` 不在那七個欄位裡）
-#    或在 Claude Code 之外的編輯器；量測請跑 `scripts/measure-baseline.sh`，它只印編號。
+#    **編輯本檔在 Claude Code 之外的編輯器做。** session 內的 Write／Edit 今天索引安全（那些欄位不在七個
+#    之列），但每一次都把整份檔案存進 jsonl（Write 的 content、Edit 的 originalFile、Read 的 attachment）
+#    ——#6 一收 tool payload，這組查詢集就整份作廢（README 規則 1 有已存副本的計數與查法）。
+#    量測請跑 `scripts/measure-baseline.sh`，它只印編號。
 #    `.gitattributes` 對本檔設了 `-diff`：它**只**改變 diff 生成——`git diff`／`git show <rev>`／
-#    `git log -p`／`git grep` 只印「Binary files differ」；凡是把 blob 原樣吐出來的命令
-#    （`git show <rev>:<path>`、`git blame`、`git cat-file -p`、`git archive`、`git diff --no-index`、
-#    `git diff --text`、`git format-patch` 的 binary literal）照樣帶全文，這份例外清單會漏，判準是
-#    「它會不會把 blob 原樣吐出來」。要看內容在 session 之外做。
+#    `git log -p` 只印「Binary files differ」、`git grep` 只印「Binary file … matches」；凡是把 blob 原樣
+#    吐出來的命令（`git show <rev>:<path>`、`git blame`、`git cat-file -p`、`git archive`、`git diff --text`、
+#    `git diff --no-index` 對 repo 外的路徑、`git format-patch` 的 base85 blob——`git apply` 一步還原）
+#    照樣帶全文，這份例外清單會漏，判準是「它會不會把 blob 原樣吐出來」。要看內容在 session 之外做。
 #
 # 3. **量測輸出只印編號、耗時與 verdict，永不印查詢文字或命中內容。**
 #    `#N` 就是本檔第 N 條非註解行（由 1 起算；去掉行首行尾的 ASCII 空白後，空行與 `#` 開頭不算；
