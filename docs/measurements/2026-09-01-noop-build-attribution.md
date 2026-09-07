@@ -69,7 +69,10 @@ sample3 證實 `getPageMMap` 有走到。（第一版寫「4 GiB 涵蓋 1.9GB」
   `2026-09-01-scan-parallelism.md` 的表）不可互比；只有 A/B 那組是同時點對照。
 - sample 掛上有延遲，sample3 只涵蓋 build 尾段（24 樣本，僅方向性引用）。
 - 「行程內 ~0.9s vs CLI 暖 0.44s」的機理（SQLite 私有頁快取、syscall 佔比）
-  未被解釋——修法不依賴它，欠一個解釋（#58 diagnosis 的 Residue）。
+  在本紀錄裡未被解釋——修法不依賴它，欠一個解釋（#58 diagnosis 的 Residue）。
+  **已解釋（#60）**：差距是連線冷熱——同一連線第一次觸碰 Q1＋Q2 要 1.86 s、第二次
+  0.15 s，而 `ltm` 每次都是新行程＝新連線；CLI 的 0.44 s 是反覆跑到暖的數字。同條件下
+  兩條路徑同級，見 `2026-09-07-gate-first-touch.md`。
 - mmap 的幅度貢獻與 Q2 的貢獻**未分離量測**（一起上的 A/B）。
 
 ## 記憶體（#58 Expected ③；verify-fix 補，第一版缺）

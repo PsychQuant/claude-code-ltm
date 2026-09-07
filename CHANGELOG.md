@@ -6,6 +6,11 @@
 
 ### Added
 
+- **量測紀錄：no-op build 閘的行程內 vs CLI 2× 差距（#60）**：`docs/measurements/2026-09-07-gate-first-touch.md`
+  ——差距不在 SQL 執行，在同一連線的第一次觸碰（Q1＋Q2 第一次 1.86 s、第二次 0.15 s；`ltm` 每次
+  都是新連線）；`cache_size` 之類的連線設定救不了，只有 #61 的「不掃 N」會消掉它。
+  `2026-09-01-noop-build-attribution.md` 誠實邊界補指回。
+
 - **基準查詢集與使用規則（#63）**：`scripts/baseline-queries.txt`（一行一條，檔頭寫明列舉會漏、
   不得在 session 內顯示、輸出只印編號；`.gitattributes` 設 `-diff`）＋ `scripts/measure-baseline.sh`
   （stdout 第一行 `set sha256:<12 hex> k=<k>` 是查詢集指紋與 k、之後只有 `#N <ms>ms <verdict>`，verdict 是封閉字母表 `clean|self|empty` 加 `tool=<n>`
