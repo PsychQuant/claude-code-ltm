@@ -89,18 +89,11 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     let errorTokensLine = scriptLines.first { $0.hasPrefix("ERROR_TOKENS=\"") }
     let runtimeLiterals = Set((errorTokensLine ?? "").dropFirst("ERROR_TOKENS=\"".count).dropLast()
         .split(separator: " ").map(String.init))
-    // 3. 腳本程式碼裡實際會印出的 error(...)：跳過註解行（去前導空白後以 # 開頭）與 valid_row 的
-    //    函式本體（那裡是比對不是輸出）。每一個輸出點必須是字面 token、{rc} 或 sig{-rc}——別的形狀
-    //    （例如 $var）不是「略過」而是失敗：略過就是 R2 的漏洞（用字元形狀當排除鍵）。
-    var inValidRow = false
-    var codeLines: [String] = []
-    for line in scriptLines {
-        let t = line.trimmingCharacters(in: .whitespaces)
-        if t.hasPrefix("#") { continue }
-        if t.hasPrefix("valid_row()") { inValidRow = true; continue }
-        if inValidRow { if t == "}" { inValidRow = false }; continue }
-        codeLines.append(line)
-    }
+    // 3. 腳本程式碼裡實際會印出的 error(...)：只跳過註解行（去前導空白後以 # 開頭）。**不排除任何
+    //    程式碼區段**——valid_row 用變數 E_OPEN 比對、不寫 error( 的字面，所以「哪些 error( 不是輸出點」
+    //    不需要這裡判斷（R3 用範圍排除 valid_row，R4 指出那等於對排除掉的行假設它們不輸出）。每一個
+    //    輸出點必須是字面 token、{rc} 或 sig{-rc}——別的形狀（例如 $var）不是「略過」而是失敗。
+    let codeLines: [String] = scriptLines.filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }
     var emitted = Set<String>()
     var unrecognised: [String] = []
     for raw in matches(#"error\(([^)]*)\)"#, in: codeLines.joined(separator: "\n")) {
@@ -123,11 +116,17 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     #expect(emitted == expected, Comment(rawValue: "腳本輸出點：\(emitted.sorted())"))
     #expect(readmeTokens == expected, Comment(rawValue: "README：\(readmeTokens.sorted())"))
 
-    // 每個 token 在測試檔裡有一個實際產生它的 expected tail（不只是集合相等）。
-    let testSource = try String(contentsOf: URL(fileURLWithPath: "\(#filePath)"), encoding: .utf8)
-    let producedLiterals = ["error(7)", "error(sig9)", "error(blank)", "error(exec)", "error(json)", "error(shape)", "error(judge)"]
-    let missingProductions = producedLiterals.filter { !testSource.contains("\"" + $0 + "\"") && !testSource.contains("[\"" + $0) && !testSource.contains(", \"" + $0) }
-    #expect(missingProductions.isEmpty, Comment(rawValue: "沒有測試產生：\(missingProductions)"))
+    // 每個 token 在**別的**測試裡有一個實際產生它的 expected tail。查的對象是本檔裡標了
+    // `// produces:` 的那些行（行為測試的 expected-tail 陣列與 fake 的斷言），本測試自己的函式本體先整段
+    // 拿掉——R3 的版本把 token 清單寫在本檔再回頭 grep 本檔，等於自己給自己答案（R4 三方抓到）。
+    // 要驗的字串從 errorTokens 導出，不另外手寫一份。
+    let rawSource = try String(contentsOf: URL(fileURLWithPath: "\(#filePath)"), encoding: .utf8)
+    let producerLines = rawSource.components(separatedBy: "\n").filter { $0.contains("// produces:") }
+    let producerText = producerLines.joined(separator: "\n")
+    let wanted = errorTokens.map { $0 == "<rc>" ? "error(7)" : $0 == "sig<N>" ? "error(sig9)" : "error(\($0))" }
+    let missingProductions = wanted.filter { !producerText.contains($0) }
+    #expect(missingProductions.isEmpty, Comment(rawValue: "沒有 // produces: 行實際產生：\(missingProductions)"))
+    #expect(producerLines.count >= 3, "produces 標記行太少：\(producerLines.count)")
 
     // 七個 metadata 欄位名：CorpusScanner 的常數、README 表、查詢檔檔頭三處同一份。
     let scanner = try String(contentsOf: root.appendingPathComponent("Sources/LTMIndex/CorpusScanner.swift"), encoding: .utf8)
@@ -189,6 +188,9 @@ private func setFingerprint(_ text: String) -> String {
     for line in nonCommentLines(text) { h.update(data: Data((line + "\n").utf8)) }
     return "set sha256:" + h.finalize().prefix(6).map { String(format: "%02x", $0) }.joined()
 }
+
+/// 腳本印的第一行：指紋加這一次的 k。
+private func setLine(_ text: String, k: String = "3") -> String { setFingerprint(text) + " k=" + k }
 
 /// `#N <ms>ms ` 之後的全部（verdict 含 `tool=<n>`）。
 private func tail(_ line: String) -> String {
@@ -313,8 +315,8 @@ func measureBaselinePrintsOnlyIndicesAndVerdicts() throws {
     let run = try runScript(queries: queries, stub: stub)
     #expect(run.status == 0, Comment(rawValue: "rc=\(run.status) err=\(run.stderr)"))
     let fixtureText = try String(contentsOf: queries, encoding: .utf8)
-    #expect(run.setLine == setFingerprint(fixtureText), Comment(rawValue: "第一行：\(run.setLine)"))
-    #expect(run.setLine.range(of: "^set sha256:[0-9a-f]{12}$", options: .regularExpression) != nil)
+    #expect(run.setLine == setLine(fixtureText), Comment(rawValue: "第一行：\(run.setLine)"))
+    #expect(run.setLine.range(of: "^set sha256:[0-9a-f]{12} k=[0-9]+$", options: .regularExpression) != nil)
     #expect(run.rows.count == 6, Comment(rawValue: run.stdout))
     #expect(run.rows.allSatisfy { $0.range(of: verdictLine, options: .regularExpression) != nil }, Comment(rawValue: run.stdout))
     #expect(run.rows.map(tail) == ["clean tool=0", "self tool=1", "self tool=0", "empty tool=0", "clean tool=2", "self tool=1"], Comment(rawValue: run.stdout))
@@ -328,6 +330,10 @@ func measureBaselinePrintsOnlyIndicesAndVerdicts() throws {
     let expected = ["ZQXJ-CLEAN-ONE", "ZQXJ-SELF-TWO", "ZQXJ QUOTE THREE", "ZQXJ-EMPTY-FOUR", "ZQXJ-TOOLONLY-FIVE", "zqxj lower six"]
         .map { ["query", "--all-projects", "--k", "3", "--json", "--", $0] }
     #expect(calls == expected, Comment(rawValue: log))
+
+    // k 進了第一行：換一個 k，指紋不變、第一行變。（放在 argv 斷言之後，因為這一跑也會寫 argv.log。）
+    let k7 = try runScript(queries: queries, stub: stub, k: "7")
+    #expect(k7.setLine == setLine(fixtureText, k: "7") && k7.setLine != run.setLine, Comment(rawValue: k7.setLine))
 }
 
 @Test("measure-baseline.sh：行定義只認 ASCII 空白，LC_ALL=C 與 UTF-8 下列數相同、與測試的 nonCommentLines 一致；只含 U+3000 的條目報 error(blank) 而不是 self")
@@ -347,10 +353,23 @@ func measureBaselineLineDefinitionIsLocaleIndependent() throws {
         #expect(run.rows.count == swiftCount, Comment(rawValue: "LC_ALL=\(locale): \(run.stdout)"))
         // 只有 U+3000 的那一行：行定義算條目，但 judge 的 Unicode 空白摺疊會得到空針——那是 error(blank)，
         // 不能是 self。U+3000 縮排的「# not a comment」摺疊後不是空的，照常量（clean）。
-        #expect(run.rows.map(tail) == ["clean tool=0", "error(blank)", "clean tool=0", "clean tool=0", "clean tool=0", "clean tool=0"], Comment(rawValue: "LC_ALL=\(locale): \(run.stdout)"))
+        #expect(run.rows.map(tail) == ["clean tool=0", "error(blank)", "clean tool=0", "clean tool=0", "clean tool=0", "clean tool=0"], Comment(rawValue: "LC_ALL=\(locale): \(run.stdout)"))  // produces: blank
         #expect(run.status == 1, Comment(rawValue: "LC_ALL=\(locale): rc=\(run.status)"))
-        #expect(run.setLine == setFingerprint(text), Comment(rawValue: "LC_ALL=\(locale): \(run.setLine)"))
+        #expect(run.setLine == setLine(text), Comment(rawValue: "LC_ALL=\(locale): \(run.setLine)"))
     }
+    // blank 那一行不跑 ltm：stub 被呼叫的次數 = 6 條 − 1 條 blank，兩個 locale 各跑一次。
+    let calls = (try? String(contentsOf: dir.appendingPathComponent("argv.log"), encoding: .utf8))?.split(separator: "\n").count ?? -1
+    #expect(calls == 2 * (swiftCount - 1), "ltm 被呼叫 \(calls) 次，blank 那一行不該進 ltm")
+
+    // 單獨的 CR 不是行分隔：腳本、測試、指紋三邊都只在 LF 切（R4：指紋的 python 曾用逐行迭代，連 CR 也切，
+    // 兩個不同的查詢集會算出同一個指紋）。放在呼叫計數之後，因為這一跑也寫 argv.log。
+    let loneCR = "ZQXJ-P\rZQXJ-Q\nZQXJ-R\n"
+    let loneCRFile = dir.appendingPathComponent("cr.txt")
+    try loneCR.write(to: loneCRFile, atomically: true, encoding: .utf8)
+    let crRun = try runScript(queries: loneCRFile, stub: stub)
+    #expect(crRun.rows.count == 2 && nonCommentLines(loneCR).count == 2, Comment(rawValue: crRun.stdout))
+    #expect(crRun.setLine == setLine(loneCR), Comment(rawValue: "lone CR: \(crRun.setLine)"))
+    #expect(crRun.setLine != setLine("ZQXJ-P\nZQXJ-Q\nZQXJ-R\n"), "含 CR 的兩行集與三行集不得同指紋")
 }
 
 @Test("measure-baseline.sh：error 字母表的每個 token 都會出現（rc、sig<N>、exec、json、shape×3）、每列照印、任一 error 以 1 離開；stderr 不帶 traceback 也不帶查詢")
@@ -368,7 +387,7 @@ func measureBaselineReportsEveryFailureAndExitsNonZero() throws {
 
     let run = try runScript(queries: queries, stub: stub)
     #expect(run.status == 1, Comment(rawValue: "rc=\(run.status) out=\(run.stdout) err=\(run.stderr)"))
-    #expect(run.rows.map(tail) == ["error(7)", "error(sig9)", "error(json)", "error(shape)", "error(shape)", "error(shape)", "clean tool=0"], Comment(rawValue: run.stdout))
+    #expect(run.rows.map(tail) == ["error(7)", "error(sig9)", "error(json)", "error(shape)", "error(shape)", "error(shape)", "clean tool=0"], Comment(rawValue: run.stdout))  // produces: rc sig json shape
     #expect(run.rows.allSatisfy { $0.range(of: verdictLine, options: .regularExpression) != nil }, Comment(rawValue: run.stdout))
     #expect(!run.combined.contains("ZQXJ") && !run.combined.contains("Traceback"), Comment(rawValue: run.stderr))
 
@@ -379,7 +398,7 @@ func measureBaselineReportsEveryFailureAndExitsNonZero() throws {
     let one = dir.appendingPathComponent("one.txt")
     try "ZQXJ-ONE\n".write(to: one, atomically: true, encoding: .utf8)
     let exec = try runScript(queries: one, stub: stub, ltmBinOverride: notAProgram.path)
-    #expect(exec.status == 1 && exec.rows.map(tail) == ["error(exec)"], Comment(rawValue: "rc=\(exec.status) out=\(exec.stdout)"))
+    #expect(exec.status == 1 && exec.rows.map(tail) == ["error(exec)"], Comment(rawValue: "rc=\(exec.status) out=\(exec.stdout)"))  // produces: exec
 }
 
 @Test("measure-baseline.sh：judge 掛掉或印出不合形狀的東西 → 該列 error(judge)、以 1 離開，judge 的 stderr／雜訊不外流")
@@ -406,12 +425,18 @@ func measureBaselineContainsAJudgeCrash() throws {
         ("badtoken", "printf '42 error(timeout)\\n'; exit 0"),
         // 空 token。
         ("emptytok", "printf '42 error()\\n'; exit 0"),
+        // 少了右括號（judge 寫到一半死掉的形狀）。
+        ("unclosed", "printf '42 error(json\\n'; exit 0"),
+        // 0 不是「非零離開碼」、sig0 不是訊號、前導零不是 rc 的印法。
+        ("rczero", "printf '42 error(0)\\n'; exit 0"),
+        ("sigzero", "printf '42 error(sig0)\\n'; exit 0"),
+        ("rcleadingzero", "printf '42 error(07)\\n'; exit 0"),
     ]
     for (label, body) in fakes {
         let bin = try makeBinDir(in: dir, judgeFakes: ["python3": body])
         let run = try runScript(queries: queries, stub: stub, pathPrefix: bin.path)
         #expect(run.status == 1, Comment(rawValue: "\(label): rc=\(run.status) out=\(run.stdout)"))
-        #expect(run.rows == ["#1 0ms error(judge)"], Comment(rawValue: "\(label): \(run.stdout)"))
+        #expect(run.rows == ["#1 0ms error(judge)"], Comment(rawValue: "\(label): \(run.stdout)"))  // produces: judge
         #expect(!run.combined.contains("ZQXJ") && !run.combined.contains("Traceback"), Comment(rawValue: "\(label): \(run.stderr)"))
     }
 }
@@ -444,6 +469,27 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
 
     let noPython = try makeBinDir(in: dir, judgeFakes: [:])
     #expect(try runScript(queries: queries, stub: stub, pathOverride: noPython.path).status == 70)
+    // 指紋算不出來（python3 對 `-` 那一次呼叫掛掉）也是 70，而且一列都不印。
+    let fpBroken = dir.appendingPathComponent("bin-fp")
+    try FileManager.default.createDirectory(at: fpBroken, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(at: fpBroken.appendingPathComponent("dirname"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/dirname"))
+    try "#!/bin/bash\nif [ \"$1\" = \"-\" ]; then exit 3; fi\nexec '\(realPython3())' \"$@\"\n"
+        .write(to: fpBroken.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpBroken.appendingPathComponent("python3").path)
+    let fpRun = try runScript(queries: queries, stub: stub, pathOverride: fpBroken.path)
+    #expect(fpRun.status == 70 && fpRun.stdout.isEmpty, Comment(rawValue: "rc=\(fpRun.status) out=\(fpRun.stdout)"))
+    // 指紋印出大寫「hex」：字面集合比對在任何 locale 都拒絕；bash 3.2 的 [0-9a-f] range 在 en_US.UTF-8 下會把
+    // A–E 收進去（collation），這條測試就是釘住不能退回 range 寫法。
+    let fpUpper = dir.appendingPathComponent("bin-fpu")
+    try FileManager.default.createDirectory(at: fpUpper, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(at: fpUpper.appendingPathComponent("dirname"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/dirname"))
+    try "#!/bin/bash\nif [ \"$1\" = \"-\" ]; then printf 'ABCDE1234567\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
+        .write(to: fpUpper.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpUpper.appendingPathComponent("python3").path)
+    for locale in ["C", "en_US.UTF-8"] {
+        let up = try runScript(queries: queries, stub: stub, pathOverride: fpUpper.path, extraEnv: ["LC_ALL": locale, "LANG": locale])
+        #expect(up.status == 70 && up.stdout.isEmpty, Comment(rawValue: "LC_ALL=\(locale): rc=\(up.status) out=\(up.stdout)"))
+    }
 
     let onlyComments = dir.appendingPathComponent("c.txt")
     try "# a\n\n   # b\n".write(to: onlyComments, atomically: true, encoding: .utf8)

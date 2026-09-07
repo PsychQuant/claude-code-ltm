@@ -34,8 +34,11 @@
 
 ### 查詢集在哪、怎麼用
 
-- 查詢集：`scripts/baseline-queries.txt`（一行一條、`#` 註解）。它的檔頭寫著同樣的規則——兩處要一起改。
-  `.gitattributes` 對它設了 `-diff`（`scripts/rrf-tie-queries.txt` 同）。它**只**改變 diff 生成：
+- 查詢集：`scripts/baseline-queries.txt`（一行一條、`#` 註解）。它的檔頭是這裡的**摘要**，改這裡要
+  一起改它；但只有欄位名、字母表、離開碼、退役清單四項由測試同步，規則本文沒有機制守（#63 verify R3
+  就是檔頭漏改被抓到的）。
+  `.gitattributes` 對它設了 `-diff`（`scripts/rrf-tie-queries.txt` 同）。它讓 git 把這個 blob **當
+  binary 處理**——只影響「產生 diff 或搜尋內容」的命令，不改變 blob 本身：
   `git diff`／`git show <rev>`／`git log -p` 只印「Binary files differ」、`git grep` 只印
   「Binary file … matches」；凡是把 blob 原樣吐出來的命令照樣帶全文——`git show <rev>:<path>`、
   `git blame`、`git cat-file -p`、`git archive`、`git diff --text`、`git diff --no-index`（對 **repo 外**
@@ -44,9 +47,12 @@
   **之外**做。GitHub 網頁的檔案檢視與 raw 也不受影響。
 - 量測：`scripts/measure-baseline.sh [k]`——讀檔、逐條跑
   `ltm query --all-projects --k <k> --json -- <查詢>`（旗標以腳本為準；注意 `--all-projects`
-  是全語料，與舊紀錄的單一 project 不同），**stdout 第一行是 `set sha256:<12 hex>`**（非註解行內容
-  的指紋；紀錄要連它一起引——`#N` 是檔內位置，退役換一條之後同一個 `#N` 就是別的查詢，兩份紀錄的
-  指紋不同就不能逐列對齊），**之後每列 `#N <ms> <verdict>`**。
+  是全語料，與舊紀錄的單一 project 不同），**stdout 第一行是 `set sha256:<12 hex> k=<k>`**（非註解行
+  內容的指紋，加這一次的 k；紀錄要連這一行一起引——`#N` 是檔內位置，退役換一條之後同一個 `#N` 就是
+  別的查詢，而 verdict 全是「前 k 名」的性質，所以兩份紀錄這一行不同就不能逐列對齊），**之後每列
+  `#N <ms>ms <verdict>`**（例如 `#3 812ms clean tool=1`；整數毫秒後面緊接字面 `ms`）。指紋是未加鹽
+  的 sha256 前 48 bit：不含查詢文字、不會造成 self，但能讓持有候選的人確認一次完整猜測（那個對手本來
+  就讀得到 jsonl 裡的副本，結論不變）。
   `#N` 是檔內第 N 條非註解行（去掉行首行尾的 **ASCII** 空白後，空行與 `#` 開頭不算——腳本與測試
   用同一個定義，而且刻意只認 ASCII：bash 的 `[:space:]` 對全形空白隨 locale 變、Swift 的不變，
   所以兩邊都不剝它，測試另外斷言查詢檔裡沒有非 ASCII 空白）。
@@ -56,8 +62,10 @@
   `error(<rc>|sig<N>|blank|exec|json|shape|judge)`。「封閉」由 `Tests/LTMMCPTests/BaselineQueryFileTests.swift`
   的**同步測試**執行：它把腳本檔頭的 token 列、腳本裡 `ERROR_TOKENS`、本行的 token 列、測試自己的
   `errorTokens`、腳本程式碼裡實際的 `error(...)` 輸出點五個集合逐一比對，任一處多一個少一個都紅，
-  輸出點寫成它認不出的形狀也紅；同一條測試也斷言每個 token 在測試檔裡有一個實際產生它的斷言
-  （查法：`swift test --filter BaselineQueryFile`，judge／error／locale 三條測試的 expected tail）。
+  輸出點寫成它認不出的形狀也紅（程式碼裡**每一個** `error(` 都算輸出點——`valid_row` 用變數比對、
+  不寫字面，所以沒有被略過的區段）；同一條測試也斷言每個 token 在**別的**測試裡有實際產生它的
+  斷言（只查標了 `// produces:` 的行、本測試自己的函式本體先拿掉、要驗的 token 從 `errorTokens`
+  導出——R3 的版本回頭 grep 含答案的本檔，永遠綠，R4 三方抓到）。
   同一條測試還同步了：退役清單（README 與測試）、七個 metadata 欄位名（`toolMetadataFields` 常數、
   README 表、查詢檔檔頭）、離開碼（腳本檔頭與程式碼裡的 `exit N`）。**其他任何複述都沒有機制守著**。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。
   `blank` 是那一行在 Unicode 空白摺疊後是空的（只有 U+3000 這類非 ASCII 空白）——行定義把它算成條目、
@@ -76,8 +84,8 @@
   ——**所以 #62 前後 `self`／`tool` 的變化量的是 #62 的效果加上兩次量測之間語料的成長，不是語料
   變乾淨了**（#62 自己的實作 session 就在談 self-hit 與工具 chunk，特別容易排進這些查詢的前 k 名）。
   另外，`tool=<n>` 也會數到**談論**這個標記的散文——純字串 `message.content` 不截斷、整段進索引；
-  這種紀錄幾乎全是 #63 自己的 session 寫的，而且**會隨討論儀器的 session 增加**（R2 數到 7、R3 數到 8，
-  九十分鐘），所以這裡不給計數只給查法：掃 `~/.claude/projects/**/*.jsonl`，統計 user／assistant 紀錄裡
+  這種紀錄幾乎全是 #63 自己的 session 寫的，而且**會隨討論儀器的 session 增加**（verify 的兩輪之間就
+  多了一筆），所以這裡不給計數只給查法：掃 `~/.claude/projects/**/*.jsonl`，統計 user／assistant 紀錄裡
   `message.content` 是純字串且含 `⟨tool ` 的筆數（只印計數）。
   第一版的判準是「含 `⟨tool ` 或含 `ltm query`」就 dirty；#63 verify 的 devil's-advocate 指出那量的是
   「有沒有工具 chunk」不是「這條查詢被自己污染了沒有」，於是改成把命中拿去跟查詢比對。
@@ -110,8 +118,9 @@
    `diff.patch` 產生於 `.gitattributes` 存在之前，查詢檔在裡面是明文）。唯獨查詢檔——**以及它的任何副本或備份**
    （變異測試 `cp` 出來的 `.good`、job tmp 裡的中間檔；判準是內容不是路徑）——review agent 只准讀檔頭
    （`grep '^#'`）與統計非註解行（條數、長度、重複），不准讀內容；含查詢的備份還原後立刻刪。
-2. **量測輸出只印編號。** 命中內容、snippet、查詢文字一律不印；要看命中內容，在 Claude Code
-   **之外**的 shell 跑（那個 shell 的逐字稿不在語料裡）。
+2. **量測輸出只印編號。** 第一行的查詢集指紋加每列的 `#N <ms>ms <verdict>`；命中內容、snippet、
+   查詢文字一律不印。紀錄要把指紋那一行一起抄進去。要看命中內容，在 Claude Code **之外**的 shell
+   跑（那個 shell 的逐字稿不在語料裡）。
 3. **每次量測前重驗，`self` 要分辨成因。** 選定當下乾淨不代表永遠乾淨——跑一次 `measure-baseline.sh`。
    `self` 的條目先在 Claude Code **之外**讀它的命中，判準只有一條：**含查詢原文的那段文字，是不是因為
    量測／本專案的工作才存在？** 是——任何工具 metadata chunk（Bash `command=`、`Grep pattern=`、

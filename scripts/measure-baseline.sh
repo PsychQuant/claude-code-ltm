@@ -1,12 +1,18 @@
 #!/bin/bash
 # 基準查詢量測（#63）：讀 scripts/baseline-queries.txt，逐條跑
 #   ltm query --all-projects --k <k> --json -- <查詢>
-# **stdout 第一行是 `set sha256:<12 hex>`（非註解行內容的指紋——查詢集一換，指紋就換；紀錄要連它一起
-# 引，兩次量測指紋不同就不能逐列對齊，`#N` 只是檔內位置），之後每列 `#N <ms> <verdict>`**。
+# **stdout 第一行是 `set sha256:<12 hex> k=<k>`（非註解行內容的指紋與這次的 k——查詢集一換，指紋就換；
+# verdict 全是「前 k 名」的性質，k 不同也不可比；紀錄要連這一行一起引，兩次量測這一行不同就不能逐列對齊，
+# `#N` 只是檔內位置），之後每列 `#N <ms>ms <verdict>`**（例如
+# `#3 812ms clean tool=1`；`<ms>` 是整數毫秒，後面緊接字面 `ms`）。
 # 查詢文字與命中內容不進 stdout／stderr，包含 `bash -x`、
 # `SHELLOPTS=xtrace`、`BASH_ENV` 裡的 `set -x`（第一行就關掉 xtrace；ltm 與 judge 的 stderr 都丟掉）。
-# 擋不住的：`BASH_ENV`／`PS4` 裡刻意放一個會讀查詢檔的命令替換——trace 第一行 `set +x` 時 PS4 先展開。
-# 那等同直接 cat 查詢檔，是操作者的動作不是本腳本的洩漏面；寫在這裡是因為上一句是全稱。
+# 擋不住的：`BASH_ENV`／`PS4` 裡刻意放一個會讀查詢檔的命令替換——trace 第一行 `set +x` 時 PS4 先展開；
+# 或 PATH 上的 python3 被換成會印檔案的東西。這份例外會漏，判準是「這個動作等不等同操作者直接 cat 查詢檔」
+# ——那是操作者的動作不是本腳本的洩漏面；寫在這裡是因為上一句是全稱。
+# 指紋揭露什麼：未加鹽的 sha256 前 48 bit。它不含查詢文字、跟查詢原文對不上（不會造成 self）；它能讓
+# 持有一組候選的人**確認**一次完整猜測——持有舊集合的人可用它驗證退役後換掉的那一條。這個對手本來就
+# 讀得到語料（jsonl 裡已有整組副本），所以不改變結論，但它是性質不是零。
 #
 # 為什麼這麼小氣：這支腳本會在 Claude Code session 裡被跑。今天會進索引的是逐字稿裡的純字串
 # `message.content`（使用者鍵入的 prompt 常是這一種，整段）、`text` block（使用者輸入、Claude 的散文）
@@ -16,8 +22,9 @@
 #
 # verdict（封閉字母表；只有這幾個，不得類推。四處列舉——本檔頭的「error tokens」行、`ERROR_TOKENS`
 # 變數、docs/measurements/README.md、測試的 errorTokens——與程式碼裡實際的 `error(...)` 輸出點由
-# Tests/LTMMCPTests/BaselineQueryFileTests.swift 的同步測試逐一對應；輸出點若寫成它認不出的形狀
-# （字面 token、`{rc}`、`sig{-rc}` 以外）測試直接紅，不是略過）：
+# Tests/LTMMCPTests/BaselineQueryFileTests.swift 的同步測試逐一對應：程式碼裡**每一個** `error(` 都當
+# 輸出點（valid_row 用變數 E_OPEN 比對、不寫字面，所以沒有任何一行被略過），寫成它認不出的形狀
+# （字面 token、`{rc}`、`sig{-rc}` 以外）測試直接紅）：
 #   clean tool=<n>   前 k 名沒有任何一個 snippet 含**這條查詢的原文**（空白摺疊、大小寫摺疊後的子字串比對）。
 #   self  tool=<n>   前 k 名至少一個 snippet 含這條查詢的原文——儀器看見了自己（量測命令列、
 #                    `ltm_query query=…`、被引述的那句散文，都是這個形狀）。這一輪該條的命中品質不可比；
@@ -25,7 +32,7 @@
 #   empty tool=0     零命中。查詢已經對不到任何東西——這不是 clean，但也不計入離開碼。
 #   error(<token>)   這一列沒量到。token 是下面這一行的封閉集合：
 #   error tokens：<rc> sig<N> blank exec json shape judge
-#                    <rc>＝ltm 非零離開碼；sig<N>＝ltm 被訊號 N 殺掉；blank＝這一行在 Unicode 空白摺疊
+#                    <rc>＝ltm 非零離開碼（不含 0、無前導零）；sig<N>＝ltm 被訊號 N 殺掉（N≥1）；blank＝這一行在 Unicode 空白摺疊
 #                    後是空的（例如只有 U+3000；不跑 ltm，因為空針對任何命中都算 self）；exec＝ltm 起不來；
 #                    json＝輸出不是 JSON；shape＝JSON 不是「每個都帶字串 snippet 的物件陣列」；
 #                    judge＝judge 自己掛了或印了不合形狀的東西。
@@ -79,17 +86,27 @@ SETID=$(python3 - "$QF" <<'PY'
 import hashlib, sys
 ws = " \t\r\v\f"
 h = hashlib.sha256()
+# 只在 LF 切行（跟 bash 的 read 與測試的 components(separatedBy: "\n") 一樣）：text-mode 逐行迭代連
+# 單獨的 CR 也會切，那會讓兩個不同的查詢集算出同一個指紋。newline="" 是為了讓 read() 不把 CRLF 翻譯掉。
 with open(sys.argv[1], encoding="utf-8", errors="surrogateescape", newline="") as f:
-    for raw in f:
-        line = raw.rstrip("\n").strip(ws)
-        if not line or line.startswith("#"):
-            continue
-        h.update(line.encode("utf-8", "surrogateescape")); h.update(b"\n")
+    data = f.read()
+for raw in data.split("\n"):
+    line = raw.strip(ws)
+    if not line or line.startswith("#"):
+        continue
+    h.update(line.encode("utf-8", "surrogateescape")); h.update(b"\n")
 print(h.hexdigest()[:12])
 PY
 ) || SETID=""
-case "$SETID" in *[!0-9a-f]*|'') echo "算不出查詢集指紋" >&2; exit 70 ;; esac
-printf 'set sha256:%s\n' "$SETID"
+# 指紋必須恰好 12 個小寫 hex：逐字元對字面集合比對，不用 [0-9a-f] 這種 range（bash 3.2 隨 locale 排序而變）。
+fp_ok=1
+case "$SETID" in ????????????) ;; *) fp_ok=0 ;; esac
+i=0; while [ $fp_ok -eq 1 ] && [ $i -lt 12 ]; do
+    case "${SETID:$i:1}" in [0123456789abcdef]) ;; *) fp_ok=0 ;; esac; i=$((i + 1))
+done
+[ $fp_ok -eq 1 ] || { echo "算不出查詢集指紋" >&2; exit 70; }
+# k 也印在同一行：verdict 全是「前 k 名」的性質，兩份紀錄 k 不同就不能逐列對齊（requirements R4-1）。
+printf 'set sha256:%s k=%s\n' "$SETID" "$K"
 
 # 一條查詢一個 python：起 ltm、用 monotonic 計時、解析 --json、只印一行「<ms> <verdict>」。
 # 不印任何 snippet；ltm 的 stdin 接 /dev/null（避免它吃掉查詢檔剩下的行）；stderr 由外層整個丟掉。
@@ -128,16 +145,19 @@ print(f"{ms} " + ("self" if selfhit else "clean") + f" tool={tool}")
 # [a-z] 隨 locale 排序而變，字面比對不會）。不合就整列換成 error(judge)——寧可少一列量測，也不讓不明
 # 字串上 stdout。多行的列不必另外擋：每個位元組都落在 ms（只准數字）或 rest（各臂完整限制到結尾）裡。
 ERROR_TOKENS="blank exec json shape judge"
+# valid_row 裡刻意不寫 error( 的字面（連這個變數的定義也拆開寫）：同步測試把程式碼裡每一個 error( 都當
+# 輸出點，這裡是比對不是輸出。
+E_OPEN="error"'('
 valid_row() {
     local ms="${1%% *}" rest="${1#* }"
     case "$ms" in ''|*[!0-9]*) return 1 ;; esac
     case "$rest" in
         'clean tool='*|'self tool='*) case "${rest#* tool=}" in ''|*[!0-9]*) return 1 ;; esac ;;
         'empty tool=0') ;;
-        'error('*')')
-            local tok="${rest#error(}"; tok="${tok%)}"
+        "$E_OPEN"*")")
+            local tok="${rest#"$E_OPEN"}"; tok="${tok%)}"
             case "$tok" in
-                '') return 1 ;;
+                ''|0*|sig0*) return 1 ;;
                 sig*) case "${tok#sig}" in ''|*[!0-9]*) return 1 ;; esac ;;
                 *[!0-9]*) case " $ERROR_TOKENS " in *" $tok "*) ;; *) return 1 ;; esac ;;
             esac ;;
@@ -154,7 +174,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     n=$((n + 1))
     row=$(python3 -c "$RUN" "$LTM" "$K" "$line" 2>/dev/null) || row=""
     valid_row "$row" || row="0 error(judge)"
-    case "${row#* }" in error*) bad=$((bad + 1)) ;; esac
+    case "${row#* }" in "$E_OPEN"*) bad=$((bad + 1)) ;; esac
     printf '#%d %sms %s\n' "$n" "${row%% *}" "${row#* }"
 done < "$QF"
 [ "$n" -gt 0 ] || { echo "查詢檔沒有任何非註解行" >&2; exit 65; }
