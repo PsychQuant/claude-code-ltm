@@ -8,8 +8,9 @@
 
 - **基準查詢集與使用規則（#63）**：`scripts/baseline-queries.txt`（一行一條，檔頭寫明列舉會漏、
   不得在 session 內顯示、輸出只印編號；`.gitattributes` 設 `-diff`）＋ `scripts/measure-baseline.sh`
-  （stdout 只有 `#N <ms> <verdict>`，verdict 是封閉字母表 `clean|dirty|empty|error(…)`，查詢文字
-  不進 stdout／stderr、含 `bash -x`；任一 error 以 1 離開）＋ `docs/measurements/README.md` 的規則段
+  （stdout 只有 `#N <ms> <verdict>`，verdict 是封閉字母表 `clean|self|empty` 加 `tool=<n>`
+  或 `error(…)`；`self` = 前 k 名有 snippet 含這條查詢的原文，`tool=<n>` 只是觀察值不是污染訊號；
+  查詢文字不進 stdout／stderr、含 `bash -x`／`SHELLOPTS`／`BASH_ENV`；任一 error 以 1 離開）＋ `docs/measurements/README.md` 的規則段
   與「什麼會進索引」的表（`text` block 與七個 tool metadata 欄位會，tool_result 內容今天不會）。
   2026-09-01 那次量測命令列上的六條查詢退役（前三條實測第一名是那則命令，後三條依同一機制推定）；
   `2026-09-01-scan-parallelism.md` 補可比性註記（耗時可比、命中未記、新舊儀器不可對齊）。

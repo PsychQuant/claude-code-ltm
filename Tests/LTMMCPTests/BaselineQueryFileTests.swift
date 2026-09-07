@@ -49,7 +49,12 @@ private struct ScriptRun {
     var combined: String { stdout + stderr }
 }
 
-private let verdictLine = #"^#[0-9]+ [0-9]+ms (clean|dirty|empty|error\([0-9a-z]+\))$"#
+private let verdictLine = #"^#[0-9]+ [0-9]+ms ((clean|self|empty) tool=[0-9]+|error\([0-9a-z]+\))$"#
+
+/// `#N <ms>ms ` 之後的全部（verdict 含 `tool=<n>`）。
+private func tail(_ line: String) -> String {
+    line.split(separator: " ", maxSplits: 2).last.map(String.init) ?? ""
+}
 
 /// 建一個把 argv 記到 `argv.log`、先把 stdin 讀光、再依查詢（最後一個參數）回應的 stub。
 /// `cat >/dev/null` 是刻意的：腳本若沒把 ltm 的 stdin 接到 /dev/null，stub 會把查詢檔剩下的行
@@ -78,7 +83,8 @@ private func makeStub(in dir: URL, responses: [String: String], exits: [String: 
 }
 
 private func runScript(queries: URL, stub: URL, k: String = "3", viaBashX: Bool = false,
-                       ltmBinOverride: String? = nil, pathPrefix: String? = nil) throws -> ScriptRun {
+                       ltmBinOverride: String? = nil, pathPrefix: String? = nil,
+                       extraEnv: [String: String] = [:]) throws -> ScriptRun {
     let script = repoRoot().appendingPathComponent("scripts/measure-baseline.sh")
     let process = Process()
     if viaBashX {
@@ -93,6 +99,7 @@ private func runScript(queries: URL, stub: URL, k: String = "3", viaBashX: Bool 
     env["LTM_BIN"] = ltmBinOverride ?? stub.path
     env["LTM_BASELINE_QUERIES"] = queries.path
     if let pathPrefix { env["PATH"] = pathPrefix + ":" + (env["PATH"] ?? "/usr/bin:/bin") }
+    for (k, v) in extraEnv { env[k] = v }
     process.environment = env
     let out = Pipe(), err = Pipe()
     process.standardOutput = out; process.standardError = err
@@ -109,7 +116,7 @@ private func tempDir() throws -> URL {
     return dir
 }
 
-@Test("measure-baseline.sh：invocation 形狀固定、行定義與測試一致、四種 verdict 各自會動、輸出不含查詢與命中")
+@Test("measure-baseline.sh：invocation 形狀固定、行定義與測試一致、clean/self/empty 與 tool=<n> 各自會動、輸出不含查詢與命中")
 func measureBaselinePrintsOnlyIndicesAndVerdicts() throws {
     let script = repoRoot().appendingPathComponent("scripts/measure-baseline.sh")
     let attrs = try FileManager.default.attributesOfItem(atPath: script.path)
@@ -118,30 +125,32 @@ func measureBaselinePrintsOnlyIndicesAndVerdicts() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
     // 合成檔（不碰真檔）：縮排註解與純空白行都不算條目；CRLF 與尾隨空白要被剝掉。
-    // #1 乾淨；#2 工具殘影在散文之後（釘 `in` 而非 startswith）；#3 只含量測動詞、無工具標記；#4 零命中。
+    // #1 乾淨（實質命中、無工具 chunk）；#2 self：查詢原文在散文之後的工具殘影裡（tool=1）；
+    // #3 self：查詢原文被引述進散文、空白摺疊後才對得上、沒有工具標記（tool=0）；#4 零命中；
+    // #5 兩個工具 chunk 但都不含查詢原文 → clean tool=2（工具 chunk 本身不是污染訊號，DA C1）。
     let queries = dir.appendingPathComponent("q.txt")
-    try "# header\n   # indented comment\nZQXJ-CLEAN-ONE\n   \nZQXJ-DIRTY-TWO\r\n  ZQXJ-VERB-THREE  \nZQXJ-EMPTY-FOUR\n"
+    try "# header\n   # indented comment\nZQXJ-CLEAN-ONE\n   \nZQXJ-SELF-TWO\r\n  ZQXJ QUOTE THREE  \nZQXJ-EMPTY-FOUR\nZQXJ-TOOLONLY-FIVE\n"
         .write(to: queries, atomically: true, encoding: .utf8)
     let stub = try makeStub(in: dir, responses: [
-        "ZQXJ-DIRTY-TWO": #"[{"snippet":"先說明一下\n⟨tool Bash command=for q in x⟩","uuid":"u"}]"#,
-        "ZQXJ-VERB-THREE": #"[{"snippet":"使用者說：ltm query 之後第一名就是它","uuid":"u"}]"#,
+        "ZQXJ-SELF-TWO": #"[{"snippet":"先說明一下\n⟨tool Bash command=ltm query ZQXJ-SELF-TWO --k 5⟩","uuid":"u"},{"snippet":"別的","uuid":"v"}]"#,
+        "ZQXJ QUOTE THREE": #"[{"snippet":"使用者說：第三條是 ZQXJ  QUOTE\nTHREE 沒錯","uuid":"u"}]"#,
         "ZQXJ-EMPTY-FOUR": "[]",
+        "ZQXJ-TOOLONLY-FIVE": #"[{"snippet":"⟨tool Bash command=swift test⟩","uuid":"u"},{"snippet":"⟨tool Read file_path=x⟩","uuid":"v"}]"#,
     ])
 
     let run = try runScript(queries: queries, stub: stub)
     #expect(run.status == 0, Comment(rawValue: "rc=\(run.status) err=\(run.stderr)"))
-    #expect(run.lines.count == 4, Comment(rawValue: run.stdout))
+    #expect(run.lines.count == 5, Comment(rawValue: run.stdout))
     #expect(run.lines.allSatisfy { $0.range(of: verdictLine, options: .regularExpression) != nil }, Comment(rawValue: run.stdout))
-    let verdicts = run.lines.map { $0.split(separator: " ").last.map(String.init) ?? "" }
-    #expect(verdicts == ["clean", "dirty", "dirty", "empty"], Comment(rawValue: run.stdout))
-    #expect(run.lines.map { $0.prefix(3) } == ["#1 ", "#2 ", "#3 ", "#4 "], Comment(rawValue: run.stdout))
+    #expect(run.lines.map(tail) == ["clean tool=0", "self tool=1", "self tool=0", "empty tool=0", "clean tool=2"], Comment(rawValue: run.stdout))
+    #expect(run.lines.map { $0.prefix(3) } == ["#1 ", "#2 ", "#3 ", "#4 ", "#5 "], Comment(rawValue: run.stdout))
     // 查詢文字與 snippet 都不得出現在任何輸出。
     #expect(!run.combined.contains("ZQXJ") && !run.combined.contains("實質內容") && !run.combined.contains("說明"))
 
     // ltm 每次都收到同一個形狀：query --all-projects --k <k> --json -- <去掉 CR 與前後空白的查詢>。
     let log = try String(contentsOf: dir.appendingPathComponent("argv.log"), encoding: .utf8)
     let calls = log.split(separator: "\n").map { $0.split(separator: "\u{1f}", omittingEmptySubsequences: false).dropLast().map(String.init) }
-    let expected = ["ZQXJ-CLEAN-ONE", "ZQXJ-DIRTY-TWO", "ZQXJ-VERB-THREE", "ZQXJ-EMPTY-FOUR"]
+    let expected = ["ZQXJ-CLEAN-ONE", "ZQXJ-SELF-TWO", "ZQXJ QUOTE THREE", "ZQXJ-EMPTY-FOUR", "ZQXJ-TOOLONLY-FIVE"]
         .map { ["query", "--all-projects", "--k", "3", "--json", "--", $0] }
     #expect(calls == expected, Comment(rawValue: log))
 }
@@ -160,8 +169,7 @@ func measureBaselineReportsEveryFailureAndExitsNonZero() throws {
 
     let run = try runScript(queries: queries, stub: stub)
     #expect(run.status == 1, Comment(rawValue: "rc=\(run.status) out=\(run.stdout) err=\(run.stderr)"))
-    let verdicts = run.lines.map { $0.split(separator: " ").last.map(String.init) ?? "" }
-    #expect(verdicts == ["error(7)", "error(json)", "error(shape)", "error(shape)", "clean"], Comment(rawValue: run.stdout))
+    #expect(run.lines.map(tail) == ["error(7)", "error(json)", "error(shape)", "error(shape)", "clean tool=0"], Comment(rawValue: run.stdout))
     #expect(run.lines.allSatisfy { $0.range(of: verdictLine, options: .regularExpression) != nil }, Comment(rawValue: run.stdout))
     #expect(!run.combined.contains("ZQXJ") && !run.combined.contains("Traceback"), Comment(rawValue: run.stderr))
 }
@@ -205,7 +213,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     #expect(run.status == 65 && run.stdout.isEmpty, Comment(rawValue: "rc=\(run.status) out=\(run.stdout)"))
 }
 
-@Test("measure-baseline.sh：`bash -x` 起跑也不漏——xtrace 在讀檔前被關掉")
+@Test("measure-baseline.sh：`bash -x`／`SHELLOPTS=xtrace`／`BASH_ENV` 三條 xtrace 路徑都不漏——第一行就關掉")
 func measureBaselineDoesNotLeakUnderXtrace() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
@@ -214,8 +222,17 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     let stub = try makeStub(in: dir, responses: [
         "ZQXJ-TRACE-ONE": #"[{"snippet":"ZQXJ-SNIPPET 一段命中","uuid":"u"}]"#,
     ])
-    let run = try runScript(queries: queries, stub: stub, viaBashX: true)
-    #expect(run.status == 0, Comment(rawValue: "rc=\(run.status)"))
-    #expect(run.lines.count == 1 && run.lines[0].hasSuffix(" clean"), Comment(rawValue: run.stdout))
-    #expect(!run.combined.contains("ZQXJ"), Comment(rawValue: "xtrace 漏了查詢或命中：\(run.stderr.count) bytes of stderr"))
+    let benv = dir.appendingPathComponent("benv.sh")
+    try "set -x\n".write(to: benv, atomically: true, encoding: .utf8)
+    let runs = [
+        ("bash -x", try runScript(queries: queries, stub: stub, viaBashX: true)),
+        ("SHELLOPTS", try runScript(queries: queries, stub: stub, extraEnv: ["SHELLOPTS": "xtrace"])),
+        ("BASH_ENV", try runScript(queries: queries, stub: stub, extraEnv: ["BASH_ENV": benv.path])),
+    ]
+    for (label, run) in runs {
+        #expect(run.status == 0, Comment(rawValue: "\(label): rc=\(run.status)"))
+        #expect(run.lines.count == 1 && run.lines[0].hasSuffix(" clean tool=0"), Comment(rawValue: "\(label): \(run.stdout)"))
+        let leaked = run.combined.contains("ZQXJ")
+        #expect(!leaked, Comment(rawValue: "\(label): xtrace 漏了查詢或命中（stderr \(run.stderr.count) bytes）"))
+    }
 }

@@ -7,7 +7,8 @@
 #    **前 5 名是否乾淨尚未在真實索引上驗過**（2026-09-07 實作當下 `~/bin/ltm` 剛換 inode、
 #    鑰匙圈要重新授權，見 .claude/rules/anchor-key-in-probes.md）。第一次在 Claude Code 之外
 #    跑 `measure-baseline.sh` 後，把日期與「N 行全 clean」寫回這一條；在那之前，本檔的乾淨
-#    是宣稱不是量測。而且 `clean` 只代表兩種已知殘影都沒出現——判準是列舉，會漏。
+#    是宣稱不是量測。而且 `clean` 只代表前 k 名沒有 snippet 含這條查詢的原文——語料裡本來就
+#    逐字含它的實質 turn 會被判 `self`，而排在前面但不含原文的殘影會被判 `clean`；判準會漏。
 #
 # 2. **本檔內容不得在 Claude Code session 內顯示。** 判準是「會不會落進被索引的欄位」：逐字稿
 #    裡會進索引的是 `text` block（使用者輸入、Claude 的散文、compaction 摘要）與 tool_use 的

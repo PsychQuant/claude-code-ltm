@@ -41,15 +41,21 @@
   `ltm query --all-projects --k <k> --json -- <查詢>`（旗標以腳本為準；注意 `--all-projects`
   是全語料，與舊紀錄的單一 project 不同），**stdout 只印 `#N <ms> <verdict>`**。
   `#N` 是檔內第 N 條非註解行（去前後空白後，空行與 `#` 開頭不算——腳本與測試用同一個定義）。
-  在 repo 根目錄跑；密鑰用命令替換餵進環境
-  （`LTM_ANCHOR_KEY="$(~/bin/ltm memory --export-key)" scripts/measure-baseline.sh`），不落地。
+  密鑰用命令替換餵進環境（`LTM_ANCHOR_KEY="$(~/bin/ltm memory --export-key)" scripts/measure-baseline.sh`），
+  不落地；查詢檔的解析不依賴 cwd（腳本用自己所在的目錄）。
 - verdict 是**封閉字母表**（`Tests/LTMMCPTests/BaselineQueryFileTests.swift` 釘住，只有這幾個）：
-  `clean`／`dirty`／`empty`／`error(<rc>|sig<N>|exec|json|shape|judge)`。任一列是 `error(…)`
-  腳本最後以 1 離開（每列照印）。
-- `dirty` 的判準（封閉列舉，會漏）：前 k 名任一 chunk 的 snippet **含** `⟨tool `，或含 `ltm query`。
-  dirty 不是錯，是「這條查詢的命中品質這一輪不可比」；耗時仍可比。
-  **`clean` 不是「乾淨」的證明**：它只說兩種已知殘影都沒出現。查詢原文被貼進對話的那則 turn
-  兩種殘影都不含，會被判 `clean`。`empty` 是零命中——查詢已經對不到任何東西，這不是 clean。
+  `clean tool=<n>`／`self tool=<n>`／`empty tool=0`／`error(<rc>|sig<N>|exec|json|shape|judge)`。
+  任一列是 `error(…)` 腳本最後以 1 離開（每列照印）。
+- **`self`** = 前 k 名至少一個 snippet **含這條查詢的原文**（空白摺疊後的子字串比對）——儀器看見了
+  自己。量測命令列、`ltm_query query=…`、被引述進散文的那句，都是這個形狀。self 那一列的命中品質
+  這一輪不可比；耗時仍可比。**`clean` 不是「乾淨」的證明**：它只說前 k 名沒有 snippet 含原文——
+  排在前面但不含原文的殘影，它看不見。`empty` 是零命中——查詢已經對不到任何東西，這不是 clean。
+- **`tool=<n>`** = 前 k 名裡含 `⟨tool ` 的 snippet 數。**它不是污染訊號**：工具 metadata chunk
+  佔語料的比例高到「前 k 名裡有一個」幾乎恆真（#67 的診斷有數字，本目錄沒有紀錄，這裡不複述），
+  拿它當 dirty 會讓每一列都不可比。它是 #62（self-hit 的檢索層排除）要移動的那個量，印出來給
+  #62 的前後比較看——**所以 #62 前後 `self`／`tool` 的變化量的是 #62 的效果，不是語料變乾淨了**。
+  第一版的判準是「含 `⟨tool ` 或含 `ltm query`」就 dirty；#63 verify 的 devil's-advocate 指出那量的是
+  「有沒有工具 chunk」不是「這條查詢被自己污染了沒有」，於是改成把命中拿去跟查詢比對。
 - `<ms>` 是 `ltm` 行程 fork→exit 的 monotonic 牆鐘（含 process 啟動、查詢前的增量併入、檢索、
   輸出；不含 judge），單一樣本、無暖身——第 1 列常帶冷啟動。
 
@@ -70,10 +76,18 @@
 
 - 人手在 session 裡貼了查詢原文，或 Claude 自己引述了——規則靠人守，沒有機制擋（`-diff`
   屬性只擋 diff 生成這一條路）。
-- 語料裡本來就有恰好含該字串的**實質** turn（例如退役查詢裡的「資格考」有一則真的使用者 turn）——
-  那不是污染，是正常召回；`dirty` 判準不會標它，讀結果時要分辨。
-- 未來新的工具殘影形狀（判準是封閉列舉），以及 #6 若把 tool payload 收進索引——那會**回溯**
-  索引過去每一次 Write 查詢檔的 `content`。到時候查詢集要整份換掉。
+- 語料裡本來就有恰好逐字含該字串的**實質** turn（例如退役查詢裡的「資格考」有一則真的使用者 turn）——
+  那不是污染，是正常召回；`self` 會把它標成 self，分不出來，讀結果時要在 session 之外看命中。
+- 查詢原文落在 metadata 欄位 200 字元截斷**之後**的那種命令——那段文字不在索引裡，`self` 看不到，
+  但它也不會靠那段文字排名；會排上來的是同一則命令的前 200 字元（`tool=<n>` 會算到它）。
+- #6 若把 tool payload 收進索引——那會**回溯**索引過去每一次 Write 查詢檔的 `content`。
+  到時候查詢集要整份換掉。
+- **同目錄另一組儀器沒有這套紀律**：`scripts/rrf-tie-queries.txt`（104 條）、
+  `scripts/rrf-tie-mechanism.sh`（查詢走 argv、預設查詢寫死在命令列、輸出表第一欄就是查詢）、
+  `scripts/measure-rrf-ties.swift`（失敗路徑印查詢）。它們支撐 `2026-08-22-rrf-tie-rate.md`，量的是
+  104 條的**聚合**平手率而不是「前 1 名是誰」，所以污染的傷害形狀不同——但在 session 裡跑一次，
+  那 104 條就帶著自己的殘影了。**不要在 session 裡跑它們**；把它們收進同一套紀律是獨立工作，
+  追蹤於 #68。
 - **目前的八條尚未在真實索引上驗過前 5 名**（檔頭第 1 條寫明了原因與補驗方式）。在那之前，
   「乾淨」是宣稱不是量測。
 
