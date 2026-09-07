@@ -21,6 +21,12 @@ for q in "${QUERIES[@]}"; do /usr/bin/time -p .build/release/ltm query "$q" --k 
 查詢集（逐字）：before 用「tokenizer 討論」「flock inode 鎖」「資格考」；after
 先跑同三則、再加「band 相關度」「memory strategy」「並行雜湊」共六筆。
 
+> **可比性註記（#63，2026-09-07）**：上面那行 `for q in …` 命令本身在 2026-09-01T04:32:12Z
+> （臺北 12:32）進了語料，而本紀錄的兩次 commit（`cfa5170` 14:59、`26389df` 15:52）都在它之後；
+> `ltm query` 查詢前會併入，所以 after 欄位量測時那則命令已在索引裡、三個查詢的第一名就是它。
+> 本紀錄只記**耗時**、不記命中，耗時仍可比；命中品質本來就沒被記。這三條查詢已退役，
+> 規則見 `docs/measurements/README.md`。
+
 ## Before（循序逐檔雜湊，`86c9246`）
 
 | 量測 | 時間 |

@@ -345,6 +345,10 @@ codex leg 失敗那幾輪，結論要以「同一家族的 N 個視角都沒看�
 
 ## 誠實邊界
 
+**量測儀器自己會污染語料（#63）**：在 session 裡輸入或印出的任何字串都會進索引，所以基準查詢
+只能活在 `scripts/baseline-queries.txt`、量測只能印編號（`scripts/measure-baseline.sh`），
+規則全文在 `docs/measurements/README.md`——**不要在 session 裡 `cat`／`Read` 那個檔**。
+
 **判準：本 repo 沒有量測支撐的效能宣稱，一律不得出現**——不在 code 註解、不在文件、
 不在 commit message。「有量測支撐」指的是 `docs/measurements/` 底下有一份可指名的
 紀錄，而該紀錄涵蓋你正在宣稱的那個比較。

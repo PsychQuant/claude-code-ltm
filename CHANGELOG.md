@@ -4,7 +4,13 @@
 
 ## Unreleased
 
-（無）
+### Added
+
+- **基準查詢集與使用規則（#63）**：`scripts/baseline-queries.txt`（一行一條，檔頭寫明列舉會漏、
+  不得在 session 內顯示、輸出只印編號）＋ `scripts/measure-baseline.sh`（stdout 只有
+  `#N <ms> clean|dirty`，查詢文字永不進輸出）＋ `docs/measurements/README.md` 的規則段。
+  原三條基準查詢因量測命令進了語料而退役（第一名固定是那則命令）；
+  `2026-09-01-scan-parallelism.md` 補可比性註記（耗時可比、命中未記）。
 
 ## [0.5.0] - 2026-09-05
 
