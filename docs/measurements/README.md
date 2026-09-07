@@ -44,7 +44,9 @@
   **之外**做。GitHub 網頁的檔案檢視與 raw 也不受影響。
 - 量測：`scripts/measure-baseline.sh [k]`——讀檔、逐條跑
   `ltm query --all-projects --k <k> --json -- <查詢>`（旗標以腳本為準；注意 `--all-projects`
-  是全語料，與舊紀錄的單一 project 不同），**stdout 只印 `#N <ms> <verdict>`**。
+  是全語料，與舊紀錄的單一 project 不同），**stdout 第一行是 `set sha256:<12 hex>`**（非註解行內容
+  的指紋；紀錄要連它一起引——`#N` 是檔內位置，退役換一條之後同一個 `#N` 就是別的查詢，兩份紀錄的
+  指紋不同就不能逐列對齊），**之後每列 `#N <ms> <verdict>`**。
   `#N` 是檔內第 N 條非註解行（去掉行首行尾的 **ASCII** 空白後，空行與 `#` 開頭不算——腳本與測試
   用同一個定義，而且刻意只認 ASCII：bash 的 `[:space:]` 對全形空白隨 locale 變、Swift 的不變，
   所以兩邊都不剝它，測試另外斷言查詢檔裡沒有非 ASCII 空白）。
@@ -52,9 +54,12 @@
   不落地；查詢檔的解析不依賴 cwd（腳本用自己所在的目錄）。
 - verdict 是**封閉字母表**：`clean tool=<n>`／`self tool=<n>`／`empty tool=0`／
   `error(<rc>|sig<N>|blank|exec|json|shape|judge)`。「封閉」由 `Tests/LTMMCPTests/BaselineQueryFileTests.swift`
-  的**同步測試**執行：它把腳本檔頭的 token 列、本行的 token 列、測試自己的 `errorTokens`、腳本程式碼
-  裡實際的 `error(...)` 輸出點四個集合逐一比對，任一處多一個少一個都紅；六個 error token 每一個
-  也各有一條測試實際產生它。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。
+  的**同步測試**執行：它把腳本檔頭的 token 列、腳本裡 `ERROR_TOKENS`、本行的 token 列、測試自己的
+  `errorTokens`、腳本程式碼裡實際的 `error(...)` 輸出點五個集合逐一比對，任一處多一個少一個都紅，
+  輸出點寫成它認不出的形狀也紅；同一條測試也斷言每個 token 在測試檔裡有一個實際產生它的斷言
+  （查法：`swift test --filter BaselineQueryFile`，judge／error／locale 三條測試的 expected tail）。
+  同一條測試還同步了：退役清單（README 與測試）、七個 metadata 欄位名（`toolMetadataFields` 常數、
+  README 表、查詢檔檔頭）、離開碼（腳本檔頭與程式碼裡的 `exit N`）。**其他任何複述都沒有機制守著**。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。
   `blank` 是那一行在 Unicode 空白摺疊後是空的（只有 U+3000 這類非 ASCII 空白）——行定義把它算成條目、
   judge 卻會得到空針，空針對任何命中都算 self，所以不跑 ltm、直接報 error；測試同時斷言查詢檔裡沒有
   這類字元。
@@ -70,8 +75,10 @@
   多數列不可比。它是 #62（self-hit 的檢索層排除）要移動的那個量，印出來給 #62 的前後比較看
   ——**所以 #62 前後 `self`／`tool` 的變化量的是 #62 的效果加上兩次量測之間語料的成長，不是語料
   變乾淨了**（#62 自己的實作 session 就在談 self-hit 與工具 chunk，特別容易排進這些查詢的前 k 名）。
-  另外，`tool=<n>` 也會數到**談論**這個標記的散文——純字串 `message.content` 不截斷、整段進索引，
-  DA R2 在全語料數到 7 筆這種紀錄、6 筆是 #63 自己的 session 寫的；量會隨討論儀器的 session 增加。
+  另外，`tool=<n>` 也會數到**談論**這個標記的散文——純字串 `message.content` 不截斷、整段進索引；
+  這種紀錄幾乎全是 #63 自己的 session 寫的，而且**會隨討論儀器的 session 增加**（R2 數到 7、R3 數到 8，
+  九十分鐘），所以這裡不給計數只給查法：掃 `~/.claude/projects/**/*.jsonl`，統計 user／assistant 紀錄裡
+  `message.content` 是純字串且含 `⟨tool ` 的筆數（只印計數）。
   第一版的判準是「含 `⟨tool ` 或含 `ltm query`」就 dirty；#63 verify 的 devil's-advocate 指出那量的是
   「有沒有工具 chunk」不是「這條查詢被自己污染了沒有」，於是改成把命中拿去跟查詢比對。
 - `<ms>` 是 `ltm` 行程 fork→exit 的 monotonic 牆鐘（含 process 啟動、查詢前的增量併入、檢索、
@@ -86,11 +93,13 @@
    **編輯查詢檔在 Claude Code 之外的編輯器做**。在 session 裡用 Write／Edit 工具是**今天**索引安全
    的（`content`／`old_string`／`new_string` 不在那七個欄位裡），但它不守本規則劃的 jsonl 邊界：
    Write 的 `content`、Edit 的 `toolUseResult.originalFile`（**整份檔案**，不是改到的那幾行）、Read／
-   Edit 之後的 `attachment` 紀錄，每一次都把完整查詢集存進 jsonl 一份——而**印**也會：一個 Bash 命令把
-   整份檔案印進 stdout，就是一筆 `toolUseResult.stdout`。判準是「這個動作會不會把整份檔案送進 jsonl」，
-   上面是例子不是清單。#63 實作與 verify 期間就這樣存了**至少 8 筆**含全部查詢的紀錄（2026-09-07
-   R3 verify 的 security lens 全語料數的，含一筆 Bash stdout 落在 `subagents` project；R1 verify 的
-   `diff.patch` 另被一個 reviewer 讀進逐字稿）。查法（只印計數、執行期讀查詢檔、不上命令列）：掃
+   Edit 之後的 `attachment` 紀錄，每一次都把完整查詢集存進 jsonl 一份——而**印**與**讀**也會：一個 Bash
+   命令把整份檔案印進 stdout 是一筆 `toolUseResult.stdout`，一次 `Read` 是一筆 `toolUseResult.file.content`。
+   判準是「這個動作會不會把整份檔案送進 jsonl」，上面是例子不是清單。#63 實作與 verify 期間就這樣存了
+   **至少 8 筆**含全部查詢的紀錄（2026-09-07 R3 verify 全語料數的：Write 2、Edit 3、attachment 1、
+   Bash stdout 1、Read 1；R1 verify 的 `diff.patch` 另被一個 reviewer 讀進逐字稿）。這個數字**只會
+   往上走**——R2b 寫「六份」的九分鐘前，另一個 session 剛 `Read` 過一次；所以它是下界不是計數，
+   要現值就跑查法。查法（只印計數、執行期讀查詢檔、不上命令列）：掃
    `~/.claude/projects/**/*.jsonl`，對每筆遞迴走訪所有字串葉節點，數「同時含全部 N 條查詢」的紀錄與其
    json 路徑。所以 **#6 一旦把 tool payload 收進索引，這一組查詢集就整份作廢**——這是已經發生的曝險，
    不是 if。第一版把 Write／Edit 與外部編輯器並列，理由是索引層的；本規則的邊界在 jsonl，兩者不等價。
@@ -104,11 +113,14 @@
 2. **量測輸出只印編號。** 命中內容、snippet、查詢文字一律不印；要看命中內容，在 Claude Code
    **之外**的 shell 跑（那個 shell 的逐字稿不在語料裡）。
 3. **每次量測前重驗，`self` 要分辨成因。** 選定當下乾淨不代表永遠乾淨——跑一次 `measure-baseline.sh`。
-   `self` 的條目先在 Claude Code **之外**讀它的命中：若含查詢原文的是量測命令、`ltm_query`、被引述的
-   散文——那是儀器自己的殘影，語料不可變、它永遠不會走，該條**退役**（補進退役清單、換一條），不是
-   標記那一輪；若是語料裡本來就逐字含這串字的實質 turn，那是正常召回，該條照用、在紀錄裡註明。
-   `empty`／`error` 的條目那一輪不可比。第一版只寫「標記那一輪不可比」——對儀器自己造成的 `self`
-   那是永遠標記，等於讓查詢集安靜地縮水而沒有退役紀錄（DA R2 D2）。
+   `self` 的條目先在 Claude Code **之外**讀它的命中，判準只有一條：**含查詢原文的那段文字，是不是因為
+   量測／本專案的工作才存在？** 是——任何工具 metadata chunk（Bash `command=`、`Grep pattern=`、
+   `ltm_query query=`、`description=`…，即上表會進索引的那些欄位）、量測命令、被貼進或引述的那句——
+   都是儀器自己的殘影，該條**退役**（補進退役清單、換一條、查詢集指紋隨之改變）。**預設是退役**；
+   唯一的例外是語料裡本來就逐字含這串字的實質 turn（例如退役查詢裡的「資格考」那則使用者 turn）——
+   那是正常召回，該條照用、在紀錄裡註明。「語料不可變、殘影永遠不會走」對兩邊都成立，所以它不是
+   判準；判準是那段文字的來歷。`empty`／`error` 的條目那一輪不可比。第一版只寫「標記那一輪不可比」
+   （DA R2 D2）；第二版用三個例子當判準、把例外當預設（DA R3 DA1）——兩次都是列舉代替性質。
 
 ### 它擋不住什麼（誠實寫下；這一節必然不完整——它列的是想到的，不是全部）
 
@@ -120,8 +132,9 @@
   反過來，空白與大小寫以外的改寫（全形／半形、標點、換序）`self` 看不到。
 - 查詢原文**跨過**或落在 metadata 欄位 200 字元截斷之後的那種命令。完全落在之後：那段文字不在索引裡，
   `self` 看不到、它也不會靠那段文字排名。**跨過邊界**：查詢的前綴進了索引、會靠它排名，`self` 卻判
-  `clean`（DA R2 實測：19 字元的佔位查詢前面填 185 字元，14 個字元進索引、判 clean）。#63 的 root
-  cause 那種 `for q in …` 一行多條查詢的命令，後面的查詢正好容易落在這個帶。
+  `clean`——進索引的字元數 ＝ 200 − 查詢在該欄位裡的起始位置（`toolUseMetadata` 攤平換行後
+  `prefix(200)`），起始位置在 200 − 查詢長度 到 200 之間都是這個帶。#63 的 root cause 那種
+  `for q in …` 一行多條查詢的命令，後面的查詢正好容易落在這個帶。
 - #6 若把 tool payload 收進索引——現在 jsonl 裡至少 8 筆完整副本（規則 1 的計數與查法）**回溯**進索引，
   查詢集整份換掉，而且換的那一組要從第一天就只在 Claude Code 之外編輯。
 - **同目錄另一組儀器沒有這套紀律**（兩支腳本、兩組查詢，不要混）：

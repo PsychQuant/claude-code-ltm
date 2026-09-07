@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 
@@ -122,6 +123,35 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     #expect(emitted == expected, Comment(rawValue: "腳本輸出點：\(emitted.sorted())"))
     #expect(readmeTokens == expected, Comment(rawValue: "README：\(readmeTokens.sorted())"))
 
+    // 每個 token 在測試檔裡有一個實際產生它的 expected tail（不只是集合相等）。
+    let testSource = try String(contentsOf: URL(fileURLWithPath: "\(#filePath)"), encoding: .utf8)
+    let producedLiterals = ["error(7)", "error(sig9)", "error(blank)", "error(exec)", "error(json)", "error(shape)", "error(judge)"]
+    let missingProductions = producedLiterals.filter { !testSource.contains("\"" + $0 + "\"") && !testSource.contains("[\"" + $0) && !testSource.contains(", \"" + $0) }
+    #expect(missingProductions.isEmpty, Comment(rawValue: "沒有測試產生：\(missingProductions)"))
+
+    // 七個 metadata 欄位名：CorpusScanner 的常數、README 表、查詢檔檔頭三處同一份。
+    let scanner = try String(contentsOf: root.appendingPathComponent("Sources/LTMIndex/CorpusScanner.swift"), encoding: .utf8)
+    let constantBody = matches(#"static let toolMetadataFields = \[([^\]]*)\]"#, in: scanner).first ?? ""
+    let constantFields = matches(#""([a-z_]+)""#, in: constantBody)
+    let readmeFieldRow = readme.components(separatedBy: "\n").first { $0.contains("七個 metadata 欄位") && $0.hasPrefix("|") } ?? ""
+    let readmeFirstCell = readmeFieldRow.components(separatedBy: "|").dropFirst().first ?? ""   // 只看「位置」那一格
+    let readmeFields = matches(#"`([a-z_]+)`"#, in: readmeFirstCell).filter { $0 != "tool_use" }
+    let queryHeader = try String(contentsOf: root.appendingPathComponent("scripts/baseline-queries.txt"), encoding: .utf8)
+        .components(separatedBy: "\n").filter { $0.hasPrefix("#") }.joined(separator: "\n")
+    // 檔頭那一段的形狀是「`CorpusScanner.toolMetadataFields`：a / b / … / g，各取前 200 字元」，可能跨行。
+    let headerJoined = queryHeader.replacingOccurrences(of: "\n#", with: "").replacingOccurrences(of: " ", with: "")
+    let headerFieldList = matches(#"toolMetadataFields`：([a-z_/]+)，各取前200字元"#, in: headerJoined).first ?? ""
+    let headerFields = headerFieldList.split(separator: "/").map(String.init)
+    #expect(constantFields.count == 7, Comment(rawValue: "常數：\(constantFields)"))
+    #expect(Set(readmeFields) == Set(constantFields), Comment(rawValue: "README 表：\(readmeFields)"))
+    #expect(Set(headerFields) == Set(constantFields), Comment(rawValue: "查詢檔檔頭少了：\(Set(constantFields).subtracting(headerFields).sorted())"))
+
+    // 離開碼：檔頭那一行列的數字 ＝ 程式碼裡 exit 的數字 ∪ {0}。
+    let exitHeaderLine = scriptLines.first { $0.hasPrefix("# 離開碼（") } ?? ""
+    let headerExits = Set((exitHeaderLine.components(separatedBy: "：").last ?? "").split(separator: " ").compactMap { Int($0) })
+    let codeExits = Set(matches(#"exit ([0-9]+)"#, in: codeLines.joined(separator: "\n")).compactMap { Int($0) }).union([0])
+    #expect(headerExits == codeExits, Comment(rawValue: "檔頭：\(headerExits.sorted()) 程式碼：\(codeExits.sorted())"))
+
     // 退役清單：README 的「…」列與測試的 retired 陣列是同一份，不能各自漂移。
     let readmeRetiredLine = readme.components(separatedBy: "\n").first { $0.hasPrefix("「") && $0.contains("」「") } ?? ""
     let readmeRetired = Set(matches(#"「([^」]+)」"#, in: readmeRetiredLine))
@@ -147,8 +177,17 @@ private struct ScriptRun {
     let status: Int32
     let stdout: String
     let stderr: String
-    var lines: [String] { stdout.split(separator: "\n").map(String.init) }
+    /// stdout 第一行是 `set sha256:<12 hex>`（查詢集指紋），之後才是列。
+    var setLine: String { stdout.split(separator: "\n").first.map(String.init) ?? "" }
+    var rows: [String] { Array(stdout.split(separator: "\n").map(String.init).dropFirst()) }
     var combined: String { stdout + stderr }
+}
+
+/// 與腳本同一個指紋：對非註解行（同一個 ASCII trim 定義）逐行 sha256（行＋"\n"），取前 12 個 hex。
+private func setFingerprint(_ text: String) -> String {
+    var h = SHA256()
+    for line in nonCommentLines(text) { h.update(data: Data((line + "\n").utf8)) }
+    return "set sha256:" + h.finalize().prefix(6).map { String(format: "%02x", $0) }.joined()
 }
 
 /// `#N <ms>ms ` 之後的全部（verdict 含 `tool=<n>`）。
@@ -221,14 +260,26 @@ private func tempDir() throws -> URL {
     return dir
 }
 
+/// 測試行程 PATH 上真正的 python3（假 python3 對非 judge 的呼叫要轉交給它）。
+private func realPython3() -> String {
+    let path = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+    for dir in path.split(separator: ":") {
+        let candidate = "\(dir)/python3"
+        if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+    }
+    return "/usr/bin/python3"
+}
+
 /// 一個 PATH 目錄，只放腳本本身需要的外部命令（`dirname`）加上呼叫端指定的假命令。
-private func makeBinDir(in dir: URL, fakes: [String: String]) throws -> URL {
+/// `judgeFakes` 是假 python3 對 **judge 呼叫**（`python3 -c …`）的行為；其他呼叫（算查詢集指紋的
+/// `python3 - <file>`）轉交真的 python3——要模擬的是 judge 掛掉，不是整個 python 壞掉。
+private func makeBinDir(in dir: URL, judgeFakes: [String: String]) throws -> URL {
     let bin = dir.appendingPathComponent("bin-\(UUID().uuidString.prefix(8))")
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
     try FileManager.default.createSymbolicLink(at: bin.appendingPathComponent("dirname"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/dirname"))
-    for (name, body) in fakes {
+    for (name, body) in judgeFakes {
         let f = bin.appendingPathComponent(name)
-        try body.write(to: f, atomically: true, encoding: .utf8)
+        try "#!/bin/bash\nif [ \"$1\" = \"-c\" ]; then\n\(body)\nfi\nexec '\(realPython3())' \"$@\"\n".write(to: f, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
     }
     return bin
@@ -261,10 +312,13 @@ func measureBaselinePrintsOnlyIndicesAndVerdicts() throws {
 
     let run = try runScript(queries: queries, stub: stub)
     #expect(run.status == 0, Comment(rawValue: "rc=\(run.status) err=\(run.stderr)"))
-    #expect(run.lines.count == 6, Comment(rawValue: run.stdout))
-    #expect(run.lines.allSatisfy { $0.range(of: verdictLine, options: .regularExpression) != nil }, Comment(rawValue: run.stdout))
-    #expect(run.lines.map(tail) == ["clean tool=0", "self tool=1", "self tool=0", "empty tool=0", "clean tool=2", "self tool=1"], Comment(rawValue: run.stdout))
-    #expect(run.lines.map { $0.prefix(3) } == ["#1 ", "#2 ", "#3 ", "#4 ", "#5 ", "#6 "], Comment(rawValue: run.stdout))
+    let fixtureText = try String(contentsOf: queries, encoding: .utf8)
+    #expect(run.setLine == setFingerprint(fixtureText), Comment(rawValue: "第一行：\(run.setLine)"))
+    #expect(run.setLine.range(of: "^set sha256:[0-9a-f]{12}$", options: .regularExpression) != nil)
+    #expect(run.rows.count == 6, Comment(rawValue: run.stdout))
+    #expect(run.rows.allSatisfy { $0.range(of: verdictLine, options: .regularExpression) != nil }, Comment(rawValue: run.stdout))
+    #expect(run.rows.map(tail) == ["clean tool=0", "self tool=1", "self tool=0", "empty tool=0", "clean tool=2", "self tool=1"], Comment(rawValue: run.stdout))
+    #expect(run.rows.map { $0.prefix(3) } == ["#1 ", "#2 ", "#3 ", "#4 ", "#5 ", "#6 "], Comment(rawValue: run.stdout))
     // 查詢文字與 snippet 都不得出現在任何輸出。
     #expect(!run.combined.lowercased().contains("zqxj") && !run.combined.contains("實質內容") && !run.combined.contains("說明"))
 
@@ -290,11 +344,12 @@ func measureBaselineLineDefinitionIsLocaleIndependent() throws {
     #expect(swiftCount == 6)
     for locale in ["C", "en_US.UTF-8"] {
         let run = try runScript(queries: queries, stub: stub, extraEnv: ["LC_ALL": locale, "LANG": locale])
-        #expect(run.lines.count == swiftCount, Comment(rawValue: "LC_ALL=\(locale): \(run.stdout)"))
+        #expect(run.rows.count == swiftCount, Comment(rawValue: "LC_ALL=\(locale): \(run.stdout)"))
         // 只有 U+3000 的那一行：行定義算條目，但 judge 的 Unicode 空白摺疊會得到空針——那是 error(blank)，
         // 不能是 self。U+3000 縮排的「# not a comment」摺疊後不是空的，照常量（clean）。
-        #expect(run.lines.map(tail) == ["clean tool=0", "error(blank)", "clean tool=0", "clean tool=0", "clean tool=0", "clean tool=0"], Comment(rawValue: "LC_ALL=\(locale): \(run.stdout)"))
+        #expect(run.rows.map(tail) == ["clean tool=0", "error(blank)", "clean tool=0", "clean tool=0", "clean tool=0", "clean tool=0"], Comment(rawValue: "LC_ALL=\(locale): \(run.stdout)"))
         #expect(run.status == 1, Comment(rawValue: "LC_ALL=\(locale): rc=\(run.status)"))
+        #expect(run.setLine == setFingerprint(text), Comment(rawValue: "LC_ALL=\(locale): \(run.setLine)"))
     }
 }
 
@@ -313,8 +368,8 @@ func measureBaselineReportsEveryFailureAndExitsNonZero() throws {
 
     let run = try runScript(queries: queries, stub: stub)
     #expect(run.status == 1, Comment(rawValue: "rc=\(run.status) out=\(run.stdout) err=\(run.stderr)"))
-    #expect(run.lines.map(tail) == ["error(7)", "error(sig9)", "error(json)", "error(shape)", "error(shape)", "error(shape)", "clean tool=0"], Comment(rawValue: run.stdout))
-    #expect(run.lines.allSatisfy { $0.range(of: verdictLine, options: .regularExpression) != nil }, Comment(rawValue: run.stdout))
+    #expect(run.rows.map(tail) == ["error(7)", "error(sig9)", "error(json)", "error(shape)", "error(shape)", "error(shape)", "clean tool=0"], Comment(rawValue: run.stdout))
+    #expect(run.rows.allSatisfy { $0.range(of: verdictLine, options: .regularExpression) != nil }, Comment(rawValue: run.stdout))
     #expect(!run.combined.contains("ZQXJ") && !run.combined.contains("Traceback"), Comment(rawValue: run.stderr))
 
     // error(exec)：LTM_BIN 是可執行的一般檔案，但不是可執行格式（ENOEXEC）。
@@ -324,7 +379,7 @@ func measureBaselineReportsEveryFailureAndExitsNonZero() throws {
     let one = dir.appendingPathComponent("one.txt")
     try "ZQXJ-ONE\n".write(to: one, atomically: true, encoding: .utf8)
     let exec = try runScript(queries: one, stub: stub, ltmBinOverride: notAProgram.path)
-    #expect(exec.status == 1 && exec.lines.map(tail) == ["error(exec)"], Comment(rawValue: "rc=\(exec.status) out=\(exec.stdout)"))
+    #expect(exec.status == 1 && exec.rows.map(tail) == ["error(exec)"], Comment(rawValue: "rc=\(exec.status) out=\(exec.stdout)"))
 }
 
 @Test("measure-baseline.sh：judge 掛掉或印出不合形狀的東西 → 該列 error(judge)、以 1 離開，judge 的 stderr／雜訊不外流")
@@ -336,27 +391,27 @@ func measureBaselineContainsAJudgeCrash() throws {
     let stub = try makeStub(in: dir, responses: [:])
     let fakes: [(String, String)] = [
         // 崩掉：traceback 進 stderr、非零離開。
-        ("crash", "#!/bin/bash\necho 'Traceback (most recent call last): ZQXJ-JUDGE' >&2\nexit 1\n"),
+        ("crash", "echo 'Traceback (most recent call last): ZQXJ-JUDGE' >&2; exit 1"),
         // 沒崩，但 stdout 多了一行雜訊（例如 site-packages 的 .pth 印字）。
-        ("junk", "#!/bin/bash\nprintf 'ZQXJ-JUNK from a .pth\\n42 clean tool=0\\n'\n"),
+        ("junk", "printf 'ZQXJ-JUNK from a .pth\\n42 clean tool=0\\n'; exit 0"),
         // 一行，但 <ms> 不是數字。
-        ("badms", "#!/bin/bash\nprintf 'fast clean tool=0\\n'\n"),
+        ("badms", "printf 'fast clean tool=0\\n'; exit 0"),
         // 一行，verdict 不在字母表。
-        ("badword", "#!/bin/bash\nprintf '42 dirty tool=0\\n'\n"),
+        ("badword", "printf '42 dirty tool=0\\n'; exit 0"),
         // tool= 後面不是數字。
-        ("toolx", "#!/bin/bash\nprintf '42 clean tool=x\\n'\n"),
+        ("toolx", "printf '42 clean tool=x\\n'; exit 0"),
         // sig 後面不是數字。
-        ("sigx", "#!/bin/bash\nprintf '42 error(sigx)\\n'\n"),
+        ("sigx", "printf '42 error(sigx)\\n'; exit 0"),
         // 字面 token 不在 ERROR_TOKENS（字元都合法——這條釘的是「字面比對」而不是「字元類別」）。
-        ("badtoken", "#!/bin/bash\nprintf '42 error(timeout)\\n'\n"),
+        ("badtoken", "printf '42 error(timeout)\\n'; exit 0"),
         // 空 token。
-        ("emptytok", "#!/bin/bash\nprintf '42 error()\\n'\n"),
+        ("emptytok", "printf '42 error()\\n'; exit 0"),
     ]
     for (label, body) in fakes {
-        let bin = try makeBinDir(in: dir, fakes: ["python3": body])
+        let bin = try makeBinDir(in: dir, judgeFakes: ["python3": body])
         let run = try runScript(queries: queries, stub: stub, pathPrefix: bin.path)
         #expect(run.status == 1, Comment(rawValue: "\(label): rc=\(run.status) out=\(run.stdout)"))
-        #expect(run.lines == ["#1 0ms error(judge)"], Comment(rawValue: "\(label): \(run.stdout)"))
+        #expect(run.rows == ["#1 0ms error(judge)"], Comment(rawValue: "\(label): \(run.stdout)"))
         #expect(!run.combined.contains("ZQXJ") && !run.combined.contains("Traceback"), Comment(rawValue: "\(label): \(run.stderr)"))
     }
 }
@@ -387,13 +442,13 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: notExecutable.path)
     #expect(try runScript(queries: queries, stub: stub, ltmBinOverride: notExecutable.path).status == 69)
 
-    let noPython = try makeBinDir(in: dir, fakes: [:])
+    let noPython = try makeBinDir(in: dir, judgeFakes: [:])
     #expect(try runScript(queries: queries, stub: stub, pathOverride: noPython.path).status == 70)
 
     let onlyComments = dir.appendingPathComponent("c.txt")
     try "# a\n\n   # b\n".write(to: onlyComments, atomically: true, encoding: .utf8)
     let run = try runScript(queries: onlyComments, stub: stub)
-    #expect(run.status == 65 && run.stdout.isEmpty, Comment(rawValue: "rc=\(run.status) out=\(run.stdout)"))
+    #expect(run.status == 65 && run.rows.isEmpty, Comment(rawValue: "rc=\(run.status) out=\(run.stdout)"))
 }
 
 @Test("measure-baseline.sh：`bash -x`／`SHELLOPTS=xtrace`／`BASH_ENV` 三條 xtrace 路徑都不漏——第一行就關掉")
@@ -414,7 +469,7 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     ]
     for (label, run) in runs {
         #expect(run.status == 0, Comment(rawValue: "\(label): rc=\(run.status)"))
-        #expect(run.lines.count == 1 && run.lines[0].hasSuffix(" clean tool=0"), Comment(rawValue: "\(label): \(run.stdout)"))
+        #expect(run.rows.count == 1 && run.rows[0].hasSuffix(" clean tool=0"), Comment(rawValue: "\(label): \(run.stdout)"))
         let leaked = run.combined.contains("ZQXJ")
         #expect(!leaked, Comment(rawValue: "\(label): xtrace 漏了查詢或命中（stderr \(run.stderr.count) bytes）"))
     }

@@ -1,7 +1,9 @@
 #!/bin/bash
 # 基準查詢量測（#63）：讀 scripts/baseline-queries.txt，逐條跑
 #   ltm query --all-projects --k <k> --json -- <查詢>
-# **stdout 只印 `#N <ms> <verdict>`**——查詢文字與命中內容不進 stdout／stderr，包含 `bash -x`、
+# **stdout 第一行是 `set sha256:<12 hex>`（非註解行內容的指紋——查詢集一換，指紋就換；紀錄要連它一起
+# 引，兩次量測指紋不同就不能逐列對齊，`#N` 只是檔內位置），之後每列 `#N <ms> <verdict>`**。
+# 查詢文字與命中內容不進 stdout／stderr，包含 `bash -x`、
 # `SHELLOPTS=xtrace`、`BASH_ENV` 裡的 `set -x`（第一行就關掉 xtrace；ltm 與 judge 的 stderr 都丟掉）。
 # 擋不住的：`BASH_ENV`／`PS4` 裡刻意放一個會讀查詢檔的命令替換——trace 第一行 `set +x` 時 PS4 先展開。
 # 那等同直接 cat 查詢檔，是操作者的動作不是本腳本的洩漏面；寫在這裡是因為上一句是全稱。
@@ -46,8 +48,10 @@
 # （`.build/release/ltm query "$q" --k 5`，單一 project、無 --json）量的不是同一件事，
 # 不要把本腳本的列與 2026-09-01 之前的表對齊——見 docs/measurements/README.md。
 #
-# 離開碼：0 全部量到（含 empty）；1 任一列 error(…)（每列照印完才離開）；64 k 不是 1–1000 的整數；
-# 65 查詢檔沒有任何非註解行；66 查詢檔不是可讀的一般檔案；69 ltm 不是可執行的一般檔案；70 沒有 python3。
+# 離開碼（封閉集合，同步測試對照程式碼裡的 exit N）：0 1 64 65 66 69 70
+#   0 全部量到（含 empty）；1 任一列 error(…)（每列照印完才離開）；64 k 不是 1–1000 的整數；
+#   65 查詢檔沒有任何非註解行；66 查詢檔不是可讀的一般檔案；69 ltm 不是可執行的一般檔案；
+#   70 沒有 python3、或算不出查詢集指紋。
 #
 # 「第 N 條非註解行」：去掉行首行尾的 **ASCII** 空白（空格、tab、CR、VT、FF；`read` 已吃掉 LF；刻意不用
 # [:space:]，它隨 locale 變、Swift 的不變）之後，空行與 `#` 開頭的行不算。全形空白（U+3000）與 NBSP 不是
@@ -68,6 +72,24 @@ case "$K" in ''|*[!0-9]*) echo "k 必須是 1–1000 的整數" >&2; exit 64 ;; 
 [ -f "$QF" ] && [ -r "$QF" ] || { echo "查詢檔不是可讀的一般檔案：$QF" >&2; exit 66; }
 [ -f "$LTM" ] && [ -x "$LTM" ] || { echo "ltm 不是可執行的一般檔案：$LTM" >&2; exit 69; }
 command -v python3 >/dev/null 2>&1 || { echo "需要 python3 計時與解析 --json" >&2; exit 70; }
+
+# 查詢集指紋：對「第 N 條非註解行」的同一個定義（ASCII trim、跳過空行與 #）逐行 sha256，只印 12 個 hex。
+# 檔案內容留在 python 行程裡，不上 stdout。
+SETID=$(python3 - "$QF" <<'PY'
+import hashlib, sys
+ws = " \t\r\v\f"
+h = hashlib.sha256()
+with open(sys.argv[1], encoding="utf-8", errors="surrogateescape", newline="") as f:
+    for raw in f:
+        line = raw.rstrip("\n").strip(ws)
+        if not line or line.startswith("#"):
+            continue
+        h.update(line.encode("utf-8", "surrogateescape")); h.update(b"\n")
+print(h.hexdigest()[:12])
+PY
+) || SETID=""
+case "$SETID" in *[!0-9a-f]*|'') echo "算不出查詢集指紋" >&2; exit 70 ;; esac
+printf 'set sha256:%s\n' "$SETID"
 
 # 一條查詢一個 python：起 ltm、用 monotonic 計時、解析 --json、只印一行「<ms> <verdict>」。
 # 不印任何 snippet；ltm 的 stdin 接 /dev/null（避免它吃掉查詢檔剩下的行）；stderr 由外層整個丟掉。

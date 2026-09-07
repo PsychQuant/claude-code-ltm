@@ -8,7 +8,7 @@
 
 - **基準查詢集與使用規則（#63）**：`scripts/baseline-queries.txt`（一行一條，檔頭寫明列舉會漏、
   不得在 session 內顯示、輸出只印編號；`.gitattributes` 設 `-diff`）＋ `scripts/measure-baseline.sh`
-  （stdout 只有 `#N <ms> <verdict>`，verdict 是封閉字母表 `clean|self|empty` 加 `tool=<n>`
+  （stdout 第一行 `set sha256:<12 hex>` 是查詢集指紋、之後只有 `#N <ms> <verdict>`，verdict 是封閉字母表 `clean|self|empty` 加 `tool=<n>`
   或 `error(…)`，四處列舉由同步測試釘住；`self` = 前 k 名有 snippet 含這條查詢的原文（空白與
   大小寫摺疊），`tool=<n>` 只是觀察值不是污染訊號；查詢文字不進 stdout／stderr、含 `bash -x`／
   `SHELLOPTS`／`BASH_ENV` 的 `set -x`（PS4 命令替換除外，檔頭寫明）；任一 error 以 1 離開；
