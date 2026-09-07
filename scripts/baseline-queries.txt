@@ -7,24 +7,30 @@
 #    **前 5 名是否乾淨尚未在真實索引上驗過**（2026-09-07 實作當下 `~/bin/ltm` 剛換 inode、
 #    鑰匙圈要重新授權，見 .claude/rules/anchor-key-in-probes.md）。第一次在 Claude Code 之外
 #    跑 `measure-baseline.sh` 後，把日期與「N 行全 clean」寫回這一條；在那之前，本檔的乾淨
-#    是宣稱不是量測。而且 `clean` 只代表前 k 名沒有 snippet 含這條查詢的原文——語料裡本來就
-#    逐字含它的實質 turn 會被判 `self`，而排在前面但不含原文的殘影會被判 `clean`；判準會漏。
+#    是宣稱不是量測。而且 `clean` 只代表前 k 名沒有 snippet 含這條查詢的原文（空白與大小寫摺疊後）
+#    ——語料裡本來就逐字含它的實質 turn 會被判 `self`，而排在前面但不含原文的殘影會被判 `clean`；
+#    判準會漏。
 #
 # 2. **本檔內容不得在 Claude Code session 內顯示。** 判準是「會不會落進被索引的欄位」：逐字稿
-#    裡會進索引的是 `text` block（使用者輸入、Claude 的散文、compaction 摘要）與 tool_use 的
-#    七個 metadata 欄位（`CorpusScanner.toolMetadataFields`：command / file_path / path / pattern /
-#    query / url / description，各取前 200 字元）。所以：查詢出現在 Bash 命令列（`echo`、
-#    `ltm query <q>`、`grep <q>`）、`ltm_query` MCP 工具的 `query=`、任何工具的 `description=`、
-#    或被貼進／引述進對話——就進索引，下一次量測的前幾名就是「顯示它的那一刻」（退役的六條
-#    實測第一名全是那則量測命令）。`cat`／`Read` 本檔的**輸出**是 tool_result、今天不被索引
-#    （#6 追蹤中、可能改變），但 Claude 看到之後引述它的那句散文一定被索引——所以一樣不做。
+#    裡會進索引的是純字串的 `message.content`（使用者鍵入的 prompt 常是這一種，整段）、`text` block
+#    （使用者輸入、Claude 的散文、compaction 摘要）與 tool_use 的七個 metadata 欄位
+#    （`CorpusScanner.toolMetadataFields`：command / file_path / path / pattern / query / url /
+#    description，各取前 200 字元）。所以：查詢出現在 Bash 命令列（`echo`、`ltm query <q>`、
+#    `grep <q>`）、`Grep` 工具的 `pattern=`、`ltm_query` MCP 工具的 `query=`、任何工具的
+#    `description=`、或被貼進／引述進對話——就進索引，下一次量測的前幾名就是「顯示它的那一刻」
+#    （退役的前三條實測第一名全是那則量測命令）。`cat`／`Read` 本檔的**輸出**是 tool_result、今天
+#    不被索引（#6 追蹤中、可能改變），但 Claude 看到之後引述它的那句散文一定被索引——所以一樣不做。
 #    編輯本檔請用 Write／Edit 工具（`content`／`old_string`／`new_string` 不在那七個欄位裡）
 #    或在 Claude Code 之外的編輯器；量測請跑 `scripts/measure-baseline.sh`，它只印編號。
-#    `.gitattributes` 對本檔設了 `-diff`：`git diff`／`git show`／`git log -p` 只印
-#    「Binary files differ」，要看內容在 session 之外用 `git diff --text`。
+#    `.gitattributes` 對本檔設了 `-diff`：它**只**改變 diff 生成——`git diff`／`git show <rev>`／
+#    `git log -p`／`git grep` 只印「Binary files differ」；凡是把 blob 原樣吐出來的命令
+#    （`git show <rev>:<path>`、`git blame`、`git cat-file -p`、`git archive`、`git diff --no-index`、
+#    `git diff --text`、`git format-patch` 的 binary literal）照樣帶全文，這份例外清單會漏，判準是
+#    「它會不會把 blob 原樣吐出來」。要看內容在 session 之外做。
 #
 # 3. **量測輸出只印編號、耗時與 verdict，永不印查詢文字或命中內容。**
-#    `#N` 就是本檔第 N 條非註解行（由 1 起算；去 CR、去前後空白後，空行與 `#` 開頭不算）。
+#    `#N` 就是本檔第 N 條非註解行（由 1 起算；去掉行首行尾的 ASCII 空白後，空行與 `#` 開頭不算；
+#    全形空白與 NBSP 不算空白，測試斷言本檔沒有這類字元）。
 #
 # 選法（2026-09-07）：自行撰寫的通用技術詞彙（CLAUDE.md 隱私邊界：不從語料抄），中英混合、
 # 含中文雙字與四字；退役的六條（見 README 的退役清單）不在此。**每次量測前都要重驗**

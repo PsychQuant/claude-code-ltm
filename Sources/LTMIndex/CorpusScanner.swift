@@ -858,18 +858,8 @@ public struct CorpusScanner: Sendable {
             timestamp: timestamp, role: role, text: text, anchor: anchor)
     }
 
-    /// content 有兩種形狀：純字串，或 block 陣列（`text` / `thinking` / `tool_use` /
-    /// `tool_result`）。`indexableText` 取 `text` 全文、`tool_use` 的下列 metadata 欄位
-    /// （各截 `toolMetadataFieldLimit`）、`tool_result` 的成敗標記；**tool payload 與
-    /// `thinking` 不取**。（這段的第一版寫「只取 `text` block」，#63 verify 抓到它與
-    /// 下方那張表互相矛盾——一份規格寫兩次就是兩份會漂移的規格。）
-    ///
-    /// tool payload 不索引是已知的取捨，不是疏漏：它會切斷決策證據（該不該索引、
-    /// 以及索引哪些欄位，追蹤於 issue #6）。`thinking` 同樣不取——它是模型的內部
-    /// 推理，不是對話內容。這個決定改變時，anchor 因為內容定址而不需要重建語意，
-    /// 但既有 chunk 的 span 會變，所以要走全量重建。
-    ///
-    /// `tool_use.input` 裡**算作 metadata** 的欄位。
+    /// `tool_use.input` 裡**算作 metadata** 的欄位（`indexableText` 收的那幾個；它收什麼、
+    /// 不收什麼的完整說明在 `indexableText` 自己的 doc，這裡不再寫一份）。
     ///
     /// **這是封閉列舉，不得依性質相似類推第八個**（`common-spec-prose-enumeration`）。
     /// 每一個都是「做了什麼」，不是「結果是什麼」：
@@ -897,6 +887,16 @@ public struct CorpusScanner: Sendable {
     static let toolMetadataFieldLimit = 200
 
     /// 可索引的文字。
+    ///
+    /// content 有兩種形狀。**純字串**：整段原樣回傳（使用者鍵入的 prompt 常是這一種——
+    /// 不經 block 分派、不截斷）。**block 陣列**：`text` 取全文；`tool_use` 取工具名加
+    /// `toolMetadataFields` 那七個欄位（各截 `toolMetadataFieldLimit`）；`tool_result` 只記
+    /// 成敗；`thinking`／`image`／`document` 與其他型別不取。tool payload 不索引是已知的
+    /// 取捨，不是疏漏：它會切斷決策證據（該不該索引、以及索引哪些欄位，追蹤於 issue #6）。
+    /// 這個決定改變時，anchor 因為內容定址而不需要重建語意，但既有 chunk 的 span 會變，
+    /// 所以要走全量重建。（這一段先前掛在 `toolMetadataFields` 上、寫著「只取 `text` block」，
+    /// #63 verify 抓到它與程式碼和下方那張表都矛盾——一份規格寫兩次就是兩份會漂移的規格，
+    /// 所以現在只有這一份，`docs/measurements/README.md` 的表以本段為查法目標。）
     ///
     /// ## tool block 只取 metadata，不取 payload（#6）
     ///

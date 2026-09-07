@@ -1,1 +1,2 @@
 scripts/baseline-queries.txt -diff
+scripts/rrf-tie-queries.txt -diff

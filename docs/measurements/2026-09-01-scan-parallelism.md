@@ -21,16 +21,20 @@ for q in "${QUERIES[@]}"; do /usr/bin/time -p .build/release/ltm query "$q" --k 
 查詢集（逐字）：before 用「tokenizer 討論」「flock inode 鎖」「資格考」；after
 先跑同三則、再加「band 相關度」「memory strategy」「並行雜湊」共六筆。
 
-> **可比性註記（#63，2026-09-07）**：上面那行 `for q in …` 命令本身在 2026-09-01T04:32:12Z
-> （臺北 12:32）進了語料。它落在 before 的 commit `86c9246`（臺北 09:52）與 after 的 commit
-> `cfa5170`（臺北 13:59）之間，所以那則 turn **就是 after 那一輪的量測本身**——`ltm query`
-> 查詢前會併入，它先把自己的命令列索引進去、再對同一組查詢排名，第一名就是它。
-> （查法：`TZ=Asia/Taipei git log -1 --date=iso-local --format='%h %ad' 86c9246 cfa5170`；
-> 第一版把兩個 commit 寫成 14:59／15:52，那是 git 記錄的 +09:00 牆鐘、不是臺北時間，#63 verify
-> 兩個 lens 各自抓到。）本紀錄只記**耗時**、不記命中，耗時仍可比；命中品質本來就沒被記。
-> 六條查詢全部退役，規則見 `docs/measurements/README.md`。新的 `scripts/measure-baseline.sh`
-> 量的是 `~/bin/ltm query --all-projects`（全語料、release 安裝版），**與本表的單一 project
-> `.build/release/ltm` 不是同一件事**，它的列不要拿來與本表對齊。
+> **可比性註記（#63，2026-09-07）**：一則帶著三條查詢字面值的 `for q in …` 量測命令在
+> 2026-09-01T04:32:12Z（臺北 12:32）進了語料（issue #63 引了那則 turn；它的時間戳只能在語料裡
+> 查，而查它就得把退役查詢放上命令列，所以這裡不給查法、只給出處）。它落在 before 的 commit
+> `86c9246`（臺北 09:52）與 after 的 commit `cfa5170`（臺北 13:59）之間——查法：
+> `TZ=Asia/Taipei git log --no-walk --date=iso-local --format='%h %ad' 86c9246 cfa5170`（`-1` 加兩個
+> rev 只會印最新那個，第一版的查法就是這樣寫錯的）。**它是哪一輪的量測、或另一次手動探針，紀錄裡
+> 沒有依據可指**：兩輪用的 code 在 09:52 之後都存在，量測後才 commit 也是常態；而 issue 引的命令
+> 帶三個字面值、本紀錄的 after 輪走 `"${QUERIES[@]}"`，形狀還不同。操作結論不依賴這一點：本紀錄
+> 只記**耗時**、不記命中，耗時仍可比，命中品質本來就沒被記、從那一刻起也不可比。
+> （第一版把兩個 commit 寫成 `cfa5170` 14:59、`26389df` 15:52——那是 git 記錄的 +09:00 牆鐘、不是
+> 臺北時間，臺北是 13:59／14:52；第二版又把 bracketing 寫成「所以就是 after 輪」的推論，兩次都由
+> #63 verify 抓到。）六條查詢全部退役，規則見 `docs/measurements/README.md`。新的
+> `scripts/measure-baseline.sh` 量的是 `~/bin/ltm query --all-projects`（全語料、release 安裝版），
+> **與本表的單一 project `.build/release/ltm` 不是同一件事**，它的列不要拿來與本表對齊。
 
 ## Before（循序逐檔雜湊，`86c9246`）
 

@@ -19,11 +19,12 @@
 
 | 逐字稿裡的位置 | 進索引？ | 查法 |
 |---|---|---|
-| `text` block（使用者輸入、Claude 的散文、compaction 摘要） | **會**，全文 | `Sources/LTMIndex/CorpusScanner.swift` 的 `indexableText`，`case "text"` |
-| `tool_use` 的七個 metadata 欄位：`command` / `file_path` / `path` / `pattern` / `query` / `url` / `description`，各取前 200 字元 | **會** | 同檔 `toolMetadataFields`（封閉列舉，隨該常數變動；改它就要回來改這段） |
-| `tool_result` 的內容（Bash 的 stdout、`Read` 讀到的檔案） | 今天**不會**，只記 `⟨tool_result ok|error⟩` | 同檔 `case "tool_result"`；`Tests/LTMIndexTests/CorpusScannerTests.swift` 的「tool_result 只記成敗，不記內容」。**這是 #6 追蹤中的決定，可能改變** |
-| `tool_use` 的其他欄位（Write 的 `content`、Edit 的 `old_string`／`new_string`） | 今天**不會** | 不在 `toolMetadataFields` 裡（同上，隨常數變動） |
-| 頂層 `toolUseResult` | 不會 | `chunk(from:)` 只讀 `message.content` |
+| `message.content` 是**純字串**（使用者鍵入的 prompt 常是這一種） | **會**，整段、不截斷 | `Sources/LTMIndex/CorpusScanner.swift` 的 `indexableText` 第一行 `if let text = content as? String`。結構普查（只印計數）：user 紀錄裡約一成走這條路 |
+| `text` block（使用者輸入、Claude 的散文、compaction 摘要） | **會**，全文 | 同檔 `indexableText`，`case "text"`。compaction 摘要那句的查法：掃 `~/.claude/projects/**/*.jsonl` 含 `isCompactSummary` 的行、統計頂層 `type`——全部是 `user`，所以通得過 `chunk(from:)` 的 user/assistant 守衛（只印計數，不讀內容） |
+| `tool_use` 的工具名＋七個 metadata 欄位：`command` / `file_path` / `path` / `pattern` / `query` / `url` / `description`，各取前 200 字元 | **會** | 同檔 `toolMetadataFields`（封閉列舉，隨該常數變動；改它就要回來改這段）與 `toolUseMetadata`（工具名先進 `pieces`） |
+| `tool_result` 的內容（Bash 的 stdout、`Read` 讀到的檔案） | 今天**不會**，只記 `⟨tool_result ok\|error⟩` 標記 | 同檔 `case "tool_result"`；`Tests/LTMIndexTests/CorpusScannerTests.swift` 的「tool_result 只記成敗，不記內容」。**這是 #6 追蹤中的決定，可能改變** |
+| `tool_use` 的其他欄位（Write 的 `content`、Edit 的 `old_string`／`new_string`、Agent 的 `prompt`） | 今天**不會** | 不在 `toolMetadataFields` 裡（同上，隨常數變動） |
+| `thinking`／`image`／`document` block；頂層 `toolUseResult`；非 user/assistant 的紀錄（`attachment`、`system`） | 不會 | `indexableText` 的 `default: continue`；`chunk(from:)` 只讀 user/assistant 的 `message.content` |
 
 所以真正危險的動作是：查詢出現在 **Bash 命令列**（`echo`、`ltm query <q>`、`grep <q>`）、
 **`ltm_query` MCP 工具的 `query=`**（`Sources/LTMMCP/RetrievalTool.swift` 的 input 欄位名就是
@@ -34,19 +35,27 @@
 ### 查詢集在哪、怎麼用
 
 - 查詢集：`scripts/baseline-queries.txt`（一行一條、`#` 註解）。它的檔頭寫著同樣的規則——兩處要一起改。
-  `.gitattributes` 對它設了 `-diff`：`git diff`／`git show <rev>`／`git log -p` 只印「Binary files differ」，
-  要看內容在 session **之外**用 `git diff --text`。`git show <rev>:scripts/baseline-queries.txt` 照樣
-  印全文（`-diff` 只管 diff 生成），別在 session 裡跑。
+  `.gitattributes` 對它設了 `-diff`（`scripts/rrf-tie-queries.txt` 同）。它**只**改變 diff 生成：
+  `git diff`／`git show <rev>`／`git log -p`／`git grep` 只印「Binary files differ」；凡是把 blob 原樣
+  吐出來的命令照樣帶全文——`git show <rev>:<path>`、`git blame`、`git cat-file -p`、`git archive`、
+  `git diff --no-index`、`git diff --text`、`git format-patch`（base85 binary literal，撿不回明文但
+  bytes 都在）。**這份例外清單會漏，判準是「它會不會把 blob 原樣吐出來」**；要看內容在 session
+  **之外**做。GitHub 網頁的檔案檢視與 raw 也不受影響。
 - 量測：`scripts/measure-baseline.sh [k]`——讀檔、逐條跑
   `ltm query --all-projects --k <k> --json -- <查詢>`（旗標以腳本為準；注意 `--all-projects`
   是全語料，與舊紀錄的單一 project 不同），**stdout 只印 `#N <ms> <verdict>`**。
-  `#N` 是檔內第 N 條非註解行（去前後空白後，空行與 `#` 開頭不算——腳本與測試用同一個定義）。
+  `#N` 是檔內第 N 條非註解行（去掉行首行尾的 **ASCII** 空白後，空行與 `#` 開頭不算——腳本與測試
+  用同一個定義，而且刻意只認 ASCII：bash 的 `[:space:]` 對全形空白隨 locale 變、Swift 的不變，
+  所以兩邊都不剝它，測試另外斷言查詢檔裡沒有非 ASCII 空白）。
   密鑰用命令替換餵進環境（`LTM_ANCHOR_KEY="$(~/bin/ltm memory --export-key)" scripts/measure-baseline.sh`），
   不落地；查詢檔的解析不依賴 cwd（腳本用自己所在的目錄）。
-- verdict 是**封閉字母表**（`Tests/LTMMCPTests/BaselineQueryFileTests.swift` 釘住，只有這幾個）：
-  `clean tool=<n>`／`self tool=<n>`／`empty tool=0`／`error(<rc>|sig<N>|exec|json|shape|judge)`。
-  任一列是 `error(…)` 腳本最後以 1 離開（每列照印）。
-- **`self`** = 前 k 名至少一個 snippet **含這條查詢的原文**（空白摺疊後的子字串比對）——儀器看見了
+- verdict 是**封閉字母表**：`clean tool=<n>`／`self tool=<n>`／`empty tool=0`／
+  `error(<rc>|sig<N>|exec|json|shape|judge)`。「封閉」由 `Tests/LTMMCPTests/BaselineQueryFileTests.swift`
+  的**同步測試**執行：它把腳本檔頭的 token 列、本行的 token 列、測試自己的 `errorTokens`、腳本程式碼
+  裡實際的 `error(...)` 輸出點四個集合逐一比對，任一處多一個少一個都紅；六個 error token 每一個
+  也各有一條測試實際產生它。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。
+  離開碼全表在腳本檔頭。
+- **`self`** = 前 k 名至少一個 snippet **含這條查詢的原文**（空白摺疊、大小寫摺疊後的子字串比對）——儀器看見了
   自己。量測命令列、`ltm_query query=…`、被引述進散文的那句，都是這個形狀。self 那一列的命中品質
   這一輪不可比；耗時仍可比。**`clean` 不是「乾淨」的證明**：它只說前 k 名沒有 snippet 含原文——
   排在前面但不含原文的殘影，它看不見。`empty` 是零命中——查詢已經對不到任何東西，這不是 clean。
@@ -61,23 +70,27 @@
 
 ### 三條規則
 
-1. **查詢字串不得落進會被索引的欄位。** 具體（由上表導出，不是另一份清單）：不在 Bash 命令列
-   上帶查詢、不餵給 `ltm_query` MCP 工具、不寫進任何工具的 `description`、不貼進對話、不在回覆
-   裡引述——連「第 N 條是『…』」這種半句都不行。`cat`／`Read` 查詢檔也不做（理由見上表最後一段）。
+1. **查詢字串不得落進會被索引的欄位。** 具體（由上表導出，不是另一份清單；表改了這裡要跟）：
+   不在 Bash 命令列上帶查詢、不放進 `Grep` 工具的 `pattern`、不餵給 `ltm_query` MCP 工具、不寫進
+   任何工具的 `description`、不貼進對話、不在回覆裡引述——連「第 N 條是『…』」這種半句都不行。
+   `cat`／`Read`／`git blame` 查詢檔也不做（理由見上表下方那一段）。
    編輯查詢檔用 Write／Edit 工具（`content`／`old_string`／`new_string` 不在那七個欄位裡）或在
    Claude Code 之外的編輯器。要把 diff 交給 review agent，**給檔案路徑讓它自己 Read**，不要把
-   diff 內嵌進 prompt——agent 的 prompt 是它逐字稿裡的 `text` block。
+   diff 內嵌進 prompt——agent 的 prompt 是它逐字稿裡的 `text` block；唯獨查詢檔本身，review agent
+   只准讀檔頭（`grep '^#'`）與統計非註解行（條數、長度、重複），不准讀內容。
 2. **量測輸出只印編號。** 命中內容、snippet、查詢文字一律不印；要看命中內容，在 Claude Code
    **之外**的 shell 跑（那個 shell 的逐字稿不在語料裡）。
 3. **每次量測前重驗。** 選定當下乾淨不代表永遠乾淨——跑一次 `measure-baseline.sh`，非 `clean`
    的條目在那一輪的命中品質欄標記為不可比。
 
-### 它擋不住什麼（誠實寫下）
+### 它擋不住什麼（誠實寫下；這一節必然不完整——它列的是想到的，不是全部）
 
-- 人手在 session 裡貼了查詢原文，或 Claude 自己引述了——規則靠人守，沒有機制擋（`-diff`
-  屬性只擋 diff 生成這一條路）。
+- 人手在 session 裡貼了查詢原文，或 Claude 自己引述了、`git blame` 了——規則靠人守，沒有機制擋
+  （`-diff` 屬性只擋 diff 生成這一條路，見上）。同類：`BASH_ENV`／`PS4` 裡刻意放一個會讀查詢檔的
+  命令替換，腳本第一行的 `set +x` 來不及擋（trace 那一行時 PS4 先展開）——那等同直接 cat。
 - 語料裡本來就有恰好逐字含該字串的**實質** turn（例如退役查詢裡的「資格考」有一則真的使用者 turn）——
   那不是污染，是正常召回；`self` 會把它標成 self，分不出來，讀結果時要在 session 之外看命中。
+  反過來，空白與大小寫以外的改寫（全形／半形、標點、換序）`self` 看不到。
 - 查詢原文落在 metadata 欄位 200 字元截斷**之後**的那種命令——那段文字不在索引裡，`self` 看不到，
   但它也不會靠那段文字排名；會排上來的是同一則命令的前 200 字元（`tool=<n>` 會算到它）。
 - #6 若把 tool payload 收進索引——那會**回溯**索引過去每一次 Write 查詢檔的 `content`。
@@ -86,8 +99,9 @@
   `scripts/rrf-tie-mechanism.sh`（查詢走 argv、預設查詢寫死在命令列、輸出表第一欄就是查詢）、
   `scripts/measure-rrf-ties.swift`（失敗路徑印查詢）。它們支撐 `2026-08-22-rrf-tie-rate.md`，量的是
   104 條的**聚合**平手率而不是「前 1 名是誰」，所以污染的傷害形狀不同——但在 session 裡跑一次，
-  那 104 條就帶著自己的殘影了。**不要在 session 裡跑它們**；把它們收進同一套紀律是獨立工作，
-  追蹤於 #68。
+  那 104 條就帶著自己的殘影了；`rrf-tie-mechanism.sh` 第 20 行還有八條預設查詢寫死在腳本裡，
+  **打開那支腳本看**就會把它們帶進 `text` block。所以：**不要在 session 裡跑、顯示、或引述它們**
+  （`rrf-tie-queries.txt` 已一併設 `-diff`）；把它們收進同一套紀律是獨立工作，追蹤於 #68。
 - **目前的八條尚未在真實索引上驗過前 5 名**（檔頭第 1 條寫明了原因與補驗方式）。在那之前，
   「乾淨」是宣稱不是量測。
 
@@ -98,9 +112,14 @@ before 用前三條、after 用全部六條）：
 
 「tokenizer 討論」「flock inode 鎖」「資格考」「band 相關度」「memory strategy」「並行雜湊」
 
-- 查法：`grep -rln -e 'tokenizer 討論' -e 'flock inode 鎖' -e '資格考' docs/` → 只有那份紀錄與本檔
-  （加上測試檔）。**只有那一份紀錄**用過它們；`2026-08-08-baseline.md` 等更早的紀錄沒有記過任何
-  查詢字串，不受影響。
+- **只有那一份紀錄寫下了它們**。查法（六條都已退役、已在語料裡，放上命令列不增加傷害）：
+  `git grep -l -e 'tokenizer 討論' -e 'flock inode 鎖' -e '資格考' -e 'band 相關度' -e 'memory strategy' -e '並行雜湊' -- . ':!scripts/'`
+  → 那份紀錄、本檔、測試檔，加上兩個 `openspec/` 檔——後者命中的是 "memory strategy" 這種通用詞組
+  的散文用法，不是查詢（正是上一節「實質 turn」那一類）。
+- 更早的紀錄（`2026-08-08-baseline.md`、`2026-08-27-query-latency-decomposition.md` 等）**是否**用了
+  同幾條查詢，紀錄裡沒寫（後者寫的是 `ltm query <字串>`）；它們不受這次污染影響的理由是**時間**
+  ——都在 2026-09-01T04:32:12Z 之前量的——而不是「沒把字串寫進紀錄」。寫進紀錄與否跟會不會污染
+  無關；污染來自命令列。
 - 後三條的污染時間點沒有紀錄可指（該紀錄只寫了 `"${QUERIES[@]}"`，陣列賦值那一行不在紀錄裡）；
   它們是**依同一機制推定**退役，不是實測到第一名被佔——這個不確定性寫在這裡，不預設它們乾淨。
 - 那份紀錄的耗時欄位仍可讀；命中品質從 2026-09-01T04:32:12Z（污染 turn 的時間）起不可比。

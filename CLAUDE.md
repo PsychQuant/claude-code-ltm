@@ -351,9 +351,10 @@ codex leg 失敗那幾輪，結論要以「同一家族的 N 個視角都沒看�
 不進（#6 追蹤中）。所以基準查詢只能活在 `scripts/baseline-queries.txt`、量測只能印編號
 （`scripts/measure-baseline.sh`），規則與那張「什麼會進索引」的表在 `docs/measurements/README.md`
 ——**不要在 session 裡顯示、引述、或用 MCP 工具查那個檔的任何一條**。
-這一段的第一版寫「輸入或印出的任何字串都會進索引」，#63 verify 四個 lens 各自對著
-`indexableText` 證偽了「印出」那一半——同一份 README 隔一段就寫著 Write 的 `content` 不進索引。
-判準寫成「會不會落進被索引的欄位」，不寫成動詞清單。
+這一段的第一版寫「輸入或印出的任何字串都會進索引」，#63 verify R1 的 requirements／security／
+regression 三個 lens 各自對著 `indexableText` 證偽了「印出」那一半（查法：issue #63 的
+verify R1 master comment，Engine 段列了六個讀者、findings 段列了哪幾個抓到）——同一份 README
+隔一段就寫著 Write 的 `content` 不進索引。判準寫成「會不會落進被索引的欄位」，不寫成動詞清單。
 
 **判準：本 repo 沒有量測支撐的效能宣稱，一律不得出現**——不在 code 註解、不在文件、
 不在 commit message。「有量測支撐」指的是 `docs/measurements/` 底下有一份可指名的
