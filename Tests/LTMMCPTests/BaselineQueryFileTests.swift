@@ -70,7 +70,7 @@ func baselineQueryFileDocumentsItsContractAndRetiresThePollutedQueries() throws 
 
 /// verdict 字母表的 error token（封閉集合）。同步測試把它與腳本檔頭、README、腳本的輸出點對照。
 private let errorTokens = ["<rc>", "sig<N>", "blank", "exec", "json", "shape", "judge"]
-private let errorTokenRegex = errorTokens.map { $0 == "<rc>" ? "[0-9]+" : $0 == "sig<N>" ? "sig[0-9]+" : $0 }.joined(separator: "|")
+private let errorTokenRegex = errorTokens.map { $0 == "<rc>" ? "[1-9][0-9]*" : $0 == "sig<N>" ? "sig[1-9][0-9]*" : $0 }.joined(separator: "|")
 private let verdictLine = "^#[0-9]+ [0-9]+ms ((clean|self|empty) tool=[0-9]+|error\\((\(errorTokenRegex))\\))$"
 
 @Test("字母表同步：腳本檔頭、ERROR_TOKENS、README、測試的 errorTokens、腳本輸出點五處逐一相等（認不出的輸出形狀直接紅）；CHANGELOG 三個 verdict 詞在；退役清單 README 與測試一致")
@@ -94,6 +94,10 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     //    不需要這裡判斷（R3 用範圍排除 valid_row，R4 指出那等於對排除掉的行假設它們不輸出）。每一個
     //    輸出點必須是字面 token、{rc} 或 sig{-rc}——別的形狀（例如 $var）不是「略過」而是失敗。
     let codeLines: [String] = scriptLines.filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }
+        .map { line -> String in   // 行尾註解（空白＋#）不算程式碼：刪掉的輸出點不能靠註解裡的字面補回來
+            if let r = line.range(of: "  #") ?? line.range(of: "\t#") { return String(line[..<r.lowerBound]) }
+            return line
+        }
     var emitted = Set<String>()
     var unrecognised: [String] = []
     for raw in matches(#"error\(([^)]*)\)"#, in: codeLines.joined(separator: "\n")) {
@@ -116,17 +120,20 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     #expect(emitted == expected, Comment(rawValue: "腳本輸出點：\(emitted.sorted())"))
     #expect(readmeTokens == expected, Comment(rawValue: "README：\(readmeTokens.sorted())"))
 
-    // 每個 token 在**別的**測試裡有一個實際產生它的 expected tail。查的對象是本檔裡標了
-    // `// produces:` 的那些行（行為測試的 expected-tail 陣列與 fake 的斷言），本測試自己的函式本體先整段
-    // 拿掉——R3 的版本把 token 清單寫在本檔再回頭 grep 本檔，等於自己給自己答案（R4 三方抓到）。
-    // 要驗的字串從 errorTokens 導出，不另外手寫一份。
+    // 每個 token 在**別的**測試裡有一個實際產生它的 expected tail。查的對象是本檔裡帶「產生標記」的行：
+    // 標記字串在這裡是執行期拼出來的（下一行），所以本函式的任何一行——包括這段註解與失敗訊息——都
+    // 不含那個字面，回頭 grep 本檔時不可能自己給自己答案（R3 的版本就是這樣永遠綠；R4 的版本把清單
+    // 移出去了，但標記字面仍在本函式裡出現三次，R5 三方抓到）。而且只算**活的斷言行**（去前導空白後
+    // 以 `#expect(` 開頭）——把斷言連標記一起註解掉，不算產生。要驗的字串從 errorTokens 導出。
+    let producesMarker = ["//", "produces", ":"].joined(separator: " ").replacingOccurrences(of: "produces :", with: "produces:")
     let rawSource = try String(contentsOf: URL(fileURLWithPath: "\(#filePath)"), encoding: .utf8)
-    let producerLines = rawSource.components(separatedBy: "\n").filter { $0.contains("// produces:") }
+    let producerLines = rawSource.components(separatedBy: "\n").filter {
+        $0.contains(producesMarker) && $0.trimmingCharacters(in: .whitespaces).hasPrefix("#expect(")
+    }
     let producerText = producerLines.joined(separator: "\n")
     let wanted = errorTokens.map { $0 == "<rc>" ? "error(7)" : $0 == "sig<N>" ? "error(sig9)" : "error(\($0))" }
     let missingProductions = wanted.filter { !producerText.contains($0) }
-    #expect(missingProductions.isEmpty, Comment(rawValue: "沒有 // produces: 行實際產生：\(missingProductions)"))
-    #expect(producerLines.count >= 3, "produces 標記行太少：\(producerLines.count)")
+    #expect(missingProductions.isEmpty, Comment(rawValue: "沒有帶產生標記的活斷言產生：\(missingProductions)"))
 
     // 七個 metadata 欄位名：CorpusScanner 的常數、README 表、查詢檔檔頭三處同一份。
     let scanner = try String(contentsOf: root.appendingPathComponent("Sources/LTMIndex/CorpusScanner.swift"), encoding: .utf8)
@@ -176,7 +183,7 @@ private struct ScriptRun {
     let status: Int32
     let stdout: String
     let stderr: String
-    /// stdout 第一行是 `set sha256:<12 hex>`（查詢集指紋），之後才是列。
+    /// stdout 第一行是 set 行（格式以腳本檔頭為準；`setLine(_:k:)` 重算），之後才是列。
     var setLine: String { stdout.split(separator: "\n").first.map(String.init) ?? "" }
     var rows: [String] { Array(stdout.split(separator: "\n").map(String.init).dropFirst()) }
     var combined: String { stdout + stderr }
@@ -490,6 +497,15 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
         let up = try runScript(queries: queries, stub: stub, pathOverride: fpUpper.path, extraEnv: ["LC_ALL": locale, "LANG": locale])
         #expect(up.status == 70 && up.stdout.isEmpty, Comment(rawValue: "LC_ALL=\(locale): rc=\(up.status) out=\(up.stdout)"))
     }
+    // 13 個小寫 hex：逐字元檢查只看前 12 位，長度檢查才擋得住。
+    let fpLong = dir.appendingPathComponent("bin-fpl")
+    try FileManager.default.createDirectory(at: fpLong, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(at: fpLong.appendingPathComponent("dirname"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/dirname"))
+    try "#!/bin/bash\nif [ \"$1\" = \"-\" ]; then printf 'abcdef0123456\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
+        .write(to: fpLong.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpLong.appendingPathComponent("python3").path)
+    let long = try runScript(queries: queries, stub: stub, pathOverride: fpLong.path)
+    #expect(long.status == 70 && long.stdout.isEmpty, Comment(rawValue: "rc=\(long.status) out=\(long.stdout)"))
 
     let onlyComments = dir.appendingPathComponent("c.txt")
     try "# a\n\n   # b\n".write(to: onlyComments, atomically: true, encoding: .utf8)
