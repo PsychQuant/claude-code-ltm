@@ -2,21 +2,32 @@
 #
 # 三件事，缺一不可（規則全文在 docs/measurements/README.md）：
 #
-# 1. **這是列舉，會漏。** 這幾條只保證「不被儀器自己污染」——選定當下前 5 名沒有量測命令
-#    或查詢動作本身——說不出它們對真實使用的代表性（沒有評估集，#33）。
+# 1. **這是列舉，會漏。** 這幾條只主張「自行撰寫、未從語料抄、選定當下不在任何 tracked 檔案裡」；
+#    說不出它們對真實使用的代表性（沒有評估集，#33）。
+#    **前 5 名是否乾淨尚未在真實索引上驗過**（2026-09-07 實作當下 `~/bin/ltm` 剛換 inode、
+#    鑰匙圈要重新授權，見 .claude/rules/anchor-key-in-probes.md）。第一次在 Claude Code 之外
+#    跑 `measure-baseline.sh` 後，把日期與「N 行全 clean」寫回這一條；在那之前，本檔的乾淨
+#    是宣稱不是量測。而且 `clean` 只代表兩種已知殘影都沒出現——判準是列舉，會漏。
 #
-# 2. **本檔內容不得在 Claude Code session 內顯示。** 任何在 session 裡 `cat`／`echo`／
-#    `Read` 這個檔、或把查詢原文貼進對話的動作，都會讓查詢字串進 `~/.claude/projects/**/*.jsonl`
-#    → 進索引 → 下一次量測的第一名就是「顯示它的那一刻」。這正是它前身（三個活在命令列
-#    歷史裡的查詢）失效的方式。編輯本檔請用 Write／Edit 工具（其 content 欄位不被索引）
+# 2. **本檔內容不得在 Claude Code session 內顯示。** 判準是「會不會落進被索引的欄位」：逐字稿
+#    裡會進索引的是 `text` block（使用者輸入、Claude 的散文、compaction 摘要）與 tool_use 的
+#    七個 metadata 欄位（`CorpusScanner.toolMetadataFields`：command / file_path / path / pattern /
+#    query / url / description，各取前 200 字元）。所以：查詢出現在 Bash 命令列（`echo`、
+#    `ltm query <q>`、`grep <q>`）、`ltm_query` MCP 工具的 `query=`、任何工具的 `description=`、
+#    或被貼進／引述進對話——就進索引，下一次量測的前幾名就是「顯示它的那一刻」（退役的六條
+#    實測第一名全是那則量測命令）。`cat`／`Read` 本檔的**輸出**是 tool_result、今天不被索引
+#    （#6 追蹤中、可能改變），但 Claude 看到之後引述它的那句散文一定被索引——所以一樣不做。
+#    編輯本檔請用 Write／Edit 工具（`content`／`old_string`／`new_string` 不在那七個欄位裡）
 #    或在 Claude Code 之外的編輯器；量測請跑 `scripts/measure-baseline.sh`，它只印編號。
+#    `.gitattributes` 對本檔設了 `-diff`：`git diff`／`git show`／`git log -p` 只印
+#    「Binary files differ」，要看內容在 session 之外用 `git diff --text`。
 #
-# 3. **量測輸出只印編號、耗時與 clean/dirty，永不印查詢文字或命中內容。**
-#    `#N` 就是本檔第 N 條非註解行（由 1 起算）。
+# 3. **量測輸出只印編號、耗時與 verdict，永不印查詢文字或命中內容。**
+#    `#N` 就是本檔第 N 條非註解行（由 1 起算；去 CR、去前後空白後，空行與 `#` 開頭不算）。
 #
 # 選法（2026-09-07）：自行撰寫的通用技術詞彙（CLAUDE.md 隱私邊界：不從語料抄），中英混合、
-# 含中文雙字與四字；退役的三條（見 README 的退役清單）不在此。**每次量測前都要重驗**
-# 前 5 名乾淨（`measure-baseline.sh` 的 dirty 欄），選一次不代表永遠乾淨。
+# 含中文雙字與四字；退役的六條（見 README 的退役清單）不在此。**每次量測前都要重驗**
+# （`measure-baseline.sh` 的 verdict 欄），選一次不代表永遠乾淨。
 向量檢索 延遲
 增量 掃描 游標
 記憶策略 衰退

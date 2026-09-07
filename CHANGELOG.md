@@ -7,10 +7,12 @@
 ### Added
 
 - **基準查詢集與使用規則（#63）**：`scripts/baseline-queries.txt`（一行一條，檔頭寫明列舉會漏、
-  不得在 session 內顯示、輸出只印編號）＋ `scripts/measure-baseline.sh`（stdout 只有
-  `#N <ms> clean|dirty`，查詢文字永不進輸出）＋ `docs/measurements/README.md` 的規則段。
-  原三條基準查詢因量測命令進了語料而退役（第一名固定是那則命令）；
-  `2026-09-01-scan-parallelism.md` 補可比性註記（耗時可比、命中未記）。
+  不得在 session 內顯示、輸出只印編號；`.gitattributes` 設 `-diff`）＋ `scripts/measure-baseline.sh`
+  （stdout 只有 `#N <ms> <verdict>`，verdict 是封閉字母表 `clean|dirty|empty|error(…)`，查詢文字
+  不進 stdout／stderr、含 `bash -x`；任一 error 以 1 離開）＋ `docs/measurements/README.md` 的規則段
+  與「什麼會進索引」的表（`text` block 與七個 tool metadata 欄位會，tool_result 內容今天不會）。
+  2026-09-01 那次量測命令列上的六條查詢退役（前三條實測第一名是那則命令，後三條依同一機制推定）；
+  `2026-09-01-scan-parallelism.md` 補可比性註記（耗時可比、命中未記、新舊儀器不可對齊）。
 
 ## [0.5.0] - 2026-09-05
 

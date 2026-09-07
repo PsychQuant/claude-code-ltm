@@ -345,9 +345,15 @@ codex leg 失敗那幾輪，結論要以「同一家族的 N 個視角都沒看�
 
 ## 誠實邊界
 
-**量測儀器自己會污染語料（#63）**：在 session 裡輸入或印出的任何字串都會進索引，所以基準查詢
-只能活在 `scripts/baseline-queries.txt`、量測只能印編號（`scripts/measure-baseline.sh`），
-規則全文在 `docs/measurements/README.md`——**不要在 session 裡 `cat`／`Read` 那個檔**。
+**量測儀器自己會污染語料（#63）**：session 逐字稿裡落進**被索引欄位**的字串都會進索引——
+`text` block（輸入、Claude 的散文）與 tool_use 的七個 metadata 欄位（`CorpusScanner.toolMetadataFields`，
+含 Bash `command=`、`ltm_query` 的 `query=`、任何工具的 `description=`）；tool_result 的內容今天
+不進（#6 追蹤中）。所以基準查詢只能活在 `scripts/baseline-queries.txt`、量測只能印編號
+（`scripts/measure-baseline.sh`），規則與那張「什麼會進索引」的表在 `docs/measurements/README.md`
+——**不要在 session 裡顯示、引述、或用 MCP 工具查那個檔的任何一條**。
+這一段的第一版寫「輸入或印出的任何字串都會進索引」，#63 verify 四個 lens 各自對著
+`indexableText` 證偽了「印出」那一半——同一份 README 隔一段就寫著 Write 的 `content` 不進索引。
+判準寫成「會不會落進被索引的欄位」，不寫成動詞清單。
 
 **判準：本 repo 沒有量測支撐的效能宣稱，一律不得出現**——不在 code 註解、不在文件、
 不在 commit message。「有量測支撐」指的是 `docs/measurements/` 底下有一份可指名的
