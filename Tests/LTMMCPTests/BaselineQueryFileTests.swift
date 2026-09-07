@@ -71,7 +71,24 @@ func baselineQueryFileDocumentsItsContractAndRetiresThePollutedQueries() throws 
 /// verdict 字母表的 error token（封閉集合）。同步測試把它與腳本檔頭、README、腳本的輸出點對照。
 private let errorTokens = ["<rc>", "sig<N>", "blank", "exec", "json", "shape", "judge"]
 private let errorTokenRegex = errorTokens.map { $0 == "<rc>" ? "[1-9][0-9]*" : $0 == "sig<N>" ? "sig[1-9][0-9]*" : $0 }.joined(separator: "|")
-private let verdictLine = "^#[0-9]+ [0-9]+ms ((clean|self|empty) tool=[0-9]+|error\\((\(errorTokenRegex))\\))$"
+private let verdictLine = "^#[0-9]+ [0-9]+ms ((clean|self) tool=[0-9]+|empty tool=0|error\\((\(errorTokenRegex))\\))$"
+
+/// 行尾註解（任何一個空白或 tab 之後的 `#` 到行尾）不算程式碼；整行註解由呼叫端先濾掉。bash 與內嵌的
+/// python 都是這個規則；`'#…'`、`\#` 這種前面不是空白的 `#` 不是註解。R5 只認「兩個空白」與 tab，
+/// 單一空白的行尾註解穿得過去（R6 三方抓到）——這個 helper 有自己的 fixture 測試，不靠真腳本的內容驅動。
+private func stripTrailingComment(_ line: String) -> String {
+    guard let r = line.range(of: "[ \t]#", options: .regularExpression) else { return line }
+    return String(line[..<r.lowerBound]).replacingOccurrences(of: "[ \t]+$", with: "", options: .regularExpression)
+}
+
+@Test("同步測試的行尾註解剝除：單一空白、tab、兩個空白都算；引號裡與反斜線後的 # 不算")
+func trailingCommentStripIsDrivenByItsOwnFixture() {
+    #expect(stripTrailingComment("x=1 # error(judge)") == "x=1")
+    #expect(stripTrailingComment("x=1\t# note") == "x=1")
+    #expect(stripTrailingComment("print(\"0 error(exec)\")  # note") == "print(\"0 error(exec)\")")
+    #expect(stripTrailingComment("printf '#%d %sms %s\\n' \"$n\"") == "printf '#%d %sms %s\\n' \"$n\"")
+    #expect(stripTrailingComment("case \"$line\" in ''|\\#*) continue ;; esac") == "case \"$line\" in ''|\\#*) continue ;; esac")
+}
 
 @Test("字母表同步：腳本檔頭、ERROR_TOKENS、README、測試的 errorTokens、腳本輸出點五處逐一相等（認不出的輸出形狀直接紅）；CHANGELOG 三個 verdict 詞在；退役清單 README 與測試一致")
 func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
@@ -86,18 +103,15 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     let headerTokens = Set((headerLine ?? "").replacingOccurrences(of: "#   error tokens：", with: "")
         .split(separator: " ").map(String.init))
     // 2. 腳本裡的 ERROR_TOKENS（valid_row 執行期用的字面集合）＝ errorTokens 扣掉兩個樣式 token。
-    let errorTokensLine = scriptLines.first { $0.hasPrefix("ERROR_TOKENS=\"") }
-    let runtimeLiterals = Set((errorTokensLine ?? "").dropFirst("ERROR_TOKENS=\"".count).dropLast()
-        .split(separator: " ").map(String.init))
+    let errorTokensLine = scriptLines.first { $0.hasPrefix("ERROR_TOKENS=\"") } ?? ""
+    let runtimeLiterals = Set((matches(#"^ERROR_TOKENS="([^"]*)""#, in: errorTokensLine).first ?? "")
+        .split(separator: " ").map(String.init))   // 只取引號裡的；那一行後面刻意帶了行尾註解
     // 3. 腳本程式碼裡實際會印出的 error(...)：只跳過註解行（去前導空白後以 # 開頭）。**不排除任何
     //    程式碼區段**——valid_row 用變數 E_OPEN 比對、不寫 error( 的字面，所以「哪些 error( 不是輸出點」
     //    不需要這裡判斷（R3 用範圍排除 valid_row，R4 指出那等於對排除掉的行假設它們不輸出）。每一個
     //    輸出點必須是字面 token、{rc} 或 sig{-rc}——別的形狀（例如 $var）不是「略過」而是失敗。
     let codeLines: [String] = scriptLines.filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }
-        .map { line -> String in   // 行尾註解（空白＋#）不算程式碼：刪掉的輸出點不能靠註解裡的字面補回來
-            if let r = line.range(of: "  #") ?? line.range(of: "\t#") { return String(line[..<r.lowerBound]) }
-            return line
-        }
+        .map(stripTrailingComment)   // 刪掉的輸出點不能靠行尾註解裡的字面補回來
     var emitted = Set<String>()
     var unrecognised: [String] = []
     for raw in matches(#"error\(([^)]*)\)"#, in: codeLines.joined(separator: "\n")) {
@@ -120,20 +134,36 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     #expect(emitted == expected, Comment(rawValue: "腳本輸出點：\(emitted.sorted())"))
     #expect(readmeTokens == expected, Comment(rawValue: "README：\(readmeTokens.sorted())"))
 
-    // 每個 token 在**別的**測試裡有一個實際產生它的 expected tail。查的對象是本檔裡帶「產生標記」的行：
-    // 標記字串在這裡是執行期拼出來的（下一行），所以本函式的任何一行——包括這段註解與失敗訊息——都
-    // 不含那個字面，回頭 grep 本檔時不可能自己給自己答案（R3 的版本就是這樣永遠綠；R4 的版本把清單
-    // 移出去了，但標記字面仍在本函式裡出現三次，R5 三方抓到）。而且只算**活的斷言行**（去前導空白後
-    // 以 `#expect(` 開頭）——把斷言連標記一起註解掉，不算產生。要驗的字串從 errorTokens 導出。
+    // **存在性**檢查（不是執行證明）：每個 token 在本檔**別的**函式裡有一條帶「產生標記」、以 `#expect(`
+    // 開頭的活斷言行寫著它的 tail。它擋的是「把產生點刪掉／改名／註解掉而清單沒跟著改」；它**不證明**那條
+    // 斷言被執行（`.disabled`、迴圈跳過都看不到）——執行由整份測試檔綠來保證，R6 logic lens 指出 R5 的
+    // 句子寫成「實際產生」是過度宣稱。標記字串執行期拼出（下一行），本函式的行範圍內不得含那個字面
+    // （R3 版永遠綠、R4 版標記字面在函式裡出現三次、R5 版沒守住這個前提——R6 三方；現在由下面的
+    // 斷言守，不是靠「今天沒有」）。標記與 tail 必須在同一實體行（拆行會紅，訊息會說）。
     let producesMarker = ["//", "produces", ":"].joined(separator: " ").replacingOccurrences(of: "produces :", with: "produces:")
     let rawSource = try String(contentsOf: URL(fileURLWithPath: "\(#filePath)"), encoding: .utf8)
-    let producerLines = rawSource.components(separatedBy: "\n").filter {
-        $0.contains(producesMarker) && $0.trimmingCharacters(in: .whitespaces).hasPrefix("#expect(")
+    let sourceLines = rawSource.components(separatedBy: "\n")
+    let selfStart = sourceLines.firstIndex { $0.contains("func verdictAlphabetIsStatedIdenticallyEverywhere") } ?? 0
+    let selfEnd = sourceLines[(selfStart + 1)...].firstIndex { $0.hasPrefix("@Test(") || $0.hasPrefix("private func ") } ?? sourceLines.count
+    let markerInsideSelf = (selfStart..<selfEnd).filter { sourceLines[$0].contains(producesMarker) }.map { $0 + 1 }
+    #expect(markerInsideSelf.isEmpty, Comment(rawValue: "產生標記出現在同步測試自己的行範圍內（不得自問自答）：行 \(markerInsideSelf)"))
+    let producerLines = sourceLines.enumerated().filter { i, l in
+        !(selfStart..<selfEnd).contains(i) && l.contains(producesMarker) && l.trimmingCharacters(in: .whitespaces).hasPrefix("#expect(")
+    }.map { $0.element }
+    // 標記後面列的 token 名要與同一行的 tail 對得上——那串名字是檢查的一部分，不是裝飾（R6 security）。
+    var suffixMismatch: [String] = []
+    for line in producerLines {
+        let suffix = line[line.range(of: producesMarker)!.upperBound...].split(separator: " ").map(String.init)
+        for name in suffix {
+            let literal = name == "rc" ? "error(7)" : name == "sig" ? "error(sig9)" : "error(\(name))"
+            if !line.contains(literal) { suffixMismatch.append("\(name)→\(literal)") }
+        }
     }
+    #expect(suffixMismatch.isEmpty, Comment(rawValue: "產生標記後的名字與同一行的 tail 對不上：\(suffixMismatch)"))
     let producerText = producerLines.joined(separator: "\n")
     let wanted = errorTokens.map { $0 == "<rc>" ? "error(7)" : $0 == "sig<N>" ? "error(sig9)" : "error(\($0))" }
     let missingProductions = wanted.filter { !producerText.contains($0) }
-    #expect(missingProductions.isEmpty, Comment(rawValue: "沒有帶產生標記的活斷言產生：\(missingProductions)"))
+    #expect(missingProductions.isEmpty, Comment(rawValue: "沒有帶產生標記、以 #expect( 開頭、且標記與 tail 同一行的活斷言寫著：\(missingProductions)"))
 
     // 七個 metadata 欄位名：CorpusScanner 的常數、README 表、查詢檔檔頭三處同一份。
     let scanner = try String(contentsOf: root.appendingPathComponent("Sources/LTMIndex/CorpusScanner.swift"), encoding: .utf8)

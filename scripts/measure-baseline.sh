@@ -144,7 +144,7 @@ print(f"{ms} " + ("self" if selfhit else "clean") + f" tool={tool}")
 # error token 只能是數字、sig＋數字、或 ERROR_TOKENS 裡的字面（不是「像 token 的字元」——bash 3.2 的
 # [a-z] 隨 locale 排序而變，字面比對不會）。不合就整列換成 error(judge)——寧可少一列量測，也不讓不明
 # 字串上 stdout。多行的列不必另外擋：每個位元組都落在 ms（只准數字）或 rest（各臂完整限制到結尾）裡。
-ERROR_TOKENS="blank exec json shape judge"
+ERROR_TOKENS="blank exec json shape judge" # 行尾註解刻意留著：error(timeout) 不在字母表，同步測試剝行尾註解的接線由這一行驅動
 # valid_row 裡刻意不寫 error( 的字面（連這個變數的定義也拆開寫）：同步測試把程式碼裡每一個 error( 都當
 # 輸出點，這裡是比對不是輸出。
 E_OPEN="error"'('
