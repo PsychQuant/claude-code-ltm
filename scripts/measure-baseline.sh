@@ -10,12 +10,11 @@
 # stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null）。
 # 擋不住的：`BASH_ENV`／`PS4` 裡刻意放一個會讀查詢檔的命令替換——trace 第一行 `set +x` 時 PS4 先展開；
 # 或 PATH 上的 python3 被換成會印檔案的東西。另外，查詢原文在執行期會在 python3 與 ltm 的 argv 上（CLI 的查詢
-# 就是位置參數、`--` 終止符用得對），同機任何行程 `ps -ww` 看得到、存活時間是那一列的 wall clock——那是作業系統
-# 的可見面不是本腳本的輸出通道。這份例外會漏，判準是「這個動作等不等同操作者直接 cat 查詢檔」
+# 就是位置參數、`--` 終止符用得對），同一帳號的行程 `ps -ww` 看得到（容器 PID namespace、Linux hidepid 下更窄）、
+# 存活時間是那一列的 wall clock——那是作業系統的可見面不是本腳本的輸出通道。這份例外會漏，判準是「這個動作等不等同操作者直接 cat 查詢檔」
 # ——那是操作者的動作不是本腳本的洩漏面；寫在這裡是因為上一句是全稱。
-# 指紋揭露什麼：未加鹽的 sha256 前 48 bit。它不含查詢文字、跟查詢原文對不上（不會造成 self）；它能讓
-# 持有一組候選的人**確認**一次完整猜測——持有舊集合的人可用它驗證退役後換掉的那一條。這個對手本來就
-# 讀得到語料（jsonl 裡已有整組副本），所以不改變結論，但它是性質不是零。
+# 指紋揭露什麼：未加鹽的 sha256 前 48 bit——持有其餘 N−1 條的人可對最後一條離線列舉；完整的說明只有一份，
+# 在 docs/measurements/README.md 的量測段（這裡不複述——R8 抓到兩份已經漂移）。
 #
 # 為什麼這麼小氣：這支腳本會在 Claude Code session 裡被跑。今天會進索引的是逐字稿裡的純字串
 # `message.content`（使用者鍵入的 prompt 常是這一種，整段）、`text` block（使用者輸入、Claude 的散文）
@@ -41,13 +40,8 @@
 #                    後是空的（例如只有 U+3000；不跑 ltm，因為空針對任何命中都算 self）；exec＝ltm 起不來；
 #                    json＝輸出不是 JSON；shape＝JSON 不是「每個都帶字串 snippet 的物件陣列」；
 #                    judge＝judge 自己掛了或印了不合形狀的東西。
-# `tool=<n>` 是前 k 名裡含 `⟨tool ` 的 snippet 數（工具 metadata chunk，加上引述這個標記的散文）。
-# 它**不是**污染訊號——它量的不是這條查詢而是「前 k 名有沒有工具 chunk」；工具 metadata chunk 佔
-# chunk 表約四成（#67；那是份額不是前 k 名出現率，實際出現率要在真索引跑過才知道），拿它當 dirty
-# 會讓每一個前 k 名含工具 chunk 的列不可比——有多少列，同一句：還沒量。它是 #62（self-hit 的檢索層排除）要移動的那個量的觀察值，印出來給 #62 的
-# 前後比較看（差值含兩次量測之間語料的成長）。
-# 第一版的判準是「含 `⟨tool ` 或含 `ltm query`」，#63 verify 的 devil's-advocate 指出它量的是
-# 「前 k 名有沒有工具 chunk」而不是「這條查詢被自己污染了沒有」；現在的 self 是把命中拿去跟查詢比對。
+# `tool=<n>` 是前 k 名裡含 `⟨tool ` 的 snippet 數。它**不是**污染訊號，只是給 #62 前後比較看的觀察值——
+# 理由、誠實邊界、第一版判準為何被換掉，只有一份，在 docs/measurements/README.md 的 `tool=<n>` 段（這裡不複述）。
 #
 # `self` 會漏什麼（這份清單必然不完整）：查詢原文**跨過** metadata 欄位 200 字元截斷的命令——前綴進了
 # 索引、會靠它排名，self 卻判 clean（完全落在截斷之後的則不在索引裡、也不會靠它排名）；空白與大小寫
@@ -56,7 +50,8 @@
 # 要分，只能在 Claude Code 之外的 shell 讀命中內容。
 #
 # <ms>：ltm 行程 fork→exit 的 monotonic 牆鐘（含 process 啟動、查詢前的增量併入、檢索、輸出），
-# 不含 judge。單一樣本、沒有暖身——第 1 列常帶冷啟動，比較各列前先看這點。跟舊紀錄的命令
+# 不含 judge。單一樣本、沒有暖身；第 1 列是否系統性偏高**沒有量過**（要量：同一集合連跑兩次、比第 1 列），
+# 比較各列前先看這點。跟舊紀錄的命令
 # （`.build/release/ltm query "$q" --k 5`，單一 project、無 --json）量的不是同一件事，
 # 不要把本腳本的列與 2026-09-01 之前的表對齊——見 docs/measurements/README.md。
 #
@@ -77,7 +72,7 @@ set +x
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 QF="${LTM_BASELINE_QUERIES:-$HERE/baseline-queries.txt}"
-LTM="${LTM_BIN:-$HOME/bin/ltm}"
+LTM="${LTM_BIN:-${HOME:-}/bin/ltm}"   # HOME 沒設也不能讓 set -u 隱式地以 1 離開（那會與「1 = 任一列 error」撞號，R8）
 K="${1:-5}"
 case "$K" in ''|*[!0-9]*) echo "k 必須是 1–1000 的整數" >&2; exit 64 ;; esac
 [ "$K" -ge 1 ] && [ "$K" -le 1000 ] || { echo "k 必須是 1–1000 的整數" >&2; exit 64; }
@@ -85,16 +80,21 @@ case "$K" in ''|*[!0-9]*) echo "k 必須是 1–1000 的整數" >&2; exit 64 ;; 
 [ -f "$LTM" ] && [ -x "$LTM" ] || { echo "ltm 不是可執行的一般檔案：$LTM" >&2; exit 69; }
 command -v python3 >/dev/null 2>&1 || { echo "需要 python3 計時與解析 --json" >&2; exit 70; }
 
+# 查詢檔只讀一次：指紋與逐列量測共用同一份內容，兩者之間換檔（編輯器原子儲存、git checkout）不會讓第一行
+# 的身分與列內容錯配（R8）。bash 變數存不了 NUL（會被靜默丟掉），先擋成 66；讀完後尾端的換行原樣保留。
+[ "$(tr -d '\000' < "$QF" | wc -c)" = "$(wc -c < "$QF")" ] || { echo "查詢檔含 NUL：$QF" >&2; exit 66; }
+QF_CONTENT=$(cat "$QF"; printf x) || { echo "查詢檔讀不了：$QF" >&2; exit 66; }
+QF_CONTENT=${QF_CONTENT%x}
 # 查詢集指紋：對「第 N 條非註解行」的同一個定義（ASCII trim、跳過空行與 #）逐行 sha256，只印 12 個 hex。
-# 檔案內容留在 python 行程裡，不上 stdout；stderr 也丟掉——它是唯一整份讀進查詢集的行程，檔頭那句「不進
-# stdout／stderr」的全稱曾漏了它（R7 security）。
-SETID=$(python3 - "$QF" 2>/dev/null <<'PY'
+# 內容經 fd 3 給 python（不上命令列、不進環境），留在 python 行程裡，不上 stdout；stderr 也丟掉——它是唯一
+# 整份讀進查詢集的行程，檔頭那句「不進 stdout／stderr」的全稱曾漏了它（R7 security）。
+SETID=$(python3 - 3<<<"$QF_CONTENT" 2>/dev/null <<'PY'
 import hashlib, sys
 ws = " \t\r\v\f"
 h = hashlib.sha256()
 # 只在 LF 切行（跟 bash 的 read 與測試的 components(separatedBy: "\n") 一樣）：text-mode 逐行迭代連
 # 單獨的 CR 也會切，那會讓兩個不同的查詢集算出同一個指紋。newline="" 是為了讓 read() 不把 CRLF 翻譯掉。
-with open(sys.argv[1], encoding="utf-8", errors="surrogateescape", newline="") as f:
+with open("/dev/fd/3", encoding="utf-8", errors="surrogateescape", newline="") as f:
     data = f.read()
 for raw in data.split("\n"):
     line = raw.strip(ws)
@@ -115,9 +115,10 @@ done
 printf 'set sha256:%s k=%s\n' "$SETID" "$K"
 
 # 一條查詢一個 python：起 ltm、用 monotonic 計時、解析 --json、只印一行「<ms> <verdict>」。
-# 不印任何 snippet；ltm 的 stdin 接 /dev/null（避免它吃掉查詢檔剩下的行），judge 自己的 stdin 也接（R7：
-# 它曾繼承查詢檔）；stderr 由外層整個丟掉。命中只看前 k 筆——「前 k 名」的語意由 judge 自己截，不靠 ltm 自律
-# （R7 codex：多回傳的命中會安靜地改變 self 與 tool=<n>）。
+# 不印任何 snippet；judge 自己的 stdin 接 /dev/null（R7：它曾繼承查詢內容），python 端對 ltm 再設一次
+# DEVNULL 是縱深、目前沒有測試分得出來（R8）；stderr 由外層整個丟掉。命中只看前 k 筆——「前 k 名」的語意由
+# judge 自己截，不靠 ltm 自律（R7 codex：多回傳的命中會安靜地改變 self 與 tool=<n>），連形狀檢查也只看
+# 前 k 筆（R8：第 k+1 筆畸形不該讓整列量不到）。
 RUN='
 import json, subprocess, sys, time
 ltm, k, query = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -140,9 +141,11 @@ try:
     hits = json.loads(p.stdout)
 except Exception:
     print(f"{ms} error(json)"); sys.exit(0)
-if not isinstance(hits, list) or not all(isinstance(h, dict) and isinstance(h.get("snippet"), str) for h in hits):
+if not isinstance(hits, list):
     print(f"{ms} error(shape)"); sys.exit(0)
 hits = hits[:int(k)]
+if not all(isinstance(h, dict) and isinstance(h.get("snippet"), str) for h in hits):
+    print(f"{ms} error(shape)"); sys.exit(0)
 if not hits:
     print(f"{ms} empty tool=0"); sys.exit(0)
 tool = sum(1 for h in hits if "⟨tool " in h["snippet"])
@@ -156,7 +159,7 @@ print(f"{ms} " + ("self" if selfhit else "clean") + f" tool={tool}")
 ERROR_TOKENS="blank exec json shape judge"
 # valid_row 裡刻意不寫 error( 的字面（連這個變數的定義也拆開寫）：同步測試把程式碼裡每一個 error( 出現都當
 # 輸出點候選、不是輸出述句形狀就紅（含行尾註解裡的字面——R6 曾在上一行留一條 error(timeout) 註解當接線的
-# canary，R7 兩個 lens 指出它無主、而且哪天 timeout 進了字母表就無聲失效；現在不剝註解也就沒有接線要驅動），
+# canary，R7 指出它無主、而且哪天 timeout 進了字母表就無聲失效；現在不剝註解也就沒有接線要驅動），
 # 這裡是比對不是輸出。
 E_OPEN="error"'('
 valid_row() {
@@ -187,6 +190,6 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     valid_row "$row" || row="0 error(judge)"
     case "${row#* }" in "$E_OPEN"*) bad=$((bad + 1)) ;; esac
     printf '#%d %sms %s\n' "$n" "${row%% *}" "${row#* }"
-done < "$QF"
+done <<<"$QF_CONTENT"
 [ "$n" -gt 0 ] || { echo "查詢檔沒有任何非註解行" >&2; exit 65; }
 [ "$bad" -eq 0 ] || exit 1

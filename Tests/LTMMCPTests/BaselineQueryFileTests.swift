@@ -39,11 +39,13 @@ private func nonCommentLines(_ text: String) -> [String] {
         .filter { !$0.isEmpty && !$0.hasPrefix("#") }
 }
 
-/// 查詢檔裡不准出現的純量——寫成**性質**不是清單（R7 codex：NUL 不在舊清單裡，bash 的變數存不了它、
-/// python 與 Swift 存得了，三邊的「第 N 條」就分岔；清單會漏，性質不會）：ASCII 控制字元與 DEL，除了
-/// 行定義自己會剝的五個 ASCII 空白；以及任何非 ASCII 的空白／行段分隔／格式／控制類（Zs、Zl、Zp、Cf、Cc——
-/// 含 U+3000、NBSP、BOM、U+0085）。判準是「這個字元會不會讓 bash 的 read、python 的 split、Swift 的
-/// components 三邊對『第 N 條』給出不同答案」。
+/// 查詢檔裡不准出現的純量——寫成**性質**不是清單（清單會漏：NUL 就不在舊清單裡）。兩條理由，各自導出一部分：
+/// (a) 行定義會分岔：能被 bash 的 read／python 的 split／Swift 的 components 或三邊的 ASCII trim 不同處理的字元
+///     ——實際上只有 LF 與五個 ASCII 空白，而那五個由行定義自己處理、不禁；
+/// (b) 落進 judge 的 Unicode 空白摺疊會變成空針（`error(blank)`，見 blank 的測試）：U+3000、NBSP 這類 Zs。
+/// 實作取 fail-closed 的**超集**：ASCII 控制字元與 DEL（五個 ASCII 空白除外）、非 ASCII 的 Zs／Zl／Zp／Cf／Cc
+/// 全禁，不逐一論證每個字元落在 (a) 還是 (b)。射程之外：肉眼看不見但三邊一致、judge 也不摺疊的字元
+/// （Mn、variation selector 等）——這條守的是行定義與 judge，不是視覺審閱。檔首 BOM 另判（見 checkQueryFile）。
 private func isForbiddenScalar(_ s: Unicode.Scalar) -> Bool {
     if s.value < 0x80 {
         return (s.value < 0x20 && !" \t\r\n\u{0B}\u{0C}".unicodeScalars.contains(s)) || s.value == 0x7F
@@ -54,33 +56,84 @@ private func isForbiddenScalar(_ s: Unicode.Scalar) -> Bool {
     }
 }
 
-/// 一條查詢的純量數上限。查詢是短語不是段落：上限擋的是「把一段逐字稿貼進來當查詢」——那正是這個檔
-/// 進 remote 卻無任何審閱路徑（`-diff`＋規則 1 的「reviewer 不准讀內容」）時，CLAUDE.md 隱私邊界唯一
-/// 擋得住的形狀（R7 security）。目前最長的一條遠低於此（查法：只印長度，不印內容）。
+/// 一條查詢的純量數上限。它擋的是**整段文字的量級**（一段逐字稿、一則 turn 整段貼進來），分不出一句第三方
+/// 逐字短句與自行撰寫的短語——這個檔進 remote 卻無任何審閱路徑（`-diff`＋規則 1 的「reviewer 不准讀內容」），
+/// 這條是它唯一的內容約束，所以射程要寫清楚。門檻與現況的查法（只印長度，不印內容）：
+/// `grep -v '^#' scripts/baseline-queries.txt | awk 'NF { print length }' | sort -n | tail -1`。
+/// README 寫的同一個數由同步測試對照這個常數。
 private let maxQueryScalars = 64
 
-@Test("baseline-queries.txt：檔頭三件事、≥6 條、無重複、每條 ≤64 個純量、不含六條退役查詢、無控制字元與非 ASCII 空白（失敗訊息只帶序號）")
-func baselineQueryFileDocumentsItsContractAndRetiresThePollutedQueries() throws {
-    let url = repoRoot().appendingPathComponent("scripts/baseline-queries.txt")
-    let text = try String(contentsOf: url, encoding: .utf8)
-    // 實體行用與 nonCommentLines 同一個切法（CRLF 也切；R7：這裡與下面的行號曾用 split，與第 31–32 行自己寫的規則相反）。
+/// 檔頭必須出現的短語：三件事（列舉會漏／不得在 session 內顯示／只印編號）與會進索引的兩個欄位名。
+private let requiredHeaderPhrases = ["列舉", "會漏", "不得在 Claude Code session 內顯示", "只印編號", "text", "toolMetadataFields"]
+
+/// 查詢檔契約可機械檢查的部分，對任一份 bytes 算。真檔與合成 fixture 走**同一支**——R8 四個讀者各自證明先前
+/// 四條守衛（禁止純量、長度上限、CRLF 切行、以及它們的行號）只讀真檔，而真檔依建構就是乾淨的，退掉零紅。
+/// 每一則違規只帶序號／行號，不帶內容。
+private struct QueryFileReport: Equatable {
+    var missingHeaderPhrases: [String] = []
+    var count = 0
+    var duplicateCount = 0
+    var retiredOffenders: [Int] = []   // 條目序號
+    var tooLong: [Int] = []            // 條目序號
+    var forbiddenLines: [Int] = []     // 實體行號；檔首 BOM 記為 0
+}
+
+private struct NotUTF8: Error {}
+
+private func checkQueryFile(_ data: Data) throws -> QueryFileReport {
+    var r = QueryFileReport()
+    // 檔首 BOM：`String(data:)` 會把它剝掉，bash 與 python 不會——第一行的 `#` 對它們不是行首，檔頭註解會被算成
+    // 第 1 條、也混進指紋。這是三邊分岔的唯一位置，而它對解碼後的字串不可見，所以看 bytes（R8 logic）。
+    if data.starts(with: [0xEF, 0xBB, 0xBF]) { r.forbiddenLines.append(0) }
+    guard let text = String(data: data, encoding: .utf8) else { throw NotUTF8() }
+    // 實體行用與 nonCommentLines 同一個切法（CRLF 也切）；註解行的判法也與行定義一致：先 ASCII trim 再看 `#`。
     let physical = text.components(separatedBy: "\n")
-    let header = physical.filter { $0.hasPrefix("#") }.joined(separator: "\n")
-    for phrase in ["列舉", "會漏", "不得在 Claude Code session 內顯示", "只印編號", "text", "toolMetadataFields"] {
-        let present = header.contains(phrase)
-        #expect(present, Comment(rawValue: "檔頭缺：\(phrase)"))
-    }
+    let header = physical.filter { $0.trimmingCharacters(in: asciiWhitespace).hasPrefix("#") }.joined(separator: "\n")
+    r.missingHeaderPhrases = requiredHeaderPhrases.filter { !header.contains($0) }
     let queries = nonCommentLines(text)
-    let count = queries.count, distinct = Set(queries).count
-    #expect(count >= 6, "基準查詢至少 6 條，得 \(count)")
-    #expect(distinct == count, "查詢重複：\(count - distinct) 條")
-    let offenders = queries.indices.filter { i in retired.contains { queries[i].contains($0) } }.map { $0 + 1 }
-    #expect(offenders.isEmpty, Comment(rawValue: "含退役查詢的條目序號：\(offenders)"))
-    let tooLong = queries.indices.filter { queries[$0].unicodeScalars.count > maxQueryScalars }.map { $0 + 1 }
-    #expect(tooLong.isEmpty, Comment(rawValue: "超過 \(maxQueryScalars) 個純量的條目序號：\(tooLong)"))
-    let forbiddenLines = physical.enumerated()
+    r.count = queries.count
+    r.duplicateCount = queries.count - Set(queries).count
+    r.retiredOffenders = queries.indices.filter { i in retired.contains { queries[i].contains($0) } }.map { $0 + 1 }
+    r.tooLong = queries.indices.filter { queries[$0].unicodeScalars.count > maxQueryScalars }.map { $0 + 1 }
+    r.forbiddenLines += physical.enumerated()
         .filter { $0.element.unicodeScalars.contains(where: isForbiddenScalar) }.map { $0.offset + 1 }
-    #expect(forbiddenLines.isEmpty, Comment(rawValue: "含禁止純量（控制字元、非 ASCII 空白）的行號：\(forbiddenLines)"))
+    return r
+}
+
+@Test("baseline-queries.txt：檔頭三件事、≥6 條、無重複、每條不超過上限、不含六條退役查詢、無控制字元／非 ASCII 空白／檔首 BOM（失敗訊息只帶序號）")
+func baselineQueryFileDocumentsItsContractAndRetiresThePollutedQueries() throws {
+    let data = try Data(contentsOf: repoRoot().appendingPathComponent("scripts/baseline-queries.txt"))
+    let r = try checkQueryFile(data)
+    #expect(r.missingHeaderPhrases.isEmpty, Comment(rawValue: "檔頭缺：\(r.missingHeaderPhrases)"))
+    #expect(r.count >= 6, "基準查詢至少 6 條，得 \(r.count)")
+    #expect(r.duplicateCount == 0, "查詢重複：\(r.duplicateCount) 條")
+    #expect(r.retiredOffenders.isEmpty, Comment(rawValue: "含退役查詢的條目序號：\(r.retiredOffenders)"))
+    #expect(r.tooLong.isEmpty, Comment(rawValue: "超過 \(maxQueryScalars) 個純量的條目序號：\(r.tooLong)"))
+    #expect(r.forbiddenLines.isEmpty, Comment(rawValue: "含禁止純量（控制字元、非 ASCII 空白；0 = 檔首 BOM）的行號：\(r.forbiddenLines)"))
+}
+
+@Test("查詢檔檢查由合成 fixture 驅動：CRLF 下的行號、檔首 BOM、行中 BOM、NUL、U+0001、U+3000、DEL、超長、重複、退役、檔頭缺短語——各自為對的理由紅；行中 tab 與尾隨空白不禁")
+func queryFileChecksAreDrivenByTheirOwnFixture() throws {
+    let header = "# " + requiredHeaderPhrases.joined(separator: " ") + "\n"
+    func report(_ s: String, bom: Bool = false) throws -> QueryFileReport {
+        try checkQueryFile((bom ? Data([0xEF, 0xBB, 0xBF]) : Data()) + Data(s.utf8))
+    }
+    #expect(try report(header + "ZQXJ-A\nZQXJ-B\nZQXJ-C\nZQXJ-D\nZQXJ-E\nZQXJ-F\n") == QueryFileReport(count: 6))
+    // CRLF：行號要指到實體行——用 split 整檔會被算成一行，行號永遠是 1、條數也錯（R7 #9 的修法先前沒有東西驅動）。
+    let crlf = try report("# h\r\nZQXJ-A\r\nZQXJ\u{0001}B\r\nZQXJ-C\r\n")
+    #expect(crlf.forbiddenLines == [3] && crlf.count == 3, Comment(rawValue: "\(crlf)"))
+    #expect(try report("ZQXJ-A\n", bom: true).forbiddenLines == [0])        // 檔首 BOM：只有 bytes 看得到
+    #expect(try report("ZQXJ-A\nZQ\u{FEFF}XJ\n").forbiddenLines == [2])      // 行中 BOM（Cf）
+    #expect(try report("ZQXJ\u{0000}A\n").forbiddenLines == [1])             // NUL：舊清單漏掉的那一個
+    #expect(try report("ZQXJ\u{3000}A\n").forbiddenLines == [1])             // U+3000（Zs）：judge 會摺成空針
+    #expect(try report("ZQXJ\u{7F}A\n").forbiddenLines == [1])               // DEL
+    #expect(try report("ZQXJ\tA \n").forbiddenLines.isEmpty)                  // 行中 tab、尾隨空白：行定義自己處理
+    #expect(try report("ZQXJ-A\n" + String(repeating: "Z", count: maxQueryScalars + 1) + "\n").tooLong == [2])
+    #expect(try report("ZQXJ-A\n" + String(repeating: "Z", count: maxQueryScalars) + "\n").tooLong.isEmpty)
+    #expect(try report("ZQXJ-A\nZQXJ-A\n").duplicateCount == 1)
+    #expect(try report("ZQXJ-A\n" + retired[0] + "\n").retiredOffenders == [2])
+    #expect(try report("ZQXJ-A\n").missingHeaderPhrases.count == requiredHeaderPhrases.count)
+    #expect(throws: NotUTF8.self) { try checkQueryFile(Data([0xFF, 0xFE, 0x41])) }   // 非 UTF-8：拒答不猜
 }
 
 // MARK: - measure-baseline.sh
@@ -91,13 +144,16 @@ private let errorTokenRegex = errorTokens.map { $0 == "<rc>" ? "[1-9][0-9]*" : $
 private let verdictLine = "^#[0-9]+ [0-9]+ms ((clean|self) tool=[0-9]+|empty tool=0|error\\((\(errorTokenRegex))\\))$"
 
 /// 腳本裡每一個 `error(` 出現（整行註解——去前導 ASCII 空白後以 `#` 開頭——由呼叫端先濾掉）都必須是下面
-/// 兩種**輸出述句形狀**之一，否則同步測試紅——**行尾註解裡的字面也紅**。這是刻意的 fail-closed：R6 用
-/// 「剝掉行尾註解」擋「刪掉的輸出點靠註解補回」，R7 三個 lens 各自證明那個剝法只是列舉（bash 的 `;#`、`|#`、
-/// `)#` 與 python 的無空白 `#` 都是註解卻穿得過去；引號裡的 ` #` 又會誤剝），而 bash 與 python 對「`#` 何時
-/// 是註解」本來就不同——一個逐行的 helper 判不出這一行是哪個語言。所以現在不剝、不猜：
-///   (a) python：整行是 `print(<expr>); sys.exit(0)`，每個 `error(` 都在雙引號裡，雙引號外沒有 `#`；
+/// 兩種**輸出述句形狀**之一，否則同步測試紅——**行尾註解裡的字面也紅、沒在同一行閉合的 `error(` 也紅**。
+/// 這是刻意的 fail-closed：R6 用「剝掉行尾註解」擋「刪掉的輸出點靠註解補回」，R7 證明那個剝法只是列舉
+/// （bash 的 `;#`、`|#`、`)#` 與 python 的無空白 `#` 都是註解卻穿得過去；引號裡的 ` #` 又會誤剝），而 bash 與
+/// python 對「`#` 何時是註解」本來就不同——一個逐行的 helper 判不出這一行是哪個語言。所以不剝、不猜：
+///   (a) python：整行是 `print(<字面>); sys.exit(0)` 或 `print(<字面> if <條件> else <字面>); sys.exit(0)`，
+///       字面是 `"…"`／`f"…"`、條件裡不准有引號與 `#`，而且整行的 `error(` 全部都在那一兩個字面裡
+///       （R7 版的 `print\(.*\)` 讓 `print("a"); x = "error(foo)"; sys.exit(0)` 通過——token 進集合卻不輸出；
+///       R7 版另一條「雙引號外沒有 `#`」的迴圈在這個形狀下沒有任何一行的判定靠它，依紀律拆掉）；
 ///   (b) bash：整行是 `valid_row "$row" || row="0 error(<token>)"`（judge 的兜底列）。
-/// 它擋的是「輸出點被刪／改名／註解掉而清單沒跟」；它**不證明**那一行可達或會執行（`if False:` 底下的
+/// 它擋的是「輸出點被刪／改名／註解掉而清單沒跟」；它**不證明**那一行可達或會執行（`if False:` 底下換行的
 /// print 一樣算），那由每個 token 各自的行為測試扛。這個分類器有自己的 fixture 測試，不靠真腳本的內容驅動。
 private enum OutputLine: Equatable {
     case notAnOutputLine
@@ -107,26 +163,27 @@ private enum OutputLine: Equatable {
 
 private func classifyOutputLine(_ raw: String) -> OutputLine {
     let line = raw.trimmingCharacters(in: asciiWhitespace)
-    let ns = line as NSString
-    let occurrences = try! NSRegularExpression(pattern: #"error\(([^)]*)\)"#)
-        .matches(in: line, range: NSRange(location: 0, length: ns.length))
-    guard !occurrences.isEmpty else { return .notAnOutputLine }
-    let tokens = occurrences.map { ns.substring(with: $0.range(at: 1)) }
+    // 偵測用 `error(` 子字串，不用閉合的 regex：R7 版用 `error\(…\)` 偵測，於是沒閉合的 `error(`（續行、`echo "error( $x"`）
+    // 被判成「不是輸出行」而靜默略過（R8 security）。這裡看到 `error(` 就進形狀檢查，沒閉合的自然對不上形狀而紅。
+    // （曾另加一條「閉合數 == 出現數」的守衛，變異證明在兩種形狀下都到不了——python 行尾必有 `sys.exit(0)` 的
+    // `)`——依紀律拆掉。）
+    guard line.contains("error(") else { return .notAnOutputLine }
+    let tokens = matches(#"error\(([^)]*)\)"#, in: line)
     if line.range(of: #"^valid_row "\$row" \|\| row="0 error\([a-z]+\)"$"#, options: .regularExpression) != nil {
         return .tokens(tokens)
     }
-    guard line.range(of: #"^print\(.*\); sys\.exit\(0\)$"#, options: .regularExpression) != nil else { return .unrecognised }
-    let units = Array(line.utf16)
-    let quote = UInt16(0x22), hash = UInt16(0x23)
-    for m in occurrences where units[..<m.range.location].filter({ $0 == quote }).count % 2 == 0 { return .unrecognised }
-    var inQuotes = false
-    for u in units {
-        if u == quote { inQuotes.toggle() } else if u == hash && !inQuotes { return .unrecognised }
+    let pyShape = try! NSRegularExpression(pattern: ##"^print\((f?"[^"]*")(?: if [^"#]+ else (f?"[^"]*"))?\); sys\.exit\(0\)$"##)   // `"#` 在單 # 的 raw string 裡會提早收尾
+    let ns = line as NSString
+    guard let m = pyShape.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) else { return .unrecognised }
+    var inLiterals = 0
+    for g in 1...2 where m.range(at: g).location != NSNotFound {
+        inLiterals += matches(#"error\(([^)]*)\)"#, in: ns.substring(with: m.range(at: g))).count
     }
+    guard inLiterals == tokens.count else { return .unrecognised }
     return .tokens(tokens)
 }
 
-@Test("同步測試的輸出點分類：兩種形狀認得；`;#` 註解、單一空白註解、輸出行後掛註解、雙引號外的 error(、少了前綴的 judge 列、單行 `if False:` 全部認不出——不剝註解、不猜")
+@Test("同步測試的輸出點分類：兩種形狀認得；`;#` 註解、單一空白註解、輸出行後掛註解、字面外的 error(、多述句同行、非字面的 print、少了前綴的 judge 列、單行 `if False:`、沒閉合的 error( 全部認不出——不剝註解、不猜")
 func outputLineClassifierIsDrivenByItsOwnFixture() {
     #expect(classifyOutputLine(#"    print("0 error(exec)"); sys.exit(0)"#) == .tokens(["exec"]))
     #expect(classifyOutputLine(#"print(f"{ms} error({rc})" if rc > 0 else f"{ms} error(sig{-rc})"); sys.exit(0)"#) == .tokens(["{rc}", "sig{-rc}"]))
@@ -134,10 +191,66 @@ func outputLineClassifierIsDrivenByItsOwnFixture() {
     #expect(classifyOutputLine("n=0; bad=0") == .notAnOutputLine)
     #expect(classifyOutputLine(#"true;# error(exec)"#) == .unrecognised)                                  // R6-A 的洞：bash 的 ;# 是註解
     #expect(classifyOutputLine(#"x=1 # error(json)"#) == .unrecognised)                                   // 單一空白的行尾註解
-    #expect(classifyOutputLine(#"print("0 error(exec)"); sys.exit(0)  # error(json)"#) == .unrecognised)  // 輸出行後面掛註解也紅
-    #expect(classifyOutputLine(#"print("0 " + error(exec)); sys.exit(0)"#) == .unrecognised)              // error( 在雙引號外
+    #expect(classifyOutputLine(#"print("0 error(exec)"); sys.exit(0)  # error(json)"#) == .unrecognised)  // 輸出行後面掛註解也紅（`$` 錨點）
+    #expect(classifyOutputLine(#"print("0 " + error(exec)); sys.exit(0)"#) == .unrecognised)              // error( 在字面外
+    #expect(classifyOutputLine(#"print("a"); x = "error(foo)"; sys.exit(0)"#) == .unrecognised)          // 多述句同行：token 進集合卻不輸出（R8）
+    #expect(classifyOutputLine(#"print(x)  # print("0 error(exec)"); sys.exit(0)"#) == .unrecognised)    // 被註解掉的假輸出點：print 的引數不是字面（R8）
+    #expect(classifyOutputLine(#"print("0 error(exec)" if x#y else "z"); sys.exit(0)"#) == .unrecognised) // 條件裡的 # 讓 python 把後半當註解
     #expect(classifyOutputLine(#"row="0 error(judge)""#) == .unrecognised)                                // 少了 valid_row 前綴：不是那個形狀
     #expect(classifyOutputLine(#"if False: print("0 error(exec)"); sys.exit(0)"#) == .unrecognised)       // 形狀外一律紅，不假裝能判可達
+    #expect(classifyOutputLine(#"echo "error( $line" >&2"#) == .unrecognised)                             // 沒閉合：不是「不是輸出行」（R8 security）
+    #expect(classifyOutputLine(#"    print("0 error("#) == .unrecognised)                                  // 續行的前半
+    #expect(classifyOutputLine(#"print("0 error("); sys.exit(0)"#) == .unrecognised)                        // 形狀對、字面沒閉合：沒有這條守衛會安靜地回空 token（R8 verify-fix 的變異抓到）
+}
+
+/// `#expect(` 的**第一個引數**（期望值那一側）：從 `#expect(` 之後掃到第一個頂層逗號——括號／中括號／大括號深度為 0、
+/// 不在字串裡（含 `\(…)` 內插與 `\"`）。訊息長什麼樣（`Comment(rawValue:)`、裸字串、內插）一概不看：R8 四個讀者
+/// 指出 R7 用字面 `, Comment(` 切是形式列舉，換一個訊息多載字面就又回到訊息側。切不出來（括號不平衡、字串沒關）
+/// 回 nil，呼叫端當紅；單引數的 `#expect(x)` 整個就是期望值。
+private func firstExpectArgument(_ line: String) -> String? {
+    guard let start = line.range(of: "#expect(") else { return nil }
+    let chars = Array(line[start.upperBound...])
+    var depth = 0, i = 0, inString = false
+    var interpolation: [Int] = []
+    var out = ""
+    while i < chars.count {
+        let c = chars[i]
+        if inString {
+            out.append(c)
+            if c == "\\", i + 1 < chars.count {
+                let n = chars[i + 1]; out.append(n); i += 2
+                if n == "(" { interpolation.append(depth); depth += 1; inString = false }
+                continue
+            }
+            if c == "\"" { inString = false }
+            i += 1; continue
+        }
+        switch c {
+        case "\"": inString = true
+        case "(", "[", "{": depth += 1
+        case ")", "]", "}":
+            if depth == 0 { return out }
+            depth -= 1
+            if c == ")", interpolation.last == depth { interpolation.removeLast(); inString = true }
+        case ",": if depth == 0 { return out }
+        default: break
+        }
+        out.append(c); i += 1
+    }
+    return nil
+}
+
+@Test("期望值側的切法由 fixture 驅動：Comment(rawValue:)、裸字串、內插、內插裡的巢狀字串與括號、單引數、括號不平衡")
+func firstExpectArgumentIsDrivenByItsOwnFixture() {
+    #expect(firstExpectArgument(#"#expect(a == ["error(x)"], Comment(rawValue: "error(y) \(z)"))"#) == #"a == ["error(x)"]"#)
+    #expect(firstExpectArgument(#"#expect(a == ["error(x)"], "error(y)")"#) == #"a == ["error(x)"]"#)               // 裸字串訊息（R7 的 `, Comment(` 切法在這裡退回整行）
+    #expect(firstExpectArgument(#"#expect(f(a, b) == [1, 2] && g("x, y"), "m")"#) == #"f(a, b) == [1, 2] && g("x, y")"#)
+    #expect(firstExpectArgument(#"#expect(s == "\(x ? "a, b" : "c")", "m")"#) == #"s == "\(x ? "a, b" : "c")""#)  // 內插裡有引號與逗號
+    #expect(firstExpectArgument(#"#expect(s == "q\"uote", "m")"#) == #"s == "q\"uote""#)
+    #expect(firstExpectArgument(#"    #expect(a == b)"#) == "a == b")                                            // 單引數：整個是期望值
+    #expect(firstExpectArgument(#"#expect(a == (b, "m")"#) == nil)                                               // 括號不平衡：切不出來
+    #expect(firstExpectArgument(#"#expect(a == "open, "m")"#) == nil)                                            // 字串沒關
+    #expect(firstExpectArgument(#"let x = 1  // not an expect"#) == nil)
 }
 
 @Test("字母表同步：腳本檔頭、README、測試的 errorTokens、腳本輸出點四處相等，ERROR_TOKENS 等於它們扣掉 <rc>／sig<N>；含 error( 的行不是輸出述句形狀直接紅；CHANGELOG 三個 verdict 詞在；退役清單 README 與測試一致")
@@ -155,7 +268,7 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // 2. 腳本裡的 ERROR_TOKENS（valid_row 執行期用的字面集合）＝ errorTokens 扣掉兩個樣式 token。
     let errorTokensLine = scriptLines.first { $0.hasPrefix("ERROR_TOKENS=\"") } ?? ""
     let runtimeLiterals = Set((matches(#"^ERROR_TOKENS="([^"]*)""#, in: errorTokensLine).first ?? "")
-        .split(separator: " ").map(String.init))   // 只取引號裡的；那一行後面刻意帶了行尾註解
+        .split(separator: " ").map(String.init))   // 只取引號裡的（那一行目前沒有行尾註解；帶了含 error( 的註解會被輸出點檢查判紅）
     // 3. 腳本程式碼裡的 error(...) 輸出點：只濾掉整行註解，剩下每一行交給 classifyOutputLine——含 error( 的行
     //    不是兩種輸出述句形狀之一就直接紅（含行尾註解裡的字面；不剝註解、不猜哪個 # 是註解，理由見該函式的 doc）。
     //    **不排除任何程式碼區段**——valid_row 用變數 E_OPEN 比對、不寫 error( 的字面，所以「哪些 error( 不是輸出點」
@@ -181,7 +294,8 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
         }
     }
     // 4. README 的字母表行：`error(<rc>|sig<N>|…)`。
-    let readmeTokens = Set(matches(#"error\(([^)]*\|[^)]*)\)"#, in: readme).flatMap { $0.split(separator: "|").map(String.init) })
+    // 不跨行：README 散文裡提到沒閉合的 `error(` 時，跨行的 `[^)]*` 會一路吃到別處的 `clean|self|empty`（R8 verify-fix 踩到）。
+    let readmeTokens = Set(matches(#"error\(([^)\n]*\|[^)\n]*)\)"#, in: readme).flatMap { $0.split(separator: "|").map(String.init) })
     // 5. 測試自己的 errorTokens。
     let expected = Set(errorTokens)
     let expectedLiterals = expected.subtracting(["<rc>", "sig<N>"])
@@ -194,43 +308,47 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     #expect(readmeTokens == expected, Comment(rawValue: "README：\(readmeTokens.sorted())"))
 
     // **存在性**檢查（不是執行證明）：每個 token 在本檔**別的**測試裡有一條帶「產生標記」、以 `#expect(`
-    // 開頭的活斷言行，其**期望值那一側**（`, Comment(` 之前）寫著它的 tail。它擋的是「把產生點刪掉／改名／
-    // 註解掉而清單沒跟著改」；它**不證明**那條斷言被執行（`.disabled`、迴圈跳過都看不到）——執行由整份測試檔
-    // 綠來保證。標記字串執行期拼出（下一行）；本測試自己的行範圍（從它的 `@Test(` 行到下一個 `@Test(`／
-    // `private func`）內不得含那個字面，由下面的斷言守——範圍起點用 #function 取自己的名字，改名會自動跟著走，
-    // 找不到就紅（R7 四個 lens：手寫函式名＋`?? 0` 讓改名時範圍塌成檔頭、零紅燈）。標記與 tail 必須在同一
-    // 實體行（拆行會紅，訊息會說）。哪一輪、哪個 lens 抓到什麼，不在這裡複述——查 issue #63 各輪的 verify
-    // comment（R6、R7 各抓到一次這裡的複述寫錯）。
+    // 開頭的活斷言行，其**第一個引數**（期望值那一側，`firstExpectArgument` 以括號配對切出、切不出來就紅）寫著
+    // 它的 tail。它擋的是「把產生點刪掉／改名／註解掉而清單沒跟著改」；它**不證明**那條斷言被執行（`.disabled`、
+    // 迴圈跳過都看不到，連本測試自己被停用也看不到）——執行由整份測試檔綠來保證。標記字串執行期拼出（下一行）；
+    // 本測試自己的行範圍（從它的 `@Test(` 行到下一個 `@Test(`／`private func`）內不得含那個字面，由下面的斷言守
+    // ——宣告行以「整行以 `func NAME(` 開頭且恰好一行」找（NAME 由 #function 取，改名自動跟著走）：子字串比對
+    // 取第一個會被更早出現的交叉引用註解劫持、範圍指到別的測試（R8）。標記與 tail 必須在同一實體行（拆行會紅，
+    // 訊息會說）。哪一輪、誰抓到什麼，不在這裡複述——查 issue #63 各輪的 verify comment。
     let producesMarker = ["//", "produces", ":"].joined(separator: " ").replacingOccurrences(of: "produces :", with: "produces:")
     let rawSource = try String(contentsOf: URL(fileURLWithPath: "\(#filePath)"), encoding: .utf8)
     let sourceLines = rawSource.components(separatedBy: "\n")
     let selfName = String(#function.prefix { $0 != "(" })
-    let funcLine = try #require(sourceLines.firstIndex { $0.contains("func \(selfName)(") }, "找不到同步測試自己的宣告行")
+    let declarationLines = sourceLines.indices.filter { sourceLines[$0].hasPrefix("func \(selfName)(") }
+    let funcLine = try #require(declarationLines.count == 1 ? declarationLines[0] : nil,
+                                "同步測試的宣告行必須恰好一行（整行以 func NAME( 開頭），得 \(declarationLines.count) 行")
     let selfStart = try #require(sourceLines[..<funcLine].lastIndex { $0.hasPrefix("@Test(") }, "同步測試的宣告行上面沒有 @Test( 行")
     let selfEnd = sourceLines[(funcLine + 1)...].firstIndex { $0.hasPrefix("@Test(") || $0.hasPrefix("private func ") } ?? sourceLines.count
     let markerInsideSelf = (selfStart..<selfEnd).filter { sourceLines[$0].contains(producesMarker) }.map { $0 + 1 }
     #expect(markerInsideSelf.isEmpty, Comment(rawValue: "產生標記出現在同步測試自己的行範圍內（不得自問自答）：行 \(markerInsideSelf)"))
     // 上一條斷言一成立，自身範圍內就沒有帶標記的行，所以這裡不再排除自身範圍——R7 DA 證明那個排除條件在任何
-    // 世界狀態下都不改變 verdict（有它沒它訊息位元相同），驅動不了的守衛拆掉。
-    let producerLines = sourceLines.filter { $0.contains(producesMarker) && $0.trimmingCharacters(in: .whitespaces).hasPrefix("#expect(") }
+    // 世界狀態下都不改變 verdict（訊息可能多一筆，但那條路徑上測試已因上一條斷言而紅），驅動不了的守衛拆掉。
+    let producerLines = sourceLines.enumerated().filter { $0.element.contains(producesMarker) && $0.element.trimmingCharacters(in: .whitespaces).hasPrefix("#expect(") }
     // 標記後面列的名字集合必須**等於**該行期望值那一側的 tail 集合——雙向、不准空、不准重複。R6 只做單向
-    // （每個名字在行內某處出現），於是漏列、重複、一個名字都不寫、字面只在失敗訊息裡都過得去（R7 三個 lens）。
+    // （每個名字在行內某處出現），於是漏列、重複、一個名字都不寫、字面只在失敗訊息裡都過得去（R7）；R7 用
+    // `, Comment(` 切期望值側，裸字串訊息又讓字面回到訊息側（R8）——現在用第一個引數，與訊息形式無關。
     func tailName(_ literal: String) -> String {
         literal == "error(7)" ? "rc" : literal == "error(sig9)" ? "sig" : String(literal.dropFirst(6).dropLast())
     }
     var suffixMismatch: [String] = []
+    var unsplittable: [Int] = []
     var expectationSides: [String] = []
-    for line in producerLines {
+    for (i, line) in producerLines {
         let marker = line.range(of: producesMarker)!
         let names = line[marker.upperBound...].split(separator: " ").map(String.init)
-        let code = String(line[..<marker.lowerBound])
-        let side = code.range(of: ", Comment(").map { String(code[..<$0.lowerBound]) } ?? code
+        guard let side = firstExpectArgument(String(line[..<marker.lowerBound])) else { unsplittable.append(i + 1); continue }
         expectationSides.append(side)
         let tails = Set(matches(#"(error\([^)]*\))"#, in: side).map(tailName))
         if names.isEmpty || Set(names).count != names.count || Set(names) != tails {
             suffixMismatch.append("標記後 \(names) vs 期望值側 \(tails.sorted())")
         }
     }
+    #expect(unsplittable.isEmpty, Comment(rawValue: "producer 行的 #expect 第一個引數切不出來（括號不平衡或字串沒關）：行 \(unsplittable)"))
     #expect(suffixMismatch.isEmpty, Comment(rawValue: "產生標記後的名字集合與同一行期望值側的 tail 集合不相等（雙向、不空、不重複）：\(suffixMismatch)"))
     let producerText = expectationSides.joined(separator: "\n")
     let wanted = errorTokens.map { $0 == "<rc>" ? "error(7)" : $0 == "sig<N>" ? "error(sig9)" : "error(\($0))" }
@@ -257,9 +375,19 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // 離開碼：檔頭那一行列的數字 ＝ 程式碼裡 exit 的數字 ∪ {0}。
     let exitHeaderLine = scriptLines.first { $0.hasPrefix("# 離開碼（") } ?? ""
     let headerExits = Set((exitHeaderLine.components(separatedBy: "：").last ?? "").split(separator: " ").compactMap { Int($0) })
-    // 行尾註解裡的 `exit N` 也算——多出來的會讓兩邊不等而紅（fail-closed 的方向），與輸出點同一條紀律：不剝、不猜。
-    let codeExits = Set(matches(#"exit ([0-9]+)"#, in: codeLines.map(\.element).joined(separator: "\n")).compactMap { Int($0) }).union([0])
+    // 行尾註解裡的 `exit N` 也算——多出來的會讓兩邊不等而紅，與輸出點同一條紀律：不剝、不猜。另一個方向也要關：
+    // `exit "$VAR"` 對 `exit N` 的比對隱形（R8 DA 變異綠），所以每一個 bash 的 `exit` 字（`sys.exit(` 不算）後面
+    // 都必須是字面數字，否則紅。
+    let codeText = codeLines.map(\.element).joined(separator: "\n")
+    let codeExits = Set(matches(#"(?<![.\w])exit ([0-9]+)"#, in: codeText).compactMap { Int($0) }).union([0])
+    let exitWords = try! NSRegularExpression(pattern: #"(?<![.\w])exit\b"#).numberOfMatches(in: codeText, range: NSRange(location: 0, length: (codeText as NSString).length))
+    let literalExits = matches(#"(?<![.\w])exit ([0-9]+)"#, in: codeText).count
+    #expect(exitWords == literalExits, Comment(rawValue: "腳本裡有 \(exitWords) 個 exit，其中 \(literalExits) 個後面是字面數字——經變數的離開對同步檢查隱形，一律紅"))
     #expect(headerExits == codeExits, Comment(rawValue: "檔頭：\(headerExits.sorted()) 程式碼：\(codeExits.sorted())"))
+    // README 的兩個數字（每條純量上限、目前條數）由這裡對照常數與真檔，不各存一份（R8）。
+    let queryReport = try checkQueryFile(try Data(contentsOf: root.appendingPathComponent("scripts/baseline-queries.txt")))
+    #expect(readme.contains("每條不超過 \(maxQueryScalars) 個純量"), "README 的純量上限與 maxQueryScalars 不同")
+    #expect(readme.contains("目前的 \(queryReport.count) 條"), Comment(rawValue: "README 寫的目前條數與真檔（\(queryReport.count)）不同"))
 
     // 退役清單：README 的「…」列與測試的 retired 陣列是同一份，不能各自漂移。
     let readmeRetiredLine = readme.components(separatedBy: "\n").first { $0.hasPrefix("「") && $0.contains("」「") } ?? ""
@@ -308,8 +436,9 @@ private func tail(_ line: String) -> String {
 }
 
 /// 建一個把 argv 記到 `argv.log`、先把 stdin 讀光、再依查詢（最後一個參數）回應的 stub。
-/// `cat >/dev/null` 是刻意的：腳本若沒把 ltm 的 stdin 接到 /dev/null，stub 會把查詢檔剩下的行
-/// 吃掉，列數就少了——這條守衛靠它驅動。`raw` 是整段 bash，給訊號自殺這類回應用。
+/// `cat >/dev/null` 是刻意的：ltm 的 stdin 若是查詢內容，stub 會把剩下的行吃掉，列數就少了。它驅動得到的是
+/// 「judge 自己的 stdin 是 /dev/null」（R7 起）；python 端另外對 ltm 設的 `stdin=DEVNULL` 從此是分不出來的縱深
+/// （R8 logic 變異：拿掉它列數不變）。`raw` 是整段 bash，給訊號自殺這類回應用。
 private func makeStub(in dir: URL, responses: [String: String], exits: [String: Int32] = [:],
                       raw: [String: String] = [:]) throws -> URL {
     let stub = dir.appendingPathComponent("ltm")
@@ -412,9 +541,10 @@ func measureBaselinePrintsOnlyIndicesAndVerdicts() throws {
     // #5 兩個工具 chunk 但都不含查詢原文 → clean tool=2（工具 chunk 本身不是污染訊號，DA C1）；
     // #6 self：只差大小寫（casefold）；
     // #7 ltm 回了 k+1 筆、只有第 k+1 筆含原文且帶工具標記 → clean tool=0：judge 只看前 k 筆，「前 k 名」的語意
-    //    由 judge 自己截、不靠 ltm 自律（R7 codex）。
+    //    由 judge 自己截、不靠 ltm 自律（R7 codex）；
+    // #8 第 k+1 筆是畸形的（snippet 不是字串）→ 仍是 clean tool=0：形狀檢查也只看前 k 筆（R8 codex：先前切在檢查之後）。
     let queries = dir.appendingPathComponent("q.txt")
-    try "# header\n   # indented comment\nZQXJ-CLEAN-ONE\n   \nZQXJ-SELF-TWO\r\n\t ZQXJ QUOTE THREE  \nZQXJ-EMPTY-FOUR\nZQXJ-TOOLONLY-FIVE\nzqxj lower six\nZQXJ-OVERFLOW-SEVEN"
+    try "# header\n   # indented comment\nZQXJ-CLEAN-ONE\n   \nZQXJ-SELF-TWO\r\n\t ZQXJ QUOTE THREE  \nZQXJ-EMPTY-FOUR\nZQXJ-TOOLONLY-FIVE\nzqxj lower six\nZQXJ-OVERFLOW-SEVEN\nZQXJ-OVERFLOW-EIGHT"
         .write(to: queries, atomically: true, encoding: .utf8)
     let stub = try makeStub(in: dir, responses: [
         "ZQXJ-SELF-TWO": #"[{"snippet":"先說明一下\n⟨tool Bash command=ltm query ZQXJ-SELF-TWO --k 5⟩","uuid":"u"},{"snippet":"別的","uuid":"v"}]"#,
@@ -423,6 +553,7 @@ func measureBaselinePrintsOnlyIndicesAndVerdicts() throws {
         "ZQXJ-TOOLONLY-FIVE": #"[{"snippet":"⟨tool Bash command=swift test⟩","uuid":"u"},{"snippet":"⟨tool Read file_path=x⟩","uuid":"v"}]"#,
         "zqxj lower six": #"[{"snippet":"⟨tool Bash command=ltm query ZQXJ Lower SIX --k 5⟩","uuid":"u"}]"#,
         "ZQXJ-OVERFLOW-SEVEN": #"[{"snippet":"一","uuid":"a"},{"snippet":"二","uuid":"b"},{"snippet":"三","uuid":"c"},{"snippet":"⟨tool Bash command=ltm query ZQXJ-OVERFLOW-SEVEN⟩","uuid":"d"}]"#,
+        "ZQXJ-OVERFLOW-EIGHT": #"[{"snippet":"一","uuid":"a"},{"snippet":"二","uuid":"b"},{"snippet":"三","uuid":"c"},{"snippet":null,"uuid":"d"}]"#,
     ])
 
     let run = try runScript(queries: queries, stub: stub)
@@ -430,17 +561,17 @@ func measureBaselinePrintsOnlyIndicesAndVerdicts() throws {
     let fixtureText = try String(contentsOf: queries, encoding: .utf8)
     #expect(run.setLine == setLine(fixtureText), Comment(rawValue: "第一行：\(run.setLine)"))
     #expect(run.setLine.range(of: "^set sha256:[0-9a-f]{12} k=[0-9]+$", options: .regularExpression) != nil)
-    #expect(run.rows.count == 7, Comment(rawValue: run.stdout))
+    #expect(run.rows.count == 8, Comment(rawValue: run.stdout))
     #expect(run.rows.allSatisfy { $0.range(of: verdictLine, options: .regularExpression) != nil }, Comment(rawValue: run.stdout))
-    #expect(run.rows.map(tail) == ["clean tool=0", "self tool=1", "self tool=0", "empty tool=0", "clean tool=2", "self tool=1", "clean tool=0"], Comment(rawValue: run.stdout))
-    #expect(run.rows.map { $0.prefix(3) } == ["#1 ", "#2 ", "#3 ", "#4 ", "#5 ", "#6 ", "#7 "], Comment(rawValue: run.stdout))
+    #expect(run.rows.map(tail) == ["clean tool=0", "self tool=1", "self tool=0", "empty tool=0", "clean tool=2", "self tool=1", "clean tool=0", "clean tool=0"], Comment(rawValue: run.stdout))
+    #expect(run.rows.map { $0.prefix(3) } == ["#1 ", "#2 ", "#3 ", "#4 ", "#5 ", "#6 ", "#7 ", "#8 "], Comment(rawValue: run.stdout))
     // 查詢文字與 snippet 都不得出現在任何輸出。
     #expect(!run.combined.lowercased().contains("zqxj") && !run.combined.contains("實質內容") && !run.combined.contains("說明"))
 
     // ltm 每次都收到同一個形狀：query --all-projects --k <k> --json -- <去掉 CR 與前後空白的查詢>。
     let log = try String(contentsOf: dir.appendingPathComponent("argv.log"), encoding: .utf8)
     let calls = log.split(separator: "\n").map { $0.split(separator: "\u{1f}", omittingEmptySubsequences: false).dropLast().map(String.init) }
-    let expected = ["ZQXJ-CLEAN-ONE", "ZQXJ-SELF-TWO", "ZQXJ QUOTE THREE", "ZQXJ-EMPTY-FOUR", "ZQXJ-TOOLONLY-FIVE", "zqxj lower six", "ZQXJ-OVERFLOW-SEVEN"]
+    let expected = ["ZQXJ-CLEAN-ONE", "ZQXJ-SELF-TWO", "ZQXJ QUOTE THREE", "ZQXJ-EMPTY-FOUR", "ZQXJ-TOOLONLY-FIVE", "zqxj lower six", "ZQXJ-OVERFLOW-SEVEN", "ZQXJ-OVERFLOW-EIGHT"]
         .map { ["query", "--all-projects", "--k", "3", "--json", "--", $0] }
     #expect(calls == expected, Comment(rawValue: log))
 
@@ -569,8 +700,16 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
 
     #expect(try runScript(queries: dir.appendingPathComponent("missing.txt"), stub: stub).status == 66)
     #expect(try runScript(queries: dir, stub: stub).status == 66)
-    // root 對 0o000 的檔案仍然 -r 為真，這一臂在 root 下（容器／CI）不成立——跳過而不是誤紅（R7 regression）。
-    if geteuid() != 0 {
+    // 含 NUL 的查詢檔：bash 變數存不了它（會靜默丟掉），腳本要在讀進記憶體之前擋成 66（R8：查詢檔改成只讀一次）。
+    let withNUL = dir.appendingPathComponent("nul.txt")
+    try Data("ZQXJ-ONE\n".utf8 + [0x5A, 0x00, 0x41, 0x0A]).write(to: withNUL)
+    let nulRun = try runScript(queries: withNUL, stub: stub)
+    #expect(nulRun.status == 66 && nulRun.stdout.isEmpty, Comment(rawValue: "rc=\(nulRun.status) out=\(nulRun.stdout)"))
+    // root 對 0o000 的檔案仍然 -r 為真，這一臂在 root 下（容器／CI）不成立。不能靜默跳過（那是「看起來有人守」），
+    // 也不能誤紅：以 known issue 留下可見訊號（R7 regression → R8 三個讀者）。
+    if geteuid() == 0 {
+        withKnownIssue("以 root 執行：0o000 的檔案對 root 仍可讀，66 的「不可讀」這一臂無法驗證") { Issue.record("這一臂在 root 下沒有跑") }
+    } else {
         let unreadable = dir.appendingPathComponent("unreadable.txt")
         try "ZQXJ-ONE\n".write(to: unreadable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: unreadable.path)
@@ -654,16 +793,17 @@ func measureBaselineIsolatesChildProcessStdio() throws {
     try "ZQXJ-ONE\nZQXJ-TWO\nZQXJ-THREE\n".write(to: queries, atomically: true, encoding: .utf8)
     let stub = try makeStub(in: dir, responses: [:])
     // 假 python3：每次呼叫都先往 stderr 吐一行；judge 那次（-c）再把 stdin 讀光；然後轉交真的 python3。
-    // ltm 那一側的同一組守衛由 makeStub 的 `cat >/dev/null` 驅動——這裡補的是 R7 security 指出的另外兩個行程：
-    // 指紋 python 是唯一整份讀進查詢集的行程，它的 stderr 曾經沒有重導；judge python 曾經繼承查詢檔當 stdin。
+    // 這裡補的是 R7 security 指出的兩個行程：指紋 python 是唯一整份讀進查詢集的行程，它的 stderr 曾經沒有重導；
+    // judge python 曾經繼承查詢內容當 stdin（ltm 那一側見 makeStub 的說明）。
+    // `cat` 用絕對路徑：這條測試的敏感度靠它——找不到 `cat` 時 judge 沒接 /dev/null 也照樣綠（R7 verify-fix 的變異
+    // 第一次就是這樣假綠的，當時是 pathOverride 讓 PATH 上沒有它；R8 指出改 pathPrefix 後仍依賴宿主 PATH）。
+    #expect(FileManager.default.isExecutableFile(atPath: "/bin/cat"), "沒有 /bin/cat，這條測試的 stdin 那一臂驅動不了")
     let bin = dir.appendingPathComponent("bin-stdio")
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
     try FileManager.default.createSymbolicLink(at: bin.appendingPathComponent("dirname"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/dirname"))
-    try "#!/bin/bash\necho 'ZQXJ-STDERR-NOISE' >&2\nif [ \"$1\" = \"-c\" ]; then cat >/dev/null; fi\nexec '\(realPython3())' \"$@\"\n"
+    try "#!/bin/bash\necho 'ZQXJ-STDERR-NOISE' >&2\nif [ \"$1\" = \"-c\" ]; then /bin/cat >/dev/null; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: bin.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.appendingPathComponent("python3").path)
-    // pathPrefix 不是 pathOverride：假 python3 裡的 `cat` 要找得到，否則這條測試在 judge 沒接 /dev/null 時照樣綠
-    // （R7 verify-fix 的變異第一次就是這樣假綠的）。
     let run = try runScript(queries: queries, stub: stub, pathPrefix: bin.path)
     #expect(run.status == 0, Comment(rawValue: "rc=\(run.status) out=\(run.stdout)"))
     #expect(run.rows.count == 3, Comment(rawValue: "judge 的 stdin 若是查詢檔，cat 會吃掉剩下的行：\(run.stdout)"))
