@@ -6,9 +6,12 @@
 # `#N` 只是檔內位置），之後每列 `#N <ms>ms <verdict>`**（例如
 # `#3 812ms clean tool=1`；`<ms>` 是整數毫秒，後面緊接字面 `ms`）。
 # 查詢文字與命中內容不進 stdout／stderr，包含 `bash -x`、
-# `SHELLOPTS=xtrace`、`BASH_ENV` 裡的 `set -x`（第一行就關掉 xtrace；ltm 與 judge 的 stderr 都丟掉）。
+# `SHELLOPTS=xtrace`、`BASH_ENV` 裡的 `set -x`（第一行就關掉 xtrace；指紋 python、judge python、ltm 三個子行程的
+# stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null）。
 # 擋不住的：`BASH_ENV`／`PS4` 裡刻意放一個會讀查詢檔的命令替換——trace 第一行 `set +x` 時 PS4 先展開；
-# 或 PATH 上的 python3 被換成會印檔案的東西。這份例外會漏，判準是「這個動作等不等同操作者直接 cat 查詢檔」
+# 或 PATH 上的 python3 被換成會印檔案的東西。另外，查詢原文在執行期會在 python3 與 ltm 的 argv 上（CLI 的查詢
+# 就是位置參數、`--` 終止符用得對），同機任何行程 `ps -ww` 看得到、存活時間是那一列的 wall clock——那是作業系統
+# 的可見面不是本腳本的輸出通道。這份例外會漏，判準是「這個動作等不等同操作者直接 cat 查詢檔」
 # ——那是操作者的動作不是本腳本的洩漏面；寫在這裡是因為上一句是全稱。
 # 指紋揭露什麼：未加鹽的 sha256 前 48 bit。它不含查詢文字、跟查詢原文對不上（不會造成 self）；它能讓
 # 持有一組候選的人**確認**一次完整猜測——持有舊集合的人可用它驗證退役後換掉的那一條。這個對手本來就
@@ -20,11 +23,13 @@
 # `description=`、`ltm_query` MCP 工具的 `query=`）。Bash 的 stdout 是 tool_result、
 # 今天不被索引——但 Claude 引述輸出的那句散文一定被索引。印了查詢字串，就等著被引述（#63 的 root cause）。
 #
-# verdict（封閉字母表；只有這幾個，不得類推。四處列舉——本檔頭的「error tokens」行、`ERROR_TOKENS`
-# 變數、docs/measurements/README.md、測試的 errorTokens——與程式碼裡實際的 `error(...)` 輸出點由
-# Tests/LTMMCPTests/BaselineQueryFileTests.swift 的同步測試逐一對應：程式碼裡**每一個** `error(` 都當
-# 輸出點（valid_row 用變數 E_OPEN 比對、不寫字面，所以沒有任何一行被略過），寫成它認不出的形狀
-# （字面 token、`{rc}`、`sig{-rc}` 以外）測試直接紅）：
+# verdict（封閉字母表；只有這幾個，不得類推。四處列舉——本檔頭的「error tokens」行、docs/measurements/README.md、
+# 測試的 errorTokens、程式碼裡的 `error(...)` 輸出點——由 Tests/LTMMCPTests/BaselineQueryFileTests.swift 的同步測試
+# 逐一相等，`ERROR_TOKENS` 變數等於它們扣掉 `<rc>`／`sig<N>` 兩個樣式 token 的子集。「輸出點」的判法是形狀：
+# 程式碼裡**每一個** `error(` 出現（整行註解除外）都必須是兩種輸出述句形狀之一——python 的
+# `print(…); sys.exit(0)` 且字面在雙引號裡、bash 的 `valid_row "$row" || row="0 error(<token>)"`——不然測試紅，
+# **行尾註解裡的字面也紅**（valid_row 用變數 E_OPEN 比對、不寫字面，所以沒有任何一行被略過）。它擋的是
+# 刪掉／改名輸出點而清單沒跟；不證明那一行可達或會執行，那由每個 token 的行為測試扛）：
 #   clean tool=<n>   前 k 名沒有任何一個 snippet 含**這條查詢的原文**（空白摺疊、大小寫摺疊後的子字串比對）。
 #   self  tool=<n>   前 k 名至少一個 snippet 含這條查詢的原文——儀器看見了自己（量測命令列、
 #                    `ltm_query query=…`、被引述的那句散文，都是這個形狀）。這一輪該條的命中品質不可比；
@@ -39,7 +44,7 @@
 # `tool=<n>` 是前 k 名裡含 `⟨tool ` 的 snippet 數（工具 metadata chunk，加上引述這個標記的散文）。
 # 它**不是**污染訊號——它量的不是這條查詢而是「前 k 名有沒有工具 chunk」；工具 metadata chunk 佔
 # chunk 表約四成（#67；那是份額不是前 k 名出現率，實際出現率要在真索引跑過才知道），拿它當 dirty
-# 會讓多數列不可比。它是 #62（self-hit 的檢索層排除）要移動的那個量的觀察值，印出來給 #62 的
+# 會讓每一個前 k 名含工具 chunk 的列不可比——有多少列，同一句：還沒量。它是 #62（self-hit 的檢索層排除）要移動的那個量的觀察值，印出來給 #62 的
 # 前後比較看（差值含兩次量測之間語料的成長）。
 # 第一版的判準是「含 `⟨tool ` 或含 `ltm query`」，#63 verify 的 devil's-advocate 指出它量的是
 # 「前 k 名有沒有工具 chunk」而不是「這條查詢被自己污染了沒有」；現在的 self 是把命中拿去跟查詢比對。
@@ -81,8 +86,9 @@ case "$K" in ''|*[!0-9]*) echo "k 必須是 1–1000 的整數" >&2; exit 64 ;; 
 command -v python3 >/dev/null 2>&1 || { echo "需要 python3 計時與解析 --json" >&2; exit 70; }
 
 # 查詢集指紋：對「第 N 條非註解行」的同一個定義（ASCII trim、跳過空行與 #）逐行 sha256，只印 12 個 hex。
-# 檔案內容留在 python 行程裡，不上 stdout。
-SETID=$(python3 - "$QF" <<'PY'
+# 檔案內容留在 python 行程裡，不上 stdout；stderr 也丟掉——它是唯一整份讀進查詢集的行程，檔頭那句「不進
+# stdout／stderr」的全稱曾漏了它（R7 security）。
+SETID=$(python3 - "$QF" 2>/dev/null <<'PY'
 import hashlib, sys
 ws = " \t\r\v\f"
 h = hashlib.sha256()
@@ -109,7 +115,9 @@ done
 printf 'set sha256:%s k=%s\n' "$SETID" "$K"
 
 # 一條查詢一個 python：起 ltm、用 monotonic 計時、解析 --json、只印一行「<ms> <verdict>」。
-# 不印任何 snippet；ltm 的 stdin 接 /dev/null（避免它吃掉查詢檔剩下的行）；stderr 由外層整個丟掉。
+# 不印任何 snippet；ltm 的 stdin 接 /dev/null（避免它吃掉查詢檔剩下的行），judge 自己的 stdin 也接（R7：
+# 它曾繼承查詢檔）；stderr 由外層整個丟掉。命中只看前 k 筆——「前 k 名」的語意由 judge 自己截，不靠 ltm 自律
+# （R7 codex：多回傳的命中會安靜地改變 self 與 tool=<n>）。
 RUN='
 import json, subprocess, sys, time
 ltm, k, query = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -134,6 +142,7 @@ except Exception:
     print(f"{ms} error(json)"); sys.exit(0)
 if not isinstance(hits, list) or not all(isinstance(h, dict) and isinstance(h.get("snippet"), str) for h in hits):
     print(f"{ms} error(shape)"); sys.exit(0)
+hits = hits[:int(k)]
 if not hits:
     print(f"{ms} empty tool=0"); sys.exit(0)
 tool = sum(1 for h in hits if "⟨tool " in h["snippet"])
@@ -144,9 +153,11 @@ print(f"{ms} " + ("self" if selfhit else "clean") + f" tool={tool}")
 # error token 只能是數字、sig＋數字、或 ERROR_TOKENS 裡的字面（不是「像 token 的字元」——bash 3.2 的
 # [a-z] 隨 locale 排序而變，字面比對不會）。不合就整列換成 error(judge)——寧可少一列量測，也不讓不明
 # 字串上 stdout。多行的列不必另外擋：每個位元組都落在 ms（只准數字）或 rest（各臂完整限制到結尾）裡。
-ERROR_TOKENS="blank exec json shape judge" # 行尾註解刻意留著：error(timeout) 不在字母表，同步測試剝行尾註解的接線由這一行驅動
-# valid_row 裡刻意不寫 error( 的字面（連這個變數的定義也拆開寫）：同步測試把程式碼裡每一個 error( 都當
-# 輸出點，這裡是比對不是輸出。
+ERROR_TOKENS="blank exec json shape judge"
+# valid_row 裡刻意不寫 error( 的字面（連這個變數的定義也拆開寫）：同步測試把程式碼裡每一個 error( 出現都當
+# 輸出點候選、不是輸出述句形狀就紅（含行尾註解裡的字面——R6 曾在上一行留一條 error(timeout) 註解當接線的
+# canary，R7 兩個 lens 指出它無主、而且哪天 timeout 進了字母表就無聲失效；現在不剝註解也就沒有接線要驅動），
+# 這裡是比對不是輸出。
 E_OPEN="error"'('
 valid_row() {
     local ms="${1%% *}" rest="${1#* }"
@@ -172,7 +183,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     line="${line%"${line##*[!$ws]}"}"
     case "$line" in ''|\#*) continue ;; esac
     n=$((n + 1))
-    row=$(python3 -c "$RUN" "$LTM" "$K" "$line" 2>/dev/null) || row=""
+    row=$(python3 -c "$RUN" "$LTM" "$K" "$line" </dev/null 2>/dev/null) || row=""
     valid_row "$row" || row="0 error(judge)"
     case "${row#* }" in "$E_OPEN"*) bad=$((bad + 1)) ;; esac
     printf '#%d %sms %s\n' "$n" "${row%% *}" "${row#* }"
