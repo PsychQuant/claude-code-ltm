@@ -15,8 +15,7 @@
 # 就是位置參數、`--` 終止符用得對），同一帳號的行程 `ps -ww` 看得到（容器 PID namespace、Linux hidepid 下更窄）、
 # 存活時間是那一列的 wall clock——那是作業系統的可見面不是本腳本的輸出通道。這份例外會漏，判準是「這個動作等不等同操作者直接 cat 查詢檔」
 # ——那是操作者的動作不是本腳本的洩漏面；寫在這裡是因為上一句是全稱。
-# 指紋揭露什麼：未加鹽的 sha256 前 48 bit——持有其餘 N−1 條的人可對最後一條離線列舉；完整的說明只有一份，
-# 在 docs/measurements/README.md 的量測段（這裡不複述——R8 抓到兩份已經漂移）。
+# 指紋揭露什麼：見 docs/measurements/README.md 的量測段（單一版本，這裡不複述——R8 抓到兩份漂移、R12 抓到這裡又複述了一半）。
 #
 # 為什麼這麼小氣：這支腳本會在 Claude Code session 裡被跑。今天會進索引的是逐字稿裡的純字串
 # `message.content`（使用者鍵入的 prompt 常是這一種，整段）、`text` block（使用者輸入、Claude 的散文）
@@ -68,22 +67,30 @@
 # `components(separatedBy: "\n")` 切行，CR 留在行尾由同一個 ASCII 集剝掉）。
 #
 # 用法：LTM_ANCHOR_KEY="$(~/bin/ltm memory --export-key)" scripts/measure-baseline.sh [k]
-#   LTM_BIN（預設 ~/bin/ltm）、LTM_BASELINE_QUERIES（預設本腳本旁的 baseline-queries.txt，不依賴 cwd）、
+#   LTM_BIN（預設 ~/bin/ltm）、LTM_BASELINE_QUERIES（預設本腳本旁的 baseline-queries.txt——「本腳本旁」照 bash 自己找腳本
+#   的順序解：`$0` 含斜線取其目錄；裸名先看 cwd、再搜 PATH）、
 #   k 1–1000（預設 5）。密鑰請用命令替換直接餵進環境，不要落地（.claude/rules/anchor-key-in-probes.md）。
 set +x +a
 set -u
-# 自己的目錄：不經 `dirname`（它缺席時 bash 3.2 的 `cd ""` 回 0、`pwd` 是 cwd，查詢檔會安靜退回 cwd 解析，R10）。
-# `$0` 含斜線就是那個目錄（經 PATH 執行時核心已把找到的完整路徑放進 argv[0]；`${0%/*}` 為空表示在根目錄）；
-# `$0` 不含斜線只有 `bash measure-baseline.sh` 這種從檔案所在目錄叫的形式，cwd 就是對的目錄——R10 版用
-# `command -v` 反而會解到 PATH 上同名的另一份（R11）。這一段沒有測試能驅動：測試永遠覆蓋 LTM_BASELINE_QUERIES。
-case "$0" in */*) d="${0%/*}"; HERE=$(cd "${d:-/}" 2>/dev/null && pwd) || HERE=/nonexistent ;; *) HERE=$(pwd) ;; esac
+# 自己的目錄：仿 bash 自己找腳本的順序——`$0` 含斜線就是那個目錄（`${0%/*}` 為空表示根目錄；經 symlink 呼叫時是 symlink
+# 所在的目錄，不解 symlink）；裸名時 bash 先在 cwd 找、找不到才搜 PATH，這裡照同一順序（`./$0` 存在就用 cwd，否則
+# `command -v`）；都對不上 → 讓 QF 落在不存在的目錄 → 66。`cd` 關掉 CDPATH（它會把解出的路徑印進命令替換、也會選到
+# 別棵樹）。前兩版都錯在一句沒查過的全稱：R10 用 `dirname`（缺席時 `cd ""` 回 0、退回 cwd），R11 對裸名一律取 cwd
+# （bash 搜 PATH 找到的腳本會量到 cwd 裡的誘餌，R12 實測）。測試：從別的 cwd 以 PATH 呼叫裸名，指紋必須是腳本旁那份。
+case "$0" in
+    */*) d="${0%/*}" ;;
+    *) if [ -f "./$0" ]; then d=.; else d=$(command -v -- "$0" 2>/dev/null); d="${d%/*}"; fi ;;
+esac
+HERE=$(CDPATH= cd -- "${d:-/}" 2>/dev/null && pwd) || HERE=/nonexistent
 QF="${LTM_BASELINE_QUERIES:-$HERE/baseline-queries.txt}"
 LTM="${LTM_BIN:-${HOME:-}/bin/ltm}"   # HOME 沒設也不能讓 set -u 隱式地以 1 離開（那會與「1 = 任一列 error」撞號，R8）
 K="${1-5}"   # 明確給了空字串是錯，不是「用預設」（R10）
-# 先擋位數：超過 intmax 的數字串會讓 `[ -ge ]` 多印一行 bash 診斷（R11）；再用 `10#` 強制十進位正規化——
-# R10 版的 `$((K))` 把前導零當八進位：`010` 靜默量成 8、`08` 算術失敗仍 rc 0（R11 實測）。
-case "$K" in ''|*[!0-9]*|?????*) echo "k 必須是 1–1000 的整數" >&2; exit 64 ;; esac
-K=$((10#$K))   # 正規化：`007` 印進 set 行會讓兩份同一量測的紀錄看起來不可比（R10）
+# k：只准數字；先剝前導零（`007`、`01000` 都合法，正規化後印進 set 行——R10 版直接印 `k=007`，兩份同一量測看起來不可比；
+# R11 版 `$((K))` 把前導零當八進位）；再擋位數（剝完零還超過 4 位就不可能在 1–1000；沒有這一層，20 位數進算術會
+# 靜默 wrap——`2^64+5` 變成 5）；再範圍檢查。順序由測試釘住（`01000` → k=1000；`18446744073709551621` → 64）。
+case "$K" in ''|*[!0-9]*) echo "k 必須是 1–1000 的整數" >&2; exit 64 ;; esac
+while [ "${#K}" -gt 1 ] && [ "${K#0}" != "$K" ]; do K="${K#0}"; done
+case "$K" in ?????*) echo "k 必須是 1–1000 的整數" >&2; exit 64 ;; esac
 [ "$K" -ge 1 ] && [ "$K" -le 1000 ] || { echo "k 必須是 1–1000 的整數" >&2; exit 64; }
 [ -f "$QF" ] && [ -r "$QF" ] || { echo "查詢檔不是可讀的一般檔案：$QF" >&2; exit 66; }
 [ -f "$LTM" ] && [ -x "$LTM" ] || { echo "ltm 不是可執行的一般檔案：$LTM" >&2; exit 69; }

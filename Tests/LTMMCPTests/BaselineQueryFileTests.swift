@@ -366,17 +366,19 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     #expect(Set(readmeFields) == Set(constantFields), Comment(rawValue: "README 表：\(readmeFields)"))
     #expect(Set(headerFields) == Set(constantFields), Comment(rawValue: "查詢檔檔頭少了：\(Set(constantFields).subtracting(headerFields).sorted())"))
     #expect(headerLimit == limit, Comment(rawValue: "查詢檔檔頭的截斷長度 \(headerLimit) ≠ toolMetadataFieldLimit \(limit)"))
-    let readmeLimits = Set(matches(#"([0-9]+) ?字元"#, in: readme)), scriptLimits = Set(matches(#"([0-9]+) ?字元"#, in: script))   // 有無空格都算
+    let readmeLimits = limitMentions(readme), scriptLimits = limitMentions(script)
     #expect(readmeLimits == [limit] && scriptLimits == [limit], Comment(rawValue: "README／腳本檔頭出現的「N 字元」不全等於 toolMetadataFieldLimit \(limit)：README \(readmeLimits.sorted()) 腳本 \(scriptLimits.sorted())"))
     // R9 的收穫要有鎖：查詢內容只能經 process substitution 的管線給指紋 python 與迴圈——herestring 在 bash 3.2 會寫
     // $TMPDIR 暫存檔、而且會補尾端換行讓 `|| [ -n "$raw" ]` 再度死掉（R10：兩處退回去全綠）。
-    // 只數程式碼行（整行註解濾掉，與輸出點、離開碼同一份 codeText）：R11 把迴圈改回 `< "$QF"` 再放一條含原字面
-    // 的註解，整檔字面計數照樣 2。另外鎖「只開一次」：`< "$QF"` 恰好一處（builtin read 那行）。
-    let scriptCode = codeLines.map(\.element).joined(separator: "\n")
-    let procSubs = scriptCode.components(separatedBy: "< <(printf '%s' \"$QF_CONTENT\")").count - 1
-    let qfOpens = scriptCode.components(separatedBy: "< \"$QF\"").count - 1
-    let hasHerestring = scriptCode.contains("<<<")
-    #expect(procSubs == 2 && qfOpens == 1 && !hasHerestring, Comment(rawValue: "查詢內容只能開檔一次（`< \"$QF\"` 得 \(qfOpens) 處）並以 process substitution 餵給指紋 python 與迴圈（得 \(procSubs) 處；herestring：\(hasHerestring)）"))
+    // 只數程式碼行（整行註解濾掉；codeText 與下方離開碼那段共用）：R11 把迴圈改回 `< "$QF"` 再放一條含原字面的註解，
+    // 整檔字面計數照樣 2。「只開一次」不數某一種拼法（R12：`SECOND=$(cat "$QF")` 穿得過 `< "$QF"` 的計數），數的是
+    // 識別碡 `$QF`／`${QF}` 在程式碼行出現的**總次數**——今天 7 次（-f/-r 那行 3、read 1、三句錯誤訊息 3）；多一次就是多開
+    // 一條路徑或多一處訊息，都要來這裡對帳。
+    let codeText = codeLines.map(\.element).joined(separator: "\n")
+    let procSubs = codeText.components(separatedBy: "< <(printf '%s' \"$QF_CONTENT\")").count - 1
+    let qfRefs = try! NSRegularExpression(pattern: #"\$\{?QF\b"#).numberOfMatches(in: codeText, range: NSRange(location: 0, length: (codeText as NSString).length))
+    let hasHerestring = codeText.contains("<<<")
+    #expect(procSubs == 2 && qfRefs == 7 && !hasHerestring, Comment(rawValue: "查詢檔的識別碼在程式碼行出現 \(qfRefs) 次（應為 7：多一次就是多一條讀取路徑或訊息）；process substitution \(procSubs) 處（應為 2）；herestring：\(hasHerestring)"))
 
     // 離開碼：檔頭那一行列的數字 ＝ 程式碼裡 exit 的數字 ∪ {0}。
     let exitHeaderLine = scriptLines.first { $0.hasPrefix("# 離開碼（") } ?? ""
@@ -384,7 +386,6 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // 行尾註解裡的 `exit N` 也算——多出來的會讓兩邊不等而紅，與輸出點同一條紀律：不剝、不猜。另一個方向也要關：
     // `exit "$VAR"` 對 `exit N` 的比對隱形（R8 變異綠），所以每一個 bash 的 `exit` 字（`sys.exit(` 不算）後面
     // 都必須是字面數字，否則紅。
-    let codeText = codeLines.map(\.element).joined(separator: "\n")
     let codeExits = Set(matches(#"(?<![.\w])exit ([0-9]+)"#, in: codeText).compactMap { Int($0) }).union([0])
     let exitWords = try! NSRegularExpression(pattern: #"(?<![.\w])exit\b"#).numberOfMatches(in: codeText, range: NSRange(location: 0, length: (codeText as NSString).length))
     let literalExits = matches(#"(?<![.\w])exit ([0-9]+)"#, in: codeText).count
@@ -482,6 +483,17 @@ func headerContinuationJoiningIsDrivenByItsOwnFixture() {
     #expect(joinHeaderContinuations("# a\nb") == "#a\nb")   // 不是 # 開頭的下一行不動（換行留著）
 }
 
+/// 散文裡對截斷長度的複述：「N 字元」（有無空格都算）。這是形式比對——「200 個字元」「200 字」這類寫法看不見，
+/// 所以 README／腳本檔頭要用這個形式寫；fixture 驅動有空格與無空格兩臂（R12）。
+private func limitMentions(_ text: String) -> Set<String> { Set(matches(#"([0-9]+) ?字元"#, in: text)) }
+
+@Test("截斷長度複述的擷取由 fixture 驅動：有空格、無空格、括號裡；「N 個字元」不算")
+func limitMentionExtractionIsDrivenByItsOwnFixture() {
+    #expect(limitMentions("上限（200 字元）與 200字元；另有 30 個字元") == ["200"])
+    #expect(limitMentions("前 400字元") == ["400"])
+    #expect(limitMentions("沒有數字").isEmpty)
+}
+
 private func matches(_ pattern: String, in text: String) -> [String] {
     let re = try! NSRegularExpression(pattern: pattern)
     let ns = text as NSString
@@ -546,16 +558,21 @@ private func makeStub(in dir: URL, responses: [String: String], exits: [String: 
 
 private func runScript(queries: URL, stub: URL, k: String = "3", viaBashX: Bool = false,
                        ltmBinOverride: String? = nil, pathOverride: String? = nil, pathPrefix: String? = nil,
-                       extraEnv: [String: String] = [:], unsetting: [String] = []) throws -> ScriptRun {
-    let script = repoRoot().appendingPathComponent("scripts/measure-baseline.sh")
+                       extraEnv: [String: String] = [:], unsetting: [String] = [],
+                       scriptOverride: URL? = nil, bashOperand: String? = nil, cwd: URL? = nil) throws -> ScriptRun {
+    let script = scriptOverride ?? repoRoot().appendingPathComponent("scripts/measure-baseline.sh")
     let process = Process()
-    if viaBashX {
+    if let bashOperand {
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")   // `bash <operand>`：$0 就是 operand（裸名時 bash 先看 cwd 再搜 PATH）
+        process.arguments = [bashOperand, k]
+    } else if viaBashX {
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = ["-x", script.path, k]
     } else {
         process.executableURL = script
         process.arguments = [k]
     }
+    if let cwd { process.currentDirectoryURL = cwd }
     var env = ProcessInfo.processInfo.environment
     env.removeValue(forKey: "LTM_ANCHOR_KEY")
     env["LTM_BIN"] = ltmBinOverride ?? stub.path
@@ -590,13 +607,12 @@ private func realPython3() -> String {
     return "/usr/bin/python3"
 }
 
-/// 一個 PATH 目錄，放呼叫端指定的假命令（`dirname` 的 symlink 是 R10 之前腳本需要它時留下的，現在無害、留著）。
+/// 一個 PATH 目錄，只放呼叫端指定的假命令（腳本自 R10 起不再需要 `dirname`，鷹架已拆）。
 /// `judgeFakes` 是假 python3 對 **judge 呼叫**（`python3 -c …`）的行為；其他呼叫（算查詢集指紋的
 /// `python3 - <file>`）轉交真的 python3——要模擬的是 judge 掛掉，不是整個 python 壞掉。
 private func makeBinDir(in dir: URL, judgeFakes: [String: String]) throws -> URL {
     let bin = dir.appendingPathComponent("bin-\(UUID().uuidString.prefix(8))")
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-    try FileManager.default.createSymbolicLink(at: bin.appendingPathComponent("dirname"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/dirname"))
     for (name, body) in judgeFakes {
         let f = bin.appendingPathComponent(name)
         try "#!/bin/bash\nif [ \"$1\" = \"-c\" ]; then\n\(body)\nfi\nexec '\(realPython3())' \"$@\"\n".write(to: f, atomically: true, encoding: .utf8)
@@ -773,8 +789,8 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     let stub = try makeStub(in: dir, responses: [:])
 
     // 三臂都斷言 stderr 只有那一句（R9：標題這樣宣稱，先前只有非數字那一臂斷言）。
-    // 空字串也是 64（R10）；超過 intmax 的數字串不能多印 bash 診斷（R11）；2^64+5 在 `10#` 算術下會 wrap 成 5——位數守衛要先擋。
-    for bad in ["0", "1001", "", "99999999999999999999", "18446744073709551621"] {
+    // 空字串也是 64（R10）；2^64+5 進算術會 wrap 成 5——位數守衛要在範圍檢查之前擋（R11／R12）。
+    for bad in ["0", "1001", "", "18446744073709551621"] {
         let r = try runScript(queries: queries, stub: stub, k: bad)
         #expect(r.status == 64 && r.stderr == "k 必須是 1–1000 的整數\n", Comment(rawValue: "k=\(bad): rc=\(r.status) err=\(r.stderr)"))
     }
@@ -782,7 +798,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     #expect(nonDigit.status == 64 && nonDigit.stderr == "k 必須是 1–1000 的整數\n", Comment(rawValue: nonDigit.stderr))
 
     // k 正規化：前導零一律十進位（R10 版的 `$((K))` 把 `010` 當八進位、`08` 算術失敗仍 rc 0，R11）；set 行印正規化後的值。
-    for (given, want) in [("007", "7"), ("010", "10"), ("08", "8"), ("0100", "100")] {
+    for (given, want) in [("007", "7"), ("010", "10"), ("08", "8"), ("0100", "100"), ("01000", "1000"), ("00007", "7")] {   // 前導零任意多個都合法（R12）
         let r = try runScript(queries: queries, stub: stub, k: given)
         #expect(r.status == 0 && r.setLine.hasSuffix(" k=\(want)") && r.stderr.isEmpty, Comment(rawValue: "k=\(given): rc=\(r.status) \(r.setLine) err=\(r.stderr)"))
     }
@@ -818,7 +834,6 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     // 指紋算不出來（python3 對 `-` 那一次呼叫掛掉）也是 70，而且一列都不印。
     let fpBroken = dir.appendingPathComponent("bin-fp")
     try FileManager.default.createDirectory(at: fpBroken, withIntermediateDirectories: true)
-    try FileManager.default.createSymbolicLink(at: fpBroken.appendingPathComponent("dirname"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/dirname"))
     try "#!/bin/bash\nif [ \"$1\" = \"-\" ]; then exit 3; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: fpBroken.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpBroken.appendingPathComponent("python3").path)
@@ -828,7 +843,6 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     // A–E 收進去（collation），這條測試就是釘住不能退回 range 寫法。
     let fpUpper = dir.appendingPathComponent("bin-fpu")
     try FileManager.default.createDirectory(at: fpUpper, withIntermediateDirectories: true)
-    try FileManager.default.createSymbolicLink(at: fpUpper.appendingPathComponent("dirname"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/dirname"))
     try "#!/bin/bash\nif [ \"$1\" = \"-\" ]; then printf 'ABCDE1234567\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: fpUpper.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpUpper.appendingPathComponent("python3").path)
@@ -839,7 +853,6 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     // 13 個小寫 hex：逐字元檢查只看前 12 位，長度檢查才擋得住。
     let fpLong = dir.appendingPathComponent("bin-fpl")
     try FileManager.default.createDirectory(at: fpLong, withIntermediateDirectories: true)
-    try FileManager.default.createSymbolicLink(at: fpLong.appendingPathComponent("dirname"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/dirname"))
     try "#!/bin/bash\nif [ \"$1\" = \"-\" ]; then printf 'abcdef0123456\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: fpLong.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpLong.appendingPathComponent("python3").path)
@@ -880,7 +893,9 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     try "set -a\n".write(to: aenv, atomically: true, encoding: .utf8)
     let envProbe = dir.appendingPathComponent("env.txt")
     let probeStub = try makeStub(in: dir, responses: [:], raw: ["ZQXJ-TRACE-ONE": "printf '%s' \"${QF_CONTENT+leaked}\" > '\(envProbe.path)'; printf '[]\\n'"])
-    for (label, env) in [("BASH_ENV set -a", ["BASH_ENV": aenv.path]), ("SHELLOPTS=allexport", ["SHELLOPTS": "allexport"])] {
+    // 第三條向量：呼叫端環境裡已經 export 了同名變數——bash 的賦值會保留 export 屬性，所以腳本一開始的 `unset QF_CONTENT`
+    // 不是裝飾（R12）：拿掉它，這一臂就 leaked。
+    for (label, env) in [("BASH_ENV set -a", ["BASH_ENV": aenv.path]), ("SHELLOPTS=allexport", ["SHELLOPTS": "allexport"]), ("pre-exported QF_CONTENT", ["QF_CONTENT": "pre-exported"])] {
         try? FileManager.default.removeItem(at: envProbe)
         let allexport = try runScript(queries: queries, stub: probeStub, extraEnv: env)
         #expect(allexport.status == 0, Comment(rawValue: "\(label): rc=\(allexport.status)"))
@@ -904,8 +919,8 @@ func measureBaselineIsolatesChildProcessStdio() throws {
     #expect(FileManager.default.isExecutableFile(atPath: "/bin/cat"), "沒有 /bin/cat，這條測試的 stdin 那一臂驅動不了")
     let bin = dir.appendingPathComponent("bin-stdio")
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-    try FileManager.default.createSymbolicLink(at: bin.appendingPathComponent("dirname"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/dirname"))
     // 指紋那次（-）另外記下 fd 3 是不是管線：R11 指出字面計數鎖不住資料路徑——herestring 或 `< "$QF"` 會給一般檔案。
+    // 鑑別力只在 bash 3.2（macOS 的 /bin/bash，就是 shebang 解到的那個）：bash ≥ 5.1 的小 herestring 也走管線（R12）。
     let fdProbe = dir.appendingPathComponent("fd3.txt")
     try "#!/bin/bash\necho 'ZQXJ-STDERR-NOISE' >&2\nif [ \"$1\" = \"-c\" ]; then /bin/cat >/dev/null; fi\nif [ \"$1\" = \"-\" ]; then { [ -p /dev/fd/3 ] && printf pipe || printf notpipe; } > '\(fdProbe.path)'; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: bin.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
@@ -917,4 +932,30 @@ func measureBaselineIsolatesChildProcessStdio() throws {
     #expect(!leaked, Comment(rawValue: "子行程的 stderr 上了腳本的 stderr（\(run.stderr.count) bytes）"))
     let fd3 = (try? String(contentsOf: fdProbe, encoding: .utf8)) ?? "(unread)"
     #expect(fd3 == "pipe", Comment(rawValue: "指紋 python 的 fd 3 不是管線：\(fd3)"))
+}
+
+@Test("measure-baseline.sh：查詢檔預設在腳本旁——裸名經 PATH 呼叫時解到腳本目錄而不是 cwd 的誘餌；相對路徑呼叫在 CDPATH 下照常；cwd 有同名腳本時照 bash 的順序用 cwd")
+func measureBaselineResolvesItsOwnDirectoryLikeBashDoes() throws {
+    let dir = try tempDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let stub = try makeStub(in: dir, responses: [:])
+    // A：腳本的複本＋旁邊兩條合成查詢；B：別的 cwd，放一條同名誘餌。都不碰真查詢檔。
+    let a = dir.appendingPathComponent("a"), b = dir.appendingPathComponent("b")
+    try FileManager.default.createDirectory(at: a, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: b, withIntermediateDirectories: true)
+    let scriptCopy = a.appendingPathComponent("measure-baseline.sh")
+    try FileManager.default.copyItem(at: repoRoot().appendingPathComponent("scripts/measure-baseline.sh"), to: scriptCopy)
+    let real = "ZQXJ-REAL-ONE\nZQXJ-REAL-TWO\n", decoy = "ZQXJ-DECOY\n"
+    try real.write(to: a.appendingPathComponent("baseline-queries.txt"), atomically: true, encoding: .utf8)
+    try decoy.write(to: b.appendingPathComponent("baseline-queries.txt"), atomically: true, encoding: .utf8)
+    let unused = dir.appendingPathComponent("unused.txt")   // runScript 要一個 queries URL；這裡把 LTM_BASELINE_QUERIES 拿掉讓預設值生效
+    // 1. 裸名、cwd=B、PATH 前綴 A：R11 版量到 B 的誘餌（1 列、指紋是誘餌的）；現在必須是 A 的兩條。
+    let viaPath = try runScript(queries: unused, stub: stub, pathPrefix: a.path, unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "measure-baseline.sh", cwd: b)
+    #expect(viaPath.status == 0 && viaPath.rows.count == 2 && viaPath.setLine == setLine(real), Comment(rawValue: "via PATH: rc=\(viaPath.status) \(viaPath.stdout)"))
+    // 2. 相對路徑呼叫＋export CDPATH=.：`cd` 不得把路徑印進命令替換（R12：印了就變兩行路徑 → 66）。
+    let rel = try runScript(queries: unused, stub: stub, extraEnv: ["CDPATH": "."], unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "a/measure-baseline.sh", cwd: dir)
+    #expect(rel.status == 0 && rel.rows.count == 2 && rel.setLine == setLine(real), Comment(rawValue: "relative+CDPATH: rc=\(rel.status) \(rel.stdout) err=\(rel.stderr)"))
+    // 3. 裸名、cwd=A（bash 先在 cwd 找到腳本）：用 A。
+    let inPlace = try runScript(queries: unused, stub: stub, unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "measure-baseline.sh", cwd: a)
+    #expect(inPlace.status == 0 && inPlace.rows.count == 2, Comment(rawValue: "in place: rc=\(inPlace.status) \(inPlace.stdout)"))
 }

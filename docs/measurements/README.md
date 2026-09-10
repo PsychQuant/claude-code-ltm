@@ -61,7 +61,8 @@
   所以兩邊都不剝它，測試另外斷言查詢檔裡沒有控制字元與非 ASCII 空白——寫成性質（C0／DEL 與
   Zs／Zl／Zp／Cf／Cc）不是清單——且每條不超過 64 個純量）。
   密鑰用命令替換餵進環境（`LTM_ANCHOR_KEY="$(~/bin/ltm memory --export-key)" scripts/measure-baseline.sh`），
-  不落地；查詢檔的解析不依賴 cwd（腳本用自己所在的目錄）。
+  不落地；查詢檔預設在腳本旁——「腳本旁」照 bash 自己找腳本的順序解（`$0` 含斜線取其目錄；裸名先看 cwd、再搜
+  PATH；`cd` 關掉 CDPATH），有測試從別的 cwd 經 PATH 呼叫裸名來驅動。
 - verdict 是**封閉字母表**：`clean tool=<n>`／`self tool=<n>`／`empty tool=0`／
   `error(<rc>|sig<N>|blank|exec|json|shape|judge)`。「封閉」由 `Tests/LTMMCPTests/BaselineQueryFileTests.swift`
   的**同步測試**執行：腳本檔頭的 token 列、本行的 token 列、測試自己的 `errorTokens`、腳本程式碼裡的
@@ -73,7 +74,7 @@
   `error(` 也紅）。
   它擋的是輸出點被刪／改名而清單沒跟；**不證明那一行可達或會執行**，那由每個 token 的行為測試扛；
   `valid_row` 用變數比對、不寫字面，所以沒有被略過的區段。同一條測試也做一個**存在性**檢查：每個 token 在
-  **別的**測試裡有一條帶「產生標記」、以 `#expect(` 開頭的活斷言行，其 `#expect` 的**第一個引數**（期望值那一側，
+  **別的**測試裡有一條帶「產生標記」、帶 `#expect(` 的活斷言行，其 `#expect` 的**第一個引數**（期望值那一側，
   以括號配對切出、切不出來就紅、與訊息的寫法無關）寫著它的 tail（要驗的
   token 從 `errorTokens` 導出；標記在檢查函式裡執行期拼出，且**斷言**該測試自己的行範圍內沒有那個字面——
   宣告行以「整行以 `func NAME(` 開頭且恰好一行」找、NAME 由 `#function` 取；標記後列的名字集合必須**等於**該行
@@ -124,7 +125,7 @@
    命令把整份檔案印進 stdout 是一筆 `toolUseResult.stdout`，一次 `Read` 是一筆 `toolUseResult.file.content`。
    判準是「這個動作會不會把整份檔案送進 jsonl」，上面是例子不是清單。#63 實作與 verify 期間就這樣存了
    **至少 8 筆**含全部查詢的紀錄（2026-09-07 R3 verify 全語料數的：Write 2、Edit 3、attachment 1、
-   Bash stdout 1、Read 1；R1 verify 的 `diff.patch` 另在該輪被讀進一份 agent 逐字稿）。這個數字**只會
+   Bash stdout 1、Read 1；R1 verify 的 `diff.patch` 另在該輪被讀進 agent 逐字稿）。這個數字**只會
    往上走**——R2b 寫「六份」的九分鐘前，另一個 session 剛 `Read` 過一次；所以它是下界不是計數，
    要現值就跑查法。查法（只印計數、執行期讀查詢檔、不上命令列）：掃
    `~/.claude/projects/**/*.jsonl`，對每筆遞迴走訪所有字串葉節點，數「同時含全部 N 條查詢」的紀錄與其
@@ -162,7 +163,8 @@
   看得到（容器 PID namespace、Linux `hidepid` 下更窄），存活時間是那一列的 wall clock——這是作業系統的
   可見面，不是本腳本的輸出通道；列在這裡是因為上一節的第一句是全稱。對照：環境變數那一面（整份集合、整個
   run）**不在**擋不住之列——`BASH_ENV` 裡的 `set -a` 與 `SHELLOPTS=allexport` 都在啟動時生效、早於腳本第一行的
-  `set +a`，所以被關掉；測試各有一臂驅動（R11 更正：R10 版把這句寫反了）。
+  `set +a`，所以被關掉；第三條向量——呼叫端環境已 export 同名 `QF_CONTENT`，賦值會保留 export 屬性——由腳本開頭的
+  `unset` 關掉；三條各有一臂測試驅動（R11 更正：R10 版把這句寫反了；R12 補第三條）。
 - 查詢檔本身是一般 tracked blob、**明文在 GitHub 伺服器上**；`-diff` 只擋 diff 生成，規則 1 又禁止 review agent
   讀內容。`-diff` 只擋會讀 attribute 的 diff 生成（上方那份例外清單裡的命令都繞得過）。有紀錄可查的曝露：R1 verify
   的 patch 產生於 `.gitattributes` 之前、含明文、在該輪被讀進 agent 逐字稿（規則 1）；R2 之後各輪 verify 的 patch 都印
