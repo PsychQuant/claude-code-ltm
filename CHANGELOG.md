@@ -21,7 +21,8 @@
   與「什麼會進索引」的表（純字串 `message.content`、`text` block 與七個 tool metadata 欄位會，
   tool_result 內容今天不會）。
   2026-09-01 那次量測命令列上的六條查詢退役（前三條實測第一名是那則命令，後三條依同一機制推定）；
-  `2026-09-01-scan-parallelism.md` 與 `2026-09-01-noop-build-attribution.md` 補可比性註記（查詢字串未記、耗時可比、命中未記、新舊儀器不可對齊）。
+  `2026-09-01-scan-parallelism.md` 補可比性註記（六條逐字記在紀錄裡、耗時可比、命中未記、新舊儀器不可對齊）；
+  `2026-09-01-noop-build-attribution.md` 另補一則（`query ×3` 欄的查詢字串未記、是否已污染無從判斷、耗時可比）。
 
 ## [0.5.0] - 2026-09-05
 

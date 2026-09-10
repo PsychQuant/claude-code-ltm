@@ -72,17 +72,19 @@
 #   k 1–1000（預設 5）。密鑰請用命令替換直接餵進環境，不要落地（.claude/rules/anchor-key-in-probes.md）。
 set +x +a
 set -u
-# 自己的目錄：不經 `dirname`（本腳本唯一會經 PATH 解析的外部命令；它缺席時 bash 3.2 的 `cd ""` 回 0、`pwd` 是 cwd，
-# 查詢檔會安靜退回 cwd 解析，R10）。經 PATH 呼叫時用 command -v 找回完整路徑；找不到就讓 QF 落在一個不存在的
-# 目錄 → 66。
-case "$0" in */*) self="$0" ;; *) self=$(command -v -- "$0" 2>/dev/null) ;; esac
-HERE=$(cd "${self%/*}" 2>/dev/null && pwd) || HERE=/nonexistent
+# 自己的目錄：不經 `dirname`（它缺席時 bash 3.2 的 `cd ""` 回 0、`pwd` 是 cwd，查詢檔會安靜退回 cwd 解析，R10）。
+# `$0` 含斜線就是那個目錄（經 PATH 執行時核心已把找到的完整路徑放進 argv[0]；`${0%/*}` 為空表示在根目錄）；
+# `$0` 不含斜線只有 `bash measure-baseline.sh` 這種從檔案所在目錄叫的形式，cwd 就是對的目錄——R10 版用
+# `command -v` 反而會解到 PATH 上同名的另一份（R11）。這一段沒有測試能驅動：測試永遠覆蓋 LTM_BASELINE_QUERIES。
+case "$0" in */*) d="${0%/*}"; HERE=$(cd "${d:-/}" 2>/dev/null && pwd) || HERE=/nonexistent ;; *) HERE=$(pwd) ;; esac
 QF="${LTM_BASELINE_QUERIES:-$HERE/baseline-queries.txt}"
 LTM="${LTM_BIN:-${HOME:-}/bin/ltm}"   # HOME 沒設也不能讓 set -u 隱式地以 1 離開（那會與「1 = 任一列 error」撞號，R8）
 K="${1-5}"   # 明確給了空字串是錯，不是「用預設」（R10）
-case "$K" in ''|*[!0-9]*) echo "k 必須是 1–1000 的整數" >&2; exit 64 ;; esac
+# 先擋位數：超過 intmax 的數字串會讓 `[ -ge ]` 多印一行 bash 診斷（R11）；再用 `10#` 強制十進位正規化——
+# R10 版的 `$((K))` 把前導零當八進位：`010` 靜默量成 8、`08` 算術失敗仍 rc 0（R11 實測）。
+case "$K" in ''|*[!0-9]*|?????*) echo "k 必須是 1–1000 的整數" >&2; exit 64 ;; esac
+K=$((10#$K))   # 正規化：`007` 印進 set 行會讓兩份同一量測的紀錄看起來不可比（R10）
 [ "$K" -ge 1 ] && [ "$K" -le 1000 ] || { echo "k 必須是 1–1000 的整數" >&2; exit 64; }
-K=$((K))   # 正規化：`007` 印進 set 行會讓兩份同一量測的紀錄看起來不可比（R10）
 [ -f "$QF" ] && [ -r "$QF" ] || { echo "查詢檔不是可讀的一般檔案：$QF" >&2; exit 66; }
 [ -f "$LTM" ] && [ -x "$LTM" ] || { echo "ltm 不是可執行的一般檔案：$LTM" >&2; exit 69; }
 command -v python3 >/dev/null 2>&1 || { echo "需要 python3 計時與解析 --json" >&2; exit 70; }

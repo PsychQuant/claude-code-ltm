@@ -7,7 +7,7 @@ import Testing
 /// 量測腳本的守衛各有一條測試扛。
 ///
 /// 「各有一條測試扛」的查法就是變異測試：把腳本裡的一條守衛退掉、跑本檔、必須變紅。#63 verify
-/// R2 的 logic lens 逐條退過 30 處，11 處綠——那 11 處在 R2 verify-fix 裡 9 處補上驅動它的測試
+/// R2 逐條退過 30 處，11 處綠——那 11 處在 R2 verify-fix 裡 9 處補上驅動它的測試
 /// （error(exec)、error(sig<N>)、66 整行、`-r` 臂、`-x` 臂、70、最後一行沒換行、k 非數字的訊息、
 /// snippet 非字串→shape）、2 處拆掉（`bool(q)`、python 端的 stderr=DEVNULL）。同一輪新加了執行期列
 /// 形狀的守衛 `valid_row`，R3 再退一次後留下的每個分支各有一個假 python3 驅動（見 judge 測試）。
@@ -339,9 +339,9 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // 不再另加「以 #expect( 開頭」的合取（R10：那個合取無驅動且 fail-open——一行 `let x = 1` 掛著產生標記會被
     // 靜默濾掉；現在它會以 unsplittable 紅、帶行號）。
     let producers = checkProducerLines(producerLines.map { (line: $0.offset + 1, text: $0.element) }, marker: producesMarker)
-    #expect(producers.unsplittable.isEmpty, Comment(rawValue: "producer 行的 #expect 第一個引數切不出來（括號不平衡或字串沒關）：\(producers.unsplittable)"))
+    #expect(producers.unsplittable.isEmpty, Comment(rawValue: "帶產生標記的行不是 #expect 行、或第一個引數切不出來（括號不平衡、字串沒關）：行 \(producers.unsplittable)"))
     #expect(producers.suffixMismatch.isEmpty, Comment(rawValue: "產生標記後的名字集合與同一行期望值側的 tail 集合不相等（雙向、不空、不重複）：\(producers.suffixMismatch)"))
-    #expect(producers.missingProductions.isEmpty, Comment(rawValue: "沒有帶產生標記、以 #expect( 開頭、且期望值側寫著它的活斷言：\(producers.missingProductions)"))
+    #expect(producers.missingProductions.isEmpty, Comment(rawValue: "沒有帶產生標記、且 #expect 第一個引數寫著它的活斷言：\(producers.missingProductions)"))
 
     // 七個 metadata 欄位名：CorpusScanner 的常數、README 表、查詢檔檔頭三處同一份。
     let scanner = try String(contentsOf: root.appendingPathComponent("Sources/LTMIndex/CorpusScanner.swift"), encoding: .utf8)
@@ -355,7 +355,7 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // 檔頭那一段的形狀是「`CorpusScanner.toolMetadataFields`：a / b / … / g，各取前 N 字元」，可能跨行（續行的 `#` 前可有縮排，
     // 反折時一併剝掉——R10：先前只接欄首的 `#`，縮排續行會讓正確的檔頭紅在欄位名）。N 不寫死在 regex 裡（R10）：
     // 截斷長度 `toolMetadataFieldLimit` 從 CorpusScanner 讀，README、腳本檔頭、查詢檔檔頭三處各自對照它，紅在對的地方。
-    let headerJoined = queryHeader.replacingOccurrences(of: "\n[ \t]*#", with: "", options: .regularExpression).replacingOccurrences(of: " ", with: "")
+    let headerJoined = joinHeaderContinuations(queryHeader)
     let headerRe = try! NSRegularExpression(pattern: #"toolMetadataFields`：([a-z_/]+)，各取前([0-9]+)字元"#)
     let headerNS = headerJoined as NSString
     let headerMatch = headerRe.firstMatch(in: headerJoined, range: NSRange(location: 0, length: headerNS.length))
@@ -366,13 +366,17 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     #expect(Set(readmeFields) == Set(constantFields), Comment(rawValue: "README 表：\(readmeFields)"))
     #expect(Set(headerFields) == Set(constantFields), Comment(rawValue: "查詢檔檔頭少了：\(Set(constantFields).subtracting(headerFields).sorted())"))
     #expect(headerLimit == limit, Comment(rawValue: "查詢檔檔頭的截斷長度 \(headerLimit) ≠ toolMetadataFieldLimit \(limit)"))
-    let readmeLimits = Set(matches(#"([0-9]+) 字元"#, in: readme)), scriptLimits = Set(matches(#"([0-9]+) 字元"#, in: script))
+    let readmeLimits = Set(matches(#"([0-9]+) ?字元"#, in: readme)), scriptLimits = Set(matches(#"([0-9]+) ?字元"#, in: script))   // 有無空格都算
     #expect(readmeLimits == [limit] && scriptLimits == [limit], Comment(rawValue: "README／腳本檔頭出現的「N 字元」不全等於 toolMetadataFieldLimit \(limit)：README \(readmeLimits.sorted()) 腳本 \(scriptLimits.sorted())"))
     // R9 的收穫要有鎖：查詢內容只能經 process substitution 的管線給指紋 python 與迴圈——herestring 在 bash 3.2 會寫
     // $TMPDIR 暫存檔、而且會補尾端換行讓 `|| [ -n "$raw" ]` 再度死掉（R10：兩處退回去全綠）。
-    let procSubs = script.components(separatedBy: "< <(printf '%s' \"$QF_CONTENT\")").count - 1
-    let hasHerestring = script.contains("<<<")
-    #expect(procSubs == 2 && !hasHerestring, Comment(rawValue: "查詢內容必須以 process substitution 餵給指紋 python 與迴圈（得 \(procSubs) 處；herestring：\(hasHerestring)）"))
+    // 只數程式碼行（整行註解濾掉，與輸出點、離開碼同一份 codeText）：R11 把迴圈改回 `< "$QF"` 再放一條含原字面
+    // 的註解，整檔字面計數照樣 2。另外鎖「只開一次」：`< "$QF"` 恰好一處（builtin read 那行）。
+    let scriptCode = codeLines.map(\.element).joined(separator: "\n")
+    let procSubs = scriptCode.components(separatedBy: "< <(printf '%s' \"$QF_CONTENT\")").count - 1
+    let qfOpens = scriptCode.components(separatedBy: "< \"$QF\"").count - 1
+    let hasHerestring = scriptCode.contains("<<<")
+    #expect(procSubs == 2 && qfOpens == 1 && !hasHerestring, Comment(rawValue: "查詢內容只能開檔一次（`< \"$QF\"` 得 \(qfOpens) 處）並以 process substitution 餵給指紋 python 與迴圈（得 \(procSubs) 處；herestring：\(hasHerestring)）"))
 
     // 離開碼：檔頭那一行列的數字 ＝ 程式碼裡 exit 的數字 ∪ {0}。
     let exitHeaderLine = scriptLines.first { $0.hasPrefix("# 離開碼（") } ?? ""
@@ -417,7 +421,8 @@ private func tailName(_ literal: String) -> String {
     literal == "error(7)" ? "rc" : literal == "error(sig9)" ? "sig" : String(literal.dropFirst(6).dropLast())
 }
 
-/// 對一組 producer 行（含產生標記、以 `#expect(` 開頭）做三件事：切出第一個引數（切不出來 → unsplittable）、
+/// 對一組 producer 行（含產生標記的每一行；`#expect(` 可以縮排、也可以不存在——不存在就是 unsplittable）做三件事：
+/// 切出 `#expect(` 的第一個引數（切不出來或沒有 `#expect(` → unsplittable）、
 /// 標記後的名字集合 == 該引數裡的 tail 集合（雙向、不空、不重複）、每個 error token 都有某一行的第一個引數寫著它。
 /// 字面只出現在訊息側的行在這裡會被判成 mismatch＋missing——那正是 R7→R8 反覆重開的洞。
 private func checkProducerLines(_ lines: [(line: Int, text: String)], marker: String) -> ProducerReport {
@@ -462,6 +467,19 @@ func producerLineChecksAreDrivenByTheirOwnFixture() {
     let notAnExpect = good + ["let x = 1  " + mk + " blank"]
     #expect(checkProducerLines(numbered(Array(notAnExpect)), marker: mk).unsplittable == [50])         // 含標記但不是 #expect 行：紅，不是靜默濾掉（R10）
     #expect(checkProducerLines([(line: 7, text: "#expect(a == b)")], marker: mk).unsplittable == [7])  // 沒有標記的行進來也紅
+}
+
+/// 檔頭續行反折：下一行開頭（可有縮排）的 `#` 連同換行拿掉，再去掉所有空格。R10 放寬成也接縮排的 `#`，R11 指出它
+/// 無驅動（真檔頭沒有縮排續行）——所以抽出來、給它 fixture。
+private func joinHeaderContinuations(_ header: String) -> String {
+    header.replacingOccurrences(of: "\n[ \t]*#", with: "", options: .regularExpression).replacingOccurrences(of: " ", with: "")
+}
+
+@Test("檔頭續行反折由 fixture 驅動：欄首與縮排的 `#` 續行都接得起來")
+func headerContinuationJoiningIsDrivenByItsOwnFixture() {
+    #expect(joinHeaderContinuations("# `x`：a / b /\n# c，各取前 200 字元") == "#`x`：a/b/c，各取前200字元")
+    #expect(joinHeaderContinuations("# `x`：a / b /\n   # c，各取前 200 字元") == "#`x`：a/b/c，各取前200字元")   // 縮排續行（R10 的放寬）
+    #expect(joinHeaderContinuations("# a\nb") == "#a\nb")   // 不是 # 開頭的下一行不動（換行留著）
 }
 
 private func matches(_ pattern: String, in text: String) -> [String] {
@@ -572,7 +590,7 @@ private func realPython3() -> String {
     return "/usr/bin/python3"
 }
 
-/// 一個 PATH 目錄，只放腳本本身需要的外部命令（`dirname`）加上呼叫端指定的假命令。
+/// 一個 PATH 目錄，放呼叫端指定的假命令（`dirname` 的 symlink 是 R10 之前腳本需要它時留下的，現在無害、留著）。
 /// `judgeFakes` 是假 python3 對 **judge 呼叫**（`python3 -c …`）的行為；其他呼叫（算查詢集指紋的
 /// `python3 - <file>`）轉交真的 python3——要模擬的是 judge 掛掉，不是整個 python 壞掉。
 private func makeBinDir(in dir: URL, judgeFakes: [String: String]) throws -> URL {
@@ -599,7 +617,7 @@ func measureBaselinePrintsOnlyIndicesAndVerdicts() throws {
     // 最後一行沒有換行也要量到。
     // #1 乾淨（實質命中、無工具 chunk）；#2 self：查詢原文在散文之後的工具殘影裡（tool=1）；
     // #3 self：查詢原文被引述進散文、空白摺疊後才對得上、沒有工具標記（tool=0）；#4 零命中；
-    // #5 兩個工具 chunk 但都不含查詢原文 → clean tool=2（工具 chunk 本身不是污染訊號，DA C1）；
+    // #5 兩個工具 chunk 但都不含查詢原文 → clean tool=2（工具 chunk 本身不是污染訊號，R2）；
     // #6 self：只差大小寫（casefold）；
     // #7 ltm 回了 k+1 筆、只有第 k+1 筆含原文且帶工具標記 → clean tool=0：judge 只看前 k 筆，「前 k 名」的語意
     //    由 judge 自己截、不靠 ltm 自律（R7）；
@@ -755,16 +773,19 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     let stub = try makeStub(in: dir, responses: [:])
 
     // 三臂都斷言 stderr 只有那一句（R9：標題這樣宣稱，先前只有非數字那一臂斷言）。
-    for bad in ["0", "1001", ""] {   // 明確的空字串也是 64，不是預設 5（R10）
+    // 空字串也是 64（R10）；超過 intmax 的數字串不能多印 bash 診斷（R11）；2^64+5 在 `10#` 算術下會 wrap 成 5——位數守衛要先擋。
+    for bad in ["0", "1001", "", "99999999999999999999", "18446744073709551621"] {
         let r = try runScript(queries: queries, stub: stub, k: bad)
         #expect(r.status == 64 && r.stderr == "k 必須是 1–1000 的整數\n", Comment(rawValue: "k=\(bad): rc=\(r.status) err=\(r.stderr)"))
     }
     let nonDigit = try runScript(queries: queries, stub: stub, k: "x")
     #expect(nonDigit.status == 64 && nonDigit.stderr == "k 必須是 1–1000 的整數\n", Comment(rawValue: nonDigit.stderr))
 
-    // k 正規化：`007` 的 set 行印 `k=7`，兩份同一量測的紀錄才對得齊（R10）。
-    let k007 = try runScript(queries: queries, stub: stub, k: "007")
-    #expect(k007.status == 0 && k007.setLine.hasSuffix(" k=7"), Comment(rawValue: "k=007: \(k007.setLine)"))
+    // k 正規化：前導零一律十進位（R10 版的 `$((K))` 把 `010` 當八進位、`08` 算術失敗仍 rc 0，R11）；set 行印正規化後的值。
+    for (given, want) in [("007", "7"), ("010", "10"), ("08", "8"), ("0100", "100")] {
+        let r = try runScript(queries: queries, stub: stub, k: given)
+        #expect(r.status == 0 && r.setLine.hasSuffix(" k=\(want)") && r.stderr.isEmpty, Comment(rawValue: "k=\(given): rc=\(r.status) \(r.setLine) err=\(r.stderr)"))
+    }
     #expect(try runScript(queries: dir.appendingPathComponent("missing.txt"), stub: stub).status == 66)
     #expect(try runScript(queries: dir, stub: stub).status == 66)
     // 含 NUL 的查詢檔：bash 變數存不了它（會靜默丟掉），腳本要在讀進記憶體之前擋成 66（R8：查詢檔改成只讀一次）。
@@ -859,10 +880,13 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     try "set -a\n".write(to: aenv, atomically: true, encoding: .utf8)
     let envProbe = dir.appendingPathComponent("env.txt")
     let probeStub = try makeStub(in: dir, responses: [:], raw: ["ZQXJ-TRACE-ONE": "printf '%s' \"${QF_CONTENT+leaked}\" > '\(envProbe.path)'; printf '[]\\n'"])
-    let allexport = try runScript(queries: queries, stub: probeStub, extraEnv: ["BASH_ENV": aenv.path])
-    #expect(allexport.status == 0, Comment(rawValue: "allexport: rc=\(allexport.status)"))
-    let exported = (try? String(contentsOf: envProbe, encoding: .utf8)) ?? "(unread)"
-    #expect(exported.isEmpty, Comment(rawValue: "查詢集變數被匯出進 ltm 的環境：\(exported)"))
+    for (label, env) in [("BASH_ENV set -a", ["BASH_ENV": aenv.path]), ("SHELLOPTS=allexport", ["SHELLOPTS": "allexport"])] {
+        try? FileManager.default.removeItem(at: envProbe)
+        let allexport = try runScript(queries: queries, stub: probeStub, extraEnv: env)
+        #expect(allexport.status == 0, Comment(rawValue: "\(label): rc=\(allexport.status)"))
+        let exported = (try? String(contentsOf: envProbe, encoding: .utf8)) ?? "(unread)"
+        #expect(exported.isEmpty, Comment(rawValue: "\(label): 查詢集變數被匯出進 ltm 的環境：\(exported)"))
+    }
 }
 
 @Test("measure-baseline.sh：拿得到查詢內容的子行程 stdio 都隔離——judge 的 stdin 不是查詢檔（吃不掉後面的行）、指紋 python 與 judge 的 stderr 不上腳本的 stderr")
@@ -881,7 +905,9 @@ func measureBaselineIsolatesChildProcessStdio() throws {
     let bin = dir.appendingPathComponent("bin-stdio")
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
     try FileManager.default.createSymbolicLink(at: bin.appendingPathComponent("dirname"), withDestinationURL: URL(fileURLWithPath: "/usr/bin/dirname"))
-    try "#!/bin/bash\necho 'ZQXJ-STDERR-NOISE' >&2\nif [ \"$1\" = \"-c\" ]; then /bin/cat >/dev/null; fi\nexec '\(realPython3())' \"$@\"\n"
+    // 指紋那次（-）另外記下 fd 3 是不是管線：R11 指出字面計數鎖不住資料路徑——herestring 或 `< "$QF"` 會給一般檔案。
+    let fdProbe = dir.appendingPathComponent("fd3.txt")
+    try "#!/bin/bash\necho 'ZQXJ-STDERR-NOISE' >&2\nif [ \"$1\" = \"-c\" ]; then /bin/cat >/dev/null; fi\nif [ \"$1\" = \"-\" ]; then { [ -p /dev/fd/3 ] && printf pipe || printf notpipe; } > '\(fdProbe.path)'; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: bin.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.appendingPathComponent("python3").path)
     let run = try runScript(queries: queries, stub: stub, pathPrefix: bin.path)
@@ -889,4 +915,6 @@ func measureBaselineIsolatesChildProcessStdio() throws {
     #expect(run.rows.count == 3, Comment(rawValue: "judge 的 stdin 若是查詢檔，cat 會吃掉剩下的行：\(run.stdout)"))
     let leaked = run.stderr.contains("ZQXJ-STDERR-NOISE")
     #expect(!leaked, Comment(rawValue: "子行程的 stderr 上了腳本的 stderr（\(run.stderr.count) bytes）"))
+    let fd3 = (try? String(contentsOf: fdProbe, encoding: .utf8)) ?? "(unread)"
+    #expect(fd3 == "pipe", Comment(rawValue: "指紋 python 的 fd 3 不是管線：\(fd3)"))
 }

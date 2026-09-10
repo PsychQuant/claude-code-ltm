@@ -83,8 +83,10 @@
   各輪的 verify comment（輪次編號是那些 comment 的索引，可以留；誰抓到、幾個讀者不寫）。
   同一條測試還同步了：退役清單（README 與測試）、七個 metadata 欄位名（`toolMetadataFields` 常數、
   README 表、查詢檔檔頭）、離開碼（腳本檔頭與程式碼裡的 `exit N`）、三個 verdict 詞（README 與腳本檔頭）、
-  CHANGELOG 含 `clean|self|empty`、README 寫的每條純量上限與目前條數（對照測試常數與真檔）。這份清單的查法：
-  讀那條測試的每一個 `#expect`——不在那裡的複述就沒有機制守著。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。
+  CHANGELOG 含 `clean|self|empty`、README 寫的每條純量上限與目前條數（對照測試常數與真檔）、截斷長度
+  （`toolMetadataFieldLimit`：查詢檔檔頭、README 與腳本檔頭的每一個「N 字元」）、查詢檔只開一次且以 process
+  substitution 餵指紋與迴圈。這份清單是**摘要**，會漂移；權威是查法：讀那條測試的每一個 `#expect`——不在那裡的
+  複述就沒有機制守著。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。
   `blank` 是那一行在 Unicode 空白摺疊後是空的（只有 U+3000 這類非 ASCII 空白）——行定義把它算成條目、
   judge 卻會得到空針，空針對任何命中都算 self，所以不跑 ltm、直接報 error；測試同時斷言查詢檔裡沒有
   這類字元。
@@ -104,7 +106,7 @@
   這種紀錄幾乎全是 #63 自己的 session 寫的，而且**會隨討論儀器的 session 增加**（verify 的兩輪之間就
   多了一筆），所以這裡不給計數只給查法：掃 `~/.claude/projects/**/*.jsonl`，統計 user／assistant 紀錄裡
   `message.content` 是純字串且含 `⟨tool ` 的筆數（只印計數）。
-  第一版的判準是「含 `⟨tool ` 或含 `ltm query`」就 dirty；#63 verify 的 devil's-advocate 指出那量的是
+  第一版的判準是「含 `⟨tool ` 或含 `ltm query`」就 dirty；#63 verify R2 指出那量的是
   「有沒有工具 chunk」不是「這條查詢被自己污染了沒有」，於是改成把命中拿去跟查詢比對。
 - `<ms>` 是 `ltm` 行程 fork→exit 的 monotonic 牆鐘（含 process 啟動、查詢前的增量併入、檢索、
   輸出；不含 judge），單一樣本、無暖身；第 1 列是否系統性偏高沒有量過（要量：同一集合連跑兩次、比第 1 列）。
@@ -122,7 +124,7 @@
    命令把整份檔案印進 stdout 是一筆 `toolUseResult.stdout`，一次 `Read` 是一筆 `toolUseResult.file.content`。
    判準是「這個動作會不會把整份檔案送進 jsonl」，上面是例子不是清單。#63 實作與 verify 期間就這樣存了
    **至少 8 筆**含全部查詢的紀錄（2026-09-07 R3 verify 全語料數的：Write 2、Edit 3、attachment 1、
-   Bash stdout 1、Read 1；R1 verify 的 `diff.patch` 另被一個 reviewer 讀進逐字稿）。這個數字**只會
+   Bash stdout 1、Read 1；R1 verify 的 `diff.patch` 另在該輪被讀進一份 agent 逐字稿）。這個數字**只會
    往上走**——R2b 寫「六份」的九分鐘前，另一個 session 剛 `Read` 過一次；所以它是下界不是計數，
    要現值就跑查法。查法（只印計數、執行期讀查詢檔、不上命令列）：掃
    `~/.claude/projects/**/*.jsonl`，對每筆遞迴走訪所有字串葉節點，數「同時含全部 N 條查詢」的紀錄與其
@@ -158,18 +160,19 @@
   反過來，空白與大小寫以外的改寫（全形／半形、標點、換序）`self` 看不到。
 - 查詢原文在執行期在 `python3` 與 `ltm` 的 argv 上（CLI 的查詢就是位置參數），同一帳號的行程 `ps -ww`
   看得到（容器 PID namespace、Linux `hidepid` 下更窄），存活時間是那一列的 wall clock——這是作業系統的
-  可見面，不是本腳本的輸出通道；列在這裡是因為上一節的第一句是全稱。環境變數那一面（整份集合、整個 run）
-  由腳本第一行的 `set +a` 關掉——`BASH_ENV` 裡的 `set -a` 或 `SHELLOPTS=allexport` 會把它打開（R10 實測）。
+  可見面，不是本腳本的輸出通道；列在這裡是因為上一節的第一句是全稱。對照：環境變數那一面（整份集合、整個
+  run）**不在**擋不住之列——`BASH_ENV` 裡的 `set -a` 與 `SHELLOPTS=allexport` 都在啟動時生效、早於腳本第一行的
+  `set +a`，所以被關掉；測試各有一臂驅動（R11 更正：R10 版把這句寫反了）。
 - 查詢檔本身是一般 tracked blob、**明文在 GitHub 伺服器上**；`-diff` 只擋 diff 生成，規則 1 又禁止 review agent
   讀內容。`-diff` 只擋會讀 attribute 的 diff 生成（上方那份例外清單裡的命令都繞得過）。有紀錄可查的曝露：R1 verify
-  的 patch 產生於 `.gitattributes` 之前、含明文、被一個 reviewer 讀過（規則 1）；R2 之後各輪 verify 的 patch 都印
+  的 patch 產生於 `.gitattributes` 之前、含明文、在該輪被讀進 agent 逐字稿（規則 1）；R2 之後各輪 verify 的 patch 都印
   `Binary files … differ`（查法：對該輪的 patch 檔 `grep -c 'Binary files'`）。其餘 diff 生成路徑沒有機制擋、也沒有
   紀錄可查；`rrf-tie-queries.txt` 同樣 tracked 且 `-diff`。內容約束只有測試的每條純量上限，它擋的是整段文字的量級，
   分不出一句第三方逐字短句與自行撰寫的短語；作者自審是這個檔的防線。
 - 查詢原文**跨過**或落在 metadata 欄位 200 字元截斷之後的那種命令。完全落在之後：那段文字不在索引裡，
   `self` 看不到、它也不會靠那段文字排名。**跨過邊界**：查詢的前綴進了索引、會靠它排名，`self` 卻判
-  `clean`——進索引的字元數 ＝ 200 − 查詢在該欄位裡的起始位置（`toolUseMetadata` 攤平換行後
-  `prefix(200)`），起始位置在 200 − 查詢長度 到 200 之間都是這個帶。#63 的 root cause 那種
+  `clean`——進索引的字元數 ＝ 上限（200 字元）− 查詢在該欄位裡的起始位置（`toolUseMetadata` 攤平換行後取
+  前 200 字元），起始位置在「上限 − 查詢長度」到上限之間都是這個帶。#63 的 root cause 那種
   `for q in …` 一行多條查詢的命令，後面的查詢正好容易落在這個帶。
 - #6 若把 tool payload 收進索引——現在 jsonl 裡至少 8 筆完整副本（規則 1 的計數與查法）**回溯**進索引，
   查詢集整份換掉，而且換的那一組要從第一天就只在 Claude Code 之外編輯。
@@ -179,7 +182,7 @@
   查詢、輸出表第一欄就是查詢。兩者支撐 `2026-08-22-rrf-tie-rate.md`，量的是**聚合**平手率而不是
   「前 1 名是誰」，所以污染的傷害形狀不同——但 `measure-rrf-ties.swift` 在 session 裡跑到失敗就把
   失敗的那幾條印進 tool_result，`rrf-tie-mechanism.sh` 的八條則是**打開那支腳本看**就進 `text` block
-  （R2 verify 有兩個 reviewer 為了核對這一段而讀了它）。所以：**不要在 session 裡跑、顯示、或引述
+  （R2 verify 期間就有 agent 為了核對這一段而讀了它）。所以：**不要在 session 裡跑、顯示、或引述
   它們**（`rrf-tie-queries.txt` 已一併設 `-diff`）；把它們收進同一套紀律是獨立工作，追蹤於 #68。
 - **目前的 8 條尚未在真實索引上驗過前 5 名**（條數由同步測試對照真檔；檔頭第 1 條寫明了原因與補驗方式）。在那之前，
   「乾淨」是宣稱不是量測。
@@ -202,7 +205,8 @@ before 用前三條、after 用全部六條）：
 - 後三條的污染時間點沒有紀錄可指（該紀錄只寫了 `"${QUERIES[@]}"`，陣列賦值那一行不在紀錄裡）；
   它們是**依同一機制推定**退役，不是實測到第一名被佔——這個不確定性寫在這裡，不預設它們乾淨。
 - 那份紀錄的耗時欄位仍可讀；命中品質從 2026-09-01T04:32:12Z（污染 turn 的時間）起不可比。
-  同日的 `2026-09-01-noop-build-attribution.md` 量的是 SQL 語句不是文字查詢，不需要註記。
+  同日的 `2026-09-01-noop-build-attribution.md`：SQL 表不涉文字查詢，但它的 A/B 表 `query ×3` 欄與「1 秒以內」
+  結論是端對端 `ltm query`、查詢字串未記、是否已污染無從判斷——註記在該檔檔頭（R10 之前這裡寫「不需要註記」，為假）。
 
 ### 與其他 issue 的關係
 
