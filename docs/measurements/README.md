@@ -35,8 +35,9 @@
 ### 查詢集在哪、怎麼用
 
 - 查詢集：`scripts/baseline-queries.txt`（一行一條、`#` 註解）。它的檔頭是這裡的**摘要**，改這裡要
-  一起改它；但只有同步測試列出的那幾項由測試同步（清單只有一份，在下方「同一條測試還同步了」那一段），
-  規則本文沒有機制守（#63 verify R3 就是檔頭漏改被抓到的）。
+  一起改它；但有機制守的只有測試裡明寫的那幾項——查法：`Tests/LTMMCPTests/BaselineQueryFileTests.swift` 裡
+  `verdictAlphabetIsStatedIdenticallyEverywhere` 的每一個 `#expect`，加上另一條測試的 `requiredHeaderPhrases`
+  （檔頭六個必備短語）；規則本文沒有機制守（#63 verify R3 就是檔頭漏改被抓到的）。
   `.gitattributes` 對它設了 `-diff`（`scripts/rrf-tie-queries.txt` 同）。它讓 git 把這個 blob **當
   binary 處理**——只影響「產生 diff 或搜尋內容」的命令，不改變 blob 本身：
   `git diff`／`git show <rev>`／`git log -p` 只印「Binary files differ」、`git grep` 只印
@@ -79,7 +80,7 @@
   期望值側的 tail 集合）。它擋的是
   產生點被刪掉／改名／註解掉而清單沒跟著改；**它不證明那條斷言被執行**（`.disabled`、迴圈跳過看不到）
   ——執行由整份測試檔綠保證。這一條的版本史（哪一輪、哪個 lens 抓到什麼）不在這裡複述——查 issue #63
-  各輪的 verify comment；R6、R7 各抓到一次這裡的複述寫錯。
+  各輪的 verify comment（輪次編號是那些 comment 的索引，可以留；誰抓到、幾個讀者不寫）。
   同一條測試還同步了：退役清單（README 與測試）、七個 metadata 欄位名（`toolMetadataFields` 常數、
   README 表、查詢檔檔頭）、離開碼（腳本檔頭與程式碼裡的 `exit N`）、三個 verdict 詞（README 與腳本檔頭）、
   CHANGELOG 含 `clean|self|empty`、README 寫的每條純量上限與目前條數（對照測試常數與真檔）。這份清單的查法：
@@ -145,7 +146,7 @@
    唯一的例外是語料裡本來就逐字含這串字的實質 turn（例如退役查詢裡的「資格考」那則使用者 turn）——
    那是正常召回，該條照用、在紀錄裡註明。「語料不可變、殘影永遠不會走」對兩邊都成立，所以它不是
    判準；判準是那段文字的來歷。`empty`／`error` 的條目那一輪不可比。第一版只寫「標記那一輪不可比」
-   （DA R2 D2）；第二版用三個例子當判準、把例外當預設（DA R3 DA1）——兩次都是列舉代替性質。
+   （R2）；第二版用三個例子當判準、把例外當預設（R3）——兩次都是列舉代替性質。
 
 ### 它擋不住什麼（誠實寫下；這一節必然不完整——它列的是想到的，不是全部）
 
@@ -157,11 +158,14 @@
   反過來，空白與大小寫以外的改寫（全形／半形、標點、換序）`self` 看不到。
 - 查詢原文在執行期在 `python3` 與 `ltm` 的 argv 上（CLI 的查詢就是位置參數），同一帳號的行程 `ps -ww`
   看得到（容器 PID namespace、Linux `hidepid` 下更窄），存活時間是那一列的 wall clock——這是作業系統的
-  可見面，不是本腳本的輸出通道；列在這裡是因為上一節的第一句是全稱。
+  可見面，不是本腳本的輸出通道；列在這裡是因為上一節的第一句是全稱。環境變數那一面（整份集合、整個 run）
+  由腳本第一行的 `set +a` 關掉——`BASH_ENV` 裡的 `set -a` 或 `SHELLOPTS=allexport` 會把它打開（R10 實測）。
 - 查詢檔本身是一般 tracked blob、**明文在 GitHub 伺服器上**；`-diff` 只擋 diff 生成，規則 1 又禁止 review agent
-  讀內容——所以自 `.gitattributes` 之後它沒有再進過任何 diff（在那之前 R1 verify 的 patch 含明文、被一個 reviewer
-  讀過，見規則 1；`rrf-tie-queries.txt` 同樣 tracked 且 `-diff`）。內容約束只有測試的每條純量上限，它擋的是整段
-  文字的量級，分不出一句第三方逐字短句與自行撰寫的短語；作者自審是這個檔的防線。
+  讀內容。`-diff` 只擋會讀 attribute 的 diff 生成（上方那份例外清單裡的命令都繞得過）。有紀錄可查的曝露：R1 verify
+  的 patch 產生於 `.gitattributes` 之前、含明文、被一個 reviewer 讀過（規則 1）；R2 之後各輪 verify 的 patch 都印
+  `Binary files … differ`（查法：對該輪的 patch 檔 `grep -c 'Binary files'`）。其餘 diff 生成路徑沒有機制擋、也沒有
+  紀錄可查；`rrf-tie-queries.txt` 同樣 tracked 且 `-diff`。內容約束只有測試的每條純量上限，它擋的是整段文字的量級，
+  分不出一句第三方逐字短句與自行撰寫的短語；作者自審是這個檔的防線。
 - 查詢原文**跨過**或落在 metadata 欄位 200 字元截斷之後的那種命令。完全落在之後：那段文字不在索引裡，
   `self` 看不到、它也不會靠那段文字排名。**跨過邊界**：查詢的前綴進了索引、會靠它排名，`self` 卻判
   `clean`——進索引的字元數 ＝ 200 − 查詢在該欄位裡的起始位置（`toolUseMetadata` 攤平換行後

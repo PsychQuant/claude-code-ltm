@@ -6,8 +6,10 @@
 # `#N` 只是檔內位置），之後每列 `#N <ms>ms <verdict>`**（例如
 # `#3 812ms clean tool=1`；`<ms>` 是整數毫秒，後面緊接字面 `ms`）。
 # 查詢文字與命中內容不進 stdout／stderr，包含 `bash -x`、
-# `SHELLOPTS=xtrace`、`BASH_ENV` 裡的 `set -x`（第一行就關掉 xtrace；指紋 python、judge python、ltm 三個子行程的
-# stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null）。
+# `SHELLOPTS=xtrace`、`BASH_ENV` 裡的 `set -x`、以及 `set -a`／`SHELLOPTS=allexport`（第一行就關掉 xtrace 與
+# allexport——後者會把裝著整份查詢集的變數匯出給每個子行程）。判準是「每一個拿得到查詢內容的子行程，它的 stderr
+# 都不是可能載內容的通道」：指紋 python、judge python、ltm 的 stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null；
+# 兩個 process substitution 的子 shell 只跑 builtin `printf`，運算元不會上 stderr。
 # 擋不住的：`BASH_ENV`／`PS4` 裡刻意放一個會讀查詢檔的命令替換——trace 第一行 `set +x` 時 PS4 先展開；
 # 或 PATH 上的 python3 被換成會印檔案的東西。另外，查詢原文在執行期會在 python3 與 ltm 的 argv 上（CLI 的查詢
 # 就是位置參數、`--` 終止符用得對），同一帳號的行程 `ps -ww` 看得到（容器 PID namespace、Linux hidepid 下更窄）、
@@ -57,7 +59,7 @@
 #
 # 離開碼（封閉集合，同步測試對照程式碼裡的 exit N）：0 1 64 65 66 69 70
 #   0 全部量到（含 empty）；1 任一列 error(…)（每列照印完才離開）；64 k 不是 1–1000 的整數；
-#   65 查詢檔沒有任何非註解行；66 查詢檔不是可讀的一般檔案、讀不了、或含 NUL；69 ltm 不是可執行的一般檔案；
+#   65 查詢檔沒有任何非註解行；66 查詢檔不是可讀的一般檔案、讀不了、含 NUL、或讀取中斷；69 ltm 不是可執行的一般檔案；
 #   70 沒有 python3、或算不出查詢集指紋。
 #
 # 「第 N 條非註解行」：去掉行首行尾的 **ASCII** 空白（空格、tab、CR、VT、FF；`read` 已吃掉 LF；刻意不用
@@ -68,31 +70,38 @@
 # 用法：LTM_ANCHOR_KEY="$(~/bin/ltm memory --export-key)" scripts/measure-baseline.sh [k]
 #   LTM_BIN（預設 ~/bin/ltm）、LTM_BASELINE_QUERIES（預設本腳本旁的 baseline-queries.txt，不依賴 cwd）、
 #   k 1–1000（預設 5）。密鑰請用命令替換直接餵進環境，不要落地（.claude/rules/anchor-key-in-probes.md）。
-set +x
+set +x +a
 set -u
-HERE=$(cd "$(dirname "$0")" && pwd)
+# 自己的目錄：不經 `dirname`（本腳本唯一會經 PATH 解析的外部命令；它缺席時 bash 3.2 的 `cd ""` 回 0、`pwd` 是 cwd，
+# 查詢檔會安靜退回 cwd 解析，R10）。經 PATH 呼叫時用 command -v 找回完整路徑；找不到就讓 QF 落在一個不存在的
+# 目錄 → 66。
+case "$0" in */*) self="$0" ;; *) self=$(command -v -- "$0" 2>/dev/null) ;; esac
+HERE=$(cd "${self%/*}" 2>/dev/null && pwd) || HERE=/nonexistent
 QF="${LTM_BASELINE_QUERIES:-$HERE/baseline-queries.txt}"
 LTM="${LTM_BIN:-${HOME:-}/bin/ltm}"   # HOME 沒設也不能讓 set -u 隱式地以 1 離開（那會與「1 = 任一列 error」撞號，R8）
-K="${1:-5}"
+K="${1-5}"   # 明確給了空字串是錯，不是「用預設」（R10）
 case "$K" in ''|*[!0-9]*) echo "k 必須是 1–1000 的整數" >&2; exit 64 ;; esac
 [ "$K" -ge 1 ] && [ "$K" -le 1000 ] || { echo "k 必須是 1–1000 的整數" >&2; exit 64; }
+K=$((K))   # 正規化：`007` 印進 set 行會讓兩份同一量測的紀錄看起來不可比（R10）
 [ -f "$QF" ] && [ -r "$QF" ] || { echo "查詢檔不是可讀的一般檔案：$QF" >&2; exit 66; }
 [ -f "$LTM" ] && [ -x "$LTM" ] || { echo "ltm 不是可執行的一般檔案：$LTM" >&2; exit 69; }
 command -v python3 >/dev/null 2>&1 || { echo "需要 python3 計時與解析 --json" >&2; exit 70; }
 
 # 查詢檔只開一次、只用 builtin 讀（不經 PATH 上的任何子行程、不落地）：`read -r -d ''` 讀到 NUL 回 0（bash 變數
-# 存不了它 → 66）、讀到 EOF 回 1（正常，尾端換行原樣保留）；重導失敗時 read 沒跑、變數維持 unset → 66。指紋與
-# 逐列量測共用讀進來的這一份，中間換檔不會讓第一行的身分與列內容錯配——這個性質沒有測試能驅動（要 race），
-# 只能由這裡的結構保證。R8 版用 `$(cat; printf x)` 加 tr／wc 的 NUL 檢查：那條 `|| exit 66` 不可達（命令替換的
+# 存不了它 → 66）、讀到 EOF 回 1（正常，尾端換行原樣保留）、其他（訊號中斷）→ 66；重導失敗時 read 沒跑、變數維持
+# unset → 66。指紋與逐列量測共用讀進來的這一份，中間換檔不會讓第一行的身分與列內容錯配。**沒有測試能驅動的**：
+# 換檔的 race、「讀不了」那一臂（`unset`＋`${QF_CONTENT+set}` 兩層都只在 -r 檢查之後的 race 窗口可達；不能拆，拆了
+# unset 變數會撞 `set -u` 的隱式 1）、以及短讀（I/O 錯誤中途停、rc 仍是 1、內容不完整）——最後這個偵測不到，只有
+# 指紋會與完整集合不同、跨兩次量測比對得出來。R8 版用 `$(cat; printf x)` 加 tr／wc 的 NUL 檢查：那條 `|| exit 66` 不可達（命令替換的
 # 離開碼是 printf 的），而三個 PATH 子行程各拿到整份查詢集、stderr 沒重導（R9）。
 unset QF_CONTENT
 { IFS= read -r -d '' QF_CONTENT < "$QF"; } 2>/dev/null; rc=$?
 [ "${QF_CONTENT+set}" = set ] || { echo "查詢檔讀不了：$QF" >&2; exit 66; }
-[ "$rc" -eq 1 ] || { echo "查詢檔含 NUL：$QF" >&2; exit 66; }
+case "$rc" in 1) ;; 0) echo "查詢檔含 NUL：$QF" >&2; exit 66 ;; *) echo "查詢檔讀取中斷（read 回 $rc）：$QF" >&2; exit 66 ;; esac
 # 查詢集指紋：對「第 N 條非註解行」的同一個定義（ASCII trim、跳過空行與 #）逐行 sha256，只印 12 個 hex。
 # 內容經 process substitution 的管線給 fd 3（不上命令列、不進環境、不落地——herestring 在 bash 3.2 會寫 $TMPDIR
-# 暫存檔，R9 security），留在 python 行程裡，不上 stdout；stderr 也丟掉——它是唯一整份讀進查詢集的行程，
-# 檔頭那句「不進 stdout／stderr」的全稱曾漏了它（R7 security）。
+# 暫存檔，R9），留在 python 行程裡，不上 stdout；stderr 也丟掉——它是唯一整份讀進查詢集的行程，
+# 檔頭那句「不進 stdout／stderr」的全稱曾漏了它（R7）。
 SETID=$(python3 - 3< <(printf '%s' "$QF_CONTENT") 2>/dev/null <<'PY'
 import hashlib, sys
 ws = " \t\r\v\f"
@@ -116,13 +125,13 @@ i=0; while [ $fp_ok -eq 1 ] && [ $i -lt 12 ]; do
     case "${SETID:$i:1}" in [0123456789abcdef]) ;; *) fp_ok=0 ;; esac; i=$((i + 1))
 done
 [ $fp_ok -eq 1 ] || { echo "算不出查詢集指紋" >&2; exit 70; }
-# k 也印在同一行：verdict 全是「前 k 名」的性質，兩份紀錄 k 不同就不能逐列對齊（requirements R4-1）。
+# k 也印在同一行：verdict 全是「前 k 名」的性質，兩份紀錄 k 不同就不能逐列對齊（R4）。
 printf 'set sha256:%s k=%s\n' "$SETID" "$K"
 
 # 一條查詢一個 python：起 ltm、用 monotonic 計時、解析 --json、只印一行「<ms> <verdict>」。
 # 不印任何 snippet；judge 自己的 stdin 接 /dev/null（R7：它曾繼承查詢內容），python 端對 ltm 再設一次
 # DEVNULL 是縱深、目前沒有測試分得出來（R8）；stderr 由外層整個丟掉。命中只看前 k 筆——「前 k 名」的語意由
-# judge 自己截，不靠 ltm 自律（R7 codex：多回傳的命中會安靜地改變 self 與 tool=<n>），連形狀檢查也只看
+# judge 自己截，不靠 ltm 自律（R7：多回傳的命中會安靜地改變 self 與 tool=<n>），連形狀檢查也只看
 # 前 k 筆（R8：第 k+1 筆畸形不該讓整列量不到）。
 RUN='
 import json, subprocess, sys, time
