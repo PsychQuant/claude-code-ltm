@@ -35,8 +35,8 @@
 ### 查詢集在哪、怎麼用
 
 - 查詢集：`scripts/baseline-queries.txt`（一行一條、`#` 註解）。它的檔頭是這裡的**摘要**，改這裡要
-  一起改它；但只有欄位名、字母表、離開碼、退役清單四項由測試同步，規則本文沒有機制守（#63 verify R3
-  就是檔頭漏改被抓到的）。
+  一起改它；但只有同步測試列出的那幾項由測試同步（清單只有一份，在下方「同一條測試還同步了」那一段），
+  規則本文沒有機制守（#63 verify R3 就是檔頭漏改被抓到的）。
   `.gitattributes` 對它設了 `-diff`（`scripts/rrf-tie-queries.txt` 同）。它讓 git 把這個 blob **當
   binary 處理**——只影響「產生 diff 或搜尋內容」的命令，不改變 blob 本身：
   `git diff`／`git show <rev>`／`git log -p` 只印「Binary files differ」、`git grep` 只印
@@ -82,8 +82,8 @@
   各輪的 verify comment；R6、R7 各抓到一次這裡的複述寫錯。
   同一條測試還同步了：退役清單（README 與測試）、七個 metadata 欄位名（`toolMetadataFields` 常數、
   README 表、查詢檔檔頭）、離開碼（腳本檔頭與程式碼裡的 `exit N`）、三個 verdict 詞（README 與腳本檔頭）、
-  CHANGELOG 含 `clean|self|empty`。這份清單的查法：讀那條測試的每一個 `#expect`——不在那裡的複述就沒有
-  機制守著。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。
+  CHANGELOG 含 `clean|self|empty`、README 寫的每條純量上限與目前條數（對照測試常數與真檔）。這份清單的查法：
+  讀那條測試的每一個 `#expect`——不在那裡的複述就沒有機制守著。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。
   `blank` 是那一行在 Unicode 空白摺疊後是空的（只有 U+3000 這類非 ASCII 空白）——行定義把它算成條目、
   judge 卻會得到空針，空針對任何命中都算 self，所以不跑 ltm、直接報 error；測試同時斷言查詢檔裡沒有
   這類字元。
@@ -159,8 +159,9 @@
   看得到（容器 PID namespace、Linux `hidepid` 下更窄），存活時間是那一列的 wall clock——這是作業系統的
   可見面，不是本腳本的輸出通道；列在這裡是因為上一節的第一句是全稱。
 - 查詢檔本身是一般 tracked blob、**明文在 GitHub 伺服器上**；`-diff` 只擋 diff 生成，規則 1 又禁止 review agent
-  讀內容——所以它是本 repo 唯一「進 remote 但沒有任何人或機制看過內容」的檔。唯一的內容約束是測試的每條純量上限，
-  它擋的是整段文字的量級，分不出一句第三方逐字短句與自行撰寫的短語；作者自審是這個檔的唯一防線。
+  讀內容——所以自 `.gitattributes` 之後它沒有再進過任何 diff（在那之前 R1 verify 的 patch 含明文、被一個 reviewer
+  讀過，見規則 1；`rrf-tie-queries.txt` 同樣 tracked 且 `-diff`）。內容約束只有測試的每條純量上限，它擋的是整段
+  文字的量級，分不出一句第三方逐字短句與自行撰寫的短語；作者自審是這個檔的防線。
 - 查詢原文**跨過**或落在 metadata 欄位 200 字元截斷之後的那種命令。完全落在之後：那段文字不在索引裡，
   `self` 看不到、它也不會靠那段文字排名。**跨過邊界**：查詢的前綴進了索引、會靠它排名，`self` 卻判
   `clean`——進索引的字元數 ＝ 200 − 查詢在該欄位裡的起始位置（`toolUseMetadata` 攤平換行後

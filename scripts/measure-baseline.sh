@@ -57,7 +57,7 @@
 #
 # 離開碼（封閉集合，同步測試對照程式碼裡的 exit N）：0 1 64 65 66 69 70
 #   0 全部量到（含 empty）；1 任一列 error(…)（每列照印完才離開）；64 k 不是 1–1000 的整數；
-#   65 查詢檔沒有任何非註解行；66 查詢檔不是可讀的一般檔案；69 ltm 不是可執行的一般檔案；
+#   65 查詢檔沒有任何非註解行；66 查詢檔不是可讀的一般檔案、讀不了、或含 NUL；69 ltm 不是可執行的一般檔案；
 #   70 沒有 python3、或算不出查詢集指紋。
 #
 # 「第 N 條非註解行」：去掉行首行尾的 **ASCII** 空白（空格、tab、CR、VT、FF；`read` 已吃掉 LF；刻意不用
@@ -80,15 +80,20 @@ case "$K" in ''|*[!0-9]*) echo "k 必須是 1–1000 的整數" >&2; exit 64 ;; 
 [ -f "$LTM" ] && [ -x "$LTM" ] || { echo "ltm 不是可執行的一般檔案：$LTM" >&2; exit 69; }
 command -v python3 >/dev/null 2>&1 || { echo "需要 python3 計時與解析 --json" >&2; exit 70; }
 
-# 查詢檔只讀一次：指紋與逐列量測共用同一份內容，兩者之間換檔（編輯器原子儲存、git checkout）不會讓第一行
-# 的身分與列內容錯配（R8）。bash 變數存不了 NUL（會被靜默丟掉），先擋成 66；讀完後尾端的換行原樣保留。
-[ "$(tr -d '\000' < "$QF" | wc -c)" = "$(wc -c < "$QF")" ] || { echo "查詢檔含 NUL：$QF" >&2; exit 66; }
-QF_CONTENT=$(cat "$QF"; printf x) || { echo "查詢檔讀不了：$QF" >&2; exit 66; }
-QF_CONTENT=${QF_CONTENT%x}
+# 查詢檔只開一次、只用 builtin 讀（不經 PATH 上的任何子行程、不落地）：`read -r -d ''` 讀到 NUL 回 0（bash 變數
+# 存不了它 → 66）、讀到 EOF 回 1（正常，尾端換行原樣保留）；重導失敗時 read 沒跑、變數維持 unset → 66。指紋與
+# 逐列量測共用讀進來的這一份，中間換檔不會讓第一行的身分與列內容錯配——這個性質沒有測試能驅動（要 race），
+# 只能由這裡的結構保證。R8 版用 `$(cat; printf x)` 加 tr／wc 的 NUL 檢查：那條 `|| exit 66` 不可達（命令替換的
+# 離開碼是 printf 的），而三個 PATH 子行程各拿到整份查詢集、stderr 沒重導（R9）。
+unset QF_CONTENT
+{ IFS= read -r -d '' QF_CONTENT < "$QF"; } 2>/dev/null; rc=$?
+[ "${QF_CONTENT+set}" = set ] || { echo "查詢檔讀不了：$QF" >&2; exit 66; }
+[ "$rc" -eq 1 ] || { echo "查詢檔含 NUL：$QF" >&2; exit 66; }
 # 查詢集指紋：對「第 N 條非註解行」的同一個定義（ASCII trim、跳過空行與 #）逐行 sha256，只印 12 個 hex。
-# 內容經 fd 3 給 python（不上命令列、不進環境），留在 python 行程裡，不上 stdout；stderr 也丟掉——它是唯一
-# 整份讀進查詢集的行程，檔頭那句「不進 stdout／stderr」的全稱曾漏了它（R7 security）。
-SETID=$(python3 - 3<<<"$QF_CONTENT" 2>/dev/null <<'PY'
+# 內容經 process substitution 的管線給 fd 3（不上命令列、不進環境、不落地——herestring 在 bash 3.2 會寫 $TMPDIR
+# 暫存檔，R9 security），留在 python 行程裡，不上 stdout；stderr 也丟掉——它是唯一整份讀進查詢集的行程，
+# 檔頭那句「不進 stdout／stderr」的全稱曾漏了它（R7 security）。
+SETID=$(python3 - 3< <(printf '%s' "$QF_CONTENT") 2>/dev/null <<'PY'
 import hashlib, sys
 ws = " \t\r\v\f"
 h = hashlib.sha256()
@@ -190,6 +195,6 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     valid_row "$row" || row="0 error(judge)"
     case "${row#* }" in "$E_OPEN"*) bad=$((bad + 1)) ;; esac
     printf '#%d %sms %s\n' "$n" "${row%% *}" "${row#* }"
-done <<<"$QF_CONTENT"
+done < <(printf '%s' "$QF_CONTENT")
 [ "$n" -gt 0 ] || { echo "查詢檔沒有任何非註解行" >&2; exit 65; }
 [ "$bad" -eq 0 ] || exit 1
