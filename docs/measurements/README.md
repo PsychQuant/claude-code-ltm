@@ -85,8 +85,10 @@
   同一條測試還同步了：退役清單（README 與測試）、七個 metadata 欄位名（`toolMetadataFields` 常數、
   README 表、查詢檔檔頭）、離開碼（腳本檔頭與程式碼裡的 `exit N`）、三個 verdict 詞（README 與腳本檔頭）、
   CHANGELOG 含 `clean|self|empty`、README 寫的每條純量上限與目前條數（對照測試常數與真檔）、截斷長度
-  （`toolMetadataFieldLimit`：查詢檔檔頭、README 與腳本檔頭的每一個「N 字元」）、查詢檔只開一次且以 process
-  substitution 餵指紋與迴圈。這份清單是**摘要**，會漂移；權威是查法：讀那條測試的每一個 `#expect`——不在那裡的
+  （`toolMetadataFieldLimit`：查詢檔檔頭、README 與腳本檔頭的每一個「N 字元」）、指到查詢檔的三種拼法（識別碼
+  `$QF`、檔名字面、環境變數名）各自的出現次數——那是拼法列舉、**不是**「只開一次」的證明，先把路徑存進第四個名字再開
+  它看不到（R13）——以及 process substitution 餵指紋與迴圈、內容路徑上的 read／printf／unset 指名 `builtin`、數字守衛
+  不用 `[0-9]` range。這份清單是**摘要**，會漂移；權威是查法：讀那條測試的每一個 `#expect`——不在那裡的
   複述就沒有機制守著。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。
   `blank` 是那一行在 Unicode 空白摺疊後是空的（只有 U+3000 這類非 ASCII 空白）——行定義把它算成條目、
   judge 卻會得到空針，空針對任何命中都算 self，所以不跑 ltm、直接報 error；測試同時斷言查詢檔裡沒有
@@ -184,8 +186,10 @@
   查詢、輸出表第一欄就是查詢。兩者支撐 `2026-08-22-rrf-tie-rate.md`，量的是**聚合**平手率而不是
   「前 1 名是誰」，所以污染的傷害形狀不同——但 `measure-rrf-ties.swift` 在 session 裡跑到失敗就把
   失敗的那幾條印進 tool_result，`rrf-tie-mechanism.sh` 的八條則是**打開那支腳本看**就進 `text` block
-  （R2 verify 期間就有 agent 為了核對這一段而讀了它）。所以：**不要在 session 裡跑、顯示、或引述
-  它們**（`rrf-tie-queries.txt` 已一併設 `-diff`）；把它們收進同一套紀律是獨立工作，追蹤於 #68。
+  （R2 verify 期間就有 agent 為了核對這一段而讀了它）。第三個入口是**那份紀錄本身**：`2026-08-22-rrf-tie-rate.md`
+  開頭就以相對連結指向這兩個檔、結尾附一條可直接複製、把 104 條餵給那支探針的命令——照這裡的指示去讀那份紀錄的 agent，
+  一次 Read 就進語料（R13）。所以：**不要在 session 裡跑、顯示、或引述它們，也不要點那份紀錄裡的連結**
+  （`rrf-tie-queries.txt` 已一併設 `-diff`）；把它們收進同一套紀律是獨立工作，追蹤於 #68。
 - **目前的 8 條尚未在真實索引上驗過前 5 名**（條數由同步測試對照真檔；檔頭第 1 條寫明了原因與補驗方式）。在那之前，
   「乾淨」是宣稱不是量測。
 

@@ -308,8 +308,9 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     #expect(emitted == expected, Comment(rawValue: "腳本輸出點：\(emitted.sorted())"))
     #expect(readmeTokens == expected, Comment(rawValue: "README：\(readmeTokens.sorted())"))
 
-    // **存在性**檢查（不是執行證明）：每個 token 在本檔**別的**測試裡有一條帶「產生標記」、以 `#expect(`
-    // 開頭的活斷言行，其**第一個引數**（期望值那一側，`firstExpectArgument` 以括號配對切出、切不出來就紅）寫著
+    // **存在性**檢查（不是執行證明）：每個 token 在本檔**別的**測試裡有一條帶「產生標記」、帶 `#expect(`
+    // 的活斷言行（producer 行的定義只有一份，在下方 checkProducerLines 那段：含標記的每一行，不加「以 `#expect(` 開頭」的
+    // 合取——R12 只改了 README 那句，這裡留著舊句與那段矛盾，R13），其**第一個引數**（期望值那一側，`firstExpectArgument` 以括號配對切出、切不出來就紅）寫著
     // 它的 tail。它擋的是「把產生點刪掉／改名／註解掉而清單沒跟著改」；它**不證明**那條斷言被執行（`.disabled`、
     // 迴圈跳過都看不到，連本測試自己被停用也看不到）——執行由整份測試檔綠來保證。標記字串執行期拼出（下一行）；
     // 本測試自己的行範圍（從它的 `@Test(` 行到下一個 `@Test(`／`private func`）內不得含那個字面，由下面的斷言守
@@ -371,14 +372,27 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // R9 的收穫要有鎖：查詢內容只能經 process substitution 的管線給指紋 python 與迴圈——herestring 在 bash 3.2 會寫
     // $TMPDIR 暫存檔、而且會補尾端換行讓 `|| [ -n "$raw" ]` 再度死掉（R10：兩處退回去全綠）。
     // 只數程式碼行（整行註解濾掉；codeText 與下方離開碼那段共用）：R11 把迴圈改回 `< "$QF"` 再放一條含原字面的註解，
-    // 整檔字面計數照樣 2。「只開一次」不數某一種拼法（R12：`SECOND=$(cat "$QF")` 穿得過 `< "$QF"` 的計數），數的是
-    // 識別碡 `$QF`／`${QF}` 在程式碼行出現的**總次數**——今天 7 次（-f/-r 那行 3、read 1、三句錯誤訊息 3）；多一次就是多開
-    // 一條路徑或多一處訊息，都要來這裡對帳。
+    // 整檔字面計數照樣 2。這條鎖**是拼法列舉，不是「只開一次」的證明**（R13：把鍵從 `< "$QF"` 換成識別碼 `$QF` 之後，
+    // `cat "$HERE/baseline-queries.txt"`、`cat "${LTM_BASELINE_QUERIES:-…}"`、`wc -l < "$HERE/…"` 照樣穿過——鍵換了、形狀沒換，
+    // CLAUDE.md #34／#37 那句）。腳本裡能指到查詢檔的拼法有三種，三種各釘一個次數：識別碼 `$QF`／`${QF}` 7 次（-f/-r 那行 3、
+    // read 1、三句錯誤訊息 3）、檔名字面 `baseline-queries.txt` 1 次（QF 的預設值）、環境變數名 `LTM_BASELINE_QUERIES` 1 次
+    // （同一行）；多一次就是多一條路徑或多一處訊息，都要來這裡對帳。它守得住的較窄陳述是「用這三種拼法之一再開一次會紅」；
+    // 先把路徑存進第四個名字再開，這裡看不到——要判準版得觀察 open 系統呼叫，不可攜，不做。README 的量測段用同一句話。
+    // 內容路徑上的 `read`／`printf`／`unset` 都要指名 `builtin`（R13：同名函式先於 builtin 被解析）；procSubs 的字面含它。
     let codeText = codeLines.map(\.element).joined(separator: "\n")
-    let procSubs = codeText.components(separatedBy: "< <(printf '%s' \"$QF_CONTENT\")").count - 1
+    let procSubs = codeText.components(separatedBy: "< <(builtin printf '%s' \"$QF_CONTENT\")").count - 1
     let qfRefs = try! NSRegularExpression(pattern: #"\$\{?QF\b"#).numberOfMatches(in: codeText, range: NSRange(location: 0, length: (codeText as NSString).length))
+    let fileNameRefs = codeText.components(separatedBy: "baseline-queries.txt").count - 1
+    let envNameRefs = codeText.components(separatedBy: "LTM_BASELINE_QUERIES").count - 1
     let hasHerestring = codeText.contains("<<<")
-    #expect(procSubs == 2 && qfRefs == 7 && !hasHerestring, Comment(rawValue: "查詢檔的識別碼在程式碼行出現 \(qfRefs) 次（應為 7：多一次就是多一條讀取路徑或訊息）；process substitution \(procSubs) 處（應為 2）；herestring：\(hasHerestring)"))
+    #expect(procSubs == 2 && qfRefs == 7 && fileNameRefs == 1 && envNameRefs == 1 && !hasHerestring, Comment(rawValue: "查詢檔的三種拼法在程式碼行出現：識別碼 \(qfRefs)（應為 7）、檔名字面 \(fileNameRefs)（應為 1）、環境變數名 \(envNameRefs)（應為 1）——多一次就是多一條讀取路徑或訊息；process substitution \(procSubs) 處（應為 2，且指名 builtin printf）；herestring：\(hasHerestring)"))
+    // 拿得到查詢內容的 read／unset 也要指名 builtin（第一句 `builtin unset QF_CONTENT`、讀檔的 `builtin read -r -d ''`、迴圈的
+    // `builtin read -r raw`）；行為由 xtrace 測試的同名函式臂驅動，這裡只釘拼法不漂。
+    let builtinReads = codeText.components(separatedBy: "builtin read -r").count - 1
+    #expect(builtinReads == 2 && codeText.contains("builtin unset QF_CONTENT"), Comment(rawValue: "內容路徑上的 read 指名 builtin 的有 \(builtinReads) 處（應為 2）；builtin unset：\(codeText.contains("builtin unset QF_CONTENT"))"))
+    // 數字比對一律字面集合，不用 range：bash 3.2 的 `[0-9]` 隨 locale 排序而變（指紋檢查 R8 起如此，其餘數字守衛 R13 才跟上）。
+    let digitRanges = matches(#"(\[!?0-9\])"#, in: codeText)
+    #expect(digitRanges.isEmpty, Comment(rawValue: "程式碼行裡有 \(digitRanges.count) 處 [0-9] 形式的 range，要改成 [!0123456789] 這類字面集合"))
 
     // 離開碼：檔頭那一行列的數字 ＝ 程式碼裡 exit 的數字 ∪ {0}。
     let exitHeaderLine = scriptLines.first { $0.hasPrefix("# 離開碼（") } ?? ""
@@ -788,9 +802,11 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     try "ZQXJ-ONE\n".write(to: queries, atomically: true, encoding: .utf8)
     let stub = try makeStub(in: dir, responses: [:])
 
-    // 三臂都斷言 stderr 只有那一句（R9：標題這樣宣稱，先前只有非數字那一臂斷言）。
-    // 空字串也是 64（R10）；2^64+5 進算術會 wrap 成 5——位數守衛要在範圍檢查之前擋（R11／R12）。
-    for bad in ["0", "1001", "", "18446744073709551621"] {
+    // 每臂都斷言 stderr 只有那一句（R9：標題這樣宣稱，先前只有非數字那一臂斷言）。
+    // 空字串也是 64（R10）；`18446744073709551621` 這臂驅動的是位數上限：沒有它，`[ -ge ]` 對超過 intmax 的字串會多印一行 bash
+    // 診斷，stderr 的相等比對就紅（查法在腳本註解；R12 寫的「wrap 成 5」是已刪掉的算術才有的行為，R13）；21 個字元的那臂驅動
+    // 剝零之前的長度閘（R13：沒有它，兩萬個零的 k 要先燒十幾秒才被拒絕或接受——這裡的 21 個字元在兩版都秒回，紅的是 rc）。
+    for bad in ["0", "1001", "", "18446744073709551621", "000000000000000000005"] {
         let r = try runScript(queries: queries, stub: stub, k: bad)
         #expect(r.status == 64 && r.stderr == "k 必須是 1–1000 的整數\n", Comment(rawValue: "k=\(bad): rc=\(r.status) err=\(r.stderr)"))
     }
@@ -798,7 +814,8 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     #expect(nonDigit.status == 64 && nonDigit.stderr == "k 必須是 1–1000 的整數\n", Comment(rawValue: nonDigit.stderr))
 
     // k 正規化：前導零一律十進位（R10 版的 `$((K))` 把 `010` 當八進位、`08` 算術失敗仍 rc 0，R11）；set 行印正規化後的值。
-    for (given, want) in [("007", "7"), ("010", "10"), ("08", "8"), ("0100", "100"), ("01000", "1000"), ("00007", "7")] {   // 前導零任意多個都合法（R12）
+    // 20 個字元是長度閘的邊界：`00000000000000001000` 仍合法（R13）。
+    for (given, want) in [("007", "7"), ("010", "10"), ("08", "8"), ("0100", "100"), ("01000", "1000"), ("00007", "7"), ("00000000000000001000", "1000")] {   // 前導零任意多個都合法（R12）
         let r = try runScript(queries: queries, stub: stub, k: given)
         #expect(r.status == 0 && r.setLine.hasSuffix(" k=\(want)") && r.stderr.isEmpty, Comment(rawValue: "k=\(given): rc=\(r.status) \(r.setLine) err=\(r.stderr)"))
     }
@@ -876,17 +893,37 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     ])
     let benv = dir.appendingPathComponent("benv.sh")
     try "set -x\n".write(to: benv, atomically: true, encoding: .utf8)
+    // errexit（R13）：`read -d ''` 在 EOF 的正常回 1 會在 `set -e` 下直接殺掉腳本——零輸出、rc 1（與「任一列 error」撞號）。
+    // 兩條入口：`SHELLOPTS=errexit` 與 `BASH_ENV` 裡的 `set -e`；腳本第一行要連它一起關。
+    let eenv = dir.appendingPathComponent("eenv.sh")
+    try "set -e\n".write(to: eenv, atomically: true, encoding: .utf8)
+    // 同名函式（R13）：bash 解析名字時函式先於 builtin。`BASH_ENV` 裡替 read／printf 定義一個把 stdin 或引數丟給 /bin/cat 的函式
+    // ——不指名 `builtin` 時 read 那次會把整份查詢檔印上 stdout（然後變數維持 unset → 66），procsub 裡的 printf 會把每條查詢當檔名
+    // 交給 cat、錯誤訊息帶著查詢上 stderr。佈完就 `unset BASH_ENV`：stub ltm 與假 python3 也是 bash、也會讀它——而 BASH_ENV 被 source 時
+    // `$0` 還是 `/bin/bash`，拿 `$0` 當守衛會讓整臂空轉通過（R13 第一版就是這樣綠的）。
+    let fenv = dir.appendingPathComponent("fenv.sh")
+    try "read() { /bin/cat; return 1; }; printf() { /bin/cat \"$@\"; }; unset BASH_ENV\n".write(to: fenv, atomically: true, encoding: .utf8)
     let runs = [
         ("bash -x", try runScript(queries: queries, stub: stub, viaBashX: true)),
         ("SHELLOPTS", try runScript(queries: queries, stub: stub, extraEnv: ["SHELLOPTS": "xtrace"])),
         ("BASH_ENV", try runScript(queries: queries, stub: stub, extraEnv: ["BASH_ENV": benv.path])),
+        ("SHELLOPTS=errexit", try runScript(queries: queries, stub: stub, extraEnv: ["SHELLOPTS": "errexit"])),
+        ("BASH_ENV set -e", try runScript(queries: queries, stub: stub, extraEnv: ["BASH_ENV": eenv.path])),
+        ("BASH_ENV read/printf functions", try runScript(queries: queries, stub: stub, extraEnv: ["BASH_ENV": fenv.path])),
     ]
     for (label, run) in runs {
-        #expect(run.status == 0, Comment(rawValue: "\(label): rc=\(run.status)"))
+        #expect(run.status == 0, Comment(rawValue: "\(label): rc=\(run.status) err=\(run.stderr.count) bytes"))
         #expect(run.rows.count == 1 && run.rows[0].hasSuffix(" clean tool=0"), Comment(rawValue: "\(label): \(run.stdout)"))
         let leaked = run.combined.contains("ZQXJ")
-        #expect(!leaked, Comment(rawValue: "\(label): xtrace 漏了查詢或命中（stderr \(run.stderr.count) bytes）"))
+        #expect(!leaked, Comment(rawValue: "\(label): 漏了查詢或命中（stderr \(run.stderr.count) bytes）"))
     }
+    // readonly（R13）：呼叫端把 `QF_CONTENT` 設成 readonly 時 `unset` 失敗、`read` 的賦值失敗也回 1（與正常 EOF 同碼）、
+    // `${QF_CONTENT+set}` 被預設值滿足——三道全過，腳本會替那份預設值算指紋、逐條量測、rc 0。要在 `unset` 的離開碼就擋成 70、
+    // 一列都不印、預設值不上任何輸出。
+    let renv = dir.appendingPathComponent("renv.sh")
+    try "readonly QF_CONTENT='ZQXJ-PRESET'; unset BASH_ENV\n".write(to: renv, atomically: true, encoding: .utf8)
+    let ro = try runScript(queries: queries, stub: stub, extraEnv: ["BASH_ENV": renv.path])
+    #expect(ro.status == 70 && ro.stdout.isEmpty && !ro.combined.contains("ZQXJ"), Comment(rawValue: "readonly QF_CONTENT: rc=\(ro.status) out=\(ro.stdout) err=\(ro.stderr)"))
     // allexport（R10；放在三條 xtrace 之後——makeStub 會覆寫同一目錄的 ltm stub）：`BASH_ENV` 裡一行 `set -a` 會把裝著整份查詢集的變數匯出給每個子行程——腳本第一行要連它一起關。
     // ltm stub 是 bash：`${QF_CONTENT+leaked}` 在它的環境裡看得到那個變數就展開成 leaked。
     let aenv = dir.appendingPathComponent("aenv.sh")
@@ -934,20 +971,25 @@ func measureBaselineIsolatesChildProcessStdio() throws {
     #expect(fd3 == "pipe", Comment(rawValue: "指紋 python 的 fd 3 不是管線：\(fd3)"))
 }
 
-@Test("measure-baseline.sh：查詢檔預設在腳本旁——裸名經 PATH 呼叫時解到腳本目錄而不是 cwd 的誘餌；相對路徑呼叫在 CDPATH 下照常；cwd 有同名腳本時照 bash 的順序用 cwd")
+@Test("measure-baseline.sh：查詢檔預設在腳本旁——裸名經 PATH 呼叫時解到腳本目錄而不是 cwd 的誘餌；相對路徑呼叫在 CDPATH 下照常；cwd 與 PATH 都有同名腳本時用 cwd；PATH 上 644 的複本排在 755 之前時用 644 那份（bash 取第一個可讀的，不是第一個可執行的）")
 func measureBaselineResolvesItsOwnDirectoryLikeBashDoes() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
     let stub = try makeStub(in: dir, responses: [:])
-    // A：腳本的複本＋旁邊兩條合成查詢；B：別的 cwd，放一條同名誘餌。都不碰真查詢檔。
-    let a = dir.appendingPathComponent("a"), b = dir.appendingPathComponent("b")
-    try FileManager.default.createDirectory(at: a, withIntermediateDirectories: true)
-    try FileManager.default.createDirectory(at: b, withIntermediateDirectories: true)
-    let scriptCopy = a.appendingPathComponent("measure-baseline.sh")
-    try FileManager.default.copyItem(at: repoRoot().appendingPathComponent("scripts/measure-baseline.sh"), to: scriptCopy)
-    let real = "ZQXJ-REAL-ONE\nZQXJ-REAL-TWO\n", decoy = "ZQXJ-DECOY\n"
+    // A：腳本的複本＋旁邊兩條合成查詢；B：別的 cwd，放一條同名誘餌；C：cwd 也有一份腳本複本＋自己的查詢檔；
+    // N：一份 644（不可執行）的複本＋自己的查詢檔。都不碰真查詢檔。每一臂都比指紋——指紋是身分，列數只是巧合（R13：第三臂曾只比列數）。
+    let a = dir.appendingPathComponent("a"), b = dir.appendingPathComponent("b"), c = dir.appendingPathComponent("c"), n = dir.appendingPathComponent("n")
+    for d in [a, b, c, n] { try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true) }
+    let source = repoRoot().appendingPathComponent("scripts/measure-baseline.sh")
+    try FileManager.default.copyItem(at: source, to: a.appendingPathComponent("measure-baseline.sh"))
+    try FileManager.default.copyItem(at: source, to: c.appendingPathComponent("measure-baseline.sh"))
+    try FileManager.default.copyItem(at: source, to: n.appendingPathComponent("measure-baseline.sh"))
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: n.appendingPathComponent("measure-baseline.sh").path)
+    let real = "ZQXJ-REAL-ONE\nZQXJ-REAL-TWO\n", decoy = "ZQXJ-DECOY\n", inCwd = "ZQXJ-CWD-ONE\nZQXJ-CWD-TWO\nZQXJ-CWD-THREE\n", nonExec = "ZQXJ-NOEXEC-ONE\n"
     try real.write(to: a.appendingPathComponent("baseline-queries.txt"), atomically: true, encoding: .utf8)
     try decoy.write(to: b.appendingPathComponent("baseline-queries.txt"), atomically: true, encoding: .utf8)
+    try inCwd.write(to: c.appendingPathComponent("baseline-queries.txt"), atomically: true, encoding: .utf8)
+    try nonExec.write(to: n.appendingPathComponent("baseline-queries.txt"), atomically: true, encoding: .utf8)
     let unused = dir.appendingPathComponent("unused.txt")   // runScript 要一個 queries URL；這裡把 LTM_BASELINE_QUERIES 拿掉讓預設值生效
     // 1. 裸名、cwd=B、PATH 前綴 A：R11 版量到 B 的誘餌（1 列、指紋是誘餌的）；現在必須是 A 的兩條。
     let viaPath = try runScript(queries: unused, stub: stub, pathPrefix: a.path, unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "measure-baseline.sh", cwd: b)
@@ -955,7 +997,15 @@ func measureBaselineResolvesItsOwnDirectoryLikeBashDoes() throws {
     // 2. 相對路徑呼叫＋export CDPATH=.：`cd` 不得把路徑印進命令替換（R12：印了就變兩行路徑 → 66）。
     let rel = try runScript(queries: unused, stub: stub, extraEnv: ["CDPATH": "."], unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "a/measure-baseline.sh", cwd: dir)
     #expect(rel.status == 0 && rel.rows.count == 2 && rel.setLine == setLine(real), Comment(rawValue: "relative+CDPATH: rc=\(rel.status) \(rel.stdout) err=\(rel.stderr)"))
-    // 3. 裸名、cwd=A（bash 先在 cwd 找到腳本）：用 A。
+    // 3. 裸名、cwd=A、PATH 上沒有：bash 在 cwd 找到腳本 → 用 A。
     let inPlace = try runScript(queries: unused, stub: stub, unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "measure-baseline.sh", cwd: a)
-    #expect(inPlace.status == 0 && inPlace.rows.count == 2, Comment(rawValue: "in place: rc=\(inPlace.status) \(inPlace.stdout)"))
+    #expect(inPlace.status == 0 && inPlace.rows.count == 2 && inPlace.setLine == setLine(real), Comment(rawValue: "in place: rc=\(inPlace.status) \(inPlace.stdout)"))
+    // 4. 裸名、cwd=C、PATH 前綴 A，**兩邊都有**腳本：bash 先看 cwd → 跑的是 C 那份 → 指紋必須是 C 的三條，不是 A 的兩條。
+    //    前三臂都問不到「誰優先」（把 cwd 與 PATH 的順序反過來寫，三臂逐字同輸出，R13）；這一臂才問。
+    let cwdWins = try runScript(queries: unused, stub: stub, pathPrefix: a.path, unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "measure-baseline.sh", cwd: c)
+    #expect(cwdWins.status == 0 && cwdWins.rows.count == 3 && cwdWins.setLine == setLine(inCwd), Comment(rawValue: "cwd over PATH: rc=\(cwdWins.status) \(cwdWins.stdout)"))
+    // 5. 裸名、cwd=B、PATH 前綴 N:A，N 那份 644：bash 沿 PATH 取第一個**可讀**的 → 跑的是 N 那份 → 指紋必須是 N 的一條。
+    //    R12 版用 `command -v`，它偏好可執行檔、會回 A → 量到 A 的兩條而 rc 0（R13 實測，bash 3.2.57 與 5.3.15 同）。
+    let readableFirst = try runScript(queries: unused, stub: stub, pathPrefix: n.path + ":" + a.path, unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "measure-baseline.sh", cwd: b)
+    #expect(readableFirst.status == 0 && readableFirst.rows.count == 1 && readableFirst.setLine == setLine(nonExec), Comment(rawValue: "readable before executable: rc=\(readableFirst.status) \(readableFirst.stdout) err=\(readableFirst.stderr)"))
 }
