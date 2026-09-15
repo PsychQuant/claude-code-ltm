@@ -5,43 +5,55 @@
 # verdict 全是「前 k 名」的性質，k 不同也不可比；紀錄要連這一行一起引，兩次量測這一行不同就不能逐列對齊，
 # `#N` 只是檔內位置），之後每列 `#N <ms>ms <verdict>`**（例如
 # `#3 812ms clean tool=1`；`<ms>` 是整數毫秒，後面緊接字面 `ms`）。
-# 查詢文字、命中內容與密鑰不進 stdout／stderr，包含呼叫端 shell 的環境帶進來的任何東西——`bash -x`、`SHELLOPTS`（xtrace、
-# allexport、errexit…）、`BASH_ENV`（裡面的 `set -x`／`set -a`／`set -e`、readonly、同名函式、DEBUG trap）、`export -f` 匯出的
-# 函式、`PS4`、已 export 的 `QF_CONTENT`、`PYTHONPATH`。關法是**性質不是清單**——前三行程式碼：
-#   1. `builtin trap - DEBUG ERR RETURN EXIT`（trap 會在下一個命令前重開 xtrace，R15）；
-#   2. `builtin set +x`（讓第三行與 fd 3 那個子 shell 不被 trace——密鑰在那裡展開）；
-#   3. `{ builtin exec -c /usr/bin/env PATH=… LTM_MB_CLEAN=$$ /bin/bash -- "$0" "$@"; } 3< <(白名單)`：以**空環境**重新啟動自己，
-#      argv 上只有 PATH、HOME（re-exec 出來的 bash 要用它展開 PATH 裡的 `~`才找得到 `$0`）與哨兵；白名單裡有設的變數以 NUL 分隔
-#      的 `NAME=VALUE` 走**繼承的 fd 3**進來（值不經任何行程的 argv——
-#      R14 版把密鑰寫成 `env` 的 argv，execve 稽核會永久記下它，R15），re-exec 出來的自己從 fd 3 讀回、export、關掉。
-#   哨兵的值是 `$$`（exec 不換 PID）：別的 PID 留下的 `LTM_MB_CLEAN`（profile 裡殘留的 export、上一次的環境）一律當未設、照常
-#   re-exec；R14 版的固定值 `1` 讓任何預設都走裸身路徑（readonly `SETID` 偽造指紋 rc 0，R15）。
-#   白名單（同步測試釘三邊相等：這段散文、fd 3 那個 for 迴圈、`Sources/` 裡 `environment["…"]` 讀的每一個名字）：HOME、LC_ALL、
-#   LANG、TMPDIR、LTM_BIN、LTM_BASELINE_QUERIES、以及 ltm 自己讀的 CLAUDE_CONFIG_DIR、LTM_ANCHOR_KEY、LTM_ANCHOR_KEY_SERVICE、
-#   LTM_BUILD_BATCH_CHUNKS、LTM_BUILD_MEMORY_BUDGET_MB、LTM_CORPUS_ROOT、LTM_DERIVED_ROOT、LTM_MEMORY_ROOT、
-#   LTM_TEST_CLOCK_STEP_SECONDS（R14 版只傳三個 LTM_*，指向受控索引的量測會靜默量到真索引，R15）。
-#   兩個 python 都以 `-I` 啟動：cwd 不進 `sys.path`（cwd 放一支 `hashlib.py` 就能整份接走查詢集並回一個合形狀的假指紋，R15）、
-#   PYTHONPATH／user site 也不進——`-I` 含 `-E`，所以刻意**不**轉發 `PYTHONUTF8`／`PYTHONCOERCECLOCALE`：隔離與解碼旗標二選一。
-#   R13 對這一族是逐名字修（`builtin read`、`builtin printf`、`builtin unset`、`set +e`、readonly 只查 `QF_CONTENT`），R14 一輪
-#   再冒五個同名（`set`、`local`、`[`、`readonly SETID`、`readonly bad`）——列舉會漏，判準不會（R14）。
+# 查詢文字、命中內容與密鑰不進 stdout／stderr。**威脅模型是一條性質，不是清單**（R14 寫成總括判準、R15 寫成封閉六項，兩者
+# 都在第一個未列的成員上為假，R16）：
+#   關得掉的是**經繼承進來的狀態**——`SHELLOPTS`（xtrace／allexport／errexit…）、已 export 的變數（`QF_CONTENT`、`PYTHONPATH`、
+#   `PS4`…）、`export -f` 匯出的函式，以及 `BASH_ENV` 裡**意外**留下的東西（`set -x`／`-a`／`-e`、readonly、同名函式、DEBUG trap）
+#   ——因為前四行程式碼讓量測本體跑在一個重新啟動、環境只含白名單的 shell 裡，而那個 shell 不再 source `BASH_ENV`。
+#   關不掉的是**在第一行之前就在本行程執行程式碼**的機制——非互動 bash 只有一個：`BASH_ENV`。它能做的事沒有上界：`cat` 查詢檔
+#   上 stdout、`enable -n builtin` 廢掉前四行、`LTM_MB_CLEAN=$$` 跳過 re-exec、定義叫 `builtin` 的函式或 alias、`trap … DEBUG`
+#   在第一行前先跑一次。這一整類不在防禦內，也不再逐項列（列一項就漏一項：R15 列了六項，R16 三個讀者各拿一個未列的
+#   成員證偽）。查法：`BASH_ENV=<任何一行> scripts/measure-baseline.sh`——那一行在腳本第一行之前執行。
+#   同一條線的另一側：呼叫端算得出的東西擋不了偽造。哨兵 `LTM_MB_CLEAN` 的值是 `$$`，它擋的是**殘留**（profile 裡的 export、
+#   上一次的環境、別的 PID）不是**偽造**——任何在 execve 前知道子行程 PID 的父行程（`bash -c '單一命令'` 不 fork、任何語言的
+#   fork+exec）都對得上；對上之後 fd 3 沒有頭標記 → 70（R16：R15 版走裸身、rc 0）。PID 重用時殘留值也會撞上，同樣落到 70。
+# 前四行程式碼：
+#   1. `LTM_MB_WHITELIST="…"`：白名單的唯一一份，寫端與讀端共用（同步測試釘它與這段散文、與 `Sources/` 裡 `environment["…"]`
+#      讀的每一個名字互相釘住：散文＝變數；Sources ⊆ 變數；變數 − Sources ＝ 腳本自己用的五個）。
+#   2. `builtin trap - DEBUG ERR RETURN EXIT`（trap 會在下一個命令前重開 xtrace，R15）；
+#   3. `builtin set +x`（讓第四行與 fd 3 那個子 shell 不被 trace——密鑰在那裡展開）；
+#   4. `builtin exec -c /usr/bin/env PATH=… HOME=… LTM_MB_CLEAN=$$ /bin/bash -- "$0" "$@" 3< <(白名單) || exit 70`：以**空環境**
+#      重新啟動自己。argv 上只有 PATH、HOME（re-exec 出來的 bash 要用它展開 PATH 裡的 `~` 才找得到 `$0`）與哨兵；白名單裡有設的
+#      變數以 NUL 分隔的 `NAME=VALUE` 走**繼承的 fd 3**（值不經任何行程的 argv——R14 版把密鑰寫成 `env` 的 argv，execve
+#      稽核會永久記下它，R15）。fd 3 有 framing（R16：R15 版沒有抵達檢查，串流空掉就靜默量到真索引）：第一筆 `LTM_MB_FD3=$$`、
+#      最後一筆 `LTM_MB_END=1`，讀端頭尾都要看到、名字要在白名單內、否則 70；重導本身失敗 → `|| exit 70`（bash 對重導失敗
+#      只印一行、不執行那個命令、然後繼續——沒有這個 `||` 腳本會以裸身跑完，R16；這一句無臂：重導失敗本機重現不出來，只有拼法 pin）。
+#   白名單：HOME、LC_ALL、LANG、TMPDIR、LTM_BIN、LTM_BASELINE_QUERIES、以及 ltm 自己讀的 CLAUDE_CONFIG_DIR、LTM_ANCHOR_KEY、
+#   LTM_ANCHOR_KEY_SERVICE、LTM_BUILD_BATCH_CHUNKS、LTM_BUILD_MEMORY_BUDGET_MB、LTM_CORPUS_ROOT、LTM_DERIVED_ROOT、LTM_MEMORY_ROOT、
+#   LTM_TEST_CLOCK_STEP_SECONDS（R14 版只傳三個 LTM_*，指向受控索引的量測會靜默量到真索引，R15）。白名單裡的東西**原樣轉發**：
+#   呼叫端殘留的 `LTM_DERIVED_ROOT` 會讓這一輪量到別棵索引而指紋不變（指紋只認查詢集）、rc 0；`LTM_ANCHOR_KEY` 值錯 → 事件全
+#   orphan 而 rc 0（.claude/rules/anchor-key-in-probes.md）；PATH 上的 python3 被換掉 → 查詢集上該行程的 stdout；`/usr/bin/env` 不在
+#   → 126。這幾條各有各的訊號或沒有訊號，寫在這裡不是為了封閉，是因為它們是白名單這個機制本身的另一面。
+#   兩個 python 都以 `-I -S` 啟動：cwd 不進 `sys.path`（cwd 放一支 `hashlib.py` 就能整份接走查詢集並回一個合形狀的假指紋、放一支
+#   `json.py` 就能改掉每一列 verdict，R15／R16）、PYTHONPATH／user site 不進（`-I`）、解譯器自己的 site-packages 與 `.pth`／
+#   `sitecustomize` 也不進（`-S`，R16；這一層沒有臂——要驅動得改系統的 site）；`-I` 含 `-E`，所以刻意不轉發任何 `PYTHON*`。
+#   R13 曾對這一族逐名字修（`builtin read`／`builtin printf`／`builtin unset`、`set +e`、readonly 只查 `QF_CONTENT`），R14 一輪
+#   再冒五個同名（`set`、`local`、`[`、`readonly SETID`、`readonly bad`）——列舉會漏，判準不會；那些拼法在 re-exec 之後驅動不了，
+#   R14 已拆（今天全檔沒有 `builtin read`）。
 # 判準（re-exec 之後）是「每一個拿得到查詢內容的子行程，它的 stderr 都不是可能載內容的通道」：指紋 python、judge python、
-# ltm 的 stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null；兩個 process substitution 的子 shell 只跑 builtin `printf`，
-# 運算元不會上 stderr。
-# 擋不住的——**封閉列舉，只有這六項，各附後果；不得依性質相似類推第七項**（R14 版給了一句總括判準，R15 抓到它把已防禦與已放棄
-# 判成同一格、還涵蓋不了自己列的第五項）：
-#   (a) `BASH_ENV`／`PS4` 裡刻意放一個會讀查詢檔的命令替換：trace 第一、二行時 PS4 先展開 → 查詢檔內容上 stderr。
-#   (b) 一個叫 `builtin` 的函式或 alias：前三行全部失效，腳本在呼叫端的 shell 裡裸跑 → 後果同 R13 前（readonly 偽造指紋、
-#       allexport 外洩、同名 read 印檔）。
-#   (c) 從自己的 shell `LTM_MB_CLEAN=$$ exec measure-baseline.sh`（exec 保 PID 才對得上哨兵）：同 (b)。
-#   (d) `SHELLOPTS=noexec`（一行都不跑）／`onecmd`（跑完第一行就走）：零輸出、rc 0 → 離開碼 0 的意義是「0 **且** stdout 第一行
-#       是 set 行」，紀錄本來就要連那一行一起抄。
-#   (e) 白名單本身傳進去的東西：PATH 上的 python3 被換成會印檔案的東西 → 查詢集上該行程的 stdout；`/usr/bin/env` 不在 →
-#       126（bash 自己的碼，不在下方集合裡）。
-#   (f) 在 re-exec 之前就改變且會跨 exec 保留的行程狀態：cwd、umask、rlimit、關掉或重導的 fd、信號處置——`env -i` 只清
-#       環境，不復原這些；後果各異（cwd 改了會讓相對 `$0` 解到別處 → 66；stderr 關掉會讓診斷消失）。
-# 另外，查詢原文在執行期會在 python3 與 ltm 的 argv 上（CLI 的查詢就是位置參數、`--` 終止符用得對），同一帳號的行程
+# ltm 的 stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null，judge 對 ltm 明寫 `close_fds=True`；兩個 process substitution 的
+# 子 shell 只跑 builtin `printf`，運算元不會上 stderr。繼承的描述子：fd 3 讀完就關；process substitution 自己的讀端（bash 3.2 配
+# 63，關不掉）會被兩個 python 繼承——白名單的寫端寫完即退出、讀端讀到 EOF 才離開迴圈，所以任何 python 起跑時那個描述子已在
+# EOF（R16 實測 `os.read` 回空）；它是衛生問題不是通道，寫在這裡是讓下一個把寫端換成長命行程的人知道它會變成通道。
+# 跨 exec 保留、白名單清不掉的行程狀態：cwd（後果由 `-I -S` 關掉）、umask、rlimit（`nofile` 極低時 fd 3 的重導失敗 → 70；
+# 再低一點 bash 自己在第一行前就死，rc 1 零列，撞「任一列 error」的號——R16 實測，門檻隨呼叫端已開的 fd 數移動，不寫數字）、
+# 關掉或重導的 fd（stderr 關掉 → 診斷消失）、信號處置。`SHELLOPTS=noexec`（一行都不跑）／`onecmd`（跑完第一行就走）：零輸出、
+# rc 0 → 離開碼 0 的意義是「0 **且** stdout 第一行是 set 行」，紀錄本來就要連那一行一起抄。
+# 作業系統的可見面：查詢原文在執行期會在 python3 與 ltm 的 argv 上（CLI 的查詢就是位置參數、`--` 終止符用得對），同一帳號的行程
 # `ps -ww` 看得到（Linux 上 `/proc/<pid>/cmdline` 預設任何帳號可讀；容器 PID namespace、hidepid 下更窄）、存活時間是那一列的
-# wall clock——那是作業系統的可見面不是本腳本的輸出通道；密鑰**不在**任何 argv 上（R15）；寫在這裡是因為上一句是全稱。
+# wall clock；密鑰不在任何 argv 上（R15，execve 稽核不再記下它），但它在 re-exec 的 bash、每個 judge 與 ltm 的**環境**裡，存活
+# 時間是整個 run，同帳號 `ps -E`／`/proc/<pid>/environ` 看得到——那正是 anchor-key-in-probes.md 要它待的地方。這些都不是本腳本的
+# 輸出通道；寫在這裡是因為第一句是全稱。
 # `$0` 同時是 re-exec 的目標：腳本餵 stdin（`bash -s < measure-baseline.sh`）時 `$0` 是 `/bin/bash`，re-exec 會拿它當腳本跑 →
 # 126；不支援。呼叫端用哪個 bash 都會被換成 `/bin/bash`（shebang 本來就是它）。
 # 指紋揭露什麼：見 docs/measurements/README.md 的量測段（單一版本，這裡不複述——R8 抓到兩份漂移、R12 抓到這裡又複述了一半）。
@@ -91,7 +103,8 @@
 #   0 全部量到（含 empty；消費端要同時看到 set 行——見上方 (d)）；1 任一列 error(…)（每列照印完才離開）；
 #   64 k 不是 1–1000 的整數、或給了超過一個引數（舊習慣把查詢放第二個參數時，字串已進 metadata，這次不算量到，R14）；
 #   65 查詢檔沒有任何非註解行；66 查詢檔不是可讀的一般檔案、讀不了、含 NUL、或讀取中斷；69 ltm 不是可執行的一般檔案；
-#   70 沒有 python3、或算不出查詢集指紋。在 set 行印出**之後**才判定的有兩個：1（有列）與 65（無列）；其餘 stdout 都是空的。
+#   70 沒有 python3、算不出查詢集指紋、或白名單沒有完整經 fd 3 到達（R16）。在 set 行印出**之後**才判定的有兩個：1（有列）與
+#   65（無列）；其餘 stdout 都是空的。
 #
 # 「第 N 條非註解行」：去掉行首行尾的 **ASCII** 空白（空格、tab、CR、VT、FF；`read` 已吃掉 LF；刻意不用
 # [:space:]，它隨 locale 變、Swift 的不變）之後，空行與 `#` 開頭的行不算。全形空白（U+3000）與 NBSP 不是
@@ -102,11 +115,23 @@
 #   LTM_BIN（預設 ~/bin/ltm）、LTM_BASELINE_QUERIES（預設本腳本旁的 baseline-queries.txt——「本腳本旁」照 bash 找腳本
 #   運算元的順序解：`$0` 含斜線取其目錄；裸名先看 cwd、再沿 PATH 取第一個可讀的檔案）——兩者明確給空字串是錯（66／69），
 #   不是「用預設」（R14；k 同，R10）、k 1–1000（預設 5）。密鑰請用命令替換直接餵進環境，不要落地（.claude/rules/anchor-key-in-probes.md）。
+LTM_MB_WHITELIST="HOME LC_ALL LANG TMPDIR LTM_BIN LTM_BASELINE_QUERIES CLAUDE_CONFIG_DIR LTM_ANCHOR_KEY LTM_ANCHOR_KEY_SERVICE LTM_BUILD_BATCH_CHUNKS LTM_BUILD_MEMORY_BUDGET_MB LTM_CORPUS_ROOT LTM_DERIVED_ROOT LTM_MEMORY_ROOT LTM_TEST_CLOCK_STEP_SECONDS"
 builtin trap - DEBUG ERR RETURN EXIT
 builtin set +x
 case "${LTM_MB_CLEAN-}" in
-    "$$") while IFS= read -r -d '' kv <&3; do export "$kv"; done 2>/dev/null; exec 3<&-; unset LTM_MB_CLEAN kv ;;
-    *) { builtin exec -c /usr/bin/env "PATH=${PATH-}" ${HOME+"HOME=$HOME"} "LTM_MB_CLEAN=$$" /bin/bash -- "$0" "$@"; } 3< <(for v in HOME LC_ALL LANG TMPDIR LTM_BIN LTM_BASELINE_QUERIES CLAUDE_CONFIG_DIR LTM_ANCHOR_KEY LTM_ANCHOR_KEY_SERVICE LTM_BUILD_BATCH_CHUNKS LTM_BUILD_MEMORY_BUDGET_MB LTM_CORPUS_ROOT LTM_DERIVED_ROOT LTM_MEMORY_ROOT LTM_TEST_CLOCK_STEP_SECONDS; do if [[ -n "${!v+set}" ]]; then builtin printf '%s=%s\0' "$v" "${!v}"; fi; done) ;;
+    "$$")
+        { IFS= read -r -d '' kv && [ "$kv" = "LTM_MB_FD3=$$" ]; } 2>/dev/null <&3 || { echo "白名單沒有經 fd 3 到達（頭標記缺）" >&2; exit 70; }
+        mb_end=0
+        while IFS= read -r -d '' kv <&3 2>/dev/null; do
+            case "$kv" in
+                LTM_MB_END=1) mb_end=1; break ;;
+                *=*) case " $LTM_MB_WHITELIST " in *" ${kv%%=*} "*) export "$kv" ;; *) echo "白名單外的名字經 fd 3 到達" >&2; exit 70 ;; esac ;;
+                *) echo "fd 3 上的記錄不是 NAME=VALUE" >&2; exit 70 ;;
+            esac
+        done
+        [ "$mb_end" = 1 ] || { echo "白名單沒有完整經 fd 3 到達（尾標記缺）" >&2; exit 70; }
+        exec 3<&-; unset LTM_MB_CLEAN kv mb_end ;;
+    *) builtin exec -c /usr/bin/env "PATH=${PATH-}" ${HOME+"HOME=$HOME"} "LTM_MB_CLEAN=$$" /bin/bash -- "$0" "$@" 3< <(builtin printf '%s\0' "LTM_MB_FD3=$$"; for v in $LTM_MB_WHITELIST; do if [[ -n "${!v+set}" ]]; then builtin printf '%s=%s\0' "$v" "${!v}"; fi; done; builtin printf '%s\0' LTM_MB_END=1) || exit 70 ;;
 esac
 set -u
 # 自己的目錄：仿 bash 找腳本運算元的順序——`$0` 含斜線就是那個目錄（尾端補 `/` 讓 `/x.sh` 解到根目錄——這一臂沒有測試，複本放不進
@@ -174,7 +199,7 @@ case "$rc" in 1) ;; 0) echo "查詢檔含 NUL：$QF" >&2; exit 66 ;; *) echo "�
 # 內容經 process substitution 的管線給 fd 3（不上命令列、不進環境、不落地——herestring 在 bash 3.2 會寫 $TMPDIR
 # 暫存檔，R9），留在 python 行程裡，不上 stdout；stderr 也丟掉——它是唯一整份讀進查詢集的行程，
 # 檔頭那句「不進 stdout／stderr」的全稱曾漏了它（R7）。
-SETID=$(python3 -I - 3< <(printf '%s' "$QF_CONTENT") 2>/dev/null <<'PY'
+SETID=$(python3 -I -S - 3< <(printf '%s' "$QF_CONTENT") 2>/dev/null <<'PY'
 import hashlib, sys
 ws = " \t\r\v\f"
 h = hashlib.sha256()
@@ -225,7 +250,7 @@ if not q:
 t0 = time.monotonic_ns()
 try:
     p = subprocess.run([ltm, "query", "--all-projects", "--k", k, "--json", "--", raw],
-                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, close_fds=True)
 except OSError:
     print("0 error(exec)"); sys.exit(0)
 ms = (time.monotonic_ns() - t0) // 1_000_000
@@ -282,7 +307,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     line="${line%"${line##*[!$ws]}"}"
     case "$line" in ''|\#*) continue ;; esac
     n=$((n + 1))
-    row=$(python3 -I -c "$RUN" "$LTM" "$K" "$line" </dev/null 2>/dev/null) || row=""
+    row=$(python3 -I -S -c "$RUN" "$LTM" "$K" "$line" </dev/null 2>/dev/null) || row=""
     valid_row "$row" || row="0 error(judge)"
     case "${row#* }" in "$E_OPEN"*) bad=$((bad + 1)) ;; esac
     printf '#%d %sms %s\n' "$n" "${row%% *}" "${row#* }"

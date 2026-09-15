@@ -88,8 +88,9 @@
   CHANGELOG 含 `clean|self|empty`、README 寫的每條純量上限與目前條數（對照測試常數與真檔）、截斷長度
   （`toolMetadataFieldLimit`：查詢檔檔頭、README 與腳本檔頭的每一個「N 字元」）、指到查詢檔的三種拼法（識別碼
   `$QF`、檔名字面、環境變數名）各自的出現次數——那是拼法列舉、**不是**「只開一次」的證明，先把路徑存進第四個名字再開
-  它看不到（R13）——以及 process substitution 餵指紋與迴圈、腳本前兩行就是 `builtin set +x` 與 re-exec 那一行（R14）、
-  字元守衛不用任何 `[X-Y]` range。這份清單是**摘要**，會漂移；權威是查法：讀那條測試的每一個 `#expect`——不在那裡的
+  它看不到（R13）——以及 process substitution 餵指紋與迴圈、腳本前四行是白名單變數／trap 清除／`builtin set +x`／re-exec 的
+  `case`（R14–R16）、白名單三邊互相釘住（變數＝檔頭散文、Sources 的 `environment["…"]` 讀取點 ⊆ 變數、Sources 不得有別的讀法）、
+  `.gitattributes` 對兩個查詢檔的 `diff` 屬性經 `git check-attr` 是 `unset`、字元守衛不用任何 `[X-Y]` range。這份清單是**摘要**，會漂移；權威是查法：讀那條測試的每一個 `#expect`——不在那裡的
   複述就沒有機制守著。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。離開碼 0 的意義是「0 **且**
   stdout 第一行是 set 行」——`SHELLOPTS=noexec` 這類讓腳本一行都不跑的選項會給零輸出、rc 0（腳本檔頭的擋不住段，R14）。
   `blank` 是那一行在 Unicode 空白摺疊後是空的（只有 U+3000 這類非 ASCII 空白）——行定義把它算成條目、
@@ -158,22 +159,23 @@
 ### 它擋不住什麼（誠實寫下；這一節必然不完整——它列的是想到的，不是全部）
 
 - 人手在 session 裡貼了查詢原文，或 Claude 自己引述了、`git blame` 了——規則靠人守，沒有機制擋
-  （`-diff` 屬性只擋 diff 生成這一條路，見上）。同類是腳本檔頭「擋不住的」那份**封閉列舉**（六項，各附後果，不得類推第七項；
-  這裡不複述——R14 把它寫成一句總括判準、R15 抓到判準涵蓋不了自己列的第五項、還與本節下一條互相矛盾）：PS4／BASH_ENV
-  的命令替換、叫 `builtin` 的函式或 alias、從自己的 shell 以 `exec` 對上哨兵、noexec／onecmd、白名單傳進去的 PATH 上的
-  python3、re-exec 之前就改變且跨 exec 保留的行程狀態。
+  （`-diff` 屬性只擋 diff 生成這一條路，見上）。同類是**在腳本第一行之前就能在本行程執行程式碼**的機制——非互動 bash 只有
+  `BASH_ENV`，它能做的事沒有上界（`cat` 查詢檔、廢掉前四行、偽造哨兵…）；這一整類不在防禦內，腳本檔頭把它寫成一條性質
+  加查法，這裡**不複述、不列項**（R14 寫成總括判準、R15 寫成封閉六項，兩者都在第一個未列的成員上為假，R16）。
 - 語料裡本來就有恰好逐字含該字串的**實質** turn（例如退役查詢裡的「資格考」有一則真的使用者 turn）——
   那不是污染，是正常召回；`self` 會把它標成 self，分不出來，讀結果時要在 session 之外看命中。
   反過來，空白與大小寫以外的改寫（全形／半形、標點、換序）`self` 看不到。
 - 查詢原文在執行期在 `python3` 與 `ltm` 的 argv 上（CLI 的查詢就是位置參數），同一帳號的行程 `ps -ww`
   看得到（容器 PID namespace、Linux `hidepid` 下更窄），存活時間是那一列的 wall clock——這是作業系統的
   可見面，不是本腳本的輸出通道；密鑰不在任何 argv 上（R14 版把它寫成 `env` 的 argv、execve 稽核會永久記下，R15 改走繼承的
-  fd 3）；列在這裡是因為上一節的第一句是全稱。對照：呼叫端 shell 的環境**透過繼承生效**的那一面（`SHELLOPTS`、`BASH_ENV`
-  帶進來的 `set -x`／`set -a`／readonly／同名函式／DEBUG trap、`export -f`、已 export 的 `QF_CONTENT`、`PYTHONPATH`）**不在**
-  擋不住之列——腳本第三行以空環境加白名單重新啟動自己，那些一次全掉；同一個名字用在 re-exec **之前**（`PS4` 作為 trace 前綴
-  展開、`BASH_ENV` 定義一個叫 `builtin` 的函式）仍在上一條的列舉裡。白名單的內容由同步測試釘到 `Sources/` 讀環境變數的每一個
-  名字（R14 版漏了 ltm 自己的 `LTM_DERIVED_ROOT` 這類，指向受控索引的量測會靜默量到真索引，R15）。R10–R13 對這一族
-  是逐名字關（`set +a`、`unset`、`builtin read`、readonly 只查一個名字），每輪再冒同名的下一個——R14 換成性質。
+  fd 3；但它在 re-exec 的 bash、judge 與 ltm 的**環境**裡整個 run，同帳號 `ps -E` 看得到——那正是密鑰該待的地方）；列在這裡是
+  因為上一節的第一句是全稱。對照：呼叫端 shell 的環境**經繼承進來**的那一面（`SHELLOPTS`、已 export 的變數與函式、以及
+  `BASH_ENV` 裡**意外**留下的 `set -x`／`set -a`／readonly／同名函式／DEBUG trap）**不在**擋不住之列——腳本以空環境加白名單
+  重新啟動自己，那些一次全掉；`BASH_ENV` 裡**刻意**放的程式碼是上一條那一類。白名單的內容由同步測試釘到 `Sources/` 裡
+  `environment["…"]` 讀取點的每一個名字（拼法，另有一條斷言擋別的讀法；R14 版漏了 ltm 自己的 `LTM_DERIVED_ROOT` 這類，指向
+  受控索引的量測會靜默量到真索引，R15）；白名單經 fd 3 到達要有頭尾標記，否則 70（R16：R15 版沒到就靜默量真索引）。哨兵
+  `LTM_MB_CLEAN=$$` 擋的是殘留不是偽造（任何知道子行程 PID 的父行程都對得上，R16）。R10–R13 對這一族是逐名字關（`set +a`、
+  `unset`、`builtin read`、readonly 只查一個名字），每輪再冒同名的下一個——R14 換成性質。
   **可比性**：`a1ec5ac`（R14）起 ltm 是在白名單環境下被量的（R14 那一版連 `TMPDIR` 都丟掉，SQLite 暫存因此換檔案系統；
   R15 起 `TMPDIR` 與 ltm 讀的名字都會到）；在那之前是呼叫端的完整環境。要跨這條線比較 `<ms>`，先把這件事寫進紀錄。
 - 查詢檔本身是一般 tracked blob、**明文在 GitHub 伺服器上**；`-diff` 只擋 diff 生成，規則 1 又禁止 review agent

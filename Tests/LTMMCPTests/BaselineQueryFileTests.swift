@@ -60,7 +60,8 @@ private func isForbiddenScalar(_ s: Unicode.Scalar) -> Bool {
 /// 逐字短句與自行撰寫的短語——這個檔進 remote 卻無任何審閱路徑（`-diff`＋規則 1 的「reviewer 不准讀內容」），
 /// 這條是它唯一的內容約束，所以射程要寫清楚。門檻與現況的查法（只印長度，不印內容；量的單位要與守衛相同——
 /// awk 的 `length` 在 macOS 回的是 bytes，中文差約 3 倍，R9）：
-/// `grep -v '^#' scripts/baseline-queries.txt | python3 -c "import sys; print(max(len(l.strip()) for l in sys.stdin if l.strip()))"`。
+/// `python3 -c "import sys; print(max(len(l.strip()) for l in open(sys.argv[1], encoding='utf-8') if l.strip() and not l.lstrip().startswith('#')))" scripts/baseline-queries.txt`
+/// （單一命令、不可切半——R16：前一版是 `grep -v '^#' … |` 接 python，前半段單獨執行就會把整份查詢集印上 stdout）。
 /// README 寫的同一個數由同步測試對照這個常數。
 private let maxQueryScalars = 64
 
@@ -378,18 +379,20 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // read 1、三句錯誤訊息 3）、檔名字面 `baseline-queries.txt` 1 次（QF 的預設值）、環境變數名 `LTM_BASELINE_QUERIES` 2 次
     // （re-exec 白名單的 for 清單 1 次＋QF 賦值 1 次）；多一次就是多一條路徑或多一處訊息，都要來這裡對帳。它守得住的較窄陳述是「用這三種拼法之一再開一次會紅」；
     // 先把路徑存進第四個名字再開，這裡看不到——要判準版得觀察 open 系統呼叫，不可攜，不做。README 的量測段用同一句話。
-    // 呼叫端 shell 環境那一族（BASH_ENV、SHELLOPTS、匯出函式、readonly、PS4、PYTHONPATH）由前兩行程式碼一次清掉：`builtin set +x`
-    // 再 `builtin exec /usr/bin/env -i <白名單> /bin/bash -- "$0" "$@"`。R13 對這一族逐名字指名 builtin，R14 一輪再冒五個同名
-    // ——那些拼法在 re-exec 之後驅動不了，拆掉；這裡釘的是「前三行就是那三行」（行為由 xtrace 測試的 DEBUG trap、同名函式、假密鑰各臂驅動）。
+    // 呼叫端 shell 環境經繼承進來的那一面由前四行程式碼一次清掉：白名單變數、`builtin trap - …`、`builtin set +x`、re-exec 的 `case`
+    // （細節只有一份，在腳本檔頭；這段註解在 R14／R15 各漂移過一次——R15 版還寫著 R15 自己判 HIGH 的舊寫法，R16）。這裡釘的是
+    // 「前四行就是那四行」；行為由 xtrace 測試的各臂驅動（DEBUG trap、同名函式、假密鑰、偽造哨兵）。
     let codeText = codeLines.map(\.element).joined(separator: "\n")
-    let firstThree = codeLines.prefix(3).map(\.element)
-    #expect(firstThree == ["builtin trap - DEBUG ERR RETURN EXIT", "builtin set +x", "case \"${LTM_MB_CLEAN-}\" in"], Comment(rawValue: "腳本的前三行程式碼必須是 trap 清除、builtin set +x、re-exec 的 case：\(firstThree)"))
-    // 白名單三邊相等（R15：R14 版的白名單一行沒有任何東西釘，刪 LTM_ANCHOR_KEY、加 PYTHONPATH 都全綠；而且漏了 ltm 自己讀的名字）：
-    // (1) re-exec 行 `for v in … ; do` 的名字、(2) 檔頭「白名單（同步測試釘三邊相等…）」那段散文裡的名字、(3) `Sources/` 裡每一個
-    // `environment["NAME"]` 讀取點的名字——(3) ⊆ (1)，(1) − (3) 恰好是腳本自己用的五個（LC_ALL、LANG、TMPDIR、LTM_BIN、LTM_BASELINE_QUERIES）。
-    let reexecLine = codeLines.map(\.element).first { $0.contains("builtin exec -c /usr/bin/env \"PATH=${PATH-}\" ${HOME+\"HOME=$HOME\"} \"LTM_MB_CLEAN=$$\" /bin/bash -- \"$0\" \"$@\"; } 3< <(for v in ") } ?? ""
-    let forList = (matches(#"3< <\(for v in ([A-Z0-9_ ]+); do"#, in: reexecLine).first ?? "").split(separator: " ").map(String.init)
-    let whitelistProse = script.components(separatedBy: "白名單（同步測試釘三邊相等").dropFirst().first?.components(separatedBy: "兩個 python 都以").first ?? ""
+    let firstFour = codeLines.prefix(4).map(\.element)
+    #expect(firstFour.count == 4 && firstFour[0].hasPrefix("LTM_MB_WHITELIST=\"") && Array(firstFour[1...]) == ["builtin trap - DEBUG ERR RETURN EXIT", "builtin set +x", "case \"${LTM_MB_CLEAN-}\" in"], Comment(rawValue: "腳本的前四行程式碼必須是白名單變數、trap 清除、builtin set +x、re-exec 的 case：\(firstFour)"))
+    // 白名單三邊互相釘住（R15：R14 版的白名單一行沒有任何東西釘；R16：寫端讀端共用同一個變數，讀端拒絕名單外的名字）：
+    // (1) 第一行 `LTM_MB_WHITELIST="…"` 的名字、(2) 檔頭「白名單：」那段散文裡的名字、(3) `Sources/` 裡每一個 `environment["NAME"]`
+    // 讀取點的名字——(1)==(2)，(3) ⊆ (1)，(1) − (3) 恰好是腳本自己用的五個（LC_ALL、LANG、TMPDIR、LTM_BIN、LTM_BASELINE_QUERIES）。
+    // (3) 是單一拼法的 grep，所以另一條斷言釘住 Sources 裡不得出現別的讀法（`getenv(`、非字面鍵的 `environment[`）——R16：
+    // 沒有那一條，「Sources 讀環境變數的每一個名字」只是一句比 regex 強的散文。
+    let reexecLine = codeLines.map(\.element).first { $0.contains("builtin exec -c /usr/bin/env \"PATH=${PATH-}\" ${HOME+\"HOME=$HOME\"} \"LTM_MB_CLEAN=$$\" /bin/bash -- \"$0\" \"$@\" 3< <(builtin printf '%s\\0' \"LTM_MB_FD3=$$\"; for v in $LTM_MB_WHITELIST; do") && $0.hasSuffix("LTM_MB_END=1) || exit 70 ;;") } ?? ""
+    let forList = (matches(#"^LTM_MB_WHITELIST=\"([A-Z0-9_ ]+)\"$"#, in: firstFour.first ?? "").first ?? "").split(separator: " ").map(String.init)
+    let whitelistProse = script.components(separatedBy: "#   白名單：").dropFirst().first?.components(separatedBy: "白名單裡的東西**原樣轉發**").first ?? ""
     let proseNames = Set(matches(#"\b([A-Z][A-Z0-9_]{2,})\b"#, in: whitelistProse).filter { !$0.hasPrefix("R1") && !$0.hasSuffix("_") })
     var sourceNames = Set<String>()
     if let walker = FileManager.default.enumerator(at: root.appendingPathComponent("Sources"), includingPropertiesForKeys: nil) {
@@ -397,7 +400,26 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
             if let text = try? String(contentsOf: url, encoding: .utf8) { sourceNames.formUnion(matches(#"environment\["([A-Z0-9_]+)"\]"#, in: text)) }
         }
     }
-    #expect(!reexecLine.isEmpty && Set(forList).count == forList.count && forList.count >= 6, Comment(rawValue: "re-exec 行找不到、或 for 清單空／重複：\(forList)"))
+    #expect(!reexecLine.isEmpty && Set(forList).count == forList.count && forList.count >= 6, Comment(rawValue: "re-exec 行找不到（要帶頭標記、for 迴圈讀 $LTM_MB_WHITELIST、尾標記、|| exit 70）、或白名單變數空／重複：\(forList)"))
+    var otherEnvReads: [String] = []
+    if let walker = FileManager.default.enumerator(at: root.appendingPathComponent("Sources"), includingPropertiesForKeys: nil) {
+        for case let url as URL in walker where url.pathExtension == "swift" {
+            if let text = try? String(contentsOf: url, encoding: .utf8) {
+                if text.contains("getenv(") { otherEnvReads.append(url.lastPathComponent + ": getenv(") }
+                otherEnvReads += matches(#"(environment\[[^"\]][^\]]*\])"#, in: text).map { url.lastPathComponent + ": " + $0 }
+            }
+        }
+    }
+    #expect(otherEnvReads.isEmpty, Comment(rawValue: "Sources 裡有 `environment[\"字面名\"]` 以外的環境變數讀法，白名單同步看不到它們：\(otherEnvReads)"))
+    // `.gitattributes` 的 `-diff` 是規則 1 的機制面，之前零測試釘它（R16）：用 git 自己的屬性解析結果，不是解析檔案文字。
+    let checkAttr = Process()
+    checkAttr.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    checkAttr.currentDirectoryURL = root
+    checkAttr.arguments = ["check-attr", "diff", "--", "scripts/baseline-queries.txt", "scripts/rrf-tie-queries.txt"]
+    let attrOut = Pipe(); checkAttr.standardOutput = attrOut; checkAttr.standardError = Pipe()
+    try checkAttr.run(); checkAttr.waitUntilExit()
+    let attrLines = String(data: attrOut.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.split(separator: "\n").map(String.init) ?? []
+    #expect(attrLines == ["scripts/baseline-queries.txt: diff: unset", "scripts/rrf-tie-queries.txt: diff: unset"], Comment(rawValue: "git check-attr：\(attrLines)"))
     #expect(Set(forList) == proseNames, Comment(rawValue: "白名單：for 清單 \(forList.sorted()) ≠ 檔頭散文 \(proseNames.sorted())"))
     #expect(!sourceNames.isEmpty && sourceNames.isSubset(of: Set(forList)), Comment(rawValue: "Sources 讀的環境變數沒全部轉發：缺 \(sourceNames.subtracting(forList).sorted())"))
     #expect(Set(forList).subtracting(sourceNames) == ["LC_ALL", "LANG", "TMPDIR", "LTM_BIN", "LTM_BASELINE_QUERIES"], Comment(rawValue: "白名單裡 Sources 沒讀的名字應恰好是腳本自己用的五個：\(Set(forList).subtracting(sourceNames).sorted())"))
@@ -594,10 +616,16 @@ private func makeStub(in dir: URL, responses: [String: String], exits: [String: 
 private func runScript(queries: URL, stub: URL, k: String = "3", viaBashX: Bool = false,
                        ltmBinOverride: String? = nil, pathOverride: String? = nil, pathPrefix: String? = nil,
                        extraEnv: [String: String] = [:], unsetting: [String] = [],
-                       scriptOverride: URL? = nil, bashOperand: String? = nil, cwd: URL? = nil, extraArgs: [String] = []) throws -> ScriptRun {
+                       scriptOverride: URL? = nil, bashOperand: String? = nil, cwd: URL? = nil, extraArgs: [String] = [],
+                       sentinelForged: Bool = false, forgedFd3Records: String? = nil) throws -> ScriptRun {
     let script = scriptOverride ?? repoRoot().appendingPathComponent("scripts/measure-baseline.sh")
     let process = Process()
-    if let bashOperand {
+    if sentinelForged {
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")   // `bash -c '單一命令'` 不 fork：那個 shell 的 $$ 就是腳本的 PID（R16）
+        // forgedFd3Records：偽造者連 fd 3 也自備——printf 格式，`%s` 是 $$（頭標記要對得上），記錄以 `\\0` 分隔。
+        let fd3 = forgedFd3Records.map { " 3< <(printf '\($0)' \"$$\")" } ?? ""
+        process.arguments = ["-c", "LTM_MB_CLEAN=$$ exec \"$0\" \"$@\"" + fd3, script.path, k] + extraArgs
+    } else if let bashOperand {
         process.executableURL = URL(fileURLWithPath: "/bin/bash")   // `bash <operand>`：$0 就是 operand（裸名時 bash 先看 cwd 再搜 PATH）
         process.arguments = [bashOperand, k] + extraArgs
     } else if viaBashX {
@@ -642,8 +670,8 @@ private func realPython3() -> String {
     return "/usr/bin/python3"
 }
 
-/// 一個 PATH 目錄，只放呼叫端指定的假命令（腳本自 R10 起不再需要 `dirname`，鷹架已拆）。腳本以 `python3 -I …` 呼叫（R15），
-/// 所以判斷 judge／指紋那次呼叫要看 `$1` 或 `$2`。
+/// 一個 PATH 目錄，只放呼叫端指定的假命令（腳本自 R10 起不再需要 `dirname`，鷹架已拆）。腳本以 `python3 -I -S …` 呼叫（R15／R16），
+/// 所以判斷 judge（`-c`）／指紋（`-`）那次呼叫看**第一個非旗標引數**——R15 版看 `$1`／`$2`，加一個旗標就全部穿過；`" $* "` 又會被 judge 原始碼裡的 ` - ` 誤中（R16）。
 /// `judgeFakes` 是假 python3 對 **judge 呼叫**（`python3 -c …`）的行為；其他呼叫（算查詢集指紋的
 /// `python3 - <file>`）轉交真的 python3——要模擬的是 judge 掛掉，不是整個 python 壞掉。
 private func makeBinDir(in dir: URL, judgeFakes: [String: String]) throws -> URL {
@@ -651,7 +679,7 @@ private func makeBinDir(in dir: URL, judgeFakes: [String: String]) throws -> URL
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
     for (name, body) in judgeFakes {
         let f = bin.appendingPathComponent(name)
-        try "#!/bin/bash\nif [ \"$1\" = \"-c\" ] || [ \"$2\" = \"-c\" ]; then\n\(body)\nfi\nexec '\(realPython3())' \"$@\"\n".write(to: f, atomically: true, encoding: .utf8)
+        try "#!/bin/bash\nmode=; for a in \"$@\"; do case \"$a\" in -[ISEP]) ;; *) mode=\"$a\"; break ;; esac; done; if [ \"$mode\" = \"-c\" ]; then\n\(body)\nfi\nexec '\(realPython3())' \"$@\"\n".write(to: f, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
     }
     return bin
@@ -899,7 +927,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     // 指紋算不出來（python3 對 `-` 那一次呼叫掛掉）也是 70，而且一列都不印。
     let fpBroken = dir.appendingPathComponent("bin-fp")
     try FileManager.default.createDirectory(at: fpBroken, withIntermediateDirectories: true)
-    try "#!/bin/bash\nif [ \"$1\" = \"-\" ] || [ \"$2\" = \"-\" ]; then exit 3; fi\nexec '\(realPython3())' \"$@\"\n"
+    try "#!/bin/bash\nmode=; for a in \"$@\"; do case \"$a\" in -[ISEP]) ;; *) mode=\"$a\"; break ;; esac; done; if [ \"$mode\" = \"-\" ]; then exit 3; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: fpBroken.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpBroken.appendingPathComponent("python3").path)
     let fpRun = try runScript(queries: queries, stub: stub, pathOverride: fpBroken.path)
@@ -908,7 +936,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     // A–E 收進去（collation），這條測試就是釘住不能退回 range 寫法。
     let fpUpper = dir.appendingPathComponent("bin-fpu")
     try FileManager.default.createDirectory(at: fpUpper, withIntermediateDirectories: true)
-    try "#!/bin/bash\nif [ \"$1\" = \"-\" ] || [ \"$2\" = \"-\" ]; then printf 'ABCDE1234567\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
+    try "#!/bin/bash\nmode=; for a in \"$@\"; do case \"$a\" in -[ISEP]) ;; *) mode=\"$a\"; break ;; esac; done; if [ \"$mode\" = \"-\" ]; then printf 'ABCDE1234567\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: fpUpper.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpUpper.appendingPathComponent("python3").path)
     for locale in ["C", "en_US.UTF-8"] {
@@ -918,7 +946,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     // 13 個小寫 hex：逐字元檢查只看前 12 位，長度檢查才擋得住。
     let fpLong = dir.appendingPathComponent("bin-fpl")
     try FileManager.default.createDirectory(at: fpLong, withIntermediateDirectories: true)
-    try "#!/bin/bash\nif [ \"$1\" = \"-\" ] || [ \"$2\" = \"-\" ]; then printf 'abcdef0123456\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
+    try "#!/bin/bash\nmode=; for a in \"$@\"; do case \"$a\" in -[ISEP]) ;; *) mode=\"$a\"; break ;; esac; done; if [ \"$mode\" = \"-\" ]; then printf 'abcdef0123456\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: fpLong.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpLong.appendingPathComponent("python3").path)
     let long = try runScript(queries: queries, stub: stub, pathOverride: fpLong.path)
@@ -930,7 +958,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     #expect(run.status == 65 && run.rows.isEmpty, Comment(rawValue: "rc=\(run.status) out=\(run.stdout)"))
 }
 
-@Test("measure-baseline.sh：呼叫端 shell 環境整族由 re-exec 清掉——xtrace 三條路（`bash -x`／`SHELLOPTS`／`BASH_ENV`）、errexit 兩條、同名函式（exec／set／read／printf）、readonly（QF_CONTENT／SETID）、allexport 三條與 pre-exported 變數：都不漏、不撞號、不偽造指紋")
+@Test("measure-baseline.sh：呼叫端 shell 環境經繼承進來的那一面由 re-exec 清掉——xtrace 三條路（`bash -x`／`SHELLOPTS`／`BASH_ENV`）、errexit 兩條、同名函式（exec／set／trap／read／printf）、DEBUG trap（含蓋掉 `trap` 的那一種）、readonly（QF_CONTENT／SETID）、殘留哨兵（R14 的 `1`、非數字）、allexport 三條與 pre-exported 變數、ltm 組態經 fd 3 完整到達：都不漏、不撞號、不偽造指紋；偽造哨兵而沒有 fd 3 → 70")
 func measureBaselineDoesNotLeakUnderXtrace() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
@@ -944,19 +972,23 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     // errexit（R13）：`read -d ''` 在 EOF 的正常回 1 會在 `set -e` 下直接殺掉腳本——零輸出、rc 1（與「任一列 error」撞號）。
     let eenv = dir.appendingPathComponent("eenv.sh")
     try "set -e\n".write(to: eenv, atomically: true, encoding: .utf8)
-    // 同名函式：bash 解析名字時函式先於 builtin。`BASH_ENV` 裡把 exec 與 set 都蓋成 no-op、再把 read／printf 蓋成丟給 /bin/cat 的
-    // 函式、然後 `builtin set -x`——腳本第一行 `builtin set +x` 沒指名 builtin 就關不掉 trace（re-exec 那一行帶 `LTM_ANCHOR_KEY`
-    // 上 stderr，見 xtrace 三臂的 ZQXJ-KEY）；第二行 `builtin exec` 沒指名 builtin 就不會 re-exec、read 函式接走整份查詢檔上 stdout。
-    // 這一臂驅動的是前兩行的兩個 `builtin`（R13 版對 read／printf／unset 各指名 builtin 並拿 `unset BASH_ENV` 收尾，R14 改成
-    // re-exec 之後那些都驅動不了、拆掉）。
+    // 同名函式：bash 解析名字時函式先於 builtin。`BASH_ENV` 裡把 exec／set／trap 都蓋成 no-op、再把 read／printf 蓋成丟給 /bin/cat 的
+    // 函式、然後 `builtin set -x`——`builtin set +x` 沒指名 builtin 就關不掉 trace（fd 3 那個子 shell 展開 `LTM_ANCHOR_KEY`
+    // 上 stderr，見各臂的 ZQXJ-KEY）；`builtin exec` 沒指名 builtin 就不會 re-exec、read 函式接走整份查詢檔上 stdout。
+    // 這一臂驅動的是 set 與 exec 的 `builtin`；trap 那一個由下面「蓋掉 trap 的 DEBUG trap」臂驅動（R16：R15 版只蓋 trap 不設 trap，
+    // 第一行的修飾詞只有字面 pin）。這整族是「意外留在 BASH_ENV 裡的東西」——刻意寫進 BASH_ENV 的任意程式碼不在防禦內，腳本檔頭。
     let fenv = dir.appendingPathComponent("fenv.sh")
     try "exec() { :; }; set() { :; }; trap() { :; }; read() { /bin/cat; return 1; }; printf() { /bin/cat \"$@\"; }; builtin set -x\n".write(to: fenv, atomically: true, encoding: .utf8)
     // DEBUG trap（R15，codex）：`trap 'builtin set -x' DEBUG` 在每個命令前重開 xtrace——第二行 `set +x` 關掉後，第三行執行前又打開，
     // fd 3 那個子 shell 裡展開的密鑰就上 stderr。第一行 `builtin trap - DEBUG …` 扛這一臂。
     let tenv = dir.appendingPathComponent("tenv.sh")
     try "trap 'builtin set -x' DEBUG\n".write(to: tenv, atomically: true, encoding: .utf8)
-    // 預設哨兵（R15）：R14 版的固定值 `1` 讓任何預設都跳過 re-exec、走裸身路徑（readonly SETID 偽造指紋 rc 0）。現在哨兵是 `$$`，
-    // 別的 PID 留下的值一律當未設——這一臂預設 12345 並在 BASH_ENV 放 readonly SETID，指紋必須仍是真的。
+    // 同上，但 trap 也被蓋掉：`builtin trap - DEBUG …` 沒指名 builtin 就清不掉（R16：這是唯一驅動第一行那個修飾詞的組態）。
+    let tenv2 = dir.appendingPathComponent("tenv2.sh")
+    try "builtin trap 'builtin set -x' DEBUG; trap() { :; }\n".write(to: tenv2, atomically: true, encoding: .utf8)
+    // 殘留哨兵（R15／R16）：R14 版的固定值 `1`——**只有**值 `1`——會跳過 re-exec、走裸身路徑（readonly SETID 偽造指紋 rc 0）；R15 版
+    // 的臂用 12345，在 R14 版下也照常 re-exec、修法前後同綠（R16 抓到，空轉臂）。現在哨兵是 `$$`，殘留值一律當未設：兩臂各用
+    // R14 的 `1` 與一個不可能是 PID 的 `x`（12345 是合法 PID，撞上時會紅在錯的理由），BASH_ENV 放 readonly SETID，指紋必須仍是真的。
     let senv = dir.appendingPathComponent("senv.sh")
     try "readonly SETID=abcdef012345\n".write(to: senv, atomically: true, encoding: .utf8)
     // readonly：呼叫端把 `QF_CONTENT` 設成 readonly 曾讓預設值冒充讀進來的內容（R13）；把 `SETID` 設成 readonly 會偽造指紋、`bad`
@@ -975,7 +1007,9 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
         ("BASH_ENV exec/set/read/printf functions", try runScript(queries: queries, stub: stub, extraEnv: key.merging(["BASH_ENV": fenv.path]) { $1 })),
         ("BASH_ENV readonly QF_CONTENT/SETID", try runScript(queries: queries, stub: stub, extraEnv: ["BASH_ENV": renv.path])),
         ("BASH_ENV DEBUG trap", try runScript(queries: queries, stub: stub, extraEnv: key.merging(["BASH_ENV": tenv.path]) { $1 })),
-        ("preset sentinel from another pid", try runScript(queries: queries, stub: stub, extraEnv: ["LTM_MB_CLEAN": "12345", "BASH_ENV": senv.path])),
+        ("BASH_ENV DEBUG trap + shadowed trap", try runScript(queries: queries, stub: stub, extraEnv: key.merging(["BASH_ENV": tenv2.path]) { $1 })),
+        ("stale sentinel 1 (R14 value)", try runScript(queries: queries, stub: stub, extraEnv: ["LTM_MB_CLEAN": "1", "BASH_ENV": senv.path])),
+        ("stale sentinel non-pid", try runScript(queries: queries, stub: stub, extraEnv: ["LTM_MB_CLEAN": "x", "BASH_ENV": senv.path])),
     ]
     for (label, run) in runs {
         #expect(run.status == 0, Comment(rawValue: "\(label): rc=\(run.status) err=\(run.stderr.count) bytes"))
@@ -990,7 +1024,8 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     let envProbe = dir.appendingPathComponent("env.txt")
     let probeStub = try makeStub(in: dir, responses: [:], raw: ["ZQXJ-TRACE-ONE": "printf '%s' \"${QF_CONTENT+leaked}\" > '\(envProbe.path)'; printf '[]\\n'"])
     // 第三條向量：呼叫端環境裡已經 export 了同名變數——bash 的賦值會保留 export 屬性。R12–R13 由腳本開頭的 `unset QF_CONTENT` 扛；
-    // R14 起由 re-exec 扛（`QF_CONTENT` 不在白名單，整個從環境消失），變異查法是把第三行的 `"$$")` 改成永不匹配的值（R15 更正註解）。
+    // R14 起由 re-exec 扛（`QF_CONTENT` 不在白名單，整個從環境消失）。變異查法是讓 `case` 的第一臂**永遠**匹配（樣式改成 `*`），
+    // 不是讓哨兵永不匹配——那會無限 re-exec、整個套件掛死而不是變紅（R16 更正 R15 的查法）。
     for (label, env) in [("BASH_ENV set -a", ["BASH_ENV": aenv.path]), ("SHELLOPTS=allexport", ["SHELLOPTS": "allexport"]), ("pre-exported QF_CONTENT", ["QF_CONTENT": "pre-exported"])] {
         try? FileManager.default.removeItem(at: envProbe)
         let allexport = try runScript(queries: queries, stub: probeStub, extraEnv: env)
@@ -1004,6 +1039,19 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     let cfgStub = try makeStub(in: dir, responses: [:], raw: ["ZQXJ-TRACE-ONE": "printf '%s|%s' \"${LTM_DERIVED_ROOT-unset}\" \"${LTM_CORPUS_ROOT-unset}\" > '\(cfgProbe.path)'; printf '[]\\n'"])
     _ = try runScript(queries: queries, stub: cfgStub, extraEnv: ["LTM_DERIVED_ROOT": "/tmp/synthetic derived\nsecond line", "LTM_CORPUS_ROOT": "/tmp/synthetic-corpus"])
     #expect((try? String(contentsOf: cfgProbe, encoding: .utf8)) == "/tmp/synthetic derived\nsecond line|/tmp/synthetic-corpus", Comment(rawValue: "ltm 的組態沒有完整經白名單到達：\((try? String(contentsOf: cfgProbe, encoding: .utf8)) ?? "(unread)")"))
+    // 偽造哨兵（R16）：任何在 execve 前知道子行程 PID 的父行程都對得上 `$$`（`bash -c '單一命令'` 不 fork）。對上之後 fd 3 沒有頭標記
+    // → 70、零輸出，不是 R15 版的裸身跑完 rc 0。這一臂也驅動 fd 3 的 framing（把頭標記檢查拿掉就變成 rc 0 的裸身量測）。
+    let forged = try runScript(queries: queries, stub: stub, sentinelForged: true)
+    #expect(forged.status == 70 && forged.stdout.isEmpty && !forged.combined.contains("ZQXJ"), Comment(rawValue: "forged sentinel without fd 3: rc=\(forged.status) out=\(forged.stdout) err=\(forged.stderr)"))
+    // 偽造者連 fd 3 都自備、頭尾標記都對、但塞一個名單外的名字：讀端拒絕（R16：R15 版的讀端對名字零驗證，白名單只在寫端執行）。
+    let forgedFd3 = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3Records: "LTM_MB_FD3=%s\\0EVIL_INJECTED=yes\\0LTM_MB_END=1\\0")
+    #expect(forgedFd3.status == 70 && forgedFd3.stdout.isEmpty, Comment(rawValue: "forged sentinel with forged fd 3: rc=\(forgedFd3.status) out=\(forgedFd3.stdout) err=\(forgedFd3.stderr)"))
+    // 串流截斷（尾標記缺）：名字都合法、只是沒有 LTM_MB_END——讀端要當成沒到齊（70），不能靜默用部分白名單量測（R16）。
+    let truncated = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3Records: "LTM_MB_FD3=%s\\0LC_ALL=C\\0")
+    #expect(truncated.status == 70 && truncated.stdout.isEmpty, Comment(rawValue: "forged fd 3 without end marker: rc=\(truncated.status) out=\(truncated.stdout) err=\(truncated.stderr)"))
+    // 頭標記的值：第一筆是合法名字而不是 `LTM_MB_FD3=$$`——讀端要拒絕；只讀不比對的話會把那一筆當頭吃掉、繼續量測（R16 變異）。
+    let wrongHead = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3Records: "LC_ALL=C%.0s\\0LTM_MB_END=1\\0")
+    #expect(wrongHead.status == 70 && wrongHead.stdout.isEmpty, Comment(rawValue: "forged fd 3 with wrong head record: rc=\(wrongHead.status) out=\(wrongHead.stdout) err=\(wrongHead.stderr)"))
 }
 
 @Test("measure-baseline.sh：拿得到查詢內容的子行程 stdio 都隔離——judge 的 stdin 不是查詢檔（吃不掉後面的行）、指紋 python 與 judge 的 stderr 不上腳本的 stderr")
@@ -1024,7 +1072,7 @@ func measureBaselineIsolatesChildProcessStdio() throws {
     // 指紋那次（-）另外記下 fd 3 是不是管線：R11 指出字面計數鎖不住資料路徑——herestring 或 `< "$QF"` 會給一般檔案。
     // 鑑別力只在 bash 3.2（macOS 的 /bin/bash，就是 shebang 解到的那個）：bash ≥ 5.1 的小 herestring 也走管線（R12）。
     let fdProbe = dir.appendingPathComponent("fd3.txt")
-    try "#!/bin/bash\necho 'ZQXJ-STDERR-NOISE' >&2\nif [ \"$1\" = \"-c\" ] || [ \"$2\" = \"-c\" ]; then /bin/cat >/dev/null; fi\nif [ \"$1\" = \"-\" ] || [ \"$2\" = \"-\" ]; then { [ -p /dev/fd/3 ] && printf pipe || printf notpipe; } > '\(fdProbe.path)'; fi\nexec '\(realPython3())' \"$@\"\n"
+    try "#!/bin/bash\necho 'ZQXJ-STDERR-NOISE' >&2\nmode=; for a in \"$@\"; do case \"$a\" in -[ISEP]) ;; *) mode=\"$a\"; break ;; esac; done; if [ \"$mode\" = \"-c\" ]; then /bin/cat >/dev/null; fi\nmode=; for a in \"$@\"; do case \"$a\" in -[ISEP]) ;; *) mode=\"$a\"; break ;; esac; done; if [ \"$mode\" = \"-\" ]; then { [ -p /dev/fd/3 ] && printf pipe || printf notpipe; } > '\(fdProbe.path)'; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: bin.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.appendingPathComponent("python3").path)
     let run = try runScript(queries: queries, stub: stub, pathPrefix: bin.path)
@@ -1036,7 +1084,7 @@ func measureBaselineIsolatesChildProcessStdio() throws {
     #expect(fd3 == "pipe", Comment(rawValue: "指紋 python 的 fd 3 不是管線：\(fd3)"))
 }
 
-@Test("measure-baseline.sh：查詢檔預設在腳本旁，走訪仿 bash 找腳本運算元的順序——裸名經 PATH 解到腳本目錄而非 cwd 誘餌；相對路徑；cwd 與 PATH 各一份時用 cwd；644 排在 755 前用 644；000 排在 755 前跳過 000；PATH 元素字面 `~/…` 展開；`~+/…` 不仿 → 66")
+@Test("measure-baseline.sh：查詢檔預設在腳本旁，走訪仿 bash 找腳本運算元的順序——裸名經 PATH 解到腳本目錄而非 cwd 誘餌；相對路徑；cwd 與 PATH 各一份時用 cwd；644 排在 755 前用 644；000 排在 755 前跳過 000；PATH 元素字面 `~/…`、裸 `~` 展開；`~+/…`（後面另有一份）與 HOME 沒設的 `~/…` → 66；cwd 放假 hashlib.py／json.py 指紋與 verdict 仍真")
 func measureBaselineResolvesItsOwnDirectoryLikeBashDoes() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
@@ -1111,6 +1159,8 @@ func measureBaselineResolvesItsOwnDirectoryLikeBashDoes() throws {
     //     探針檔不存在（R15，DA：re-exec 只清環境，cwd 那一半 python 的模組搜尋路徑要另外關）。
     let shimProbe = dir.appendingPathComponent("shim.txt")
     try "import sys\nclass _H:\n    def update(self, b):\n        open('\(shimProbe.path)', 'ab').write(b)\n    def hexdigest(self):\n        return 'deadbeefcafe' + '0' * 52\ndef sha256():\n    return _H()\n".write(to: a.appendingPathComponent("hashlib.py"), atomically: true, encoding: .utf8)
+    //     judge 那一支同理（R16：R15 只給指紋那支一臂）：cwd 放一支 `json.py` 讓 `loads` 回空陣列，沒有 `-I` 時每一列都變成 `empty`。
+    try "def loads(x):\n    return []\n".write(to: a.appendingPathComponent("json.py"), atomically: true, encoding: .utf8)
     let shim = try runScript(queries: unused, stub: stub, unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "measure-baseline.sh", cwd: a)
-    #expect(shim.status == 0 && shim.setLine == setLine(real) && !FileManager.default.fileExists(atPath: shimProbe.path), Comment(rawValue: "hashlib.py in cwd: rc=\(shim.status) \(shim.stdout) probe=\(FileManager.default.fileExists(atPath: shimProbe.path))"))
+    #expect(shim.status == 0 && shim.setLine == setLine(real) && shim.rows.map(tail) == ["clean tool=0", "clean tool=0"] && !FileManager.default.fileExists(atPath: shimProbe.path), Comment(rawValue: "hashlib.py/json.py in cwd: rc=\(shim.status) \(shim.stdout) probe=\(FileManager.default.fileExists(atPath: shimProbe.path))"))
 }
