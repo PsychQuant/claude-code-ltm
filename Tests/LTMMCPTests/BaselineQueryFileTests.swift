@@ -375,26 +375,45 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // 整檔字面計數照樣 2。這條鎖**是拼法列舉，不是「只開一次」的證明**（R13：把鍵從 `< "$QF"` 換成識別碼 `$QF` 之後，
     // `cat "$HERE/baseline-queries.txt"`、`cat "${LTM_BASELINE_QUERIES:-…}"`、`wc -l < "$HERE/…"` 照樣穿過——鍵換了、形狀沒換，
     // CLAUDE.md #34／#37 那句）。腳本裡能指到查詢檔的拼法有三種，三種各釘一個次數：識別碼 `$QF`／`${QF}` 7 次（-f/-r 那行 3、
-    // read 1、三句錯誤訊息 3）、檔名字面 `baseline-queries.txt` 1 次（QF 的預設值）、環境變數名 `LTM_BASELINE_QUERIES` 4 次
-    // （re-exec 白名單那一行 3 次＋QF 賦值 1 次）；多一次就是多一條路徑或多一處訊息，都要來這裡對帳。它守得住的較窄陳述是「用這三種拼法之一再開一次會紅」；
+    // read 1、三句錯誤訊息 3）、檔名字面 `baseline-queries.txt` 1 次（QF 的預設值）、環境變數名 `LTM_BASELINE_QUERIES` 2 次
+    // （re-exec 白名單的 for 清單 1 次＋QF 賦值 1 次）；多一次就是多一條路徑或多一處訊息，都要來這裡對帳。它守得住的較窄陳述是「用這三種拼法之一再開一次會紅」；
     // 先把路徑存進第四個名字再開，這裡看不到——要判準版得觀察 open 系統呼叫，不可攜，不做。README 的量測段用同一句話。
     // 呼叫端 shell 環境那一族（BASH_ENV、SHELLOPTS、匯出函式、readonly、PS4、PYTHONPATH）由前兩行程式碼一次清掉：`builtin set +x`
     // 再 `builtin exec /usr/bin/env -i <白名單> /bin/bash -- "$0" "$@"`。R13 對這一族逐名字指名 builtin，R14 一輪再冒五個同名
-    // ——那些拼法在 re-exec 之後驅動不了，拆掉；這裡釘的是「前兩行就是那兩行」（行為由 xtrace 測試的 exec／set 同名函式臂驅動）。
+    // ——那些拼法在 re-exec 之後驅動不了，拆掉；這裡釘的是「前三行就是那三行」（行為由 xtrace 測試的 DEBUG trap、同名函式、假密鑰各臂驅動）。
     let codeText = codeLines.map(\.element).joined(separator: "\n")
-    let firstTwo = codeLines.prefix(2).map(\.element)
-    #expect(firstTwo.first == "builtin set +x" && (firstTwo.last ?? "").hasPrefix("case \"${LTM_MB_CLEAN-}\" in 1) ;; *) builtin exec /usr/bin/env -i LTM_MB_CLEAN=1 "), Comment(rawValue: "腳本的前兩行程式碼必須是 builtin set +x 與 re-exec 那一行：\(firstTwo)"))
+    let firstThree = codeLines.prefix(3).map(\.element)
+    #expect(firstThree == ["builtin trap - DEBUG ERR RETURN EXIT", "builtin set +x", "case \"${LTM_MB_CLEAN-}\" in"], Comment(rawValue: "腳本的前三行程式碼必須是 trap 清除、builtin set +x、re-exec 的 case：\(firstThree)"))
+    // 白名單三邊相等（R15：R14 版的白名單一行沒有任何東西釘，刪 LTM_ANCHOR_KEY、加 PYTHONPATH 都全綠；而且漏了 ltm 自己讀的名字）：
+    // (1) re-exec 行 `for v in … ; do` 的名字、(2) 檔頭「白名單（同步測試釘三邊相等…）」那段散文裡的名字、(3) `Sources/` 裡每一個
+    // `environment["NAME"]` 讀取點的名字——(3) ⊆ (1)，(1) − (3) 恰好是腳本自己用的五個（LC_ALL、LANG、TMPDIR、LTM_BIN、LTM_BASELINE_QUERIES）。
+    let reexecLine = codeLines.map(\.element).first { $0.contains("builtin exec -c /usr/bin/env \"PATH=${PATH-}\" ${HOME+\"HOME=$HOME\"} \"LTM_MB_CLEAN=$$\" /bin/bash -- \"$0\" \"$@\"; } 3< <(for v in ") } ?? ""
+    let forList = (matches(#"3< <\(for v in ([A-Z0-9_ ]+); do"#, in: reexecLine).first ?? "").split(separator: " ").map(String.init)
+    let whitelistProse = script.components(separatedBy: "白名單（同步測試釘三邊相等").dropFirst().first?.components(separatedBy: "兩個 python 都以").first ?? ""
+    let proseNames = Set(matches(#"\b([A-Z][A-Z0-9_]{2,})\b"#, in: whitelistProse).filter { !$0.hasPrefix("R1") && !$0.hasSuffix("_") })
+    var sourceNames = Set<String>()
+    if let walker = FileManager.default.enumerator(at: root.appendingPathComponent("Sources"), includingPropertiesForKeys: nil) {
+        for case let url as URL in walker where url.pathExtension == "swift" {
+            if let text = try? String(contentsOf: url, encoding: .utf8) { sourceNames.formUnion(matches(#"environment\["([A-Z0-9_]+)"\]"#, in: text)) }
+        }
+    }
+    #expect(!reexecLine.isEmpty && Set(forList).count == forList.count && forList.count >= 6, Comment(rawValue: "re-exec 行找不到、或 for 清單空／重複：\(forList)"))
+    #expect(Set(forList) == proseNames, Comment(rawValue: "白名單：for 清單 \(forList.sorted()) ≠ 檔頭散文 \(proseNames.sorted())"))
+    #expect(!sourceNames.isEmpty && sourceNames.isSubset(of: Set(forList)), Comment(rawValue: "Sources 讀的環境變數沒全部轉發：缺 \(sourceNames.subtracting(forList).sorted())"))
+    #expect(Set(forList).subtracting(sourceNames) == ["LC_ALL", "LANG", "TMPDIR", "LTM_BIN", "LTM_BASELINE_QUERIES"], Comment(rawValue: "白名單裡 Sources 沒讀的名字應恰好是腳本自己用的五個：\(Set(forList).subtracting(sourceNames).sorted())"))
     let procSubs = codeText.components(separatedBy: "< <(printf '%s' \"$QF_CONTENT\")").count - 1
     let qfRefs = try! NSRegularExpression(pattern: #"\$\{?QF\b"#).numberOfMatches(in: codeText, range: NSRange(location: 0, length: (codeText as NSString).length))
     let fileNameRefs = codeText.components(separatedBy: "baseline-queries.txt").count - 1
     let envNameRefs = codeText.components(separatedBy: "LTM_BASELINE_QUERIES").count - 1
     let hasHerestring = codeText.contains("<<<")
-    #expect(procSubs == 2 && qfRefs == 7 && fileNameRefs == 1 && envNameRefs == 4 && !hasHerestring, Comment(rawValue: "查詢檔的三種拼法在程式碼行出現：識別碼 \(qfRefs)（應為 7）、檔名字面 \(fileNameRefs)（應為 1）、環境變數名 \(envNameRefs)（應為 4：白名單行 3＋QF 賦值 1）——多一次就是多一條讀取路徑或訊息；process substitution \(procSubs) 處（應為 2）；herestring：\(hasHerestring)"))
+    #expect(procSubs == 2 && qfRefs == 7 && fileNameRefs == 1 && envNameRefs == 2 && !hasHerestring, Comment(rawValue: "查詢檔的三種拼法在程式碼行出現：識別碼 \(qfRefs)（應為 7）、檔名字面 \(fileNameRefs)（應為 1）、環境變數名 \(envNameRefs)（應為 2：白名單 for 清單 1＋QF 賦值 1）——多一次就是多一條讀取路徑或訊息；process substitution \(procSubs) 處（應為 2）；herestring：\(hasHerestring)"))
     // 字元比對一律字面集合、不用 `[X-Y]` range——含字母的 range 在 bash 3.2 隨 locale 排序而變（指紋檢查的 fpUpper 臂驅動）；
     // 純數字 range 找不到反例（R14），這裡釘的是同檔一致寫法。pin 認任何 `[`、可選 `!`／`^`、英數、`-`、英數 的形式
     // （R13 版只認 `[0-9]`／`[!0-9]` 兩種拼法，`[^0-9]`、`[0-9a-f]` 穿得過，R14）。
-    let charRanges = matches(#"(\[[!^]?[0-9A-Za-z]-[0-9A-Za-z])"#, in: codeText)
-    #expect(charRanges.isEmpty, Comment(rawValue: "程式碼行裡有 \(charRanges.count) 處 [X-Y] 形式的 range：\(charRanges)，要改成字面集合"))
+    // pin 掃括號運算式（不含空白、逗號、引號——排除 `[ -f … ]` 與 python 的 list）裡**任一位置**的 `X-Y`（R14 版只認括號第一個位置，
+    // `[abc0-9]` 穿過，R15）。
+    let charRanges = matches(#"(\[[!^]?[^\]\s,"']*[0-9A-Za-z]-[0-9A-Za-z][^\]\s,"']*\])"#, in: codeText)
+    #expect(charRanges.isEmpty, Comment(rawValue: "程式碼行裡有 \(charRanges.count) 處含 X-Y range 的括號運算式：\(charRanges)，要改成字面集合"))
 
     // 離開碼：檔頭那一行列的數字 ＝ 程式碼裡 exit 的數字 ∪ {0}。
     let exitHeaderLine = scriptLines.first { $0.hasPrefix("# 離開碼（") } ?? ""
@@ -623,7 +642,8 @@ private func realPython3() -> String {
     return "/usr/bin/python3"
 }
 
-/// 一個 PATH 目錄，只放呼叫端指定的假命令（腳本自 R10 起不再需要 `dirname`，鷹架已拆）。
+/// 一個 PATH 目錄，只放呼叫端指定的假命令（腳本自 R10 起不再需要 `dirname`，鷹架已拆）。腳本以 `python3 -I …` 呼叫（R15），
+/// 所以判斷 judge／指紋那次呼叫要看 `$1` 或 `$2`。
 /// `judgeFakes` 是假 python3 對 **judge 呼叫**（`python3 -c …`）的行為；其他呼叫（算查詢集指紋的
 /// `python3 - <file>`）轉交真的 python3——要模擬的是 judge 掛掉，不是整個 python 壞掉。
 private func makeBinDir(in dir: URL, judgeFakes: [String: String]) throws -> URL {
@@ -631,7 +651,7 @@ private func makeBinDir(in dir: URL, judgeFakes: [String: String]) throws -> URL
     try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
     for (name, body) in judgeFakes {
         let f = bin.appendingPathComponent(name)
-        try "#!/bin/bash\nif [ \"$1\" = \"-c\" ]; then\n\(body)\nfi\nexec '\(realPython3())' \"$@\"\n".write(to: f, atomically: true, encoding: .utf8)
+        try "#!/bin/bash\nif [ \"$1\" = \"-c\" ] || [ \"$2\" = \"-c\" ]; then\n\(body)\nfi\nexec '\(realPython3())' \"$@\"\n".write(to: f, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
     }
     return bin
@@ -716,14 +736,21 @@ func measureBaselineLineDefinitionIsLocaleIndependent() throws {
     let calls = (try? String(contentsOf: dir.appendingPathComponent("argv.log"), encoding: .utf8))?.split(separator: "\n").count ?? -1
     #expect(calls == 2 * (swiftCount - 1), "ltm 被呼叫 \(calls) 次，blank 那一行不該進 ltm")
 
-    // judge 的 argv 解碼（R14，codex）：Linux 上 LC_ALL=C 加 PYTHONUTF8=0 加 PYTHONCOERCECLOCALE=0 時 python 把 argv 解成 surrogate、
-    // snippet 卻是真 Unicode，非 ASCII 查詢逐字命中也判 clean。腳本改成還原 bytes 再明確以 UTF-8 解。macOS 的 python fs encoding
-    // 恆為 UTF-8，這一臂在本機驅動不到——鑑別力只在 Linux（同 fd3 探針「只在 bash 3.2 有鑑別力」的註記）。
+    // 非 ASCII 查詢在 C locale 下逐字命中要判 self（R14，codex：argv 解成 surrogate 時會判 clean）。腳本用 `python3 -I` 且還原 bytes
+    // 再 strict 解；`-I` 讓 PYTHONUTF8 之類進不來、macOS 的 fs encoding 又恆為 UTF-8，所以這一臂驅動不到解碼那兩行（任何平台都不行，
+    // R15）——它驅動的只是「C locale 下非 ASCII 查詢的 self 判定」這個行為本身。
+    // LC_ALL 真的經白名單到了子行程（R15：白名單刪掉 `LC_ALL` 時這條測試的兩臂變成同一臂、仍綠）：stub 把它看到的 LC_ALL 寫進檔案。
+    let lcProbe = dir.appendingPathComponent("lc.txt")
+    let lcStub = try makeStub(in: dir, responses: [:], raw: ["ZQXJ-LC": "printf '%s' \"${LC_ALL-unset}\" > '\(lcProbe.path)'; printf '[]\\n'"])
+    let lcFile = dir.appendingPathComponent("lc-q.txt")
+    try "ZQXJ-LC\n".write(to: lcFile, atomically: true, encoding: .utf8)
+    _ = try runScript(queries: lcFile, stub: lcStub, extraEnv: ["LC_ALL": "C", "LANG": "C"])
+    #expect((try? String(contentsOf: lcProbe, encoding: .utf8)) == "C", "LC_ALL 沒有經白名單到達 ltm 子行程")
     let nonASCII = "ZQXJ-查詢-甲\n"
     let nonASCIIFile = dir.appendingPathComponent("nonascii.txt")
     try nonASCII.write(to: nonASCIIFile, atomically: true, encoding: .utf8)
     let echoStub = try makeStub(in: dir, responses: ["ZQXJ-查詢-甲": #"[{"snippet":"命中裡逐字含 ZQXJ-查詢-甲 這條","uuid":"u"}]"#])
-    let cLocale = try runScript(queries: nonASCIIFile, stub: echoStub, extraEnv: ["LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"])
+    let cLocale = try runScript(queries: nonASCIIFile, stub: echoStub, extraEnv: ["LC_ALL": "C", "LANG": "C"])
     #expect(cLocale.status == 0 && cLocale.rows.map(tail) == ["self tool=0"], Comment(rawValue: "C locale, non-ASCII query: rc=\(cLocale.status) \(cLocale.stdout) err=\(cLocale.stderr)"))
     let stub2 = try makeStub(in: dir, responses: [:])   // 上面重寫了 stub；後面的 CR 臂要回到預設回應
     // 單獨的 CR 不是行分隔：腳本、測試、指紋三邊都只在 LF 切（R4：指紋的 python 曾用逐行迭代，連 CR 也切，
@@ -872,7 +899,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     // 指紋算不出來（python3 對 `-` 那一次呼叫掛掉）也是 70，而且一列都不印。
     let fpBroken = dir.appendingPathComponent("bin-fp")
     try FileManager.default.createDirectory(at: fpBroken, withIntermediateDirectories: true)
-    try "#!/bin/bash\nif [ \"$1\" = \"-\" ]; then exit 3; fi\nexec '\(realPython3())' \"$@\"\n"
+    try "#!/bin/bash\nif [ \"$1\" = \"-\" ] || [ \"$2\" = \"-\" ]; then exit 3; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: fpBroken.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpBroken.appendingPathComponent("python3").path)
     let fpRun = try runScript(queries: queries, stub: stub, pathOverride: fpBroken.path)
@@ -881,7 +908,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     // A–E 收進去（collation），這條測試就是釘住不能退回 range 寫法。
     let fpUpper = dir.appendingPathComponent("bin-fpu")
     try FileManager.default.createDirectory(at: fpUpper, withIntermediateDirectories: true)
-    try "#!/bin/bash\nif [ \"$1\" = \"-\" ]; then printf 'ABCDE1234567\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
+    try "#!/bin/bash\nif [ \"$1\" = \"-\" ] || [ \"$2\" = \"-\" ]; then printf 'ABCDE1234567\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: fpUpper.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpUpper.appendingPathComponent("python3").path)
     for locale in ["C", "en_US.UTF-8"] {
@@ -891,7 +918,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     // 13 個小寫 hex：逐字元檢查只看前 12 位，長度檢查才擋得住。
     let fpLong = dir.appendingPathComponent("bin-fpl")
     try FileManager.default.createDirectory(at: fpLong, withIntermediateDirectories: true)
-    try "#!/bin/bash\nif [ \"$1\" = \"-\" ]; then printf 'abcdef0123456\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
+    try "#!/bin/bash\nif [ \"$1\" = \"-\" ] || [ \"$2\" = \"-\" ]; then printf 'abcdef0123456\\n'; exit 0; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: fpLong.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fpLong.appendingPathComponent("python3").path)
     let long = try runScript(queries: queries, stub: stub, pathOverride: fpLong.path)
@@ -923,12 +950,20 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     // 這一臂驅動的是前兩行的兩個 `builtin`（R13 版對 read／printf／unset 各指名 builtin 並拿 `unset BASH_ENV` 收尾，R14 改成
     // re-exec 之後那些都驅動不了、拆掉）。
     let fenv = dir.appendingPathComponent("fenv.sh")
-    try "exec() { :; }; set() { :; }; read() { /bin/cat; return 1; }; printf() { /bin/cat \"$@\"; }; builtin set -x\n".write(to: fenv, atomically: true, encoding: .utf8)
+    try "exec() { :; }; set() { :; }; trap() { :; }; read() { /bin/cat; return 1; }; printf() { /bin/cat \"$@\"; }; builtin set -x\n".write(to: fenv, atomically: true, encoding: .utf8)
+    // DEBUG trap（R15，codex）：`trap 'builtin set -x' DEBUG` 在每個命令前重開 xtrace——第二行 `set +x` 關掉後，第三行執行前又打開，
+    // fd 3 那個子 shell 裡展開的密鑰就上 stderr。第一行 `builtin trap - DEBUG …` 扛這一臂。
+    let tenv = dir.appendingPathComponent("tenv.sh")
+    try "trap 'builtin set -x' DEBUG\n".write(to: tenv, atomically: true, encoding: .utf8)
+    // 預設哨兵（R15）：R14 版的固定值 `1` 讓任何預設都跳過 re-exec、走裸身路徑（readonly SETID 偽造指紋 rc 0）。現在哨兵是 `$$`，
+    // 別的 PID 留下的值一律當未設——這一臂預設 12345 並在 BASH_ENV 放 readonly SETID，指紋必須仍是真的。
+    let senv = dir.appendingPathComponent("senv.sh")
+    try "readonly SETID=abcdef012345\n".write(to: senv, atomically: true, encoding: .utf8)
     // readonly：呼叫端把 `QF_CONTENT` 設成 readonly 曾讓預設值冒充讀進來的內容（R13）；把 `SETID` 設成 readonly 會偽造指紋、`bad`
     // 設成 readonly 會吃掉 error 列（R14）——同一族。re-exec 之後這個 shell 裡沒有任何 readonly，指紋必須是真的。
     let renv = dir.appendingPathComponent("renv.sh")
     try "readonly QF_CONTENT='ZQXJ-PRESET'; readonly SETID=abcdef012345\n".write(to: renv, atomically: true, encoding: .utf8)
-    // xtrace 三臂帶一把假密鑰：re-exec 那一行把 `LTM_ANCHOR_KEY` 放在命令列上，第一行 `builtin set +x` 沒生效它就會被 trace 出來
+    // xtrace 各臂帶一把假密鑰：密鑰在 fd 3 那個子 shell 裡展開（不在任何 argv 上，R15），`builtin set +x` 沒生效它就會被 trace 出來
     // ——密鑰不是查詢，但它是同一條 stderr，也是 .claude/rules/anchor-key-in-probes.md 說不得落地的東西。
     let key = ["LTM_ANCHOR_KEY": "ZQXJ-KEY"]
     let runs = [
@@ -939,6 +974,8 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
         ("BASH_ENV set -e", try runScript(queries: queries, stub: stub, extraEnv: ["BASH_ENV": eenv.path])),
         ("BASH_ENV exec/set/read/printf functions", try runScript(queries: queries, stub: stub, extraEnv: key.merging(["BASH_ENV": fenv.path]) { $1 })),
         ("BASH_ENV readonly QF_CONTENT/SETID", try runScript(queries: queries, stub: stub, extraEnv: ["BASH_ENV": renv.path])),
+        ("BASH_ENV DEBUG trap", try runScript(queries: queries, stub: stub, extraEnv: key.merging(["BASH_ENV": tenv.path]) { $1 })),
+        ("preset sentinel from another pid", try runScript(queries: queries, stub: stub, extraEnv: ["LTM_MB_CLEAN": "12345", "BASH_ENV": senv.path])),
     ]
     for (label, run) in runs {
         #expect(run.status == 0, Comment(rawValue: "\(label): rc=\(run.status) err=\(run.stderr.count) bytes"))
@@ -946,14 +983,14 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
         let leaked = run.combined.contains("ZQXJ")
         #expect(!leaked, Comment(rawValue: "\(label): 漏了查詢、命中或密鑰（stderr \(run.stderr.count) bytes）"))
     }
-    // allexport（R10；放在三條 xtrace 之後——makeStub 會覆寫同一目錄的 ltm stub）：`BASH_ENV` 裡一行 `set -a` 會把裝著整份查詢集的變數匯出給每個子行程——腳本第一行要連它一起關。
+    // allexport（R10；放在 xtrace 各臂之後——makeStub 會覆寫同一目錄的 ltm stub）：`BASH_ENV` 裡一行 `set -a` 會把裝著整份查詢集的變數匯出給每個子行程——由 re-exec 扛（R14 之前是第一行的 `set +a`）。
     // ltm stub 是 bash：`${QF_CONTENT+leaked}` 在它的環境裡看得到那個變數就展開成 leaked。
     let aenv = dir.appendingPathComponent("aenv.sh")
     try "set -a\n".write(to: aenv, atomically: true, encoding: .utf8)
     let envProbe = dir.appendingPathComponent("env.txt")
     let probeStub = try makeStub(in: dir, responses: [:], raw: ["ZQXJ-TRACE-ONE": "printf '%s' \"${QF_CONTENT+leaked}\" > '\(envProbe.path)'; printf '[]\\n'"])
-    // 第三條向量：呼叫端環境裡已經 export 了同名變數——bash 的賦值會保留 export 屬性，所以腳本一開始的 `unset QF_CONTENT`
-    // 不是裝飾（R12）：拿掉它，這一臂就 leaked。
+    // 第三條向量：呼叫端環境裡已經 export 了同名變數——bash 的賦值會保留 export 屬性。R12–R13 由腳本開頭的 `unset QF_CONTENT` 扛；
+    // R14 起由 re-exec 扛（`QF_CONTENT` 不在白名單，整個從環境消失），變異查法是把第三行的 `"$$")` 改成永不匹配的值（R15 更正註解）。
     for (label, env) in [("BASH_ENV set -a", ["BASH_ENV": aenv.path]), ("SHELLOPTS=allexport", ["SHELLOPTS": "allexport"]), ("pre-exported QF_CONTENT", ["QF_CONTENT": "pre-exported"])] {
         try? FileManager.default.removeItem(at: envProbe)
         let allexport = try runScript(queries: queries, stub: probeStub, extraEnv: env)
@@ -961,6 +998,12 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
         let exported = (try? String(contentsOf: envProbe, encoding: .utf8)) ?? "(unread)"
         #expect(exported.isEmpty, Comment(rawValue: "\(label): 查詢集變數被匯出進 ltm 的環境：\(exported)"))
     }
+    // ltm 自己讀的組態要經白名單到達它（R15：R14 版把 LTM_DERIVED_ROOT 這類丟掉，指向受控索引的量測會靜默量到真索引、rc 0）。
+    // 值帶空白與換行也要完整（fd 3 是 NUL 分隔）。
+    let cfgProbe = dir.appendingPathComponent("cfg.txt")
+    let cfgStub = try makeStub(in: dir, responses: [:], raw: ["ZQXJ-TRACE-ONE": "printf '%s|%s' \"${LTM_DERIVED_ROOT-unset}\" \"${LTM_CORPUS_ROOT-unset}\" > '\(cfgProbe.path)'; printf '[]\\n'"])
+    _ = try runScript(queries: queries, stub: cfgStub, extraEnv: ["LTM_DERIVED_ROOT": "/tmp/synthetic derived\nsecond line", "LTM_CORPUS_ROOT": "/tmp/synthetic-corpus"])
+    #expect((try? String(contentsOf: cfgProbe, encoding: .utf8)) == "/tmp/synthetic derived\nsecond line|/tmp/synthetic-corpus", Comment(rawValue: "ltm 的組態沒有完整經白名單到達：\((try? String(contentsOf: cfgProbe, encoding: .utf8)) ?? "(unread)")"))
 }
 
 @Test("measure-baseline.sh：拿得到查詢內容的子行程 stdio 都隔離——judge 的 stdin 不是查詢檔（吃不掉後面的行）、指紋 python 與 judge 的 stderr 不上腳本的 stderr")
@@ -981,7 +1024,7 @@ func measureBaselineIsolatesChildProcessStdio() throws {
     // 指紋那次（-）另外記下 fd 3 是不是管線：R11 指出字面計數鎖不住資料路徑——herestring 或 `< "$QF"` 會給一般檔案。
     // 鑑別力只在 bash 3.2（macOS 的 /bin/bash，就是 shebang 解到的那個）：bash ≥ 5.1 的小 herestring 也走管線（R12）。
     let fdProbe = dir.appendingPathComponent("fd3.txt")
-    try "#!/bin/bash\necho 'ZQXJ-STDERR-NOISE' >&2\nif [ \"$1\" = \"-c\" ]; then /bin/cat >/dev/null; fi\nif [ \"$1\" = \"-\" ]; then { [ -p /dev/fd/3 ] && printf pipe || printf notpipe; } > '\(fdProbe.path)'; fi\nexec '\(realPython3())' \"$@\"\n"
+    try "#!/bin/bash\necho 'ZQXJ-STDERR-NOISE' >&2\nif [ \"$1\" = \"-c\" ] || [ \"$2\" = \"-c\" ]; then /bin/cat >/dev/null; fi\nif [ \"$1\" = \"-\" ] || [ \"$2\" = \"-\" ]; then { [ -p /dev/fd/3 ] && printf pipe || printf notpipe; } > '\(fdProbe.path)'; fi\nexec '\(realPython3())' \"$@\"\n"
         .write(to: bin.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.appendingPathComponent("python3").path)
     let run = try runScript(queries: queries, stub: stub, pathPrefix: bin.path)
@@ -1049,6 +1092,25 @@ func measureBaselineResolvesItsOwnDirectoryLikeBashDoes() throws {
     #expect(tilde.status == 0 && tilde.rows.count == 2 && tilde.setLine == setLine(real), Comment(rawValue: "literal ~/ in PATH: rc=\(tilde.status) \(tilde.stdout) err=\(tilde.stderr)"))
     // 8. PATH 元素寫成 `~+/a`（bash 展開成 $PWD，走訪刻意不仿）：bash 找得到、走訪找不到 → HERE=/nonexistent → 66，而不是安靜量到
     //    別棵樹。這一臂驅動的正是那條退路（R13 寫它「實務上到不了」）。
-    let plus = try runScript(queries: unused, stub: stub, pathPrefix: "~+/a", unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "measure-baseline.sh", cwd: dir)
+    //    R15：`~+/a` **後面再放一份**同名腳本（A）——R14 版跳過不仿的元素後繼續往後找，會量到 A 而 rc 0；現在一遇到就停、66。
+    let plus = try runScript(queries: unused, stub: stub, pathPrefix: "~+/a:" + a.path, unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "measure-baseline.sh", cwd: dir)
     #expect(plus.status == 66 && plus.stdout.isEmpty && plus.stderr.contains("/nonexistent/"), Comment(rawValue: "~+ in PATH: rc=\(plus.status) \(plus.stdout) err=\(plus.stderr)"))
+    // 9. PATH 元素只有 `~`（HOME=H，腳本複本與查詢檔就在 H 裡）：bash 展開成 H → 指紋是 H 的（R15：R14 版這一分支無臂）。
+    let h = dir.appendingPathComponent("h")
+    try FileManager.default.createDirectory(at: h, withIntermediateDirectories: true)
+    try FileManager.default.copyItem(at: source, to: h.appendingPathComponent("measure-baseline.sh"))
+    let inHome = "ZQXJ-HOME-ONE\nZQXJ-HOME-TWO\nZQXJ-HOME-THREE\nZQXJ-HOME-FOUR\n"
+    try inHome.write(to: h.appendingPathComponent("baseline-queries.txt"), atomically: true, encoding: .utf8)
+    let bareTilde = try runScript(queries: unused, stub: stub, pathPrefix: "~", extraEnv: ["HOME": h.path], unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "measure-baseline.sh", cwd: b)
+    #expect(bareTilde.status == 0 && bareTilde.rows.count == 4 && bareTilde.setLine == setLine(inHome), Comment(rawValue: "bare ~ in PATH: rc=\(bareTilde.status) \(bareTilde.stdout) err=\(bareTilde.stderr)"))
+    // 10. PATH 元素 `~/a` 而 HOME 沒設：走訪當作找不到 → 66（bash 自己會用 passwd 的家目錄，這裡刻意不仿；R15：R14 版這一分支無臂）。
+    //     bash 找腳本時也要 HOME——所以 PATH 另放一份 A 在後面讓 bash 找得到、走訪卻在 `~/a` 就停。
+    let noHome = try runScript(queries: unused, stub: stub, pathPrefix: "~/a:" + a.path, unsetting: ["LTM_BASELINE_QUERIES", "HOME"], bashOperand: "measure-baseline.sh", cwd: b)
+    #expect(noHome.status == 66 && noHome.stdout.isEmpty && noHome.stderr.contains("/nonexistent/"), Comment(rawValue: "~/ with HOME unset: rc=\(noHome.status) \(noHome.stdout) err=\(noHome.stderr)"))
+    // 11. cwd 放一支假 `hashlib.py`（回一個合形狀的假指紋、把內容寫進探針檔）：`python3 -I` 不把 cwd 放進 sys.path，指紋必須仍是真的、
+    //     探針檔不存在（R15，DA：re-exec 只清環境，cwd 那一半 python 的模組搜尋路徑要另外關）。
+    let shimProbe = dir.appendingPathComponent("shim.txt")
+    try "import sys\nclass _H:\n    def update(self, b):\n        open('\(shimProbe.path)', 'ab').write(b)\n    def hexdigest(self):\n        return 'deadbeefcafe' + '0' * 52\ndef sha256():\n    return _H()\n".write(to: a.appendingPathComponent("hashlib.py"), atomically: true, encoding: .utf8)
+    let shim = try runScript(queries: unused, stub: stub, unsetting: ["LTM_BASELINE_QUERIES"], bashOperand: "measure-baseline.sh", cwd: a)
+    #expect(shim.status == 0 && shim.setLine == setLine(real) && !FileManager.default.fileExists(atPath: shimProbe.path), Comment(rawValue: "hashlib.py in cwd: rc=\(shim.status) \(shim.stdout) probe=\(FileManager.default.fileExists(atPath: shimProbe.path))"))
 }

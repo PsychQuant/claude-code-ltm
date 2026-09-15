@@ -63,7 +63,7 @@
   更正這裡漏寫的例外）不是清單——且每條不超過 64 個純量）。
   密鑰用命令替換餵進環境（`LTM_ANCHOR_KEY="$(~/bin/ltm memory --export-key)" scripts/measure-baseline.sh`），
   不落地；查詢檔預設在腳本旁——「腳本旁」照 bash 自己找腳本的順序解（`$0` 含斜線取其目錄；裸名先看 cwd、再搜
-  PATH；`cd` 關掉 CDPATH），有測試從別的 cwd 經 PATH 呼叫裸名來驅動。
+  PATH——細節只有一份，在腳本檔頭），有測試從別的 cwd 經 PATH 呼叫裸名來驅動。
 - verdict 是**封閉字母表**：`clean tool=<n>`／`self tool=<n>`／`empty tool=0`／
   `error(<rc>|sig<N>|blank|exec|json|shape|judge)`。「封閉」由 `Tests/LTMMCPTests/BaselineQueryFileTests.swift`
   的**同步測試**執行：腳本檔頭的 token 列、本行的 token 列、測試自己的 `errorTokens`、腳本程式碼裡的
@@ -158,18 +158,24 @@
 ### 它擋不住什麼（誠實寫下；這一節必然不完整——它列的是想到的，不是全部）
 
 - 人手在 session 裡貼了查詢原文，或 Claude 自己引述了、`git blame` 了——規則靠人守，沒有機制擋
-  （`-diff` 屬性只擋 diff 生成這一條路，見上）。同類：`BASH_ENV`／`PS4` 裡刻意放一個會讀查詢檔的
-  命令替換，腳本第一行的 `builtin set +x` 來不及擋（trace 那一行時 PS4 先展開）；或讓第二行的 re-exec 不發生（一個叫
-  `builtin` 的函式或 alias、預先設好哨兵、`SHELLOPTS=noexec`）——那等同直接 cat：同一個人、同一個 shell。
+  （`-diff` 屬性只擋 diff 生成這一條路，見上）。同類是腳本檔頭「擋不住的」那份**封閉列舉**（六項，各附後果，不得類推第七項；
+  這裡不複述——R14 把它寫成一句總括判準、R15 抓到判準涵蓋不了自己列的第五項、還與本節下一條互相矛盾）：PS4／BASH_ENV
+  的命令替換、叫 `builtin` 的函式或 alias、從自己的 shell 以 `exec` 對上哨兵、noexec／onecmd、白名單傳進去的 PATH 上的
+  python3、re-exec 之前就改變且跨 exec 保留的行程狀態。
 - 語料裡本來就有恰好逐字含該字串的**實質** turn（例如退役查詢裡的「資格考」有一則真的使用者 turn）——
   那不是污染，是正常召回；`self` 會把它標成 self，分不出來，讀結果時要在 session 之外看命中。
   反過來，空白與大小寫以外的改寫（全形／半形、標點、換序）`self` 看不到。
 - 查詢原文在執行期在 `python3` 與 `ltm` 的 argv 上（CLI 的查詢就是位置參數），同一帳號的行程 `ps -ww`
   看得到（容器 PID namespace、Linux `hidepid` 下更窄），存活時間是那一列的 wall clock——這是作業系統的
-  可見面，不是本腳本的輸出通道；列在這裡是因為上一節的第一句是全稱。對照：呼叫端 shell 的環境那一面（`BASH_ENV`、
-  `SHELLOPTS`、匯出的函式、readonly、`PS4`、已 export 的 `QF_CONTENT`、`PYTHONPATH`）**不在**擋不住之列——腳本第二行以
-  `/usr/bin/env -i` 加白名單重新啟動自己，那些一次全掉；能留下的只有「讓那一行不發生」的東西（上一條）。R10–R13 對這一族
+  可見面，不是本腳本的輸出通道；密鑰不在任何 argv 上（R14 版把它寫成 `env` 的 argv、execve 稽核會永久記下，R15 改走繼承的
+  fd 3）；列在這裡是因為上一節的第一句是全稱。對照：呼叫端 shell 的環境**透過繼承生效**的那一面（`SHELLOPTS`、`BASH_ENV`
+  帶進來的 `set -x`／`set -a`／readonly／同名函式／DEBUG trap、`export -f`、已 export 的 `QF_CONTENT`、`PYTHONPATH`）**不在**
+  擋不住之列——腳本第三行以空環境加白名單重新啟動自己，那些一次全掉；同一個名字用在 re-exec **之前**（`PS4` 作為 trace 前綴
+  展開、`BASH_ENV` 定義一個叫 `builtin` 的函式）仍在上一條的列舉裡。白名單的內容由同步測試釘到 `Sources/` 讀環境變數的每一個
+  名字（R14 版漏了 ltm 自己的 `LTM_DERIVED_ROOT` 這類，指向受控索引的量測會靜默量到真索引，R15）。R10–R13 對這一族
   是逐名字關（`set +a`、`unset`、`builtin read`、readonly 只查一個名字），每輪再冒同名的下一個——R14 換成性質。
+  **可比性**：`a1ec5ac`（R14）起 ltm 是在白名單環境下被量的（R14 那一版連 `TMPDIR` 都丟掉，SQLite 暫存因此換檔案系統；
+  R15 起 `TMPDIR` 與 ltm 讀的名字都會到）；在那之前是呼叫端的完整環境。要跨這條線比較 `<ms>`，先把這件事寫進紀錄。
 - 查詢檔本身是一般 tracked blob、**明文在 GitHub 伺服器上**；`-diff` 只擋 diff 生成，規則 1 又禁止 review agent
   讀內容。`-diff` 只擋會讀 attribute 的 diff 生成（上方那份例外清單裡的命令都繞得過）。有紀錄可查的曝露：R1 verify
   的 patch 產生於 `.gitattributes` 之前、含明文、在該輪被讀進 agent 逐字稿（規則 1）；R2 之後各輪 verify 的 patch 都印
