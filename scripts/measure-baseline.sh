@@ -5,50 +5,57 @@
 # verdict 全是「前 k 名」的性質，k 不同也不可比；紀錄要連這一行一起引，兩次量測這一行不同就不能逐列對齊，
 # `#N` 只是檔內位置），之後每列 `#N <ms>ms <verdict>`**（例如
 # `#3 812ms clean tool=1`；`<ms>` 是整數毫秒，後面緊接字面 `ms`）。
-# 查詢文字、命中內容與密鑰不進 stdout／stderr。**威脅模型是一條性質，不是清單**（R14 寫成總括判準、R15 寫成封閉六項，兩者
-# 都在第一個未列的成員上為假，R16）：
-#   關得掉的是**經繼承進來的狀態**——`SHELLOPTS`（xtrace／allexport／errexit…）、已 export 的變數（`QF_CONTENT`、`PYTHONPATH`、
-#   `PS4`…）、`export -f` 匯出的函式，以及 `BASH_ENV` 裡**意外**留下的東西（`set -x`／`-a`／`-e`、readonly、同名函式、DEBUG trap）
-#   ——因為前四行程式碼讓量測本體跑在一個重新啟動、環境只含白名單的 shell 裡，而那個 shell 不再 source `BASH_ENV`。
-#   關不掉的是**在第一行之前就在本行程執行程式碼**的機制——非互動 bash 只有一個：`BASH_ENV`。它能做的事沒有上界：`cat` 查詢檔
-#   上 stdout、`enable -n builtin` 廢掉前四行、`LTM_MB_CLEAN=$$` 跳過 re-exec、定義叫 `builtin` 的函式或 alias、`trap … DEBUG`
-#   在第一行前先跑一次。這一整類不在防禦內，也不再逐項列（列一項就漏一項：R15 列了六項，R16 三個讀者各拿一個未列的
-#   成員證偽）。查法：`BASH_ENV=<任何一行> scripts/measure-baseline.sh`——那一行在腳本第一行之前執行。
-#   同一條線的另一側：呼叫端算得出的東西擋不了偽造。哨兵 `LTM_MB_CLEAN` 的值是 `$$`，它擋的是**殘留**（profile 裡的 export、
-#   上一次的環境、別的 PID）不是**偽造**——任何在 execve 前知道子行程 PID 的父行程（`bash -c '單一命令'` 不 fork、任何語言的
-#   fork+exec）都對得上；對上之後 fd 3 沒有頭標記 → 70（R16：R15 版走裸身、rc 0）。PID 重用時殘留值也會撞上，同樣落到 70。
+# 查詢文字、命中內容與密鑰不進 stdout／stderr——這句只對**第四行 `exec` 生效之後**的世界成立。
+# 防禦邊界（一條性質，不點名、不說「只有」：R14 寫成總括判準、R15 寫成封閉六項、R16 寫成「第一行之前只有 BASH_ENV」，三版都在
+# 第一個未列的成員上為假——R17 三個讀者各拿一個：經繼承的 `export -f builtin`、`PS4` 命令替換＋繼承的 xtrace、`bash --login`
+# 的 profile）：**凡是在第四行 `exec` 生效之前，能在本行程執行呼叫端的程式碼、或改變前四行任一命令字語意的機制，一律不在防禦內**。
+# 切點是護甲**完成**的那一刻，不是它開始的那一刻——前四行本身跑在呼叫端的 shell 裡，那裡的一切都是呼叫端的。查法：在 `BASH_ENV`
+# 放一行、或 `export -f builtin`、或 `PS4='$(…)'` 配 `SHELLOPTS=xtrace`，任一種都在 exec 之前執行。這一類等同操作者自己 cat 查詢檔。
+# exec 之後：環境只含白名單（下方），`BASH_ENV`／`SHELLOPTS`／匯出的函式與變數／`PS4`／`PYTHONPATH` 都不在——測試驅動的是這一側
+# （xtrace、errexit、allexport、readonly、同名函式、DEBUG trap、經繼承的 `BASH_FUNC_*` 函式，各一臂）。前兩行 `builtin trap - …` 與
+# `builtin set +x` 防的是**意外**（呼叫端環境裡殘留的 `set -x`／DEBUG trap 會 trace 到第四行、密鑰在那裡展開）——不是防禦，是
+# 讓意外不延續；有臂（假密鑰）。
+# 哨兵 `LTM_MB_CLEAN=$$`（exec 不換 PID）擋的是**殘留**（profile 裡的 export、上一次的環境、別的 PID）不是**偽造**：任何在 execve
+# 前知道子行程 PID 的父行程都對得上（`bash -c '單一命令'` 不 fork）；對上之後 fd 3 沒有正確的頭標記時，在 fd 建得起來的世界裡 → 70
+# （四臂），fd 耗盡時見下方 rlimit。PID 重用時殘留值也會撞上，同樣落到 70。
 # 前四行程式碼：
-#   1. `LTM_MB_WHITELIST="…"`：白名單的唯一一份，寫端與讀端共用（同步測試釘它與這段散文、與 `Sources/` 裡 `environment["…"]`
+#   1. `builtin trap - DEBUG ERR RETURN EXIT`（trap 會在下一個命令前重開 xtrace，R15）。
+#   2. `builtin set +x`。順序不能反：`set +x` 放第一行時，DEBUG trap 在第二行前重開 xtrace、之後每一行都被 trace（R17 實測，
+#      密鑰在 fd 3 子 shell 裡就上 stderr）。繼承的 xtrace 下前兩行各被 trace 一次、`PS4` 各展開一次——這是結構下限，而 PS4 在
+#      exec 之前，屬防禦外。
+#   3. `LTM_MB_WHITELIST="…"`：白名單的唯一一份，寫端與讀端共用（同步測試釘它與這段散文、與 `Sources/` 裡 `environment["…"]`
 #      讀的每一個名字互相釘住：散文＝變數；Sources ⊆ 變數；變數 − Sources ＝ 腳本自己用的五個）。
-#   2. `builtin trap - DEBUG ERR RETURN EXIT`（trap 會在下一個命令前重開 xtrace，R15）；
-#   3. `builtin set +x`（讓第四行與 fd 3 那個子 shell 不被 trace——密鑰在那裡展開）；
 #   4. `builtin exec -c /usr/bin/env PATH=… HOME=… LTM_MB_CLEAN=$$ /bin/bash -- "$0" "$@" 3< <(白名單) || exit 70`：以**空環境**
-#      重新啟動自己。argv 上只有 PATH、HOME（re-exec 出來的 bash 要用它展開 PATH 裡的 `~` 才找得到 `$0`）與哨兵；白名單裡有設的
-#      變數以 NUL 分隔的 `NAME=VALUE` 走**繼承的 fd 3**（值不經任何行程的 argv——R14 版把密鑰寫成 `env` 的 argv，execve
-#      稽核會永久記下它，R15）。fd 3 有 framing（R16：R15 版沒有抵達檢查，串流空掉就靜默量到真索引）：第一筆 `LTM_MB_FD3=$$`、
-#      最後一筆 `LTM_MB_END=1`，讀端頭尾都要看到、名字要在白名單內、否則 70；重導本身失敗 → `|| exit 70`（bash 對重導失敗
-#      只印一行、不執行那個命令、然後繼續——沒有這個 `||` 腳本會以裸身跑完，R16；這一句無臂：重導失敗本機重現不出來，只有拼法 pin）。
+#      重新啟動自己。argv 上只有 PATH、HOME（re-exec 出來的 bash 要用它展開 PATH 裡的 `~` 才找得到 `$0`；`${HOME+"HOME=$HOME"}` 的
+#      內層引號讓含空白的值仍是一個字——查法 `HOME='/a b' bash -c 'printf "[%s]" ${HOME+"HOME=$HOME"}'`）與哨兵；白名單裡有設的變數
+#      以 NUL 分隔的 `NAME=VALUE` 走**繼承的 fd 3**（值不經任何行程的 argv——R14 版把密鑰寫成 `env` 的 argv，execve 稽核會永久記下
+#      它，R15）。fd 3 有 framing：第一筆 `LTM_MB_FD3=$$`、最後一筆 `LTM_MB_END=1`；讀端要求頭標記的值對、每筆是 `NAME=VALUE`、
+#      NAME 在白名單且 `export` 收得下（非法識別碼由 `export` 自己拒絕、腳本看它的離開碼）、看到尾標記才算到齊、每次 `read` 十秒內要返回——任一不成立 → 70（R16／R17，
+#      各有臂）。`|| exit 70` 只在重導目標開不出來（不存在的路徑、管線建不出來）時 fire；`/dev/fd` dup 失敗那一段 bash 直接結束
+#      shell，`||` 沒機會跑（見 rlimit）。
 #   白名單：HOME、LC_ALL、LANG、TMPDIR、LTM_BIN、LTM_BASELINE_QUERIES、以及 ltm 自己讀的 CLAUDE_CONFIG_DIR、LTM_ANCHOR_KEY、
 #   LTM_ANCHOR_KEY_SERVICE、LTM_BUILD_BATCH_CHUNKS、LTM_BUILD_MEMORY_BUDGET_MB、LTM_CORPUS_ROOT、LTM_DERIVED_ROOT、LTM_MEMORY_ROOT、
 #   LTM_TEST_CLOCK_STEP_SECONDS（R14 版只傳三個 LTM_*，指向受控索引的量測會靜默量到真索引，R15）。白名單裡的東西**原樣轉發**：
 #   呼叫端殘留的 `LTM_DERIVED_ROOT` 會讓這一輪量到別棵索引而指紋不變（指紋只認查詢集）、rc 0；`LTM_ANCHOR_KEY` 值錯 → 事件全
 #   orphan 而 rc 0（.claude/rules/anchor-key-in-probes.md）；PATH 上的 python3 被換掉 → 查詢集上該行程的 stdout；`/usr/bin/env` 不在
-#   → 126。這幾條各有各的訊號或沒有訊號，寫在這裡不是為了封閉，是因為它們是白名單這個機制本身的另一面。
+#   → 126。這幾條各有各的訊號或沒有訊號，是白名單這個機制本身的另一面。
 #   兩個 python 都以 `-I -S` 啟動：cwd 不進 `sys.path`（cwd 放一支 `hashlib.py` 就能整份接走查詢集並回一個合形狀的假指紋、放一支
-#   `json.py` 就能改掉每一列 verdict，R15／R16）、PYTHONPATH／user site 不進（`-I`）、解譯器自己的 site-packages 與 `.pth`／
-#   `sitecustomize` 也不進（`-S`，R16；這一層沒有臂——要驅動得改系統的 site）；`-I` 含 `-E`，所以刻意不轉發任何 `PYTHON*`。
+#   `json.py` 就能改掉每一列 verdict，R15／R16，各有臂）、PYTHONPATH／user site 不進（`-I`）、解譯器自己的 site-packages 與 `.pth`／
+#   `sitecustomize` 也不進（`-S`，R16；無臂——要驅動得改系統的 site）；`-I` 含 `-E`，所以刻意不轉發任何 `PYTHON*`。
 #   R13 曾對這一族逐名字修（`builtin read`／`builtin printf`／`builtin unset`、`set +e`、readonly 只查 `QF_CONTENT`），R14 一輪
 #   再冒五個同名（`set`、`local`、`[`、`readonly SETID`、`readonly bad`）——列舉會漏，判準不會；那些拼法在 re-exec 之後驅動不了，
-#   R14 已拆（今天全檔沒有 `builtin read`）。
+#   R14 已拆（程式碼行裡沒有 `builtin read`；這句話自己與上一句會被 grep 命中）。
 # 判準（re-exec 之後）是「每一個拿得到查詢內容的子行程，它的 stderr 都不是可能載內容的通道」：指紋 python、judge python、
-# ltm 的 stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null，judge 對 ltm 明寫 `close_fds=True`；兩個 process substitution 的
-# 子 shell 只跑 builtin `printf`，運算元不會上 stderr。繼承的描述子：fd 3 讀完就關；process substitution 自己的讀端（bash 3.2 配
-# 63，關不掉）會被兩個 python 繼承——白名單的寫端寫完即退出、讀端讀到 EOF 才離開迴圈，所以任何 python 起跑時那個描述子已在
-# EOF（R16 實測 `os.read` 回空）；它是衛生問題不是通道，寫在這裡是讓下一個把寫端換成長命行程的人知道它會變成通道。
-# 跨 exec 保留、白名單清不掉的行程狀態：cwd（後果由 `-I -S` 關掉）、umask、rlimit（`nofile` 極低時 fd 3 的重導失敗 → 70；
-# 再低一點 bash 自己在第一行前就死，rc 1 零列，撞「任一列 error」的號——R16 實測，門檻隨呼叫端已開的 fd 數移動，不寫數字）、
-# 關掉或重導的 fd（stderr 關掉 → 診斷消失）、信號處置。`SHELLOPTS=noexec`（一行都不跑）／`onecmd`（跑完第一行就走）：零輸出、
-# rc 0 → 離開碼 0 的意義是「0 **且** stdout 第一行是 set 行」，紀錄本來就要連那一行一起抄。
+# ltm 的 stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null（judge 對 ltm 寫的 `close_fds=True` 是 Python 的預設值，寫出來是文件、
+# 無行為）；兩個 process substitution 的子 shell 只跑 builtin `printf`，運算元不會上 stderr。繼承的描述子：fd 3 看到尾標記就關
+# （尾標記之後的記錄不讀）；process substitution 自己的讀端（bash 3.2 配 63，關不掉）只被指紋 python 繼承（judge 只有 0／1／2，
+# R17 實測）——白名單的寫端寫完即退出，尾標記是它最後一筆，所以指紋 python 起跑時那個描述子已在 EOF（R16／R17 實測 `os.read`
+# 回空）；它是衛生問題不是通道，寫在這裡是讓下一個把寫端換成長命行程的人知道它會變成通道。
+# 跨 exec 保留、白名單清不掉的行程狀態：cwd（後果由 `-I -S` 關掉）、umask、關掉或重導的 fd（stderr 關掉 → 診斷消失）、信號處置、
+# rlimit。`nofile` 由高往低的實測階梯（R17，門檻隨呼叫端已開的 fd 數移動，不寫數字）：正常 → **rc 0 零輸出**（`/dev/fd` dup 失敗，
+# bash 直接結束 shell，`||` 與讀端的 70 都沒機會跑）→ rc 1 零列（撞「任一列 error」的號）→ 70（管線建不出來，`||` fire）→ 134。
+# 這一段從腳本內關不掉。所以**離開碼 0 的意義是「0 且 stdout 第一行是 set 行」**——這是消費端的硬規則，不是註腳；任何讓 set 行
+# 印不出來的失效（`SHELLOPTS=noexec`／`onecmd`、fd 耗盡、…）都落在這條規則下，紀錄本來就要連那一行一起抄。
 # 作業系統的可見面：查詢原文在執行期會在 python3 與 ltm 的 argv 上（CLI 的查詢就是位置參數、`--` 終止符用得對），同一帳號的行程
 # `ps -ww` 看得到（Linux 上 `/proc/<pid>/cmdline` 預設任何帳號可讀；容器 PID namespace、hidepid 下更窄）、存活時間是那一列的
 # wall clock；密鑰不在任何 argv 上（R15，execve 稽核不再記下它），但它在 re-exec 的 bash、每個 judge 與 ltm 的**環境**裡，存活
@@ -100,7 +107,7 @@
 #
 # 離開碼（腳本自己的 `exit N` 是封閉集合，同步測試對照程式碼；re-exec 失敗的 126／127 見下一行）：0 1 64 65 66 69 70
 #   re-exec 那一行失敗時 bash 自己給 126／127，在集合外、無測試——查法：把 `/usr/bin/env` 換成不存在的路徑 → 126（R15）。
-#   0 全部量到（含 empty；消費端要同時看到 set 行——見上方 (d)）；1 任一列 error(…)（每列照印完才離開）；
+#   0 全部量到（含 empty；消費端要同時看到 set 行——見上方 rlimit 段的硬規則）；1 任一列 error(…)（每列照印完才離開）；
 #   64 k 不是 1–1000 的整數、或給了超過一個引數（舊習慣把查詢放第二個參數時，字串已進 metadata，這次不算量到，R14）；
 #   65 查詢檔沒有任何非註解行；66 查詢檔不是可讀的一般檔案、讀不了、含 NUL、或讀取中斷；69 ltm 不是可執行的一般檔案；
 #   70 沒有 python3、算不出查詢集指紋、或白名單沒有完整經 fd 3 到達（R16）。在 set 行印出**之後**才判定的有兩個：1（有列）與
@@ -115,22 +122,23 @@
 #   LTM_BIN（預設 ~/bin/ltm）、LTM_BASELINE_QUERIES（預設本腳本旁的 baseline-queries.txt——「本腳本旁」照 bash 找腳本
 #   運算元的順序解：`$0` 含斜線取其目錄；裸名先看 cwd、再沿 PATH 取第一個可讀的檔案）——兩者明確給空字串是錯（66／69），
 #   不是「用預設」（R14；k 同，R10）、k 1–1000（預設 5）。密鑰請用命令替換直接餵進環境，不要落地（.claude/rules/anchor-key-in-probes.md）。
-LTM_MB_WHITELIST="HOME LC_ALL LANG TMPDIR LTM_BIN LTM_BASELINE_QUERIES CLAUDE_CONFIG_DIR LTM_ANCHOR_KEY LTM_ANCHOR_KEY_SERVICE LTM_BUILD_BATCH_CHUNKS LTM_BUILD_MEMORY_BUDGET_MB LTM_CORPUS_ROOT LTM_DERIVED_ROOT LTM_MEMORY_ROOT LTM_TEST_CLOCK_STEP_SECONDS"
 builtin trap - DEBUG ERR RETURN EXIT
 builtin set +x
+LTM_MB_WHITELIST="HOME LC_ALL LANG TMPDIR LTM_BIN LTM_BASELINE_QUERIES CLAUDE_CONFIG_DIR LTM_ANCHOR_KEY LTM_ANCHOR_KEY_SERVICE LTM_BUILD_BATCH_CHUNKS LTM_BUILD_MEMORY_BUDGET_MB LTM_CORPUS_ROOT LTM_DERIVED_ROOT LTM_MEMORY_ROOT LTM_TEST_CLOCK_STEP_SECONDS"
 case "${LTM_MB_CLEAN-}" in
     "$$")
-        { IFS= read -r -d '' kv && [ "$kv" = "LTM_MB_FD3=$$" ]; } 2>/dev/null <&3 || { echo "白名單沒有經 fd 3 到達（頭標記缺）" >&2; exit 70; }
+        { IFS= read -t 10 -r -d '' kv && [ "$kv" = "LTM_MB_FD3=$$" ]; } 2>/dev/null <&3 || { echo "白名單沒有經 fd 3 到達（頭標記缺或值錯）" >&2; exit 70; }
         mb_end=0
-        while IFS= read -r -d '' kv <&3 2>/dev/null; do
+        while IFS= read -t 10 -r -d '' kv <&3 2>/dev/null; do
             case "$kv" in
                 LTM_MB_END=1) mb_end=1; break ;;
-                *=*) case " $LTM_MB_WHITELIST " in *" ${kv%%=*} "*) export "$kv" ;; *) echo "白名單外的名字經 fd 3 到達" >&2; exit 70 ;; esac ;;
+                *=*) mb_name="${kv%%=*}"
+                     case " $LTM_MB_WHITELIST " in *" $mb_name "*) export "$kv" 2>/dev/null || { echo "fd 3 上的記錄無法 export" >&2; exit 70; } ;; *) echo "白名單外的名字經 fd 3 到達" >&2; exit 70 ;; esac ;;
                 *) echo "fd 3 上的記錄不是 NAME=VALUE" >&2; exit 70 ;;
             esac
         done
-        [ "$mb_end" = 1 ] || { echo "白名單沒有完整經 fd 3 到達（尾標記缺）" >&2; exit 70; }
-        exec 3<&-; unset LTM_MB_CLEAN kv mb_end ;;
+        [ "$mb_end" = 1 ] || { echo "白名單沒有完整經 fd 3 到達（尾標記缺或讀取逾時）" >&2; exit 70; }
+        exec 3<&-; unset LTM_MB_CLEAN kv mb_end mb_name ;;
     *) builtin exec -c /usr/bin/env "PATH=${PATH-}" ${HOME+"HOME=$HOME"} "LTM_MB_CLEAN=$$" /bin/bash -- "$0" "$@" 3< <(builtin printf '%s\0' "LTM_MB_FD3=$$"; for v in $LTM_MB_WHITELIST; do if [[ -n "${!v+set}" ]]; then builtin printf '%s=%s\0' "$v" "${!v}"; fi; done; builtin printf '%s\0' LTM_MB_END=1) || exit 70 ;;
 esac
 set -u

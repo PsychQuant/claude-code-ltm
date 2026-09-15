@@ -88,11 +88,13 @@
   CHANGELOG 含 `clean|self|empty`、README 寫的每條純量上限與目前條數（對照測試常數與真檔）、截斷長度
   （`toolMetadataFieldLimit`：查詢檔檔頭、README 與腳本檔頭的每一個「N 字元」）、指到查詢檔的三種拼法（識別碼
   `$QF`、檔名字面、環境變數名）各自的出現次數——那是拼法列舉、**不是**「只開一次」的證明，先把路徑存進第四個名字再開
-  它看不到（R13）——以及 process substitution 餵指紋與迴圈、腳本前四行是白名單變數／trap 清除／`builtin set +x`／re-exec 的
-  `case`（R14–R16）、白名單三邊互相釘住（變數＝檔頭散文、Sources 的 `environment["…"]` 讀取點 ⊆ 變數、Sources 不得有別的讀法）、
+  它看不到（R13）——以及 process substitution 餵指紋與迴圈、腳本前四行是 trap 清除／`builtin set +x`／白名單變數／re-exec 的
+  `case`（R14–R17）、白名單三邊互相釘住（變數＝檔頭散文、Sources 的 `environment["…"]` 讀取點 ⊆ 變數、Sources 不得有 `getenv(`
+  或非大寫字面鍵的 `environment[`——拼法守衛，改名綁定看不到）、
   `.gitattributes` 對兩個查詢檔的 `diff` 屬性經 `git check-attr` 是 `unset`、字元守衛不用任何 `[X-Y]` range。這份清單是**摘要**，會漂移；權威是查法：讀那條測試的每一個 `#expect`——不在那裡的
   複述就沒有機制守著。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。離開碼 0 的意義是「0 **且**
-  stdout 第一行是 set 行」——`SHELLOPTS=noexec` 這類讓腳本一行都不跑的選項會給零輸出、rc 0（腳本檔頭的擋不住段，R14）。
+  stdout 第一行是 set 行」——這是消費端的硬規則：任何讓 set 行印不出來的失效（`SHELLOPTS=noexec`／`onecmd`、fd 耗盡讓 bash 直接
+  結束 shell、…）都給零輸出、rc 0（腳本檔頭的 rlimit 段，R14／R17）。
   `blank` 是那一行在 Unicode 空白摺疊後是空的（只有 U+3000 這類非 ASCII 空白）——行定義把它算成條目、
   judge 卻會得到空針，空針對任何命中都算 self，所以不跑 ltm、直接報 error；測試同時斷言查詢檔裡沒有
   這類字元。

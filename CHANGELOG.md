@@ -16,7 +16,7 @@
   （stdout 第一行 `set sha256:<12 hex> k=<k>` 是查詢集指紋與 k、之後只有 `#N <ms>ms <verdict>`，verdict 是封閉字母表 `clean|self|empty` 加 `tool=<n>`
   或 `error(…)`，四處列舉由同步測試釘住；`self` = 前 k 名有 snippet 含這條查詢的原文（空白與
   大小寫摺疊），`tool=<n>` 只是觀察值不是污染訊號；查詢文字不進 stdout／stderr、含 `bash -x`／
-  呼叫端 shell 環境透過繼承生效的任何東西（`SHELLOPTS`、`BASH_ENV`、匯出函式、readonly、DEBUG trap、`PYTHONPATH`——腳本前三行
+  呼叫端 shell 環境透過繼承生效的任何東西（`SHELLOPTS`、`BASH_ENV`、匯出函式、readonly、DEBUG trap、`PYTHONPATH`——腳本前四行
   清 trap、關 xtrace、以空環境加白名單重啟自己；白名單經繼承的 fd 3（有頭尾標記，沒到就 70）、argv 上只有 PATH／HOME／哨兵、
   內容由測試釘到 `Sources/` 的環境變數讀取點；擋不住的是「在第一行之前就能在本行程執行程式碼」這一條性質，檔頭寫明）；
   查詢檔預設「腳本旁」照 bash 找腳本運算元的順序解（cwd 先、再沿 PATH 取第一個可讀的檔案，PATH 元素做 `~`／`~/` 展開）；

@@ -95,7 +95,11 @@ private func checkQueryFile(_ data: Data) throws -> QueryFileReport {
     let queries = nonCommentLines(text)
     r.count = queries.count
     r.duplicateCount = queries.count - Set(queries).count
-    r.retiredOffenders = queries.indices.filter { i in retired.contains { queries[i].contains($0) } }.map { $0 + 1 }
+    // 退役比對用與 judge 同一套正規化（空白摺疊＋casefold）：R17（codex）指出只比原始字面時，改大小寫或內部空白就能讓污染查詢重新進基準集，
+    // 而這是查詢檔唯一的自動內容防線（`-diff`＋規則 1 讓 reviewer 不准讀內容）。
+    func foldForRetired(_ s: String) -> String { s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").lowercased() }
+    let foldedRetired = retired.map(foldForRetired)
+    r.retiredOffenders = queries.indices.filter { i in foldedRetired.contains { foldForRetired(queries[i]).contains($0) } }.map { $0 + 1 }
     r.tooLong = queries.indices.filter { queries[$0].unicodeScalars.count > maxQueryScalars }.map { $0 + 1 }
     r.forbiddenLines += physical.enumerated()
         .filter { $0.element.unicodeScalars.contains(where: isForbiddenScalar) }.map { $0.offset + 1 }
@@ -134,6 +138,7 @@ func queryFileChecksAreDrivenByTheirOwnFixture() throws {
     #expect(try report("ZQXJ-A\n" + String(repeating: "Z", count: maxQueryScalars) + "\n").tooLong.isEmpty)
     #expect(try report("ZQXJ-A\nZQXJ-A\n").duplicateCount == 1)
     #expect(try report("ZQXJ-A\n" + retired[0] + "\n").retiredOffenders == [2])
+    #expect(try report("ZQXJ-A\n" + retired[0].uppercased().replacingOccurrences(of: " ", with: "  \t") + "\n").retiredOffenders == [2])   // 大小寫與內部空白改寫也算退役（R17）
     #expect(try report("ZQXJ-A\n").missingHeaderPhrases.count == requiredHeaderPhrases.count)
     #expect(throws: NotUTF8.self) { try checkQueryFile(Data([0xFF, 0xFE, 0x41])) }   // 非 UTF-8：拒答不猜
 }
@@ -377,23 +382,23 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // `cat "$HERE/baseline-queries.txt"`、`cat "${LTM_BASELINE_QUERIES:-…}"`、`wc -l < "$HERE/…"` 照樣穿過——鍵換了、形狀沒換，
     // CLAUDE.md #34／#37 那句）。腳本裡能指到查詢檔的拼法有三種，三種各釘一個次數：識別碼 `$QF`／`${QF}` 7 次（-f/-r 那行 3、
     // read 1、三句錯誤訊息 3）、檔名字面 `baseline-queries.txt` 1 次（QF 的預設值）、環境變數名 `LTM_BASELINE_QUERIES` 2 次
-    // （re-exec 白名單的 for 清單 1 次＋QF 賦值 1 次）；多一次就是多一條路徑或多一處訊息，都要來這裡對帳。它守得住的較窄陳述是「用這三種拼法之一再開一次會紅」；
+    // （白名單變數那一行 1 次＋QF 賦值 1 次）；多一次就是多一條路徑或多一處訊息，都要來這裡對帳。它守得住的較窄陳述是「用這三種拼法之一再開一次會紅」；
     // 先把路徑存進第四個名字再開，這裡看不到——要判準版得觀察 open 系統呼叫，不可攜，不做。README 的量測段用同一句話。
-    // 呼叫端 shell 環境經繼承進來的那一面由前四行程式碼一次清掉：白名單變數、`builtin trap - …`、`builtin set +x`、re-exec 的 `case`
+    // 呼叫端 shell 環境經繼承進來的那一面由前四行程式碼一次清掉：`builtin trap - …`、`builtin set +x`、白名單變數、re-exec 的 `case`
     // （細節只有一份，在腳本檔頭；這段註解在 R14／R15 各漂移過一次——R15 版還寫著 R15 自己判 HIGH 的舊寫法，R16）。這裡釘的是
     // 「前四行就是那四行」；行為由 xtrace 測試的各臂驅動（DEBUG trap、同名函式、假密鑰、偽造哨兵）。
     let codeText = codeLines.map(\.element).joined(separator: "\n")
     let firstFour = codeLines.prefix(4).map(\.element)
-    #expect(firstFour.count == 4 && firstFour[0].hasPrefix("LTM_MB_WHITELIST=\"") && Array(firstFour[1...]) == ["builtin trap - DEBUG ERR RETURN EXIT", "builtin set +x", "case \"${LTM_MB_CLEAN-}\" in"], Comment(rawValue: "腳本的前四行程式碼必須是白名單變數、trap 清除、builtin set +x、re-exec 的 case：\(firstFour)"))
+    #expect(firstFour.count == 4 && Array(firstFour[0...1]) == ["builtin trap - DEBUG ERR RETURN EXIT", "builtin set +x"] && firstFour[2].hasPrefix("LTM_MB_WHITELIST=\"") && firstFour[3] == "case \"${LTM_MB_CLEAN-}\" in", Comment(rawValue: "腳本的前四行程式碼必須是 trap 清除、builtin set +x、白名單變數、re-exec 的 case（R17：順序不能反，見腳本檔頭）：\(firstFour)"))
     // 白名單三邊互相釘住（R15：R14 版的白名單一行沒有任何東西釘；R16：寫端讀端共用同一個變數，讀端拒絕名單外的名字）：
-    // (1) 第一行 `LTM_MB_WHITELIST="…"` 的名字、(2) 檔頭「白名單：」那段散文裡的名字、(3) `Sources/` 裡每一個 `environment["NAME"]`
+    // (1) 第三行 `LTM_MB_WHITELIST="…"` 的名字、(2) 檔頭「白名單：」那段散文裡的名字、(3) `Sources/` 裡每一個 `environment["NAME"]`
     // 讀取點的名字——(1)==(2)，(3) ⊆ (1)，(1) − (3) 恰好是腳本自己用的五個（LC_ALL、LANG、TMPDIR、LTM_BIN、LTM_BASELINE_QUERIES）。
     // (3) 是單一拼法的 grep，所以另一條斷言釘住 Sources 裡不得出現別的讀法（`getenv(`、非字面鍵的 `environment[`）——R16：
     // 沒有那一條，「Sources 讀環境變數的每一個名字」只是一句比 regex 強的散文。
     let reexecLine = codeLines.map(\.element).first { $0.contains("builtin exec -c /usr/bin/env \"PATH=${PATH-}\" ${HOME+\"HOME=$HOME\"} \"LTM_MB_CLEAN=$$\" /bin/bash -- \"$0\" \"$@\" 3< <(builtin printf '%s\\0' \"LTM_MB_FD3=$$\"; for v in $LTM_MB_WHITELIST; do") && $0.hasSuffix("LTM_MB_END=1) || exit 70 ;;") } ?? ""
-    let forList = (matches(#"^LTM_MB_WHITELIST=\"([A-Z0-9_ ]+)\"$"#, in: firstFour.first ?? "").first ?? "").split(separator: " ").map(String.init)
+    let forList = (matches(#"^LTM_MB_WHITELIST=\"([A-Z0-9_ ]+)\"$"#, in: firstFour.count == 4 ? firstFour[2] : "").first ?? "").split(separator: " ").map(String.init)
     let whitelistProse = script.components(separatedBy: "#   白名單：").dropFirst().first?.components(separatedBy: "白名單裡的東西**原樣轉發**").first ?? ""
-    let proseNames = Set(matches(#"\b([A-Z][A-Z0-9_]{2,})\b"#, in: whitelistProse).filter { !$0.hasPrefix("R1") && !$0.hasSuffix("_") })
+    let proseNames = Set(matches(#"\b([A-Z][A-Z0-9_]{2,})\b"#, in: whitelistProse).filter { $0.range(of: #"^R[0-9]+$"#, options: .regularExpression) == nil && !$0.hasSuffix("_") })   // 輪次編號（R14…R99）不是名字；R16 版用 hasPrefix("R1") 是編號列舉
     var sourceNames = Set<String>()
     if let walker = FileManager.default.enumerator(at: root.appendingPathComponent("Sources"), includingPropertiesForKeys: nil) {
         for case let url as URL in walker where url.pathExtension == "swift" {
@@ -405,14 +410,20 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     if let walker = FileManager.default.enumerator(at: root.appendingPathComponent("Sources"), includingPropertiesForKeys: nil) {
         for case let url as URL in walker where url.pathExtension == "swift" {
             if let text = try? String(contentsOf: url, encoding: .utf8) {
-                if text.contains("getenv(") { otherEnvReads.append(url.lastPathComponent + ": getenv(") }
-                otherEnvReads += matches(#"(environment\[[^"\]][^\]]*\])"#, in: text).map { url.lastPathComponent + ": " + $0 }
+                if text.range(of: #"getenv\s*\("#, options: .regularExpression) != nil { otherEnvReads.append(url.lastPathComponent + ": getenv(") }
+                // `environment[` 後面不是「大寫字面鍵」就紅：內插鍵、小寫字面、變數鍵、空白都算（R17：R16 版只擋「第一個字元不是引號」）。
+                // 改名綁定（`let env = …environment; env["X"]`）與 `getenv` 之外的 wrapper 仍看不到——這是拼法守衛，README 也這樣寫。
+                otherEnvReads += matches(#"(environment\s*\[(?!"[A-Z][A-Z0-9_]*"\])[^\]]*\])"#, in: text).map { url.lastPathComponent + ": " + $0 }
             }
         }
     }
     #expect(otherEnvReads.isEmpty, Comment(rawValue: "Sources 裡有 `environment[\"字面名\"]` 以外的環境變數讀法，白名單同步看不到它們：\(otherEnvReads)"))
     // `.gitattributes` 的 `-diff` 是規則 1 的機制面，之前零測試釘它（R16）：用 git 自己的屬性解析結果，不是解析檔案文字。
+    // 這是套件裡唯一需要 git 本身的斷言：不在 checkout 裡或沒有 /usr/bin/git 時會以錯的理由紅（R17），所以先確認 .git 存在、否則具名跳過。
     let checkAttr = Process()
+    let gitAvailable = FileManager.default.fileExists(atPath: root.appendingPathComponent(".git").path) && FileManager.default.isExecutableFile(atPath: "/usr/bin/git")
+    #expect(gitAvailable, "不在 git checkout 裡或沒有 /usr/bin/git：`.gitattributes` 的 -diff 屬性這一條沒有驗到（不是屬性錯了）")
+    if gitAvailable {
     checkAttr.executableURL = URL(fileURLWithPath: "/usr/bin/git")
     checkAttr.currentDirectoryURL = root
     checkAttr.arguments = ["check-attr", "diff", "--", "scripts/baseline-queries.txt", "scripts/rrf-tie-queries.txt"]
@@ -420,6 +431,7 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     try checkAttr.run(); checkAttr.waitUntilExit()
     let attrLines = String(data: attrOut.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.split(separator: "\n").map(String.init) ?? []
     #expect(attrLines == ["scripts/baseline-queries.txt: diff: unset", "scripts/rrf-tie-queries.txt: diff: unset"], Comment(rawValue: "git check-attr：\(attrLines)"))
+    }
     #expect(Set(forList) == proseNames, Comment(rawValue: "白名單：for 清單 \(forList.sorted()) ≠ 檔頭散文 \(proseNames.sorted())"))
     #expect(!sourceNames.isEmpty && sourceNames.isSubset(of: Set(forList)), Comment(rawValue: "Sources 讀的環境變數沒全部轉發：缺 \(sourceNames.subtracting(forList).sorted())"))
     #expect(Set(forList).subtracting(sourceNames) == ["LC_ALL", "LANG", "TMPDIR", "LTM_BIN", "LTM_BASELINE_QUERIES"], Comment(rawValue: "白名單裡 Sources 沒讀的名字應恰好是腳本自己用的五個：\(Set(forList).subtracting(sourceNames).sorted())"))
@@ -428,7 +440,7 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     let fileNameRefs = codeText.components(separatedBy: "baseline-queries.txt").count - 1
     let envNameRefs = codeText.components(separatedBy: "LTM_BASELINE_QUERIES").count - 1
     let hasHerestring = codeText.contains("<<<")
-    #expect(procSubs == 2 && qfRefs == 7 && fileNameRefs == 1 && envNameRefs == 2 && !hasHerestring, Comment(rawValue: "查詢檔的三種拼法在程式碼行出現：識別碼 \(qfRefs)（應為 7）、檔名字面 \(fileNameRefs)（應為 1）、環境變數名 \(envNameRefs)（應為 2：白名單 for 清單 1＋QF 賦值 1）——多一次就是多一條讀取路徑或訊息；process substitution \(procSubs) 處（應為 2）；herestring：\(hasHerestring)"))
+    #expect(procSubs == 2 && qfRefs == 7 && fileNameRefs == 1 && envNameRefs == 2 && !hasHerestring, Comment(rawValue: "查詢檔的三種拼法在程式碼行出現：識別碼 \(qfRefs)（應為 7）、檔名字面 \(fileNameRefs)（應為 1）、環境變數名 \(envNameRefs)（應為 2：白名單變數 1＋QF 賦值 1）——多一次就是多一條讀取路徑或訊息；process substitution \(procSubs) 處（應為 2）；herestring：\(hasHerestring)"))
     // 字元比對一律字面集合、不用 `[X-Y]` range——含字母的 range 在 bash 3.2 隨 locale 排序而變（指紋檢查的 fpUpper 臂驅動）；
     // 純數字 range 找不到反例（R14），這裡釘的是同檔一致寫法。pin 認任何 `[`、可選 `!`／`^`、英數、`-`、英數 的形式
     // （R13 版只認 `[0-9]`／`[!0-9]` 兩種拼法，`[^0-9]`、`[0-9a-f]` 穿得過，R14）。
@@ -488,6 +500,8 @@ private func checkProducerLines(_ lines: [(line: Int, text: String)], marker: St
     var sides: [String] = []
     for (n, line) in lines {
         guard let m = line.range(of: marker) else { r.unsplittable.append(n); continue }
+        // 整行被 `//` 註解掉的 producer 行不是活斷言（R17，codex：R10 拆掉「以 #expect( 開頭」的合取時沒補「不是註解」，註解掉的產生點會被當成活的）。
+        if line.trimmingCharacters(in: .whitespaces).hasPrefix("//") { r.unsplittable.append(n); continue }
         let names = line[m.upperBound...].split(separator: " ").map(String.init)
         // 整行交給 firstExpectArgument：它在第一個頂層逗號或收尾就回，永遠到不了標記（R10：切到標記之前是 no-op）。
         guard let side = firstExpectArgument(line) else { r.unsplittable.append(n); continue }
@@ -525,6 +539,7 @@ func producerLineChecksAreDrivenByTheirOwnFixture() {
     let notAnExpect = good + ["let x = 1  " + mk + " blank"]
     #expect(checkProducerLines(numbered(Array(notAnExpect)), marker: mk).unsplittable == [50])         // 含標記但不是 #expect 行：紅，不是靜默濾掉（R10）
     #expect(checkProducerLines([(line: 7, text: "#expect(a == b)")], marker: mk).unsplittable == [7])  // 沒有標記的行進來也紅
+    #expect(checkProducerLines([(line: 9, text: "    // #expect(x == \"error(judge)\") \(mk) judge")], marker: mk).unsplittable == [9])  // 整行註解掉的產生點也紅（R17）
 }
 
 /// 檔頭續行反折：下一行開頭（可有縮排）的 `#` 連同換行拿掉，再去掉所有空格。R10 放寬成也接縮排的 `#`，R11 指出它
@@ -617,13 +632,15 @@ private func runScript(queries: URL, stub: URL, k: String = "3", viaBashX: Bool 
                        ltmBinOverride: String? = nil, pathOverride: String? = nil, pathPrefix: String? = nil,
                        extraEnv: [String: String] = [:], unsetting: [String] = [],
                        scriptOverride: URL? = nil, bashOperand: String? = nil, cwd: URL? = nil, extraArgs: [String] = [],
-                       sentinelForged: Bool = false, forgedFd3Records: String? = nil) throws -> ScriptRun {
+                       sentinelForged: Bool = false, forgedFd3Records: String? = nil, forgedFd3BlockAfter: String? = nil) throws -> ScriptRun {
     let script = scriptOverride ?? repoRoot().appendingPathComponent("scripts/measure-baseline.sh")
     let process = Process()
     if sentinelForged {
         process.executableURL = URL(fileURLWithPath: "/bin/bash")   // `bash -c '單一命令'` 不 fork：那個 shell 的 $$ 就是腳本的 PID（R16）
         // forgedFd3Records：偽造者連 fd 3 也自備——printf 格式，`%s` 是 $$（頭標記要對得上），記錄以 `\\0` 分隔。
-        let fd3 = forgedFd3Records.map { " 3< <(printf '\($0)' \"$$\")" } ?? ""
+        // 阻塞來源的子 shell 先關掉繼承的 stdio，否則測試端的 readDataToEndOfFile 會等到 sleep 結束（R17）。
+        // forgedFd3BlockAfter：先送這些記錄（可為空），然後寫端停住不寫、也不關——讀端要靠 `read -t` 逾時。
+        let fd3 = forgedFd3BlockAfter.map { " 3< <(printf '\($0)' \"$$\"; exec 2>/dev/null </dev/null; sleep 120)" } ?? (forgedFd3Records.map { " 3< <(printf '\($0)' \"$$\")" } ?? "")
         process.arguments = ["-c", "LTM_MB_CLEAN=$$ exec \"$0\" \"$@\"" + fd3, script.path, k] + extraArgs
     } else if let bashOperand {
         process.executableURL = URL(fileURLWithPath: "/bin/bash")   // `bash <operand>`：$0 就是 operand（裸名時 bash 先看 cwd 再搜 PATH）
@@ -1010,6 +1027,9 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
         ("BASH_ENV DEBUG trap + shadowed trap", try runScript(queries: queries, stub: stub, extraEnv: key.merging(["BASH_ENV": tenv2.path]) { $1 })),
         ("stale sentinel 1 (R14 value)", try runScript(queries: queries, stub: stub, extraEnv: ["LTM_MB_CLEAN": "1", "BASH_ENV": senv.path])),
         ("stale sentinel non-pid", try runScript(queries: queries, stub: stub, extraEnv: ["LTM_MB_CLEAN": "x", "BASH_ENV": senv.path])),
+        // 經**繼承**（不經 BASH_ENV）進來的匯出函式：`export -f read` 在環境裡的形狀是 `BASH_FUNC_read%%=() { … }`（bash 3.2 與 5.3 同）。
+        // 檔頭說它是「經繼承進來的狀態、re-exec 之後全掉」，R16 之前零臂（R17）。
+        ("inherited BASH_FUNC_read%%", try runScript(queries: queries, stub: stub, extraEnv: key.merging(["BASH_FUNC_read%%": "() { /bin/cat; return 1; }"]) { $1 })),
     ]
     for (label, run) in runs {
         #expect(run.status == 0, Comment(rawValue: "\(label): rc=\(run.status) err=\(run.stderr.count) bytes"))
@@ -1052,6 +1072,23 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     // 頭標記的值：第一筆是合法名字而不是 `LTM_MB_FD3=$$`——讀端要拒絕；只讀不比對的話會把那一筆當頭吃掉、繼續量測（R16 變異）。
     let wrongHead = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3Records: "LC_ALL=C%.0s\\0LTM_MB_END=1\\0")
     #expect(wrongHead.status == 70 && wrongHead.stdout.isEmpty, Comment(rawValue: "forged fd 3 with wrong head record: rc=\(wrongHead.status) out=\(wrongHead.stdout) err=\(wrongHead.stderr)"))
+    // 頭標記名字對、**值**錯（不是本行程的 PID）：R16 版只有名字那一半有臂，比對改成只看名字 16 條全綠（R17）。
+    let wrongHeadValue = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3Records: "LTM_MB_FD3=0%.0s\\0LTM_MB_END=1\\0")
+    #expect(wrongHeadValue.status == 70 && wrongHeadValue.stdout.isEmpty, Comment(rawValue: "forged fd 3 with wrong head value: rc=\(wrongHeadValue.status) out=\(wrongHeadValue.stdout) err=\(wrongHeadValue.stderr)"))
+    // 記錄不是 NAME=VALUE（R17：R16 版這條 exit 70 無臂）；名字不是單一合法 token（兩個相鄰白名單名字用空白接起來，R16 版的子字串比對會過
+    // ——現在由 `export` 自己拒絕非法識別碼、腳本檢查它的離開碼；另寫一道名字驗證與它重疊、無臂，R17 拆掉）。
+    let junkRecord = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3Records: "LTM_MB_FD3=%s\\0junk\\0LTM_MB_END=1\\0")
+    #expect(junkRecord.status == 70 && junkRecord.stdout.isEmpty, Comment(rawValue: "forged fd 3 with a non NAME=VALUE record: rc=\(junkRecord.status) out=\(junkRecord.stdout) err=\(junkRecord.stderr)"))
+    let twoTokenName = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3Records: "LTM_MB_FD3=%s\\0HOME LC_ALL=x\\0LTM_MB_END=1\\0")
+    #expect(twoTokenName.status == 70 && twoTokenName.stdout.isEmpty, Comment(rawValue: "forged fd 3 with a two-token name: rc=\(twoTokenName.status) out=\(twoTokenName.stdout) err=\(twoTokenName.stderr)"))
+    // fd 3 接到有寫端但不寫的來源：讀端不能無限期阻塞（R17，DA：hook 裡就是 30 秒逾時後被靜默丟棄）——`read -t 10` 逾時 → 70。這一臂要等十秒。
+    // 兩臂：頭標記都還沒送就停住（驅動頭讀取的 -t）、頭標記送到後停住（驅動迴圈讀取的 -t）；各要等十秒。
+    for (label, before) in [("before head", ""), ("after head", "LTM_MB_FD3=%s\\0")] {
+        let t0 = Date()
+        let blocking = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3BlockAfter: before)
+        let waited = Date().timeIntervalSince(t0)
+        #expect(blocking.status == 70 && blocking.stdout.isEmpty && waited < 60, Comment(rawValue: "forged fd 3 that stalls \(label): rc=\(blocking.status) waited=\(Int(waited))s（沒有 -t 會等到寫端在 120 秒後退出）out=\(blocking.stdout) err=\(blocking.stderr)"))
+    }
 }
 
 @Test("measure-baseline.sh：拿得到查詢內容的子行程 stdio 都隔離——judge 的 stdin 不是查詢檔（吃不掉後面的行）、指紋 python 與 judge 的 stderr 不上腳本的 stderr")
