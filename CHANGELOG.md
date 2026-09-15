@@ -18,7 +18,7 @@
   大小寫摺疊），`tool=<n>` 只是觀察值不是污染訊號；查詢文字不進 stdout／stderr、含 `bash -x`／
   呼叫端 shell 環境透過繼承生效的任何東西（`SHELLOPTS`、`BASH_ENV`、匯出函式、readonly、DEBUG trap、`PYTHONPATH`——腳本前四行
   清 trap、關 xtrace、以空環境加白名單重啟自己；白名單經繼承的 fd 3（有頭尾標記，沒到就 70）、argv 上只有 PATH／HOME／哨兵、
-  內容由測試釘到 `Sources/` 的環境變數讀取點；擋不住的是「在第一行之前就能在本行程執行程式碼」這一條性質，檔頭寫明）；
+  內容由測試釘到 `Sources/` 的環境變數讀取點；防禦邊界是一條性質、只寫在檔頭「防禦邊界」段，這裡不複述）；
   查詢檔預設「腳本旁」照 bash 找腳本運算元的順序解（cwd 先、再沿 PATH 取第一個可讀的檔案，PATH 元素做 `~`／`~/` 展開）；
   只接受一個引數；任一 error 以 1 離開；
   行定義只認 ASCII 空白、不隨 locale 變）＋ `docs/measurements/README.md` 的規則段

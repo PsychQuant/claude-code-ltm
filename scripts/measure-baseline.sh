@@ -5,15 +5,16 @@
 # verdict 全是「前 k 名」的性質，k 不同也不可比；紀錄要連這一行一起引，兩次量測這一行不同就不能逐列對齊，
 # `#N` 只是檔內位置），之後每列 `#N <ms>ms <verdict>`**（例如
 # `#3 812ms clean tool=1`；`<ms>` 是整數毫秒，後面緊接字面 `ms`）。
-# 查詢文字、命中內容與密鑰不進 stdout／stderr——這句只對**第四行 `exec` 生效之後**的世界成立。
+# 查詢文字、命中內容與密鑰不進 stdout／stderr——這句只對 **re-exec 生效之後**的世界成立（re-exec 是第四行 `case` 裡的
+# `builtin exec`；「第四行」指的是 `case` 那一行，同步測試釘的前四行程式碼裡沒有一行叫 `exec`，R18）。
 # 防禦邊界（一條性質，不點名、不說「只有」：R14 寫成總括判準、R15 寫成封閉六項、R16 寫成「第一行之前只有 BASH_ENV」，三版都在
 # 第一個未列的成員上為假——R17 三個讀者各拿一個：經繼承的 `export -f builtin`、`PS4` 命令替換＋繼承的 xtrace、`bash --login`
-# 的 profile）：**凡是在第四行 `exec` 生效之前，能在本行程執行呼叫端的程式碼、或改變前四行任一命令字語意的機制，一律不在防禦內**。
+# 的 profile）：**凡是在 re-exec 生效之前，能在本行程執行呼叫端的程式碼、或改變前四行任一命令字語意的機制，一律不在防禦內**。
 # 切點是護甲**完成**的那一刻，不是它開始的那一刻——前四行本身跑在呼叫端的 shell 裡，那裡的一切都是呼叫端的。查法：在 `BASH_ENV`
 # 放一行、或 `export -f builtin`、或 `PS4='$(…)'` 配 `SHELLOPTS=xtrace`，任一種都在 exec 之前執行。這一類等同操作者自己 cat 查詢檔。
 # exec 之後：環境只含白名單（下方），`BASH_ENV`／`SHELLOPTS`／匯出的函式與變數／`PS4`／`PYTHONPATH` 都不在——測試驅動的是這一側
 # （xtrace、errexit、allexport、readonly、同名函式、DEBUG trap、經繼承的 `BASH_FUNC_*` 函式，各一臂）。前兩行 `builtin trap - …` 與
-# `builtin set +x` 防的是**意外**（呼叫端環境裡殘留的 `set -x`／DEBUG trap 會 trace 到第四行、密鑰在那裡展開）——不是防禦，是
+# `builtin set +x` 防的是**意外**（呼叫端環境裡殘留的 `set -x`／DEBUG trap 會 trace 到 re-exec 那一行、密鑰在那裡展開）——不是防禦，是
 # 讓意外不延續；有臂（假密鑰）。
 # 哨兵 `LTM_MB_CLEAN=$$`（exec 不換 PID）擋的是**殘留**（profile 裡的 export、上一次的環境、別的 PID）不是**偽造**：任何在 execve
 # 前知道子行程 PID 的父行程都對得上（`bash -c '單一命令'` 不 fork）；對上之後 fd 3 沒有正確的頭標記時，在 fd 建得起來的世界裡 → 70
@@ -30,15 +31,22 @@
 #      內層引號讓含空白的值仍是一個字——查法 `HOME='/a b' bash -c 'printf "[%s]" ${HOME+"HOME=$HOME"}'`）與哨兵；白名單裡有設的變數
 #      以 NUL 分隔的 `NAME=VALUE` 走**繼承的 fd 3**（值不經任何行程的 argv——R14 版把密鑰寫成 `env` 的 argv，execve 稽核會永久記下
 #      它，R15）。fd 3 有 framing：第一筆 `LTM_MB_FD3=$$`、最後一筆 `LTM_MB_END=1`；讀端要求頭標記的值對、每筆是 `NAME=VALUE`、
-#      NAME 在白名單且 `export` 收得下（非法識別碼由 `export` 自己拒絕、腳本看它的離開碼）、看到尾標記才算到齊、每次 `read` 十秒內要返回——任一不成立 → 70（R16／R17，
-#      各有臂）。`|| exit 70` 只在重導目標開不出來（不存在的路徑、管線建不出來）時 fire；`/dev/fd` dup 失敗那一段 bash 直接結束
-#      shell，`||` 沒機會跑（見 rlimit）。
+#      NAME 在白名單且 `export` 收得下（非法識別碼由 `export` 自己拒絕、腳本看它的離開碼；`export` 失敗時 bash 會把整筆記錄印上
+#      stderr，所以它的 stderr 丟掉——有臂：記錄值帶標記字串，斷言 stderr 不含）、看到尾標記才算到齊、每次 `read` 十秒內要返回、
+#      記錄筆數不超過白名單的名字數——任一不成立 → 70（R16／R17／R18，各有臂）。framing 檢的是**傳輸**不是**內容**：頭標記＋尾標記
+#      中間零筆記錄是合法的（呼叫端一個白名單變數都沒設就是這個形狀），走預設值量測；「呼叫端有設卻沒送到」這種內容缺失 framing
+#      看不到（R18）。逾時是**每次** `read` 十秒、不是總時間；總時間的上界來自筆數封頂（頭＋名字數＋尾）×十秒——寫端每幾秒送一筆合法
+#      記錄、永不送尾標記，R17 版永不結束（DA 實測 rc 124），現在第 N+1 筆 → 70（有臂）。`|| exit 70` 只在重導目標開不出來（不存在
+#      的路徑、管線建不出來）時 fire；`/dev/fd` dup 失敗那一段 bash 直接結束 shell，`||` 沒機會跑（見 rlimit）——**這一句無臂**：
+#      重導失敗本機重現不出來，只有拼法 pin（R16；R17 版把這個標記刪掉了，R18 標回來）。
 #   白名單：HOME、LC_ALL、LANG、TMPDIR、LTM_BIN、LTM_BASELINE_QUERIES、以及 ltm 自己讀的 CLAUDE_CONFIG_DIR、LTM_ANCHOR_KEY、
 #   LTM_ANCHOR_KEY_SERVICE、LTM_BUILD_BATCH_CHUNKS、LTM_BUILD_MEMORY_BUDGET_MB、LTM_CORPUS_ROOT、LTM_DERIVED_ROOT、LTM_MEMORY_ROOT、
 #   LTM_TEST_CLOCK_STEP_SECONDS（R14 版只傳三個 LTM_*，指向受控索引的量測會靜默量到真索引，R15）。白名單裡的東西**原樣轉發**：
 #   呼叫端殘留的 `LTM_DERIVED_ROOT` 會讓這一輪量到別棵索引而指紋不變（指紋只認查詢集）、rc 0；`LTM_ANCHOR_KEY` 值錯 → 事件全
-#   orphan 而 rc 0（.claude/rules/anchor-key-in-probes.md）；PATH 上的 python3 被換掉 → 查詢集上該行程的 stdout；`/usr/bin/env` 不在
-#   → 126。這幾條各有各的訊號或沒有訊號，是白名單這個機制本身的另一面。
+#   orphan 而 rc 0（.claude/rules/anchor-key-in-probes.md）；PATH 上的 python3 被換掉 → 查詢集上該行程的 stdout（揭露），而且它可以
+#   先把 fd 3 讀光再交給真的 python3 → 指紋是**空集合**的、每一列照量、rc 0（完整性，R18）——所以有非註解行卻算出空集合的指紋
+#   → 70（有臂；擋的只是「讀光」這一種，wrapper 改成回傳任意合形狀的指紋仍然過，那是 PATH 的信任問題不是本腳本的）；`/usr/bin/env`
+#   不在 → 126。這幾條各有各的訊號或沒有訊號，是白名單這個機制本身的另一面。
 #   兩個 python 都以 `-I -S` 啟動：cwd 不進 `sys.path`（cwd 放一支 `hashlib.py` 就能整份接走查詢集並回一個合形狀的假指紋、放一支
 #   `json.py` 就能改掉每一列 verdict，R15／R16，各有臂）、PYTHONPATH／user site 不進（`-I`）、解譯器自己的 site-packages 與 `.pth`／
 #   `sitecustomize` 也不進（`-S`，R16；無臂——要驅動得改系統的 site）；`-I` 含 `-E`，所以刻意不轉發任何 `PYTHON*`。
@@ -48,12 +56,15 @@
 # 判準（re-exec 之後）是「每一個拿得到查詢內容的子行程，它的 stderr 都不是可能載內容的通道」：指紋 python、judge python、
 # ltm 的 stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null（judge 對 ltm 寫的 `close_fds=True` 是 Python 的預設值，寫出來是文件、
 # 無行為）；兩個 process substitution 的子 shell 只跑 builtin `printf`，運算元不會上 stderr。繼承的描述子：fd 3 看到尾標記就關
-# （尾標記之後的記錄不讀）；process substitution 自己的讀端（bash 3.2 配 63，關不掉）只被指紋 python 繼承（judge 只有 0／1／2，
-# R17 實測）——白名單的寫端寫完即退出，尾標記是它最後一筆，所以指紋 python 起跑時那個描述子已在 EOF（R16／R17 實測 `os.read`
-# 回空）；它是衛生問題不是通道，寫在這裡是讓下一個把寫端換成長命行程的人知道它會變成通道。
+# （尾標記之後的記錄不讀；`exec 3<&-` 有臂：尾標記之後再塞一筆，judge 那個行程的 fd 3 必須是關的，R18——R17 版無臂）；process
+# substitution 自己的讀端（bash 3.2 配 63，關不掉）被指紋 python **與每個 judge** 繼承（R17 版寫「judge 只有 0／1／2」，R18 實測
+# 為假；ltm 不繼承是 `subprocess` 的 `close_fds` 預設）——白名單的寫端寫完即退出，尾標記是它最後一筆，所以那些行程起跑時那個
+# 描述子已在 EOF（R16／R17 實測 `os.read` 回空）；它是衛生問題不是通道，寫在這裡是讓下一個把寫端換成長命行程的人知道它會變成通道。
 # 跨 exec 保留、白名單清不掉的行程狀態：cwd（後果由 `-I -S` 關掉）、umask、關掉或重導的 fd（stderr 關掉 → 診斷消失）、信號處置、
-# rlimit。`nofile` 由高往低的實測階梯（R17，門檻隨呼叫端已開的 fd 數移動，不寫數字）：正常 → **rc 0 零輸出**（`/dev/fd` dup 失敗，
-# bash 直接結束 shell，`||` 與讀端的 70 都沒機會跑）→ rc 1 零列（撞「任一列 error」的號）→ 70（管線建不出來，`||` fire）→ 134。
+# rlimit。`nofile` 由高往低的實測階梯（R17／R18，門檻隨呼叫端已開的 fd 數移動，不寫數字）：正常 → **rc 0、set 行與每一列都對、
+# stderr 多一行 dup 診斷**（腳本內某個重導失敗但結果與正常段逐位元組相同——硬規則也過，只有 stderr 看得出來，R18）→ **rc 0 零輸出**
+# （`/dev/fd` dup 失敗，bash 直接結束 shell，`||` 與讀端的 70 都沒機會跑）→ rc 1 零列（撞「任一列 error」的號）→ 70（管線建不出來，
+# `||` fire）→ 134。這是一次掃描看到的段，不是「`nofile` 壓力長什麼樣」的完整列舉。
 # 這一段從腳本內關不掉。所以**離開碼 0 的意義是「0 且 stdout 第一行是 set 行」**——這是消費端的硬規則，不是註腳；任何讓 set 行
 # 印不出來的失效（`SHELLOPTS=noexec`／`onecmd`、fd 耗盡、…）都落在這條規則下，紀錄本來就要連那一行一起抄。
 # 作業系統的可見面：查詢原文在執行期會在 python3 與 ltm 的 argv 上（CLI 的查詢就是位置參數、`--` 終止符用得對），同一帳號的行程
@@ -127,18 +138,20 @@ builtin set +x
 LTM_MB_WHITELIST="HOME LC_ALL LANG TMPDIR LTM_BIN LTM_BASELINE_QUERIES CLAUDE_CONFIG_DIR LTM_ANCHOR_KEY LTM_ANCHOR_KEY_SERVICE LTM_BUILD_BATCH_CHUNKS LTM_BUILD_MEMORY_BUDGET_MB LTM_CORPUS_ROOT LTM_DERIVED_ROOT LTM_MEMORY_ROOT LTM_TEST_CLOCK_STEP_SECONDS"
 case "${LTM_MB_CLEAN-}" in
     "$$")
-        { IFS= read -t 10 -r -d '' kv && [ "$kv" = "LTM_MB_FD3=$$" ]; } 2>/dev/null <&3 || { echo "白名單沒有經 fd 3 到達（頭標記缺或值錯）" >&2; exit 70; }
-        mb_end=0
+        { IFS= read -t 10 -r -d '' kv && [ "$kv" = "LTM_MB_FD3=$$" ]; } 2>/dev/null <&3 || { echo "白名單沒有經 fd 3 到達（頭標記缺、值錯或讀取逾時）" >&2; exit 70; }
+        mb_end=0; mb_n=0; mb_max=0
+        for mb_name in $LTM_MB_WHITELIST; do mb_max=$((mb_max + 1)); done
         while IFS= read -t 10 -r -d '' kv <&3 2>/dev/null; do
             case "$kv" in
                 LTM_MB_END=1) mb_end=1; break ;;
-                *=*) mb_name="${kv%%=*}"
+                *=*) mb_name="${kv%%=*}"; mb_n=$((mb_n + 1))
+                     [ "$mb_n" -le "$mb_max" ] || { echo "fd 3 上的記錄比白名單的名字還多" >&2; exit 70; }
                      case " $LTM_MB_WHITELIST " in *" $mb_name "*) export "$kv" 2>/dev/null || { echo "fd 3 上的記錄無法 export" >&2; exit 70; } ;; *) echo "白名單外的名字經 fd 3 到達" >&2; exit 70 ;; esac ;;
                 *) echo "fd 3 上的記錄不是 NAME=VALUE" >&2; exit 70 ;;
             esac
         done
         [ "$mb_end" = 1 ] || { echo "白名單沒有完整經 fd 3 到達（尾標記缺或讀取逾時）" >&2; exit 70; }
-        exec 3<&-; unset LTM_MB_CLEAN kv mb_end mb_name ;;
+        exec 3<&-; unset LTM_MB_CLEAN kv mb_end mb_n mb_max mb_name ;;
     *) builtin exec -c /usr/bin/env "PATH=${PATH-}" ${HOME+"HOME=$HOME"} "LTM_MB_CLEAN=$$" /bin/bash -- "$0" "$@" 3< <(builtin printf '%s\0' "LTM_MB_FD3=$$"; for v in $LTM_MB_WHITELIST; do if [[ -n "${!v+set}" ]]; then builtin printf '%s=%s\0' "$v" "${!v}"; fi; done; builtin printf '%s\0' LTM_MB_END=1) || exit 70 ;;
 esac
 set -u
@@ -230,6 +243,16 @@ i=0; while [ $fp_ok -eq 1 ] && [ $i -lt 12 ]; do
     case "${SETID:$i:1}" in [0123456789abcdef]) ;; *) fp_ok=0 ;; esac; i=$((i + 1))
 done
 [ $fp_ok -eq 1 ] || { echo "算不出查詢集指紋" >&2; exit 70; }
+# 指紋等於空集合的（sha256 of nothing 的前 12 個 hex；查法 `printf '' | shasum -a 256`）而查詢檔有非註解行：指紋 python 沒讀到內容
+# ——PATH 上的 python3 wrapper 先把 fd 3 讀光就是這個形狀，列照量、rc 0（R18）。行數用與迴圈同一個定義先數一次。
+ws=$' \t\r\v\f'
+n_pre=0
+while IFS= read -r raw || [ -n "$raw" ]; do
+    line="${raw#"${raw%%[!$ws]*}"}"; line="${line%"${line##*[!$ws]}"}"
+    case "$line" in ''|\#*) continue ;; esac
+    n_pre=$((n_pre + 1))
+done < <(printf '%s' "$QF_CONTENT")
+[ "$n_pre" -eq 0 ] || [ "$SETID" != e3b0c44298fc ] || { echo "查詢檔有內容但指紋是空集合的：指紋行程沒讀到查詢集" >&2; exit 70; }
 # k 也印在同一行：verdict 全是「前 k 名」的性質，兩份紀錄 k 不同就不能逐列對齊（R4）。
 printf 'set sha256:%s k=%s\n' "$SETID" "$K"
 
@@ -302,13 +325,13 @@ valid_row() {
             case "$tok" in
                 ''|0*|sig0*) return 1 ;;
                 sig*) case "${tok#sig}" in ''|*[!0123456789]*) return 1 ;; esac ;;
-                *[!0123456789]*) case " $ERROR_TOKENS " in *" $tok "*) ;; *) return 1 ;; esac ;;
+                *[!0123456789]*) case "$tok" in *[!abcdefghijklmnopqrstuvwxyz]*) return 1 ;; esac   # 字面 token 只由小寫字母組成：`blank exec` 這種帶空白的
+                                 case " $ERROR_TOKENS " in *" $tok "*) ;; *) return 1 ;; esac ;;   # 子字串在 R17 版過得了（R18）
             esac ;;
         *) return 1 ;;
     esac
     return 0
 }
-ws=$' \t\r\v\f'
 n=0; bad=0
 while IFS= read -r raw || [ -n "$raw" ]; do
     line="${raw#"${raw%%[!$ws]*}"}"
