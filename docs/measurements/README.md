@@ -58,8 +58,9 @@
   腳本檔頭只指回這裡。
   `#N` 是檔內第 N 條非註解行（去掉行首行尾的 **ASCII** 空白後，空行與 `#` 開頭不算——腳本與測試
   用同一個定義，而且刻意只認 ASCII：bash 的 `[:space:]` 對全形空白隨 locale 變、Swift 的不變，
-  所以兩邊都不剝它，測試另外斷言查詢檔裡沒有控制字元與非 ASCII 空白——寫成性質（C0／DEL 與
-  Zs／Zl／Zp／Cf／Cc）不是清單——且每條不超過 64 個純量）。
+  所以兩邊都不剝它，測試另外斷言查詢檔裡沒有控制字元與非 ASCII 空白——寫成性質（DEL、五個 ASCII 空白
+  TAB／LF／VT／FF／CR **以外**的 C0、以及非 ASCII 的 Zs／Zl／Zp／Cf／Cc；權威是測試的 `isForbiddenScalar`，R14
+  更正這裡漏寫的例外）不是清單——且每條不超過 64 個純量）。
   密鑰用命令替換餵進環境（`LTM_ANCHOR_KEY="$(~/bin/ltm memory --export-key)" scripts/measure-baseline.sh`），
   不落地；查詢檔預設在腳本旁——「腳本旁」照 bash 自己找腳本的順序解（`$0` 含斜線取其目錄；裸名先看 cwd、再搜
   PATH；`cd` 關掉 CDPATH），有測試從別的 cwd 經 PATH 呼叫裸名來驅動。
@@ -87,9 +88,10 @@
   CHANGELOG 含 `clean|self|empty`、README 寫的每條純量上限與目前條數（對照測試常數與真檔）、截斷長度
   （`toolMetadataFieldLimit`：查詢檔檔頭、README 與腳本檔頭的每一個「N 字元」）、指到查詢檔的三種拼法（識別碼
   `$QF`、檔名字面、環境變數名）各自的出現次數——那是拼法列舉、**不是**「只開一次」的證明，先把路徑存進第四個名字再開
-  它看不到（R13）——以及 process substitution 餵指紋與迴圈、內容路徑上的 read／printf／unset 指名 `builtin`、數字守衛
-  不用 `[0-9]` range。這份清單是**摘要**，會漂移；權威是查法：讀那條測試的每一個 `#expect`——不在那裡的
-  複述就沒有機制守著。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。
+  它看不到（R13）——以及 process substitution 餵指紋與迴圈、腳本前兩行就是 `builtin set +x` 與 re-exec 那一行（R14）、
+  字元守衛不用任何 `[X-Y]` range。這份清單是**摘要**，會漂移；權威是查法：讀那條測試的每一個 `#expect`——不在那裡的
+  複述就沒有機制守著。任一列是 `error(…)` 腳本最後以 1 離開（每列照印；`empty` 不計入）。離開碼 0 的意義是「0 **且**
+  stdout 第一行是 set 行」——`SHELLOPTS=noexec` 這類讓腳本一行都不跑的選項會給零輸出、rc 0（腳本檔頭的擋不住段，R14）。
   `blank` 是那一行在 Unicode 空白摺疊後是空的（只有 U+3000 這類非 ASCII 空白）——行定義把它算成條目、
   judge 卻會得到空針，空針對任何命中都算 self，所以不跑 ltm、直接報 error；測試同時斷言查詢檔裡沒有
   這類字元。
@@ -157,16 +159,17 @@
 
 - 人手在 session 裡貼了查詢原文，或 Claude 自己引述了、`git blame` 了——規則靠人守，沒有機制擋
   （`-diff` 屬性只擋 diff 生成這一條路，見上）。同類：`BASH_ENV`／`PS4` 裡刻意放一個會讀查詢檔的
-  命令替換，腳本第一行的 `set +x` 來不及擋（trace 那一行時 PS4 先展開）——那等同直接 cat。
+  命令替換，腳本第一行的 `builtin set +x` 來不及擋（trace 那一行時 PS4 先展開）；或讓第二行的 re-exec 不發生（一個叫
+  `builtin` 的函式或 alias、預先設好哨兵、`SHELLOPTS=noexec`）——那等同直接 cat：同一個人、同一個 shell。
 - 語料裡本來就有恰好逐字含該字串的**實質** turn（例如退役查詢裡的「資格考」有一則真的使用者 turn）——
   那不是污染，是正常召回；`self` 會把它標成 self，分不出來，讀結果時要在 session 之外看命中。
   反過來，空白與大小寫以外的改寫（全形／半形、標點、換序）`self` 看不到。
 - 查詢原文在執行期在 `python3` 與 `ltm` 的 argv 上（CLI 的查詢就是位置參數），同一帳號的行程 `ps -ww`
   看得到（容器 PID namespace、Linux `hidepid` 下更窄），存活時間是那一列的 wall clock——這是作業系統的
-  可見面，不是本腳本的輸出通道；列在這裡是因為上一節的第一句是全稱。對照：環境變數那一面（整份集合、整個
-  run）**不在**擋不住之列——`BASH_ENV` 裡的 `set -a` 與 `SHELLOPTS=allexport` 都在啟動時生效、早於腳本第一行的
-  `set +a`，所以被關掉；第三條向量——呼叫端環境已 export 同名 `QF_CONTENT`，賦值會保留 export 屬性——由腳本開頭的
-  `unset` 關掉；三條各有一臂測試驅動（R11 更正：R10 版把這句寫反了；R12 補第三條）。
+  可見面，不是本腳本的輸出通道；列在這裡是因為上一節的第一句是全稱。對照：呼叫端 shell 的環境那一面（`BASH_ENV`、
+  `SHELLOPTS`、匯出的函式、readonly、`PS4`、已 export 的 `QF_CONTENT`、`PYTHONPATH`）**不在**擋不住之列——腳本第二行以
+  `/usr/bin/env -i` 加白名單重新啟動自己，那些一次全掉；能留下的只有「讓那一行不發生」的東西（上一條）。R10–R13 對這一族
+  是逐名字關（`set +a`、`unset`、`builtin read`、readonly 只查一個名字），每輪再冒同名的下一個——R14 換成性質。
 - 查詢檔本身是一般 tracked blob、**明文在 GitHub 伺服器上**；`-diff` 只擋 diff 生成，規則 1 又禁止 review agent
   讀內容。`-diff` 只擋會讀 attribute 的 diff 生成（上方那份例外清單裡的命令都繞得過）。有紀錄可查的曝露：R1 verify
   的 patch 產生於 `.gitattributes` 之前、含明文、在該輪被讀進 agent 逐字稿（規則 1）；R2 之後各輪 verify 的 patch 都印

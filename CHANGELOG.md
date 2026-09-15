@@ -16,8 +16,10 @@
   （stdout 第一行 `set sha256:<12 hex> k=<k>` 是查詢集指紋與 k、之後只有 `#N <ms>ms <verdict>`，verdict 是封閉字母表 `clean|self|empty` 加 `tool=<n>`
   或 `error(…)`，四處列舉由同步測試釘住；`self` = 前 k 名有 snippet 含這條查詢的原文（空白與
   大小寫摺疊），`tool=<n>` 只是觀察值不是污染訊號；查詢文字不進 stdout／stderr、含 `bash -x`／
-  `SHELLOPTS`／`BASH_ENV` 的 `set -x`、`set -a`、`set -e`（PS4 命令替換、同名的 `builtin` 函式除外，檔頭寫明）；
-  查詢檔預設「腳本旁」照 bash 找腳本運算元的順序解（cwd 先、再沿 PATH 取第一個可讀的檔案）；任一 error 以 1 離開；
+  呼叫端 shell 環境帶進來的任何東西（`SHELLOPTS`、`BASH_ENV`、匯出函式、readonly、`PS4`——腳本前兩行 `builtin set +x`
+  加 `exec /usr/bin/env -i <白名單>` 重啟自己，性質不是清單；擋不住的只有讓那一行不發生的東西，檔頭寫明）；
+  查詢檔預設「腳本旁」照 bash 找腳本運算元的順序解（cwd 先、再沿 PATH 取第一個可讀的檔案，PATH 元素做 `~`／`~/` 展開）；
+  只接受一個引數；任一 error 以 1 離開；
   行定義只認 ASCII 空白、不隨 locale 變）＋ `docs/measurements/README.md` 的規則段
   與「什麼會進索引」的表（純字串 `message.content`、`text` block 與七個 tool metadata 欄位會，
   tool_result 內容今天不會）。
