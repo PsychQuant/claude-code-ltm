@@ -485,10 +485,10 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     }
     // 空集合指紋守衛用的字面（sha256 of nothing 的前 12 個 hex）與測試自己算的一致（R18）。
     #expect(script.contains(" != e3b0c44298fc ]") && setFingerprint("") == "set sha256:e3b0c44298fc", "腳本的空集合指紋字面與 sha256(\"\") 前 12 hex 不一致")
-    // `valid_row` 只放行純小寫字母的字面 token（R18）：ERROR_TOKENS 的每個元素都得合這個形狀，否則新 token 的每一列會被改寫成 error(judge)
-    // 而四處列舉照樣同步（R19）。
-    let tokenShapeLine = (scriptLines.first { $0.hasPrefix("ERROR_TOKENS=\"") } ?? "").dropFirst("ERROR_TOKENS=\"".count).dropLast()
-    #expect(!tokenShapeLine.isEmpty && tokenShapeLine.split(separator: " ").allSatisfy { $0.range(of: #"^[a-z]+$"#, options: .regularExpression) != nil }, Comment(rawValue: "ERROR_TOKENS 有不是純小寫字母的 token：\(tokenShapeLine)"))
+    // 字面 token 的形狀（純小寫字母）由上方抽輸出點的 regex `^[a-z]+$` 釘住；R19 另寫的一條形狀 pin 被它與 `runtimeLiterals == expectedLiterals`
+    // 完全支配、沒有變異能讓它單獨紅，R20 拆掉。
+    // README 手抄了這條測試的函式名，釘住它（R20：改名時 README 對不上而無人發現）。
+    #expect(readme.contains(String(#function.prefix { $0 != "(" })), "README 指名的測試函式名與本函式名不一致")
     // README 手抄的「檔頭 N 個必備短語」要等於 requiredHeaderPhrases 的個數（R19：R18 版把「四項」換成「六個」，另一個無人釘的數字）。
     #expect(readme.contains("檔頭 \(requiredHeaderPhrases.count) 個必備短語"), "README 寫的必備短語個數與 requiredHeaderPhrases.count 不一致")
 }
@@ -1023,7 +1023,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     #expect(run.status == 65 && run.rows.isEmpty, Comment(rawValue: "rc=\(run.status) out=\(run.stdout)"))
 }
 
-@Test("measure-baseline.sh：呼叫端 shell 環境經繼承進來的那一面由 re-exec 清掉——xtrace 三條路（`bash -x`／`SHELLOPTS`／`BASH_ENV`）、errexit 兩條、BASH_ENV 定義的同名函式（exec／set／trap／read／printf——這五個名字在結構上都碰不到 `builtin X`；會碰到的只有 `builtin` 自己，而它在防禦外）、DEBUG trap（含蓋掉 `trap` 的那一種）、readonly（QF_CONTENT／SETID）、殘留哨兵（R14 的 `1`、非數字）、allexport 三條與 pre-exported 變數、ltm 組態經 fd 3 完整到達：都不漏、不撞號、不偽造指紋；偽造哨兵而沒有 fd 3 → 70；fd 3 偽造的各種形狀各 70（有幾臂數 `forgedFd3Records:`／`forgedFd3Writer:`，標題不寫數字；只有 two-token 那一臂另斷言被 `export` 拒絕的記錄值不上 stderr）；恰好滿白名單的合法傳遞 → rc 0；尾標記之後的記錄：fd 3 關了、但經 re-exec 那一行 procsub 讀端的副本（63）judge 仍讀得到；PATH 上的 python3 讀光 fd 3 → 70")
+@Test("measure-baseline.sh：呼叫端 shell 環境經繼承進來的那一面由 re-exec 清掉——xtrace 三條路（`bash -x`／`SHELLOPTS`／`BASH_ENV`）、errexit 兩條、BASH_ENV 定義的同名函式（exec／set／trap／read／printf——這五個名字在結構上都碰不到 `builtin X`；會碰到的只有 `builtin` 自己，而它在防禦外）、DEBUG trap（含蓋掉 `trap` 的那一種）、readonly（QF_CONTENT／SETID）、殘留哨兵（R14 的 `1`、非數字）、allexport 三條與 pre-exported 變數、ltm 組態經 fd 3 完整到達：都不漏、不撞號、不偽造指紋；偽造哨兵而沒有 fd 3 → 70；fd 3 偽造的各種形狀各 70（臂在本體，標題不數；只有 two-token 那一臂另斷言被 `export` 拒絕的記錄值不上 stderr）；恰好滿白名單的合法傳遞 → rc 0；尾標記之後的記錄到不了 judge（3 以外的繼承描述子都關掉，judge 的 fd>3 全空）；PATH 上的 python3 讀光 fd 3 → 70；預數與量測迴圈的管線建不出來（mutant 複本）→ 70")
 func measureBaselineDoesNotLeakUnderXtrace() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
@@ -1135,22 +1135,24 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     // fd 3 接到有寫端但不寫的來源：**單次讀取**不能無限期阻塞（R17，DA：hook 裡就是 30 秒逾時後被靜默丟棄）——`read -t 10` 逾時 → 70。
     // 兩臂：頭標記都還沒送就停住（驅動頭讀取的 -t）、頭標記送到後停住（驅動迴圈讀取的 -t）；各要等十秒。寫端在腳本走後一秒內自己退出，
     // 但輪詢有上界（70 秒，跨過下面 `waited < 60` 的門檻）：R18 版無上界的 `kill -0` 輪詢讓「拿掉 `read -t`」的變異從紅變成套件永久掛死
-    // （寫端等腳本、腳本等寫端，R19）；有上界時那個變異在 ~70 秒後 EOF → 70、timing 斷言紅。
-    let stall = "exec 2>/dev/null </dev/null; for i in $(seq 70); do kill -0 \"$$\" 2>/dev/null || exit; sleep 1; done"
+    // （寫端等腳本、腳本等寫端，R19）；有上界時那個變異在 ~70 秒後 EOF → 70、timing 斷言紅。上界用 bash 算術、不用 `seq`（R20：R19 版
+    // `$(seq 70)` 在 seq 缺席時展開成空、寫端立刻退出、兩臂仍綠而 `read -t` 零臂）；下界 `waited >= 9` 區分「逾時」與「寫端自己走了」。
+    let stall = "exec 2>/dev/null </dev/null; i=0; while [ $i -lt 70 ]; do kill -0 \"$$\" 2>/dev/null || exit; sleep 1; i=$((i + 1)); done"
     for (label, before) in [("before head", ""), ("after head", "printf 'LTM_MB_FD3=%s\\0' \"$$\"; ")] {
         let t0 = Date()
         let blocking = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3Writer: before + stall)
         let waited = Date().timeIntervalSince(t0)
-        #expect(blocking.status == 70 && blocking.stdout.isEmpty && waited < 60, Comment(rawValue: "forged fd 3 that stalls \(label): rc=\(blocking.status) waited=\(Int(waited))s（沒有 -t 會等到寫端退出）out=\(blocking.stdout) err=\(blocking.stderr)"))
+        #expect(blocking.status == 70 && blocking.stdout.isEmpty && waited >= 9 && waited < 60, Comment(rawValue: "forged fd 3 that stalls \(label): rc=\(blocking.status) waited=\(Int(waited))s（沒有 -t 會等到寫端退出；小於 9 秒是寫端自己走了、-t 沒被驅動）out=\(blocking.stdout) err=\(blocking.stderr)"))
     }
-    // 寫端**一直寫**合法記錄、永不送尾標記：每次 read 都在十秒內返回，`-t` 永遠不 fire——R17 版永不結束（DA 實測 rc 124）。總時間的上界來自
-    // 記錄筆數封頂（白名單名字數），第 N+1 筆 → 70（R18）。這一臂在幾秒內結束；寫端在讀端關掉管線後被 SIGPIPE 殺掉。
+    // 寫端**一直寫**合法記錄、永不送尾標記：每次 read 都在十秒內返回，`-t` 永遠不 fire——R17 版永不結束（DA 用 timeout 實測）。總時間的上界來自
+    // 記錄筆數封頂（白名單名字數），第 N+1 筆 → 70（R18）。這一臂在幾秒內結束；寫端在讀端關掉管線後被 SIGPIPE 殺掉。寫端自己也有上界
+    // （400 筆 × 0.2 秒 ≈ 80 秒，跨過 `dripWaited < 60`）：R19 版是 `while :`，拿掉封頂時這一臂先掛死、後面的有限臂跑不到（R20）。
     let t1 = Date()
-    let drip = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3Writer: "printf 'LTM_MB_FD3=%s\\0' \"$$\"; exec 2>/dev/null </dev/null; while :; do printf 'LC_ALL=C\\0'; sleep 0.2; done")
+    let drip = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3Writer: "printf 'LTM_MB_FD3=%s\\0' \"$$\"; exec 2>/dev/null </dev/null; i=0; while [ $i -lt 400 ]; do printf 'LC_ALL=C\\0'; sleep 0.2; i=$((i + 1)); done")
     let dripWaited = Date().timeIntervalSince(t1)
     #expect(drip.status == 70 && drip.stdout.isEmpty && dripWaited < 60, Comment(rawValue: "forged fd 3 that never stops writing: rc=\(drip.status) waited=\(Int(dripWaited))s out=\(drip.stdout) err=\(drip.stderr)"))
-    // 同一個守衛的**有限**形狀：比白名單名字數多的合法記錄、然後正常送尾標記。拿掉筆數封頂時上面那臂是掛死（rc 124，紅在逾時），
-    // 這一臂是 rc 0 照量——變異時紅在對的理由。
+    // 同一個守衛的**有限**形狀：比白名單名字數多的合法記錄、然後正常送尾標記。拿掉筆數封頂時上面那臂紅在逾時（寫端 80 秒後退出），
+    // 這一臂是 rc 0 照量——紅在對的理由。
     let whitelistLine = try String(contentsOf: repoRoot().appendingPathComponent("scripts/measure-baseline.sh"), encoding: .utf8).split(separator: "\n").first { $0.hasPrefix("LTM_MB_WHITELIST=\"") } ?? ""
     let whitelistNames = whitelistLine.dropFirst("LTM_MB_WHITELIST=\"".count).dropLast().split(separator: " ").map(String.init)
     #expect(whitelistNames.count >= 6, "白名單變數抽不出來，下面兩臂沒有意義")
@@ -1158,19 +1160,46 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     #expect(overLength.status == 70 && overLength.stdout.isEmpty, Comment(rawValue: "forged fd 3 with more records than whitelist names: rc=\(overLength.status) out=\(overLength.stdout) err=\(overLength.stderr)"))
     // 邊界值：恰好 N 筆（每個白名單名字一筆，值都合法）＋尾標記是合法的滿白名單傳遞 → rc 0（R19：`-le` 改 `-lt` 全綠、卻會拒絕這種合法傳遞）。
     let fullValues: [String: String] = ["HOME": dir.path, "LC_ALL": "C", "LANG": "C", "TMPDIR": dir.path, "LTM_BIN": stub.path, "LTM_BASELINE_QUERIES": queries.path]
+    // fullValues 的鍵是腳本自己會讀的名字（同步測試釘的「白名單 − Sources」那五個＋HOME）；其餘是 ltm 的組態，餵 stub 所以 `x` 無害。
+    // 鍵集合要是白名單的子集（R20：白名單長出腳本自己會讀的新名字時，這裡拿到 `x` 會紅在錯的理由——那時把它加進 fullValues）。
+    #expect(Set(fullValues.keys).isSubset(of: Set(whitelistNames)), Comment(rawValue: "fullValues 有不在白名單的名字：\(Set(fullValues.keys).subtracting(whitelistNames).sorted())"))
     let fullRecords = whitelistNames.map { "\($0)=\(fullValues[$0] ?? "x")\\0" }.joined()
     let fullHouse = try runScript(queries: queries, stub: stub, sentinelForged: true, forgedFd3Records: "LTM_MB_FD3=%s\\0" + fullRecords + "LTM_MB_END=1\\0")
     #expect(fullHouse.status == 0 && fullHouse.rows.count == 1, Comment(rawValue: "exactly whitelist-count records must be accepted: rc=\(fullHouse.status) out=\(fullHouse.stdout) err=\(fullHouse.stderr)"))
-    // 尾標記之後再塞一筆：讀端看到尾標記就 `exec 3<&-`——關掉的是 fd 3 這個**別名**（R18：R17 版這行無臂——拿掉它 judge 的 fd 3 讀得到那一筆）。
-    // 同一條管線的 procsub 讀端副本（bash 3.2 配 63）跨 exec 存活、judge 照樣繼承，所以那筆記錄經 63 仍讀得到（R19 實測；R18 版的臂只探
-    // fd 3、標題寫成「judge 看不到」）。假 python3 在 judge 呼叫（-c）探 `/dev/fd` 全部：fd 3 開不開得起來、其他 fd 上有什麼——這一臂釘的
-    // 是那個事實的兩半：fd 3 關了，記錄在別的 fd 上。它不是查詢集的通道（餵 $QF_CONTENT 的讀端是 close-on-exec；假 python3 在 -c 模式看到的
-    // 也只有 0、1、2 與那一個）。
+    // 尾標記之後再塞一筆：讀端看到尾標記就 `exec 3<&-` 並關掉 0、1、2、255 以外的每一個繼承描述子（R20：R19 版只關 fd 3 這個別名，同一條管線
+    // 的 procsub 讀端副本（63）judge 照樣繼承、那筆記錄讀得到；R19 的臂把「讀得到」釘成契約——修好洩漏反而紅，DA 抓到）。假 python3 在
+    // judge 呼叫（-c）探 `/dev/fd` 全部：斷言 fd 3 開不起來、其他每個 fd 都空（wrapper bash 自己的 10／255 也在清單裡，內容為空）。這同時
+    // 釘住「judge 看不到查詢集」——不再靠散文說哪些 fd 是 close-on-exec。變異：拿掉關閉迴圈 → 63 上有記錄 → 紅；拿掉 `exec 3<&-` → fd3=open → 紅。
+    // 失敗訊息只印 fd 名不印內容。這一臂不依賴合成檔的條數（R19 版靠「恰好一條」才綠：管線讀取是破壞性的，第二個 judge 就讀不到）。
     let fd3Probe = dir.appendingPathComponent("fd3-after-end.txt")
     let fd3Bin = try makeBinDir(in: dir, judgeFakes: ["python3": "{ if { true <&3; } 2>/dev/null; then printf 'fd3=open;'; else printf 'fd3=closed;'; fi; for f in /dev/fd/*; do n=\"${f##*/}\"; [ \"$n\" -gt 3 ] || continue; printf 'fd%s=' \"$n\"; /bin/cat <&\"$n\" 2>/dev/null | /usr/bin/tr '\\0' '|'; printf ';'; done; } > '\(fd3Probe.path)'"])
     let afterEnd = try runScript(queries: queries, stub: stub, pathPrefix: fd3Bin.path, sentinelForged: true, forgedFd3Records: "LTM_MB_FD3=%s\\0LTM_MB_END=1\\0AFTER_END_ZQXJ=1\\0")
     let fd3Seen = (try? String(contentsOf: fd3Probe, encoding: .utf8)) ?? "(unread)"
-    #expect(afterEnd.status == 0 && fd3Seen.hasPrefix("fd3=closed;") && fd3Seen.contains("AFTER_END_ZQXJ=1|"), Comment(rawValue: "post-end-marker record: fd 3 must be closed and the record must still be visible on the inherited procsub fd: rc=\(afterEnd.status) probe=\(fd3Seen)"))
+    let othersEmpty = fd3Seen.dropFirst("fd3=closed;".count).range(of: #"^(fd[0-9]+=;)*$"#, options: .regularExpression) != nil
+    let fdNames = fd3Seen.replacingOccurrences(of: "=[^;]*;", with: ";", options: .regularExpression)
+    #expect(afterEnd.status == 0 && fd3Seen.hasPrefix("fd3=closed;") && othersEmpty, Comment(rawValue: "post-end-marker record: fd 3 must be closed and every other inherited fd must be empty: rc=\(afterEnd.status) fds=\(fdNames)"))
+    // 兩條重導失敗的 70：預數迴圈、量測迴圈的 `done < <(…)` 建不出來。自然成因（fd 耗盡）走不到這兩個 `||`（bash 自己印 dup 診斷後繼續、或直接
+    // 結束 shell），所以分支用**改掉重導目標的 mutant 複本**驅動（R20：R19 版標「無臂：重現不出來」；複本只含腳本、不含查詢檔）。
+    let scriptText = try String(contentsOf: repoRoot().appendingPathComponent("scripts/measure-baseline.sh"), encoding: .utf8)
+    let redirect = "done < <(printf '%s' \"$QF_CONTENT\") || { echo \""
+    #expect(scriptText.components(separatedBy: redirect).count == 3, "腳本裡帶 || 的 QF_CONTENT 迴圈重導應恰好兩處（預數、量測迴圈）")
+    for (label, marker, expectSetLine) in [("pre-count", "行數預數的管線建不出來", false), ("measurement loop", "量測迴圈的管線建不出來", true)] {
+        let mutant = dir.appendingPathComponent("mutant-\(label.replacingOccurrences(of: " ", with: "-")).sh")
+        try scriptText.replacingOccurrences(of: redirect + marker, with: "done < /nonexistent/zqxj-mutant || { echo \"" + marker).write(to: mutant, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mutant.path)
+        let broken = try runScript(queries: queries, stub: stub, scriptOverride: mutant)
+        #expect(broken.status == 70 && broken.stderr.contains(marker) && broken.rows.isEmpty && (broken.setLine.isEmpty != expectSetLine), Comment(rawValue: "\(label) redirect failure: rc=\(broken.status) out=\(broken.stdout) err=\(broken.stderr)"))
+    }
+    // 兩個迴圈看到的條數不同 → 70（R20：量測迴圈少跑時 R19 版是 rc 0 配完整集合的指紋與不完整的列，硬規則過）。mutant 複本讓量測迴圈印完第一列就 break。
+    let twoQueries = dir.appendingPathComponent("q2.txt")
+    try "ZQXJ-TRACE-ONE\nZQXJ-TRACE-TWO\n".write(to: twoQueries, atomically: true, encoding: .utf8)
+    let rowLine = "    printf '#%d %sms %s\\n' \"$n\" \"${row%% *}\" \"${row#* }\"\n"
+    #expect(scriptText.components(separatedBy: rowLine).count == 2, "量測迴圈印列的那一行找不到或不只一處")
+    let shortLoop = dir.appendingPathComponent("mutant-short-loop.sh")
+    try scriptText.replacingOccurrences(of: rowLine, with: rowLine + "    break\n").write(to: shortLoop, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shortLoop.path)
+    let short = try runScript(queries: twoQueries, stub: stub, scriptOverride: shortLoop)
+    #expect(short.status == 70 && short.rows.count == 1 && short.stderr.contains("量測迴圈看到的條數與預數不同"), Comment(rawValue: "short measurement loop: rc=\(short.status) rows=\(short.rows.count) err=\(short.stderr)"))
     // PATH 上的 python3 wrapper 在指紋呼叫（`-`）先把 fd 3 讀光再交給真的 python3：指紋是空集合的、每一列照量、rc 0——完整性缺口（R18，DA）。
     // 有非註解行卻算出空集合的指紋 → 70、零輸出。
     let drainBin = dir.appendingPathComponent("bin-drain")
