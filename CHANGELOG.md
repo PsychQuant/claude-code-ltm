@@ -15,10 +15,9 @@
   不得在 session 內顯示、輸出只印編號；`.gitattributes` 設 `-diff`）＋ `scripts/measure-baseline.sh`
   （stdout 第一行 `set sha256:<12 hex> k=<k>` 是查詢集指紋與 k、之後只有 `#N <ms>ms <verdict>`，verdict 是封閉字母表 `clean|self|empty` 加 `tool=<n>`
   或 `error(…)`，四處列舉由同步測試釘住；`self` = 前 k 名有 snippet 含這條查詢的原文（空白與
-  大小寫摺疊），`tool=<n>` 只是觀察值不是污染訊號；查詢文字不進 stdout／stderr、含 `bash -x`／
-  呼叫端 shell 環境透過繼承生效的任何東西（`SHELLOPTS`、`BASH_ENV`、匯出函式、readonly、DEBUG trap、`PYTHONPATH`——腳本前四行
-  清 trap、關 xtrace、以空環境加白名單重啟自己；白名單經繼承的 fd 3（有頭尾標記，沒到就 70）、argv 上只有 PATH／HOME／哨兵、
-  內容由測試釘到 `Sources/` 的環境變數讀取點；防禦邊界是一條性質、只寫在檔頭「防禦邊界」段，這裡不複述）；
+  大小寫摺疊），`tool=<n>` 只是觀察值不是污染訊號；查詢文字不進 stdout／stderr——這句只在腳本 re-exec 生效之後成立，哪些機制在
+  防禦內、哪些在外只寫在腳本檔頭「防禦邊界」段（R19：R18 版在這裡留了一份列舉、把邊界外的類別寫成擋得住）；白名單經繼承的 fd 3
+  （有頭尾標記，沒到就 70）、argv 上只有 PATH／HOME／哨兵、內容由測試釘到 `Sources/` 的環境變數讀取點；
   查詢檔預設「腳本旁」照 bash 找腳本運算元的順序解（cwd 先、再沿 PATH 取第一個可讀的檔案，PATH 元素做 `~`／`~/` 展開）；
   只接受一個引數；任一 error 以 1 離開；
   行定義只認 ASCII 空白、不隨 locale 變）＋ `docs/measurements/README.md` 的規則段

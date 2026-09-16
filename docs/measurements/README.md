@@ -37,7 +37,7 @@
 - 查詢集：`scripts/baseline-queries.txt`（一行一條、`#` 註解）。它的檔頭是這裡的**摘要**，改這裡要
   一起改它；但有機制守的只有測試裡明寫的那幾項——查法：`Tests/LTMMCPTests/BaselineQueryFileTests.swift` 裡
   `verdictAlphabetIsStatedIdenticallyEverywhere` 的每一個 `#expect`，加上另一條測試的 `requiredHeaderPhrases`
-  （檔頭六個必備短語）；規則本文沒有機制守（#63 verify R3 就是檔頭漏改被抓到的）。
+  （檔頭 6 個必備短語——這個數字由同步測試對照 `requiredHeaderPhrases.count`）；規則本文沒有機制守（#63 verify R3 就是檔頭漏改被抓到的）。
   `.gitattributes` 對它設了 `-diff`（`scripts/rrf-tie-queries.txt` 同）。它讓 git 把這個 blob **當
   binary 處理**——只影響「產生 diff 或搜尋內容」的命令，不改變 blob 本身：
   `git diff`／`git show <rev>`／`git log -p` 只印「Binary files differ」、`git grep` 只印
@@ -88,7 +88,7 @@
   CHANGELOG 含 `clean|self|empty`、README 寫的每條純量上限與目前條數（對照測試常數與真檔）、截斷長度
   （`toolMetadataFieldLimit`：查詢檔檔頭、README 與腳本檔頭的每一個「N 字元」）、指到查詢檔的三種拼法（識別碼
   `$QF`、檔名字面、環境變數名）各自的出現次數——那是拼法列舉、**不是**「只開一次」的證明，先把路徑存進第四個名字再開
-  它看不到（R13）——以及 process substitution 餵指紋與迴圈、腳本前四行是 trap 清除／`builtin set +x`／白名單變數／re-exec 的
+  它看不到（R13）——以及餵 `$QF_CONTENT` 的 process substitution 的個數、腳本前四行是 trap 清除／`builtin set +x`／白名單變數／re-exec 的
   `case`（R14–R17）、README／CHANGELOG 不得再出現被檔頭退回的邊界句拼法（R18）、空集合指紋的字面、白名單三邊互相釘住（變數＝檔頭散文、Sources 的 `environment["…"]` 讀取點 ⊆ 變數、Sources 不得有 `getenv(`
   或非大寫字面鍵的 `environment[`——拼法守衛，改名綁定看不到）、
   `.gitattributes` 對兩個查詢檔的 `diff` 屬性經 `git check-attr` 是 `unset`、字元守衛不用任何 `[X-Y]` range。這份清單是**摘要**，會漂移；權威是查法：讀那條測試的每一個 `#expect`——不在那裡的
@@ -162,8 +162,8 @@
 ### 它擋不住什麼（誠實寫下；這一節必然不完整——它列的是想到的，不是全部）
 
 - 人手在 session 裡貼了查詢原文，或 Claude 自己引述了、`git blame` 了——規則靠人守，沒有機制擋
-  （`-diff` 屬性只擋 diff 生成這一條路，見上）。同類是腳本防禦邊界之外的那一整類——邊界句只有一份，在 `scripts/measure-baseline.sh`
-  檔頭（「防禦邊界」那一段），這裡**只給指標**：R14 寫成總括判準、R15 寫成封閉六項、R16 縮成只點名一個機制的一元全稱，三版都在
+  （`-diff` 屬性只擋 diff 生成這一條路，見上）。同類是腳本防禦邊界之外的那一整類——邊界句的權威在 `scripts/measure-baseline.sh`
+  檔頭（「防禦邊界」那一段），這裡**只給指標**（「只有一份」這句 R19 在 CHANGELOG 證偽過：負向 pin 抓複述不抓改寫）：R14 寫成總括判準、R15 寫成封閉六項、R16 縮成只點名一個機制的一元全稱，三版都在
   第一個未列的成員上為假（R17）；R17 改了檔頭卻留下這裡與 CHANGELOG 的舊句（R18）——同步測試現在釘住被退回的拼法不得再出現。
 - 語料裡本來就有恰好逐字含該字串的**實質** turn（例如退役查詢裡的「資格考」有一則真的使用者 turn）——
   那不是污染，是正常召回；`self` 會把它標成 self，分不出來，讀結果時要在 session 之外看命中。
@@ -172,7 +172,7 @@
   看得到（容器 PID namespace、Linux `hidepid` 下更窄），存活時間是那一列的 wall clock——這是作業系統的
   可見面，不是本腳本的輸出通道；密鑰不在任何 argv 上（R14 版把它寫成 `env` 的 argv、execve 稽核會永久記下，R15 改走繼承的
   fd 3；但它在 re-exec 的 bash、judge 與 ltm 的**環境**裡整個 run，同帳號 `ps -E` 看得到——那正是密鑰該待的地方）；列在這裡是
-  因為上一節的第一句是全稱。對照：呼叫端 shell 的環境經繼承進來的那一面，re-exec 之後全掉——**哪些算「意外」、哪些落在邊界外，
+  因為上一節的第一句是全稱。對照：呼叫端 shell 的環境經繼承進來的那一面，除白名單那些名字（原樣轉發，見檔頭）之外 re-exec 之後全掉——**哪些算「意外」、哪些落在邊界外，
   只由檔頭那一段判定**，這裡不再分列（R18：R17 版在這裡把「已 export 的變數與函式」整個列成擋得住，而 `export -f builtin` 純靠繼承
   就讓前四行全失效、re-exec 不發生、rc 0 且 set 行正常——它在檔頭是邊界外的第一個反例）。白名單的內容由同步測試釘到 `Sources/` 裡
   `environment["…"]` 讀取點的每一個名字（拼法，另有一條斷言擋別的讀法；R14 版漏了 ltm 自己的 `LTM_DERIVED_ROOT` 這類，指向

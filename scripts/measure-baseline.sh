@@ -46,7 +46,9 @@
 #   orphan 而 rc 0（.claude/rules/anchor-key-in-probes.md）；PATH 上的 python3 被換掉 → 查詢集上該行程的 stdout（揭露），而且它可以
 #   先把 fd 3 讀光再交給真的 python3 → 指紋是**空集合**的、每一列照量、rc 0（完整性，R18）——所以有非註解行卻算出空集合的指紋
 #   → 70（有臂；擋的只是「讀光」這一種，wrapper 改成回傳任意合形狀的指紋仍然過，那是 PATH 的信任問題不是本腳本的）；`/usr/bin/env`
-#   不在 → 126。這幾條各有各的訊號或沒有訊號，是白名單這個機制本身的另一面。
+#   不在 → 126；被接受的記錄**值**會經 66／69 的錯誤訊息原樣上 stderr（`LTM_BASELINE_QUERIES` 指到不存在的路徑，訊息就印那個路徑——
+#   那是呼叫端自己的值，R19；「記錄值不上 stderr」那一臂釘的只是被 `export` 拒絕的記錄）。這幾條各有各的訊號或沒有訊號，是白名單這個
+#   機制本身的另一面。
 #   兩個 python 都以 `-I -S` 啟動：cwd 不進 `sys.path`（cwd 放一支 `hashlib.py` 就能整份接走查詢集並回一個合形狀的假指紋、放一支
 #   `json.py` 就能改掉每一列 verdict，R15／R16，各有臂）、PYTHONPATH／user site 不進（`-I`）、解譯器自己的 site-packages 與 `.pth`／
 #   `sitecustomize` 也不進（`-S`，R16；無臂——要驅動得改系統的 site）；`-I` 含 `-E`，所以刻意不轉發任何 `PYTHON*`。
@@ -55,14 +57,21 @@
 #   R14 已拆（程式碼行裡沒有 `builtin read`；這句話自己與上一句會被 grep 命中）。
 # 判準（re-exec 之後）是「每一個拿得到查詢內容的子行程，它的 stderr 都不是可能載內容的通道」：指紋 python、judge python、
 # ltm 的 stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null（judge 對 ltm 寫的 `close_fds=True` 是 Python 的預設值，寫出來是文件、
-# 無行為）；兩個 process substitution 的子 shell 只跑 builtin `printf`，運算元不會上 stderr。繼承的描述子：fd 3 看到尾標記就關
-# （尾標記之後的記錄不讀；`exec 3<&-` 有臂：尾標記之後再塞一筆，judge 那個行程的 fd 3 必須是關的，R18——R17 版無臂）；process
-# substitution 自己的讀端（bash 3.2 配 63，關不掉）被指紋 python **與每個 judge** 繼承（R17 版寫「judge 只有 0／1／2」，R18 實測
-# 為假；ltm 不繼承是 `subprocess` 的 `close_fds` 預設）——白名單的寫端寫完即退出，尾標記是它最後一筆，所以那些行程起跑時那個
-# 描述子已在 EOF（R16／R17 實測 `os.read` 回空）；它是衛生問題不是通道，寫在這裡是讓下一個把寫端換成長命行程的人知道它會變成通道。
+# 無行為）；每一個餵 `$QF_CONTENT` 的 process substitution 子 shell 都只跑 builtin `printf`，運算元不會上 stderr（有幾個由同步測試數
+# `< <(printf '%s' "$QF_CONTENT")` 的出現次數，這裡不寫數字——R18 加了第三個而檔頭還寫「兩個」，R19）。繼承的描述子：fd 3 看到尾標記
+# 就關（尾標記之後的記錄不讀）——`exec 3<&-` 關掉的是 fd 3 **這個別名**，不是那條管線：re-exec 那一行的 process substitution 讀端
+# （bash 3.2 配 63）跨 execve 存活、關不掉（腳本不知道它的號碼），被指紋 python **與每個 judge** 繼承（R17 版寫「judge 只有 0／1／2」，
+# R18 實測為假；ltm 不繼承是 `subprocess` 的 `close_fds` 預設）。腳本**自己的**寫端寫完即退出、尾標記是它最後一筆，所以正常路徑上那些
+# 行程起跑時 63 已在 EOF（R16／R17／R19 實測 `os.read` 回空）；**偽造的**寫端在尾標記之後塞的記錄則經 63 讀得到（R19 實測第一個
+# judge 讀到 35 bytes，R18 版的臂只探 fd 3、標題寫成「judge 看不到」——臂現在探 `/dev/fd` 全部，釘的是這個事實）。它不是查詢集的通道：
+# 餵 `$QF_CONTENT` 的三個讀端是 close-on-exec，judge 的 `/dev/fd` 只有 0、1、2、63；它是偽造者自己的位元組回到偽造者選的行程。
+# judge 等 ltm **沒有上界**（`subprocess.run` 沒有 `timeout=`）：ltm 掛住，這支腳本就掛住——留下 set 行與部分列、**永遠沒有 rc**，而消費端
+# 的硬規則對「沒有 rc」無話可說。R18 為 fd 3 那條路加了筆數封頂（總時間有上界），這一條刻意不加：`timeout` 要進字母表、要臂、要 token
+# 存在性斷言（R6 加過、R7 以無主拆掉），成本真實；寫在這裡是讓它與 fd 3 那條對稱地被說出來（R19，DA）。
 # 跨 exec 保留、白名單清不掉的行程狀態：cwd（後果由 `-I -S` 關掉）、umask、關掉或重導的 fd（stderr 關掉 → 診斷消失）、信號處置、
 # rlimit。`nofile` 由高往低的實測階梯（R17／R18，門檻隨呼叫端已開的 fd 數移動，不寫數字）：正常 → **rc 0、set 行與每一列都對、
-# stderr 多一行 dup 診斷**（腳本內某個重導失敗但結果與正常段逐位元組相同——硬規則也過，只有 stderr 看得出來，R18）→ **rc 0 零輸出**
+# stderr 多一行 dup 診斷**（腳本內某個重導失敗但 set 行與每一列的 verdict 都與正常段相同、`<ms>` 本來就每次不同——硬規則也過，只有
+# stderr 看得出來，R18／R19）→ **rc 0 零輸出**
 # （`/dev/fd` dup 失敗，bash 直接結束 shell，`||` 與讀端的 70 都沒機會跑）→ rc 1 零列（撞「任一列 error」的號）→ 70（管線建不出來，
 # `||` fire）→ 134。這是一次掃描看到的段，不是「`nofile` 壓力長什麼樣」的完整列舉。
 # 這一段從腳本內關不掉。所以**離開碼 0 的意義是「0 且 stdout 第一行是 set 行」**——這是消費端的硬規則，不是註腳；任何讓 set 行
@@ -96,6 +105,8 @@
 #   empty tool=0     零命中。查詢已經對不到任何東西——這不是 clean，但也不計入離開碼。
 #   error(<token>)   這一列沒量到。token 是下面這一行的封閉集合：
 #   error tokens：<rc> sig<N> blank exec json shape judge
+#                    字面 token 只由小寫 ASCII 字母組成（`valid_row` 的形狀檢查，R18；同步測試釘 `ERROR_TOKENS` 每個元素都合這個形狀，R19
+#                    ——要加 `utf8` 這種含數字的 token，先改 `valid_row`）。
 #                    <rc>＝ltm 非零離開碼（不含 0、無前導零）；sig<N>＝ltm 被訊號 N 殺掉（N≥1）；blank＝這一行在 Unicode 空白摺疊
 #                    後是空的（例如只有 U+3000；不跑 ltm，因為空針對任何命中都算 self）；exec＝ltm 起不來；
 #                    json＝輸出不是 JSON；shape＝JSON 不是陣列、或**前 k 個**元素不是帶字串 snippet 的物件（第 k+1 筆不看，R8）；
@@ -121,7 +132,8 @@
 #   0 全部量到（含 empty；消費端要同時看到 set 行——見上方 rlimit 段的硬規則）；1 任一列 error(…)（每列照印完才離開）；
 #   64 k 不是 1–1000 的整數、或給了超過一個引數（舊習慣把查詢放第二個參數時，字串已進 metadata，這次不算量到，R14）；
 #   65 查詢檔沒有任何非註解行；66 查詢檔不是可讀的一般檔案、讀不了、含 NUL、或讀取中斷；69 ltm 不是可執行的一般檔案；
-#   70 沒有 python3、算不出查詢集指紋、或白名單沒有完整經 fd 3 到達（R16）。在 set 行印出**之後**才判定的有兩個：1（有列）與
+#   70 沒有 python3、算不出查詢集指紋、查詢檔有內容而指紋是空集合的（R18）、行數預數的管線建不出來（R19）、或白名單沒有完整經 fd 3
+#      到達（R16）。在 set 行印出**之後**才判定的有兩個：1（有列）與
 #   65（無列）；其餘 stdout 都是空的。
 #
 # 「第 N 條非註解行」：去掉行首行尾的 **ASCII** 空白（空格、tab、CR、VT、FF；`read` 已吃掉 LF；刻意不用
@@ -244,14 +256,18 @@ i=0; while [ $fp_ok -eq 1 ] && [ $i -lt 12 ]; do
 done
 [ $fp_ok -eq 1 ] || { echo "算不出查詢集指紋" >&2; exit 70; }
 # 指紋等於空集合的（sha256 of nothing 的前 12 個 hex；查法 `printf '' | shasum -a 256`）而查詢檔有非註解行：指紋 python 沒讀到內容
-# ——PATH 上的 python3 wrapper 先把 fd 3 讀光就是這個形狀，列照量、rc 0（R18）。行數用與迴圈同一個定義先數一次。
+# ——PATH 上的 python3 wrapper 先把 fd 3 讀光就是這個形狀，列照量、rc 0（R18）。行數先數一次；「第 N 條非註解行」的定義只有 qf_entry
+# 這一份（R19：R18 版把 trim／skip 兩行抄成第二份，漂移時預數變 0、守衛安靜短路）。預數的管線建不出來 → 70（`||` 那一句無臂：重導失敗
+# 本機重現不出來，與 re-exec 那一行同；`/dev/fd` dup 失敗那一段 bash 直接結束 shell，見 rlimit——R18 版在這裡是 fail-open，R19）。
 ws=$' \t\r\v\f'
+# 把 $1 剝掉頭尾 ASCII 空白放進 line；空行與 # 開頭回 1（不是條目）。指紋 python 用同一個定義（ws、跳過規則）各寫一份，那是跨語言的
+# 兩份，由測試的 setFingerprint 對帳。
+qf_entry() { line="${1#"${1%%[!$ws]*}"}"; line="${line%"${line##*[!$ws]}"}"; case "$line" in ''|\#*) return 1 ;; esac; }
 n_pre=0
 while IFS= read -r raw || [ -n "$raw" ]; do
-    line="${raw#"${raw%%[!$ws]*}"}"; line="${line%"${line##*[!$ws]}"}"
-    case "$line" in ''|\#*) continue ;; esac
+    qf_entry "$raw" || continue
     n_pre=$((n_pre + 1))
-done < <(printf '%s' "$QF_CONTENT")
+done < <(printf '%s' "$QF_CONTENT") || { echo "行數預數的管線建不出來" >&2; exit 70; }
 [ "$n_pre" -eq 0 ] || [ "$SETID" != e3b0c44298fc ] || { echo "查詢檔有內容但指紋是空集合的：指紋行程沒讀到查詢集" >&2; exit 70; }
 # k 也印在同一行：verdict 全是「前 k 名」的性質，兩份紀錄 k 不同就不能逐列對齊（R4）。
 printf 'set sha256:%s k=%s\n' "$SETID" "$K"
@@ -334,9 +350,7 @@ valid_row() {
 }
 n=0; bad=0
 while IFS= read -r raw || [ -n "$raw" ]; do
-    line="${raw#"${raw%%[!$ws]*}"}"
-    line="${line%"${line##*[!$ws]}"}"
-    case "$line" in ''|\#*) continue ;; esac
+    qf_entry "$raw" || continue
     n=$((n + 1))
     row=$(python3 -I -S -c "$RUN" "$LTM" "$K" "$line" </dev/null 2>/dev/null) || row=""
     valid_row "$row" || row="0 error(judge)"
