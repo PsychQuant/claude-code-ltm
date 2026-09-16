@@ -33,8 +33,9 @@
 #      重新啟動自己。argv 整行就是那一行寫的：`/usr/bin/env`、PATH、HOME、哨兵、`/bin/bash`、`--`、`$0`、`$@`——呼叫端控制的是 PATH、
 #      HOME（re-exec 出來的 bash 要用它展開 PATH 裡的 `~` 才找得到 `$0`、也決定預設 binary `~/bin/ltm`；`${HOME+"HOME=$HOME"}` 的內層
 #      引號讓含空白的值仍是一個字——查法 `HOME='/a b' bash -c 'printf "[%s]" ${HOME+"HOME=$HOME"}'`）、`$0`（決定腳本與預設查詢檔的位置，
-#      見下方「自己的目錄」段——R21：R20 版寫「argv 上只有 PATH、HOME 與哨兵」，漏了同一行上的 `$0`／`$@`）與 `$@`（k）；密鑰與白名單值
-#      不在 argv 上：白名單裡有設的變數
+#      見下方「自己的目錄」段——R21：R20 版寫「argv 上只有 PATH、HOME 與哨兵」，漏了同一行上的 `$0`／`$@`）與 `$@`（呼叫端**整個**引數
+#      向量——`$# ≤ 1` 的守衛在 re-exec 之後才跑，多給的引數會原樣上 `env` 與 re-exec bash 的 argv，R22）；密鑰與白名單值不在 argv 上：
+#      白名單裡有設的變數
 #      以 NUL 分隔的 `NAME=VALUE` 走**繼承的 fd 3**（值不經任何行程的 argv——R14 版把密鑰寫成 `env` 的 argv，execve 稽核會永久記下
 #      它，R15）。fd 3 有 framing：第一筆 `LTM_MB_FD3=$$`、最後一筆 `LTM_MB_END=1`；讀端要求頭標記的值對、每筆是 `NAME=VALUE`、
 #      NAME 在白名單且 `export` 收得下（非法識別碼由 `export` 自己拒絕、腳本看它的離開碼；`export` 失敗時 bash 會把整筆記錄印上
@@ -55,7 +56,9 @@
 #   不在 → 126；被接受的記錄**值**會經 66／69 的錯誤訊息原樣上 stderr（`LTM_BASELINE_QUERIES` 指到不存在的路徑，訊息就印那個路徑——
 #   那是呼叫端自己的值，R19；「記錄值不上 stderr」那一臂釘的只是被 `export` 拒絕的記錄）；HOME 決定預設 binary（`${HOME:-}/bin/ltm`）
 #   ——沒設 `LTM_BIN` 時，惡意 HOME 選到的那支程式拿到每一條查詢的 argv 與環境裡的密鑰，rc 0、無訊號（R21，security 實測；HOME 同時
-#   走 argv 與 fd 3，不需要偽造 fd 3）；`LTM_ANCHOR_KEY_SERVICE` 同族（改 binary 讀哪個鑰匙圈項目）。這幾條各有各的訊號或沒有訊號，是
+#   走 argv 與 fd 3，不需要偽造 fd 3）；HOME 還決定 PATH 元素 `~`／`~/` 的展開——裸名 `$0` 時 re-exec 出來的 bash 用它找**哪個檔案被當成
+#   本腳本執行**、`HERE` 走訪用它決定預設查詢檔（第 9 臂 `bareTilde` 就是：只換 HOME，被執行的腳本檔與被量測的查詢集一起換，rc 0；R22，
+#   DA）；`LTM_ANCHOR_KEY_SERVICE` 同族（改 binary 讀哪個鑰匙圈項目）。這幾條各有各的訊號或沒有訊號，是
 #   白名單這個機制本身的另一面——而清單本身會漏（R21 才補上 HOME），判準是「白名單裡每一個名字，在 ltm 或本腳本裡各決定什麼」。
 #   兩個 python 都以 `-I -S` 啟動：cwd 不進 `sys.path`（cwd 放一支 `hashlib.py` 就能整份接走查詢集並回一個合形狀的假指紋、放一支
 #   `json.py` 就能改掉每一列 verdict，R15／R16，各有臂）、PYTHONPATH／user site 不進（`-I`）、解譯器自己的 site-packages 與 `.pth`／
@@ -67,23 +70,28 @@
 # ltm 的 stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null（judge 對 ltm 寫的 `close_fds=True` 是 Python 的預設值，寫出來是文件、
 # 無行為）；每一個餵 `$QF_CONTENT` 的 process substitution 子 shell 都只跑 builtin `printf`，運算元不會上 stderr（有幾個由同步測試數
 # `< <(printf '%s' "$QF_CONTENT")` 的出現次數，這裡不寫數字——R18 加了第三個而檔頭還寫「兩個」，R19）。繼承的描述子：讀到尾標記之後
-# 腳本把 0、1、2 與 bash 讀腳本用的那個描述子以外的**每一個**描述子關掉（列舉 `/dev/fd`、只接受純數字的名字——不命中的 glob 字面 `*` 進 `eval`
+# 腳本把 0、1、2 與 255 以外的**每一個**描述子關掉（3 也在內——R21 把跳過清單裡的 3 拆掉後，前一行的 `exec 3<&-` 已是多餘、R22 拆；255
+# 是 bash 讀腳本用的描述子——只在 `RLIMIT_NOFILE` ≥ 256 時，見下；列舉 `/dev/fd`、只接受純數字的名字——不命中的 glob 字面 `*` 進 `eval`
 # 會 exec 到 cwd 第一個檔名，R21；純數字守衛**無臂**：macOS 上 `/dev/fd` 恆在，驅動不到；R20——R19 版只 `exec 3<&-`，
 # 那關的是 fd 3 這個別名，而 re-exec 那一行的 process substitution 讀端（bash 3.2 配 63）跨 execve 存活、每個 python 都繼承；R19 版寫
 # 「關不掉（腳本不知道它的號碼）」，假的，號碼就在 `/dev/fd` 裡）。bash 讀腳本的描述子是 `min(getdtablesize(), 256) − 1`：`RLIMIT_NOFILE`
-# ≥ 256 時是 255，程式碼寫死 255；低於 256 時關到的是腳本 fd，今天無害只因 bash 對一般檔案一次讀完整份腳本、之後不再讀（R21 實測
-# `ulimit -n 14…24` 仍 rc 0 全列；查法 `( ulimit -n 100; bash -c 'for f in /dev/fd/*; do echo $f; done' )` → 腳本 fd 是 99）。**跳過 255
+# ≥ 256 時是 255，程式碼寫死 255；低於 256 時關到的是腳本 fd——實測 `ulimit -n 14…24`、43 KB 的本腳本仍 rc 0 全列（R21／R22），那是
+# 結果觀察，分不出「bash 對一般檔案一次讀完、之後不再讀」與「這支剛好一次讀得完」，腳本內沒有查法能證明前者；查法（腳本 fd 的號碼，
+# 要用腳本檔運算元、`bash -c` 沒有腳本 fd）：`printf '#!/bin/bash\nfor f in /dev/fd/*; do echo $f; done\n' > p.sh; ( ulimit -n 100; /bin/bash p.sh )`
+# → 99。**跳過 255
 # 無臂**：把它也關掉今天沒有任何測試會紅、腳本也照跑（同一個理由）；留著是因為那是 bash 文件外的自保行為，不該靠它（R21）。所以偽造的
 # 寫端在尾標記之後塞的記錄到不了任何子行程。臂（R21 重寫）分三步：先對「拿掉關閉迴圈」的 mutant 複本跑同一支探針、證明那筆記錄讀得到
 # （R20 版的紅燈只掛在 fixture 裡一個沒人斷言的字面上）；再對真腳本斷言 judge 那個行程 3 以外每個 fd **從頭讀**（`lseek` 回 0）都空——
 # R20 版的探針只從目前 offset 讀，開著整份查詢檔而 offset 在 EOF 的 fd 看不見（DA 用 `exec 9< "$QF"` 的 mutant 證偽），現在那種 mutant
-# 是第三步的負向臂；探針要列舉到 fd 才算數（列不到時真空通過，R21）。這三步釘的是「尾標記後的記錄到不了 judge」與「judge 沒有任何一個
+# 是第三步的負向臂——用一條查詢的檔，讀掉一行後 offset 才真的在 EOF（R22：R21 版餵兩條，`lseek` 零臂）；第二步斷言的是 judge 3 以外
+# **沒有任何 fd**（不是「讀不出 bytes」：唯寫 fd、目錄 fd、讀失敗都不是空，R22；探針對讀失敗印 `?`、一律當紅）。這三步釘的是「尾標記後的記錄到不了 judge」與「judge 沒有任何一個
 # 開著查詢集的 fd」（R19 版寫「餵 `$QF_CONTENT` 的讀端是 close-on-exec」，假的：指紋 python 除 fd 3 外還繼承 bash 給那個 process
 # substitution 的副本，同一內容的兩個別名，它本來就有權讀）。ltm 不繼承是 `subprocess` 的 `close_fds` 預設。
 # judge 等 ltm **沒有上界**（`subprocess.run` 沒有 `timeout=`）：ltm 掛住，這支腳本就掛住——留下 set 行與部分列、**永遠沒有 rc**，而消費端
 # 的硬規則對「沒有 rc」無話可說。R18 為 fd 3 那條路加了筆數封頂（總時間有上界），這一條刻意不加：`timeout` 要進字母表、要臂、要 token
 # 存在性斷言（R6 加過、R7 以無主拆掉），成本真實；寫在這裡是讓它與 fd 3 那條對稱地被說出來（R19，DA）。
-# 跨 exec 保留、白名單清不掉的行程狀態：cwd（後果由 `-I -S` 關掉）、umask、關掉或重導的 fd（stderr 關掉 → 診斷消失）、信號處置、
+# 跨 exec 保留、白名單清不掉的行程狀態：cwd（python 的 `sys.path` 那一條後果由 `-I -S` 關掉；裸名 `$0` 的解析與 `HERE` 走訪那兩條沒關
+# ——cwd 決定哪個檔被當成本腳本跑、與預設查詢檔，第 4 臂 `cwdWins` 就是；R22 更正 R21 的「後果由 -I -S 關掉」）、umask、關掉或重導的 fd（stderr 關掉 → 診斷消失）、信號處置、
 # rlimit。`nofile` 由高往低的實測階梯（R17／R18，門檻隨呼叫端已開的 fd 數移動，不寫數字）：正常 → **rc 0、set 行與每一列都對、
 # stderr 多一行 dup 診斷**（腳本內某個重導失敗但 set 行與每一列的 verdict 都與正常段相同、`<ms>` 本來就每次不同——硬規則也過，只有
 # stderr 看得出來，R18／R19）→ **rc 0 零輸出**
@@ -144,16 +152,19 @@
 # 不要把本腳本的列與 2026-09-01 之前的表對齊——見 docs/measurements/README.md。
 #
 # 離開碼（腳本自己的 `exit N` 是封閉集合，同步測試對照程式碼；re-exec 那一行失敗時的離開碼見下一行）：0 1 64 65 66 69 70
-#   re-exec 那一行失敗時離開碼由 bash 決定、不在集合內、無測試——實測 126（查法：把 `/usr/bin/env` 換成不存在的路徑，R15）與 2（重導
-#   dup 失敗：`( ulimit -n 12; … )`，R21——R20 版寫成「126／127」的列舉，漏了 2）。
+#   re-exec 那一行失敗有三種，三種碼（R22：R21 版寫成一句「由 bash 決定、不在集合內」，與同檔的 `|| exit 70` 矛盾）：exec 本身失敗 →
+#   bash 決定、不在集合內、無測試（實測 126，查法：把 `/usr/bin/env` 換成不存在的路徑，R15）；`/dev/fd` dup 失敗 → bash 直接結束 shell
+#   （實測 2：`( ulimit -n 12; … )`，R21）；重導目標開不出來 → `||` fire → 70，在集合內（無臂，見第 4 點）。
 #   0 全部量到（含 empty；消費端要同時看到 set 行——見上方 rlimit 段的硬規則）；1 任一列 error(…)（每列照印完才離開）；
 #   64 k 不是 1–1000 的整數、或給了超過一個引數（舊習慣把查詢放第二個參數時，字串已進 metadata，這次不算量到，R14）；
 #   65 查詢檔沒有任何非註解行；66 查詢檔不是可讀的一般檔案、讀不了、含 NUL、或讀取中斷；69 ltm 不是可執行的一般檔案；
 #   70 量測的前提不成立：python3、指紋（算不出、或空集合）、fd 3 的白名單傳遞（頭尾標記、逾時、筆數、每筆合規）、re-exec 與兩個迴圈的
-#      重導、兩個迴圈看到的條數一致——每一條的細節在它自己那一段，這裡是判準不是名目清單（R21：R20 版列七個名目對十三個站點，「沒有完整
-#      到達」描述不了「到達但不合規」的四處）。在 set 行印出**之後**才判定的離開碼：1、65、70（1 有列；65 無列；70 是量測迴圈那兩條——
-#      管線建不出來或最後一列寫不進 stdout、條數不同——stdout 有 set 行、可能有部分列，R21）；其餘 stdout 都是空的。這句由同步測試釘：
-#      程式碼裡 set 行之後出現的 `exit N` 集合必須等於這裡列的三個。
+#      重導、兩個迴圈看到的條數一致、列寫得進 stdout——每一條的細節在它自己那一段，這裡是判準不是名目清單（R21：R20 版列七個名目對十三個
+#      站點，「沒有完整到達」描述不了「到達但不合規」的四處；R22 補「列寫得進 stdout」：R21 版把它掛在迴圈的 `||` 上，末行是註解時
+#      `continue` 的 0 蓋掉 printf 失敗、rc 0 少一列，現在每一列的 printf 自己 `|| exit 70`）。在 set 行印出**之後**才判定的離開碼：1、65、70
+#      （1 有列；65 無列；70 是量測迴圈那三條——管線建不出來、某一列寫不進 stdout、條數不同——stdout 有 set 行、可能有部分列，R21／R22），
+#      以及走到底的 0（set 行＋全列）；64、66、69 與 70 的其他成因都在 set 行之前判定、stdout 空（R22：R21 版寫「其餘 stdout 都是空的」，
+#      而「其餘」含 0）。這句由同步測試釘：程式碼裡 set 行之後出現的 `exit N` 集合必須等於 1、65、70，之前的必須等於 64、66、69、70。
 #
 # 「第 N 條非註解行」：去掉行首行尾的 **ASCII** 空白（空格、tab、CR、VT、FF；`read` 已吃掉 LF；刻意不用
 # [:space:]，它隨 locale 變、Swift 的不變）之後，空行與 `#` 開頭的行不算。全形空白（U+3000）與 NBSP 不是
@@ -164,7 +175,8 @@
 #   LTM_BIN（預設 ~/bin/ltm）、LTM_BASELINE_QUERIES（預設本腳本旁的 baseline-queries.txt——「本腳本旁」照 bash 找腳本
 #   運算元的順序解：`$0` 含斜線取其目錄；裸名先看 cwd、再沿 PATH 取第一個可讀的檔案）——兩者明確給空字串是錯（66／69），
 #   不是「用預設」（R14；k 同，R10）、k 1–1000（預設 5）。密鑰請用命令替換直接餵進環境，不要落地（.claude/rules/anchor-key-in-probes.md）。
-#   本腳本在第一列之前把 0、1、2 以外繼承的描述子全部關掉——不要用 `flock <file> 本腳本` 這種把鎖寄託在繼承 fd 上的呼叫法（R21）。
+#   本腳本在第一列之前把 0、1、2、255 以外繼承的描述子全部關掉（255 是 bash 自己的，見防禦段）——不要用 `flock <file> 本腳本` 這種把鎖
+#   寄託在繼承 fd 上的呼叫法（R21）。
 builtin trap - DEBUG ERR RETURN EXIT
 builtin set +x
 LTM_MB_WHITELIST="HOME LC_ALL LANG TMPDIR LTM_BIN LTM_BASELINE_QUERIES CLAUDE_CONFIG_DIR LTM_ANCHOR_KEY LTM_ANCHOR_KEY_SERVICE LTM_BUILD_BATCH_CHUNKS LTM_BUILD_MEMORY_BUDGET_MB LTM_CORPUS_ROOT LTM_DERIVED_ROOT LTM_MEMORY_ROOT LTM_TEST_CLOCK_STEP_SECONDS"
@@ -183,7 +195,6 @@ case "${LTM_MB_CLEAN-}" in
             esac
         done
         [ "$mb_end" = 1 ] || { echo "白名單沒有完整經 fd 3 到達（尾標記缺或讀取逾時）" >&2; exit 70; }
-        exec 3<&-
         for mb_fd in /dev/fd/*; do mb_name="${mb_fd##*/}"; case "$mb_name" in ''|*[!0123456789]*|0|1|2|255) ;; *) eval "exec ${mb_name}<&-" 2>/dev/null ;; esac; done
         unset LTM_MB_CLEAN kv mb_end mb_n mb_max mb_name mb_fd ;;
     *) builtin exec -c /usr/bin/env "PATH=${PATH-}" ${HOME+"HOME=$HOME"} "LTM_MB_CLEAN=$$" /bin/bash -- "$0" "$@" 3< <(builtin printf '%s\0' "LTM_MB_FD3=$$"; for v in $LTM_MB_WHITELIST; do if [[ -n "${!v+set}" ]]; then builtin printf '%s=%s\0' "$v" "${!v}"; fi; done; builtin printf '%s\0' LTM_MB_END=1) || exit 70 ;;
@@ -221,6 +232,10 @@ esac
 { [ -n "$d" ] && HERE=$(cd -- "$d" 2>/dev/null && pwd); } || HERE=/nonexistent
 QF="${LTM_BASELINE_QUERIES-$HERE/baseline-queries.txt}"
 LTM="${LTM_BIN-${HOME:-}/bin/ltm}"   # HOME 沒設也不能讓 set -u 隱式地以 1 離開（那會與「1 = 任一列 error」撞號，R8）
+# LTM_BIN 是檔案路徑，不是命令名：不含 `/` 的值固定成 `./` 相對——bash 的 `-f` 對裸名看 cwd、python 的 execvp 對裸名沿 PATH 搜，同一個
+# 裸名兩邊解到不同檔案（cwd 一支、PATH 一支同名時檢查過 cwd、跑的是 PATH 那支，rc 0 無訊號；codex R22 抓到）。加上 `./` 之後兩邊都是 cwd
+# 那一個（有臂）。
+case "$LTM" in */*) ;; *) LTM="./$LTM" ;; esac
 [ "$#" -le 1 ] || { echo "只接受一個引數 [k]（多給的引數不回顯）" >&2; exit 64; }
 K="${1-5}"   # 明確給了空字串是錯，不是「用預設」（R10）
 # k：只准數字（字面集合 `[!0123456789]` 是同檔的一致寫法——指紋檢查用它的理由是**含字母**的 range 隨 locale 排序而變；純數字
@@ -280,7 +295,7 @@ done
 # 指紋等於空集合的（sha256 of nothing 的前 12 個 hex；查法 `printf '' | shasum -a 256`）而查詢檔有非註解行：指紋 python 沒讀到內容
 # ——PATH 上的 python3 wrapper 先把 fd 3 讀光就是這個形狀，列照量、rc 0（R18）。行數先數一次；bash 這一側「第 N 條非註解行」的定義只有
 # qf_entry 一份（R19：R18 版把 trim／skip 兩行抄成第二份，漂移時預數變 0、守衛安靜短路），與指紋 python、測試的 Swift 各一份共三份實作
-# （R20 更正 R19 的「一份／兩份」）；對帳：測試的 `setFingerprint` 用 Swift 那份對每個 fixture 重算指紋、與 python 那份印的 set 行相等，
+# （R20 更正 R19 的「一份／兩份」）；對帳：測試的 `setFingerprint` 用 Swift 那份對用到指紋的每個 fixture 重算指紋、與 python 那份印的 set 行相等，
 # locale 測試把 bash 這份數出的列數對 Swift 那份（R21：R20 版指到上方「第 N 條非註解行」段，那段的「三邊」是腳本／測試／檔案，另一組三，
 # 且沒有對帳方式）。預數的管線建不出來 → 70；量測迴圈的管線建不出來、或兩個迴圈
 # 看到的條數不同 → 70（R20：R19 只補了預數那條，量測迴圈少跑時 rc 0 配完整集合的指紋、管線失敗時 set 行後 exit 65 配一句被 n_pre 證偽的
@@ -381,8 +396,8 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     row=$(python3 -I -S -c "$RUN" "$LTM" "$K" "$line" </dev/null 2>/dev/null) || row=""
     valid_row "$row" || row="0 error(judge)"
     case "${row#* }" in "$E_OPEN"*) bad=$((bad + 1)) ;; esac
-    printf '#%d %sms %s\n' "$n" "${row%% *}" "${row#* }"
-done < <(printf '%s' "$QF_CONTENT") || { echo "量測迴圈的管線建不出來、或最後一列寫不進 stdout" >&2; exit 70; }
+    printf '#%d %sms %s\n' "$n" "${row%% *}" "${row#* }" || { echo "列寫不進 stdout" >&2; exit 70; }
+done < <(printf '%s' "$QF_CONTENT") || { echo "量測迴圈的管線建不出來" >&2; exit 70; }
 [ "$n" -eq "$n_pre" ] || { echo "量測迴圈看到的條數與預數不同" >&2; exit 70; }
 [ "$n" -gt 0 ] || { echo "查詢檔沒有任何非註解行" >&2; exit 65; }
 [ "$bad" -eq 0 ] || exit 1

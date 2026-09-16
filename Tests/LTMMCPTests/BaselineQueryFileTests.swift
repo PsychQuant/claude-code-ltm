@@ -466,14 +466,21 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     let afterSetExits = Set(matches(#"(?<![.\w])exit ([0-9]+)"#, in: afterSetText).compactMap { Int($0) })
     let afterSetSentence = "才判定的離開碼：" + afterSetExits.sorted().map(String.init).joined(separator: "、")
     #expect(setLineIndex < codeLines.count && afterSetExits == [1, 65, 70] && script.contains(afterSetSentence), Comment(rawValue: "set 行之後的 exit 集合 \(afterSetExits.sorted()) 與檔頭那句（要含「\(afterSetSentence)」）不一致"))
-    // README「查詢集在哪、怎麼用」那一節手抄的每一個 camelCase 識別碼都要在這個測試檔或 Sources 裡出現（R21：R20 只釘了 #function 那一個，
-    // `requiredHeaderPhrases`／`errorTokens` 沒釘）。只掃那一節：其他節的 camelCase 是 jsonl 欄位名（`toolUseResult`），不是程式識別碼。
+    // 反向：set 行之前的 `exit N` 集合（R22：R21 版那句「其餘 stdout 都是空的」的「其餘」含走到底的 0，而 0 不是字面 exit、pin 看不到）。
+    let beforeSetText = codeLines[..<setLineIndex].map(\.element).joined(separator: "\n")
+    let beforeSetExits = Set(matches(#"(?<![.\w])exit ([0-9]+)"#, in: beforeSetText).compactMap { Int($0) })
+    #expect(beforeSetExits == [64, 66, 69, 70] && script.contains("之前的必須等於 " + beforeSetExits.sorted().map(String.init).joined(separator: "、")), Comment(rawValue: "set 行之前的 exit 集合 \(beforeSetExits.sorted()) 與檔頭那句不一致"))
+    // README「什麼會進索引」與「查詢集在哪、怎麼用」兩節手抄的每一個 camelCase 識別碼都要在這個測試檔或 Sources 裡出現（R21：R20 只釘了 #function
+    // 那一個；R22：R21 只掃第二節、理由寫成「其他節是 jsonl 欄位名」，而第一節有 `indexableText`／`toolUseMetadata` 兩個程式識別碼）。
+    // jsonl 欄位名是封閉例外、不得類推：`isCompactSummary`、`toolUseResult`（Sources 不以這兩個字面讀它們）。「三條規則」節之後不掃（那裡的 camelCase 是
+    // jsonl 欄位路徑 `toolUseResult.stdout` 這類）。
     let testSource = try String(contentsOf: root.appendingPathComponent("Tests/LTMMCPTests/BaselineQueryFileTests.swift"), encoding: .utf8)
     let sourcesText = ((FileManager.default.enumerator(at: root.appendingPathComponent("Sources"), includingPropertiesForKeys: nil)?.allObjects as? [URL]) ?? [])
         .filter { $0.pathExtension == "swift" }.compactMap { try? String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
-    let usageSection = readme.components(separatedBy: "### 查詢集在哪、怎麼用").dropFirst().first?.components(separatedBy: "\n### ").first ?? ""
-    #expect(!usageSection.isEmpty, "README 的「查詢集在哪、怎麼用」節找不到")
-    let readmeIdentifiers = Set(matches(#"`([a-z][a-z0-9]*[A-Z][A-Za-z0-9]*)`"#, in: usageSection))
+    let usageSection = readme.components(separatedBy: "### 什麼會進索引").dropFirst().first?.components(separatedBy: "\n### 三條規則").first ?? ""
+    #expect(!usageSection.isEmpty && usageSection.contains("### 查詢集在哪、怎麼用"), "README 的「什麼會進索引」到「三條規則」之間找不到")
+    let jsonlFieldNames: Set<String> = ["isCompactSummary", "toolUseResult"]
+    let readmeIdentifiers = Set(matches(#"`([a-z][a-z0-9]*[A-Z][A-Za-z0-9]*)`"#, in: usageSection)).subtracting(jsonlFieldNames)
     let orphanIdentifiers = readmeIdentifiers.filter { !testSource.contains($0) && !sourcesText.contains($0) }
     #expect(readmeIdentifiers.count >= 3 && orphanIdentifiers.isEmpty, Comment(rawValue: "README 那一節的 camelCase 識別碼在測試檔與 Sources 都找不到：\(orphanIdentifiers.sorted())（掃到 \(readmeIdentifiers.count) 個）"))
     // README 的兩個數字（每條純量上限、目前條數）由這裡對照常數與真檔，不各存一份（R8）。
@@ -1041,7 +1048,7 @@ func measureBaselinePreflightGuardsHaveDistinctExitCodes() throws {
     #expect(run.status == 65 && run.rows.isEmpty, Comment(rawValue: "rc=\(run.status) out=\(run.stdout)"))
 }
 
-@Test("measure-baseline.sh：呼叫端 shell 環境經繼承進來的那一面由 re-exec 清掉——xtrace 三條路（`bash -x`／`SHELLOPTS`／`BASH_ENV`）、errexit 兩條、BASH_ENV 定義的同名函式（exec／set／trap／read／printf——這五個名字在結構上都碰不到 `builtin X`；會碰到的只有 `builtin` 自己，而它在防禦外）、DEBUG trap（含蓋掉 `trap` 的那一種）、readonly（QF_CONTENT／SETID）、殘留哨兵（R14 的 `1`、非數字）、allexport 三條與 pre-exported 變數、ltm 組態經 fd 3 完整到達：都不漏、不撞號、不偽造指紋；偽造哨兵而沒有 fd 3 → 70；fd 3 偽造的各種形狀各 70（臂在本體，標題不數；只有 two-token 那一臂另斷言被 `export` 拒絕的記錄值不上 stderr）；恰好滿白名單的合法傳遞 → rc 0；尾標記之後的記錄到不了 judge（0、1、2、255 以外的繼承描述子都關掉；三步：無關閉迴圈時記錄可讀、真腳本每個 fd 從頭讀都空、seekable 洩漏探得到）；PATH 上的 python3 讀光 fd 3 → 70；預數與量測迴圈的管線建不出來（mutant 複本）→ 70")
+@Test("measure-baseline.sh：呼叫端 shell 環境經繼承進來的那一面由 re-exec 清掉——xtrace 三條路（`bash -x`／`SHELLOPTS`／`BASH_ENV`）、errexit 兩條、BASH_ENV 定義的同名函式（exec／set／trap／read／printf——這五個名字在結構上都碰不到 `builtin X`；會碰到的只有 `builtin` 自己，而它在防禦外）、DEBUG trap（含蓋掉 `trap` 的那一種）、readonly（QF_CONTENT／SETID）、殘留哨兵（R14 的 `1`、非數字）、allexport 三條與 pre-exported 變數、ltm 組態經 fd 3 完整到達：都不漏、不撞號、不偽造指紋；偽造哨兵而沒有 fd 3 → 70；fd 3 偽造的各種形狀各 70（臂在本體，標題不數；只有 two-token 那一臂另斷言被 `export` 拒絕的記錄值不上 stderr）；恰好滿白名單的合法傳遞 → rc 0；尾標記之後的記錄到不了 judge（0、1、2、255 以外的繼承描述子都關掉；三步：無關閉迴圈時某個繼承 fd 非空、真腳本 3 以外沒有任何 fd、offset 在 EOF 的 seekable 洩漏探得到）；列寫不進 stdout → 70（末行註解）；裸名 LTM_BIN 檢查與執行同一檔；PATH 上的 python3 讀光 fd 3 → 70；預數與量測迴圈的管線建不出來（mutant 複本）→ 70")
 func measureBaselineDoesNotLeakUnderXtrace() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
@@ -1191,7 +1198,7 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     // 把整份查詢檔開在 fd 9 並讀掉一行的 mutant，探針必須看得到（R20 版的探針只從目前 offset 讀，這種 seekable 洩漏看不見，DA 證偽）。
     // 探針是真 python3（每個 fd 先 `lseek(0)` 再讀）、只印 X／空不印內容、附加寫入（兩條查詢、兩個 judge）。
     let fd3Probe = dir.appendingPathComponent("fd3-after-end.txt")
-    let probePy = "import os\nout=['fd3=closed;']\ntry:\n    os.fstat(3); out[0]='fd3=open;'\nexcept OSError:\n    pass\nfds=sorted(int(x) for x in os.listdir('/dev/fd'))\nout.append('n=%d;' % len(fds))\nfor fd in fds:\n    if fd <= 3: continue\n    try: os.fstat(fd)\n    except OSError: continue\n    try: os.lseek(fd, 0, 0)\n    except OSError: pass\n    try: data = os.read(fd, 65536)\n    except OSError: data = b''\n    out.append('fd%d=%s;' % (fd, 'X' if data else ''))\nopen('\(fd3Probe.path)', 'a').write(''.join(out) + '\\n')\n"
+    let probePy = "import os\nout=['fd3=closed;']\ntry:\n    os.fstat(3); out[0]='fd3=open;'\nexcept OSError:\n    pass\nfds=sorted(int(x) for x in os.listdir('/dev/fd'))\nout.append('n=%d;' % len(fds))\nfor fd in fds:\n    if fd <= 3: continue\n    try: os.fstat(fd)\n    except OSError: continue\n    try: os.lseek(fd, 0, 0)\n    except OSError: pass\n    try: data = os.read(fd, 65536)\n    except OSError: data = None\n    out.append('fd%d=%s;' % (fd, '?' if data is None else ('X' if data else '')))\nopen('\(fd3Probe.path)', 'a').write(''.join(out) + '\\n')\n"
     let probeFile = dir.appendingPathComponent("fdprobe.py")
     try probePy.write(to: probeFile, atomically: true, encoding: .utf8)
     let fd3Bin = try makeBinDir(in: dir, judgeFakes: ["python3": "'\(realPython3())' -I -S '\(probeFile.path)'"])
@@ -1208,22 +1215,24 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     }
     func probeLines() -> [String] { ((try? String(contentsOf: fd3Probe, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init) }
     let afterEndRecords = "LTM_MB_FD3=%s\\0LTM_MB_END=1\\0AFTER_END_ZQXJ=1\\0"
-    // (1) 前置：沒有關閉迴圈時記錄讀得到。
+    // (1) 前置：沒有關閉迴圈時某個繼承 fd 讀得到東西（探針不印內容，所以證的是「有一個非空的繼承 fd」，今天是 63 上那筆記錄；R22 標明）。
     let noClose = try mutantScript("no-close-loop") { $0.replacingOccurrences(of: closeLoop, with: "        for mb_fd in; do") }
     _ = try runScript(queries: twoQueries, stub: stub, pathPrefix: fd3Bin.path, scriptOverride: noClose, sentinelForged: true, forgedFd3Records: afterEndRecords)
     let leakSeen = probeLines()
     #expect(leakSeen.contains { $0.contains("=X;") }, Comment(rawValue: "precondition: without the close loop the post-end record must be readable by some judge: \(leakSeen)"))
     try? FileManager.default.removeItem(at: fd3Probe)
-    // (2) 真腳本：每個 judge 的 fd 3 關、其他 fd 從頭讀都空、且列舉到 fd。
+    // (2) 真腳本：每個 judge 的 fd 3 關、3 以外**沒有任何 fd**（R22：R21 版斷言「讀不出 bytes」——唯寫 fd、目錄 fd、讀失敗都會綠；`n>=3` 底線數的是
+    // /dev/fd 總數、恆 ≥4、零鑑別力，拆掉；`n=` 只留作診斷）。探針對讀失敗印 `?`，任何 `fdN=` 條目都紅。
     let afterEnd = try runScript(queries: twoQueries, stub: stub, pathPrefix: fd3Bin.path, sentinelForged: true, forgedFd3Records: afterEndRecords)
     let seen = probeLines()
-    let allClean = seen.count == 2 && seen.allSatisfy { $0.hasPrefix("fd3=closed;n=") && !$0.contains("=X;") && ($0.range(of: #"n=([3-9]|[1-9][0-9]+);"#, options: .regularExpression) != nil) }
-    #expect(afterEnd.status == 0 && afterEnd.rows.count == 2 && allClean, Comment(rawValue: "post-end-marker record: every judge must see fd 3 closed and every other fd empty from offset 0: rc=\(afterEnd.status) probes=\(seen)"))
+    let allClean = seen.count == 2 && seen.allSatisfy { $0.hasPrefix("fd3=closed;n=") && $0.range(of: #";fd[0-9]+="#, options: .regularExpression) == nil }
+    #expect(afterEnd.status == 0 && afterEnd.rows.count == 2 && allClean, Comment(rawValue: "post-end-marker record: every judge must see fd 3 closed and no other fd at all: rc=\(afterEnd.status) probes=\(seen)"))
     try? FileManager.default.removeItem(at: fd3Probe)
-    // (3) 負向：整份查詢檔開在 fd 9、offset 停在第一行之後——探針要看得到。
+    // (3) 負向：整份查詢檔開在 fd 9、讀掉一行——用**一條**查詢的檔，offset 才真的在 EOF，探針的 `lseek(0)` 才被驅動（R22：R21 版餵兩條，
+    // 第二行還在目前 offset 之後、不 lseek 也看得到，`lseek` 零臂）。
     let leaky = try mutantScript("leaky-fd9") { $0.replacingOccurrences(of: "n=0; bad=0\n", with: "exec 9< \"$QF\"; IFS= read -r mut9 <&9\nn=0; bad=0\n") }
     #expect(scriptText.components(separatedBy: "n=0; bad=0\n").count == 2, "量測迴圈前的 `n=0; bad=0` 找不到或不只一處")
-    let leakyRun = try runScript(queries: twoQueries, stub: stub, pathPrefix: fd3Bin.path, scriptOverride: leaky)
+    let leakyRun = try runScript(queries: queries, stub: stub, pathPrefix: fd3Bin.path, scriptOverride: leaky)
     let leakyProbe = probeLines()
     #expect(leakyRun.status == 0 && leakyProbe.contains { $0.contains("fd9=X;") }, Comment(rawValue: "probe must see a seekable fd holding the query file even when its offset is at EOF: rc=\(leakyRun.status) probes=\(leakyProbe)"))
     try? FileManager.default.removeItem(at: fd3Probe)
@@ -1231,7 +1240,7 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     // 結束 shell），所以分支用**改掉重導目標的 mutant 複本**驅動（R20：R19 版標「無臂：重現不出來」；複本只含腳本、不含查詢檔）。
     let redirect = "done < <(printf '%s' \"$QF_CONTENT\") || { echo \""
     #expect(scriptText.components(separatedBy: redirect).count == 3, "腳本裡帶 || 的 QF_CONTENT 迴圈重導應恰好兩處（預數、量測迴圈）")
-    for (label, marker, expectSetLine) in [("pre-count", "行數預數的管線建不出來", false), ("measurement loop", "量測迴圈的管線建不出來、或最後一列寫不進 stdout", true)] {
+    for (label, marker, expectSetLine) in [("pre-count", "行數預數的管線建不出來", false), ("measurement loop", "量測迴圈的管線建不出來", true)] {
         let mutant = dir.appendingPathComponent("mutant-\(label.replacingOccurrences(of: " ", with: "-")).sh")
         try scriptText.replacingOccurrences(of: redirect + marker, with: "done < /nonexistent/zqxj-mutant || { echo \"" + marker).write(to: mutant, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mutant.path)
@@ -1239,13 +1248,34 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
         #expect(broken.status == 70 && broken.stderr.contains(marker) && broken.rows.isEmpty && (broken.setLine.isEmpty != expectSetLine), Comment(rawValue: "\(label) redirect failure: rc=\(broken.status) out=\(broken.stdout) err=\(broken.stderr)"))
     }
     // 兩個迴圈看到的條數不同 → 70（R20：量測迴圈少跑時 R19 版是 rc 0 配完整集合的指紋與不完整的列，硬規則過）。mutant 複本讓量測迴圈印完第一列就 break。
-    let rowLine = "    printf '#%d %sms %s\\n' \"$n\" \"${row%% *}\" \"${row#* }\"\n"
+    let rowLine = "    printf '#%d %sms %s\\n' \"$n\" \"${row%% *}\" \"${row#* }\" || { echo \"列寫不進 stdout\" >&2; exit 70; }\n"
     #expect(scriptText.components(separatedBy: rowLine).count == 2, "量測迴圈印列的那一行找不到或不只一處")
     let shortLoop = dir.appendingPathComponent("mutant-short-loop.sh")
     try scriptText.replacingOccurrences(of: rowLine, with: rowLine + "    break\n").write(to: shortLoop, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shortLoop.path)
     let short = try runScript(queries: twoQueries, stub: stub, scriptOverride: shortLoop)
     #expect(short.status == 70 && short.rows.count == 1 && short.stderr.contains("量測迴圈看到的條數與預數不同"), Comment(rawValue: "short measurement loop: rc=\(short.status) rows=\(short.rows.count) err=\(short.stderr)"))
+    // 列寫不進 stdout → 70（R22：R21 版掛在迴圈的 `||` 上，查詢檔末行是註解時最後執行的是 `continue`、printf 失敗被蓋掉、rc 0 少一列）。
+    // mutant 在 set 行之後關掉 stdout；查詢檔刻意以註解收尾。
+    let trailingComment = dir.appendingPathComponent("q-trailing-comment.txt")
+    try "ZQXJ-TRACE-ONE\n# trailing comment\n".write(to: trailingComment, atomically: true, encoding: .utf8)
+    let setPrintf = "printf 'set sha256:%s k=%s\\n' \"$SETID\" \"$K\"\n"
+    #expect(scriptText.components(separatedBy: setPrintf).count == 2, "set 行的 printf 找不到或不只一處")
+    let closedOut = try mutantScript("closed-stdout") { $0.replacingOccurrences(of: setPrintf, with: setPrintf + "exec 1>&-\n") }
+    let noStdout = try runScript(queries: trailingComment, stub: stub, scriptOverride: closedOut)
+    #expect(noStdout.status == 70 && noStdout.stderr.contains("列寫不進 stdout"), Comment(rawValue: "row printf failure must be named: rc=\(noStdout.status) err=\(noStdout.stderr)"))
+    // LTM_BIN 裸名（codex R22）：bash 的 `-f` 看 cwd、python 的 execvp 沿 PATH——腳本把不含 `/` 的值固定成 `./`。cwd 與 PATH 各一支同名 stub，
+    // cwd 那支回一列命中、PATH 那支以 rc 9 死：跑的必須是 cwd 那支；cwd 沒有時 → 69（不是靜默跑 PATH 那支）。
+    let cwdDir = dir.appendingPathComponent("cwd-ltm"); try FileManager.default.createDirectory(at: cwdDir, withIntermediateDirectories: true)
+    try FileManager.default.moveItem(at: try makeStub(in: cwdDir, responses: ["ZQXJ-TRACE-ONE": #"[{"snippet":"ZQXJ-SNIPPET 一段命中","uuid":"u"}]"#]), to: cwdDir.appendingPathComponent("zqxjltm"))
+    let pathDir = dir.appendingPathComponent("path-ltm"); try FileManager.default.createDirectory(at: pathDir, withIntermediateDirectories: true)
+    try "#!/bin/bash\nexit 9\n".write(to: pathDir.appendingPathComponent("zqxjltm"), atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: pathDir.appendingPathComponent("zqxjltm").path)
+    let bareCwd = try runScript(queries: queries, stub: stub, ltmBinOverride: "zqxjltm", pathPrefix: pathDir.path, cwd: cwdDir)
+    #expect(bareCwd.status == 0 && bareCwd.rows.count == 1 && bareCwd.rows[0].hasSuffix(" clean tool=0"), Comment(rawValue: "bare LTM_BIN must run the cwd file the check looked at: rc=\(bareCwd.status) out=\(bareCwd.stdout) err=\(bareCwd.stderr)"))
+    let cwdEmpty = dir.appendingPathComponent("cwd-empty"); try FileManager.default.createDirectory(at: cwdEmpty, withIntermediateDirectories: true)
+    let bareAbsent = try runScript(queries: queries, stub: stub, ltmBinOverride: "zqxjltm", pathPrefix: pathDir.path, cwd: cwdEmpty)
+    #expect(bareAbsent.status == 69 && bareAbsent.stdout.isEmpty, Comment(rawValue: "bare LTM_BIN absent from cwd must be 69 even if PATH has it: rc=\(bareAbsent.status) out=\(bareAbsent.stdout)"))
     // PATH 上的 python3 wrapper 在指紋呼叫（`-`）先把 fd 3 讀光再交給真的 python3：指紋是空集合的、每一列照量、rc 0——完整性缺口（R18，DA）。
     // 有非註解行卻算出空集合的指紋 → 70、零輸出。
     let drainBin = dir.appendingPathComponent("bin-drain")
