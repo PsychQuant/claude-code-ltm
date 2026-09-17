@@ -72,16 +72,28 @@
 # 無行為）；每一個餵 `$QF_CONTENT` 的 process substitution 子 shell 都只跑 builtin `printf`，運算元不會上 stderr——條件是寫成功：bash 對寫失敗
 # 的 printf 把緩衝留著、下一個 builtin 往別的 fd 寫時把它一起 flush 過去（R23 實測 payload 上 stderr）。**帶 `|| exit 70` 的只有兩個
 # printf**：set 行那一個與量測迴圈每一列那一個（R22／R23；訊息用外部 `/bin/echo`，有臂：stderr 不得含 set 行。查法：
-# `grep -vE '^\s*#' 本檔 | grep -cE "printf .*\|\| \{ /bin/echo"` → 2）。餵 `$QF_CONTENT` 的那幾個
-# 沒有，而它們正是運算元是查詢原文的那幾個——**在扛的是另一條性質：那些子 shell 裡沒有第二個 fd 的 builtin 寫入**，所以留著的緩衝沒有
-# 第二個出口，離開時只會對同一個壞掉的 fd 靜默 flush（查法：`grep -nE '< <\(printf .%s. "\$QF_CONTENT"\)' 本檔`，每一行的子 shell
-# 都只有那一個 `printf`、沒有第二個命令。**無臂**；R24 實測 138 KB 合成查詢檔＋SIGPIPE `SIG_IGN`＋stdout 早關：那個
-# procsub 的 printf 確實寫失敗、確實沒有「當下就離開」，而查詢原文沒有上 stderr。哪天有人在它們任一個後面加一句往 stderr 的 builtin
-# 寫入，這條性質就沒了——R23 版寫「本腳本每個 printf 失敗當下就離開」，全稱，而主詞正是沒被保護的那幾個，R24）。它們寫的是管線；
-# 量測迴圈與預數迴圈那兩個的 reader 是本腳本自己，**指紋那個的 reader 是本腳本不控制的獨立行程**（python3；它早退的情境見上方
-# PATH／cwd 那一段），而它的緩衝內容是整份查詢集——上面兩個 `|| exit 70` 對它一個字都不適用（R23 版寫「那三個子 shell 寫的是管線、
-# reader 是本腳本自己」，對三個中的那一個為假，而且同句括號才剛寫過「這裡不寫數字」，R24，DA；有幾個由同步測試數
-# `< <(printf '%s' "$QF_CONTENT")` 的出現次數，這裡不寫數字——R18 加了第三個而檔頭還寫「兩個」，R19）。繼承的描述子：讀到尾標記之後
+# `grep -vE '^\s*#' 本檔 | grep -cE '^[[:space:]]*printf .*\|\|.*exit 70'` → 2，而 `grep -vE '^\s*#' 本檔 | grep -c printf` → 6
+# （帶守衛者／全部。行首錨點是必要的：不錨的話 `done < <(printf …) || { …; exit 70; }` 那兩行也會被算進來，回 5——**這條查法
+# 自己在 R25 verify-fix 寫出來時就是錯的，跑過才發現**。R25，DA：R24 版的查法數的是「用 `/bin/echo` 印訊息的 printf」，與句子
+# 講的「帶 `|| exit 70` 的」是兩個集合——插一行 `printf "zzz" || exit 70` 之後句子立刻為假而它仍回 2，**結構上不可能證偽它
+# 旁邊那句話**）。同步測試釘這兩個數（`guardedPrintfLines`／`printfLines`）。其餘的 printf 沒有守衛，而它們
+# 正是運算元最敏感的那些——**在扛的是另一條性質：它們所在的子 shell 裡沒有第二個 fd 的 builtin 寫入**，所以留著的緩衝沒有第二個
+# 出口，離開時只會對同一個壞掉的 fd 靜默 flush。這條性質涵蓋**兩組**（R25，DA：R24 版的主詞只寫了第一組，而 commit message
+# 宣稱「其餘六個」——落地只涵蓋三個）：
+#   (a) 餵 `$QF_CONTENT` 的那些 process substitution。查法：`grep -vE '^\s*#' 本檔 | grep -nE '< <\(printf .%s. "\$QF_CONTENT"\)'`
+#       （R25：R24 版的查法沒濾註解，逐字跑會命中它自己那句散文，而附帶的性質對那一行不可評估），每一行的子 shell 都只有
+#       那一個 `printf`、沒有第二個命令。運算元是查詢原文。
+#   (b) re-exec 那一行 fd 3 寫端的 `builtin printf`（**同一實體行上三個**，所以要數出現次數不是行數）。查法：
+#       `grep -vE '^\s*#' 本檔 | grep -o 'builtin printf' | wc -l` → 3。運算元是白名單環境**值**，其中含 `LTM_ANCHOR_KEY`
+#       ——未保護的 printf 裡運算元最敏感的就是這一組，而 R24 一個字都沒寫下它們為什麼安全。
+# 兩組都**無臂**；R24 實測 138 KB 合成查詢檔＋SIGPIPE `SIG_IGN`＋stdout 早關：(a) 那個 procsub 的 printf 確實寫失敗、確實沒有
+# 「當下就離開」，而查詢原文沒有上 stderr。哪天有人在任一個後面加一句往 stderr 的 builtin 寫入，這條性質就沒了（R23 版寫
+# 「本腳本每個 printf 失敗當下就離開」，全稱，而主詞正是沒被保護的那些，R24）。(a) 寫的是管線；量測迴圈與預數迴圈的 reader 是
+# 本腳本自己，**指紋那個的 reader 是本腳本不控制的獨立行程**（python3；它早退的情境見上方 PATH／cwd 那一段），而它的緩衝內容是
+# 整份查詢集——上面兩個 `|| exit 70` 對它一個字都不適用（R23 版寫「那三個子 shell 寫的是管線、reader 是本腳本自己」，對其中一個
+# 為假，R24，DA；R24 的修法寫成「那兩個」＋「那個」，仍然是在自稱不寫數字的同一句裡編碼了三，R25——**現在不計數**。
+# 有幾個由同步測試數 `< <(printf '%s' "$QF_CONTENT")` 的出現次數，這裡不寫數字——R18 加了第三個而檔頭還寫「兩個」，R19）。
+# 繼承的描述子：讀到尾標記之後
 # 腳本先無條件 `exec 3<&-`（builtin、不需要空閒 fd；**有臂**——R22 以「關閉迴圈也關 3」為由拆掉，R23 實測 fd 壓力下 `/dev/fd/*` glob
 # 退化成字面、迴圈整個 no-op、fd 3 留給 judge，放回並標「無臂」；R24 用同一個世界的 mutant 複本把它驅動起來了：把迴圈退化成 no-op
 # 的複本上，judge 有沒有 fd 3 就分得出這一行在不在——`exec 3<&-` 拿掉時紅。它買到的是**少一個別名，不是關掉那條通道**：fd 3 與
@@ -350,8 +362,14 @@ done < <(printf '%s' "$QF_CONTENT") || { echo "行數預數的管線建不出來
 # 會把 set 行（或那一列）連帶印上 stderr（R23 實測）；`exit` 時的 flush 對已關的 fd 1 靜默失敗。真正在扛的判準是**「持有留存緩衝的
 # 行程，沒有任何一個會往別的 fd 寫」**——exec 成功的 `/bin/echo` 是它的一個實例，而 fork 成功、exec 失敗的子行程是它的反例：那個子
 # 行程仍是帶著父行程緩衝的 bash，它印的 `No such file or directory` 會把緩衝一起帶上 stderr（R24 實測，把 `/bin/echo` 換成不存在的
-# 絕對路徑即重現 R23 的洩漏；**離開碼相同**都是 70，差別只在 stderr 多一行——「只有 stderr 看得出來」那一族。`/bin/echo` 因此是繼
-# `/usr/bin/env`（不在 → 126）與 `python3`（有顯式閘）之後的第三個絕對路徑依賴，缺席時無閘、無自己的離開碼；**無臂**）。
+# 絕對路徑即重現 R23 的洩漏；**離開碼相同**都是 70，差別只在 stderr 多一行——「只有 stderr 看得出來」那一族。絕對路徑依賴共三個，
+# 缺席後果**逐個不同**（查法：`grep -vE '^[[:space:]]*#' 本檔 | grep -oE '(^|[^}])/(bin|usr/bin)/[A-Za-z0-9_.-]+' |
+# grep -oE '/(bin|usr/bin)/[A-Za-z0-9_.-]+' | sort -u` → 三個。前一個 `grep` 是為了把 `${HOME}/bin/ltm` 這個預設值的尾段
+# 排除掉——它不是依賴，而不排除的話查法會回四個）：`/bin/bash`
+# （shebang 與 re-exec 的 exec 目標；缺席時 re-exec 那一行的 `|| exit 70` 接住）、`/usr/bin/env`（不在 → 126）、`/bin/echo`
+# （缺席時**無閘、無自己的離開碼**，就是上面這一段）。`python3` **不在這個列舉裡**：它走裸名＋PATH，另有 `command -v` 的顯式閘
+# （R25，DA：R24 版寫「繼 `/usr/bin/env` 與 `python3` 之後的第三個」，漏了 `/bin/bash`——而同一份檔頭下方自己寫著「呼叫端用哪個
+# bash 都會被換成 `/bin/bash`」——又把走 PATH 的 python3 算了進去，於是序數與「缺席時無閘」這條性質一起錯）。`/bin/echo` 這一條**無臂**）。
 printf 'set sha256:%s k=%s\n' "$SETID" "$K" || { /bin/echo "set 行寫不進 stdout" >&2; exit 70; }
 
 # 一條查詢一個 python：起 ltm、用 monotonic 計時、解析 --json、只印一行「<ms> <verdict>」。
