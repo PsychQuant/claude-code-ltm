@@ -56,8 +56,12 @@ private func isForbiddenScalar(_ s: Unicode.Scalar) -> Bool {
     }
 }
 
-/// 一條**非註解行**的純量數上限。查詢檔的自動內容約束是封閉的四條（README 同一份，R23 統一——R22 版三處各寫一個互斥的「唯一」）：
-/// (1) 退役查詢的子字串比對（空白摺疊＋小寫）、(2) 不得重複、(3) 禁用字元（控制字元、非 ASCII 空白、BOM；含註解行）、(4) 這條上限。
+/// 一條**非註解行**的純量數上限。查詢檔的自動內容約束是 6 項（README 同一份，R23 統一——R22 版三處各寫一個互斥的「唯一」；
+/// R24：R23 版寫「封閉的四條」，而照它自己指名的查法去數是六項，連第 (4) 條的括號裡都躺著第五項）。**查法**：`checkQueryFile`
+/// 算出的 `QueryFileReport` 有幾個欄位就有幾項，真檔那條測試逐一斷言它們——兩邊的數由 `contentConstraintCount` 這條同步檢查釘住。
+/// (1) 檔頭必備短語（`requiredHeaderPhrases`；對註解行內容的自動要求）、(2) 條數下限、(3) 不得重複（與 judge 同形的正規化，R24）、
+/// (4) 退役查詢的子字串比對（同一個正規化）、(5) 這條上限（非註解行）、(6) 禁用字元（控制字元、非 ASCII 空白、BOM；含註解行）。
+/// 另有一個不進 `QueryFileReport` 的前置：非 UTF-8 直接 `throw NotUTF8`（欄位數不含它，所以同步檢查也不含它）。
 /// 它擋不住整段文字（切成多條短行、或放進 `#` 註解都過，codex R22），更分不出一句第三方逐字短句與自行撰寫的短語——這個檔進 remote
 /// 卻無任何審閱路徑（`-diff`＋規則 1 的「reviewer 不准讀內容」），作者自審是防線。門檻與現況的查法（只印長度，不印內容；量的單位要與守衛相同——
 /// awk 的 `length` 在 macOS 回的是 bytes，中文差約 3 倍，R9）：
@@ -83,6 +87,10 @@ private struct QueryFileReport: Equatable {
 
 private struct NotUTF8: Error {}
 
+/// 與 judge 的 `norm()`（`" ".join(s.split()).casefold()`）**同形**的正規化：空白摺疊＋小寫。Swift 沒有 casefold，`lowercased()`
+/// 對 ß／ς 這類字元與 Python 不同——用它的兩條守衛（重複、退役）都比 judge 窄那麼一點；退役清單今天沒有這類字元（查法：`retired` 陣列）。
+private func foldLikeJudge(_ s: String) -> String { s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").lowercased() }
+
 private func checkQueryFile(_ data: Data) throws -> QueryFileReport {
     var r = QueryFileReport()
     // 檔首 BOM：`String(data:)` 會把它剝掉，bash 與 python 不會——第一行的 `#` 對它們不是行首，檔頭註解會被算成
@@ -95,14 +103,15 @@ private func checkQueryFile(_ data: Data) throws -> QueryFileReport {
     r.missingHeaderPhrases = requiredHeaderPhrases.filter { !header.contains($0) }
     let queries = nonCommentLines(text)
     r.count = queries.count
-    r.duplicateCount = queries.count - Set(queries).count
-    // 退役比對用與 judge **同形**的正規化（空白摺疊＋小寫）：judge 是 Python `casefold()`、這裡是 Swift `lowercased()`（Swift 沒有 casefold），
-    // 兩者對 ß／ς 這類字元不同——這條守衛比 judge 窄那麼一點；退役清單今天沒有這類字元（查法：`retired` 陣列），R18 更正 R17 的「同一套」。
-    // R17（codex）指出只比原始字面時，改大小寫或內部空白就能讓污染查詢重新進基準集，
-    // 而這是查詢檔四條自動內容約束裡唯一針對「已知污染字串」的一條（四條列在 maxQueryScalars 的說明；`-diff`＋規則 1 讓 reviewer 不准讀內容）。
-    func foldForRetired(_ s: String) -> String { s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").lowercased() }
-    let foldedRetired = retired.map(foldForRetired)
-    r.retiredOffenders = queries.indices.filter { i in foldedRetired.contains { foldForRetired(queries[i]).contains($0) } }.map { $0 + 1 }
+    // 重複比對用與退役檢查、judge 同一個正規化（R24，codex：R23 版是 `Set(queries)` 逐位元相等，只差大小寫或內部空白的兩條
+    // 會過「無重複」，卻在 judge 的 `norm()`（`" ".join(s.split()).casefold()`）下是同一個 needle、並產生兩列實質重複的 measured row。
+    // R17 對同一形狀的修法只套到退役檢查，正上方這一行沒一起關）。`foldLikeJudge` 的 ß／ς 缺口見下方註解，兩條共用同一個。
+    r.duplicateCount = queries.count - Set(queries.map(foldLikeJudge)).count
+    // 正規化見 `foldLikeJudge`（R18 更正 R17 的「同一套」）。R17（codex）指出只比原始字面時，改大小寫或內部空白就能讓污染查詢
+    // 重新進基準集，而這是六項自動內容約束裡唯一針對「已知污染字串」的一條（六項列在 maxQueryScalars 的說明；`-diff`＋規則 1 讓
+    // reviewer 不准讀內容）。
+    let foldedRetired = retired.map(foldLikeJudge)
+    r.retiredOffenders = queries.indices.filter { i in foldedRetired.contains { foldLikeJudge(queries[i]).contains($0) } }.map { $0 + 1 }
     r.tooLong = queries.indices.filter { queries[$0].unicodeScalars.count > maxQueryScalars }.map { $0 + 1 }
     r.forbiddenLines += physical.enumerated()
         .filter { $0.element.unicodeScalars.contains(where: isForbiddenScalar) }.map { $0.offset + 1 }
@@ -140,6 +149,9 @@ func queryFileChecksAreDrivenByTheirOwnFixture() throws {
     #expect(try report("ZQXJ-A\n" + String(repeating: "Z", count: maxQueryScalars + 1) + "\n").tooLong == [2])
     #expect(try report("ZQXJ-A\n" + String(repeating: "Z", count: maxQueryScalars) + "\n").tooLong.isEmpty)
     #expect(try report("ZQXJ-A\nZQXJ-A\n").duplicateCount == 1)
+    // 只差大小寫／內部空白也算重複（R24，codex：R23 版比逐位元相等，這兩條會過「無重複」卻是 judge 眼中的同一個 needle）。
+    #expect(try report("ZQXJ A B\nzqxj  a\tb\n").duplicateCount == 1)
+    #expect(try report("ZQXJ-A B\nZQXJ-A  C\n").duplicateCount == 0)   // 摺疊之後仍不同：不算重複
     #expect(try report("ZQXJ-A\n" + retired[0] + "\n").retiredOffenders == [2])
     #expect(try report("ZQXJ-A\n" + retired[0].uppercased().replacingOccurrences(of: " ", with: "  \t") + "\n").retiredOffenders == [2])   // 大小寫與內部空白改寫也算退役（R17）
     #expect(try report("ZQXJ-A\n").missingHeaderPhrases.count == requiredHeaderPhrases.count)
@@ -191,6 +203,19 @@ private func classifyOutputLine(_ raw: String) -> OutputLine {
     }
     guard inLiterals == tokens.count else { return .unrecognised }
     return .tokens(tokens)
+}
+
+@Test("ScriptRun.physicalLines：保留中間與尾端的空行，只丟掉正常結尾造成的那一個尾端空元素；沒有換行收尾時殘行算一列")
+func physicalLinesKeepsBlankLines() {
+    // R24：`components(separatedBy:)` 這個改動（R23，codex）退回 `split` 後 18 條測試全綠——無臂、也沒標無臂。這條是它的臂：
+    // 退回 `split(separator: "\n")` 時，下面三個「中間／尾端有空行」的期望會少掉那些空元素而紅。
+    func run(_ out: String) -> ScriptRun { ScriptRun(status: 0, stdout: out, stderr: "") }
+    #expect(run("set\n#1 1ms clean\n").physicalLines == ["set", "#1 1ms clean"])   // 正常結尾：丟掉那一個尾端空元素
+    #expect(run("set\n\n#1 1ms clean\n").physicalLines == ["set", "", "#1 1ms clean"])   // 中間的空行留著（split 會丟掉）
+    #expect(run("set\n#1 1ms clean\n\n").physicalLines == ["set", "#1 1ms clean", ""])   // 多印一個空行：留著，rows 因此多一筆
+    #expect(run("set\n#1 1ms cle").physicalLines == ["set", "#1 1ms cle"])   // 沒有換行收尾：殘行照算一列（正規化不檢查這件事）
+    #expect(run("").physicalLines == [] && run("").setLine == "")
+    #expect(run("\n").physicalLines == [""] && run("\n").setLine == "")   // 只印了一個空行：setLine 也是 ""，與「什麼都沒印」分不出（見 :1250 那一臂改用 stdout.isEmpty）
 }
 
 @Test("同步測試的輸出點分類：兩種形狀認得；`;#` 註解、單一空白註解、輸出行後掛註解、字面外的 error(、多述句同行、非字面的 print、少了前綴的 judge 列、單行 `if False:`、沒閉合的 error( 全部認不出——不剝註解、不猜")
@@ -418,15 +443,16 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     }
     #expect(otherEnvReads.isEmpty, Comment(rawValue: "Sources 裡有 `environment[\"字面名\"]` 以外的環境變數讀法，白名單同步看不到它們：\(otherEnvReads)"))
     // `.gitattributes` 的 `-diff` 是規則 1 的機制面，之前零測試釘它（R16）：用 git 自己的屬性解析結果，不是解析檔案文字。
-    // 這是套件裡唯一需要 git 本身的斷言：不在 checkout 裡或沒有 /usr/bin/git 時會以錯的理由紅（R17），所以先確認 .git 存在、否則**具名地紅**
+    // 這是套件裡唯一需要 git 本身的斷言：不在 checkout 裡或找不到 git 時會以錯的理由紅（R17），所以先確認 .git 存在、否則**具名地紅**
+    // （R24，codex：R23 版硬寫 `/usr/bin/git`，git 不在那個路徑的環境（Nix、部分 Linux）會以「沒有 git」紅而那個理由可以自動解掉——改走 `env`）。
     // （不是跳過——swift-testing 這裡沒用 skip 機制；紅的訊息說明是環境不是屬性。R17 的註解與 commit 寫「跳過」，R18 更正）。
     let checkAttr = Process()
-    let gitAvailable = FileManager.default.fileExists(atPath: root.appendingPathComponent(".git").path) && FileManager.default.isExecutableFile(atPath: "/usr/bin/git")
-    #expect(gitAvailable, "不在 git checkout 裡或沒有 /usr/bin/git：`.gitattributes` 的 -diff 屬性這一條沒有驗到（不是屬性錯了）")
+    let gitAvailable = FileManager.default.fileExists(atPath: root.appendingPathComponent(".git").path) && FileManager.default.isExecutableFile(atPath: "/usr/bin/env")
+    #expect(gitAvailable, "不在 git checkout 裡或沒有 /usr/bin/env：`.gitattributes` 的 -diff 屬性這一條沒有驗到（不是屬性錯了）")
     if gitAvailable {
-    checkAttr.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    checkAttr.executableURL = URL(fileURLWithPath: "/usr/bin/env")
     checkAttr.currentDirectoryURL = root
-    checkAttr.arguments = ["check-attr", "diff", "--", "scripts/baseline-queries.txt", "scripts/rrf-tie-queries.txt"]
+    checkAttr.arguments = ["git", "check-attr", "diff", "--", "scripts/baseline-queries.txt", "scripts/rrf-tie-queries.txt"]
     let attrOut = Pipe(); checkAttr.standardOutput = attrOut; checkAttr.standardError = Pipe()
     try checkAttr.run(); checkAttr.waitUntilExit()
     let attrLines = String(data: attrOut.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.split(separator: "\n").map(String.init) ?? []
@@ -463,12 +489,16 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // set 行之後才判定的離開碼：程式碼裡 set 行（`printf 'set sha256:`）之後出現的 `exit N` 集合 ＝ 檔頭那句列的三個（R21：R20 加了兩條
     // set 行之後的 70，檔頭那句「只有 1 與 65、其餘 stdout 都是空的」沒改——消費端契約句，先前無人釘）。
     let setLineIndex = codeLines.firstIndex { $0.element.hasPrefix("printf 'set sha256:") } ?? codeLines.count
-    let afterSetText = codeLines[(setLineIndex + 1)...].map(\.element).joined(separator: "\n")
+    // 切法對 `?? codeLines.count` 這個 fallback 必須安全：R23 把兩個切片各往外挪一格（讓 set 行自己的 `|| exit 70` 恰好算一次、
+    // 落在「之前或當下」那側），而 `[(count + 1)...]` 與 `[...count]` 在 fallback 上**都越界**——pin 漂掉時整個測試行程 SIGTRAP、
+    // 下面那個具名守衛不可達、同行程其他測試的結果一併消失（R24 四家共證；本檔 :189 自己寫著「group 數變了要紅不要 trap」）。
+    let setSplit = min(setLineIndex + 1, codeLines.count)
+    let afterSetText = codeLines[setSplit...].map(\.element).joined(separator: "\n")
     let afterSetExits = Set(matches(#"(?<![.\w])exit ([0-9]+)"#, in: afterSetText).compactMap { Int($0) })
     let afterSetSentence = "才判定的離開碼：" + afterSetExits.sorted().map(String.init).joined(separator: "、")
     #expect(setLineIndex < codeLines.count && afterSetExits == [1, 65, 70] && script.contains(afterSetSentence), Comment(rawValue: "set 行之後的 exit 集合 \(afterSetExits.sorted()) 與檔頭那句（要含「\(afterSetSentence)」）不一致"))
     // 反向：set 行之前的 `exit N` 集合（R22：R21 版那句「其餘 stdout 都是空的」的「其餘」含走到底的 0，而 0 不是字面 exit、pin 看不到）。
-    let beforeSetText = codeLines[...setLineIndex].map(\.element).joined(separator: "\n")   // set 行自己的 `|| exit 70` 算在「之前或當下」（R23）
+    let beforeSetText = codeLines[..<setSplit].map(\.element).joined(separator: "\n")   // set 行自己的 `|| exit 70` 算在「之前或當下」（R23）
     let beforeSetExits = Set(matches(#"(?<![.\w])exit ([0-9]+)"#, in: beforeSetText).compactMap { Int($0) })
     #expect(beforeSetExits == [64, 66, 69, 70] && script.contains("及之前的必須等於 " + beforeSetExits.sorted().map(String.init).joined(separator: "、")), Comment(rawValue: "set 行之前的 exit 集合 \(beforeSetExits.sorted()) 與檔頭那句不一致"))
     // README 手抄的每一個 camelCase 識別碼都要在這個測試檔或 Sources 裡出現（R21：R20 只釘了 #function 那一個；R22：R21 只掃一節、理由為假）。
@@ -481,6 +511,21 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     let readmeIdentifiers = Set(matches(#"`([a-z][a-z0-9]*[A-Z][A-Za-z0-9]*)`"#, in: readme)).subtracting(jsonlFieldNames)
     let orphanIdentifiers = readmeIdentifiers.filter { !testSource.contains($0) && !sourcesText.contains($0) }
     #expect(readmeIdentifiers.count >= 3 && orphanIdentifiers.isEmpty, Comment(rawValue: "README 的 camelCase 識別碼在測試檔與 Sources 都找不到：\(orphanIdentifiers.sorted())（掃到 \(readmeIdentifiers.count) 個）"))
+    // README 的兩個節標題：README 之外有三個指標指著「什麼會進索引」（CLAUDE.md、CHANGELOG、腳本的導讀句），而 R23 拓寬識別碼
+    // 掃描時把唯一釘住它們的那條斷言一起刪掉、沒有替補——改名或刪節不會有任何地方紅（R24，regression）。這裡只釘存在與先後。
+    let idxHeading = "### 什麼會進索引", useHeading = "### 查詢集在哪、怎麼用"
+    let idxAt = readme.range(of: idxHeading), useAt = readme.range(of: useHeading)
+    #expect(idxAt != nil && useAt != nil && idxAt!.lowerBound < useAt!.lowerBound,
+            Comment(rawValue: "README 要有「\(idxHeading)」與「\(useHeading)」兩節且前者在前——CLAUDE.md、CHANGELOG 與腳本都指著它們"))
+    // 自動內容約束的項數：散文那份列舉的項數 ＝ `QueryFileReport` 的欄位數，且真檔那條測試逐一斷言每個欄位（R24：R23 的「封閉的四條」
+    // 與它自己指名的查法不符，而那份「統一成一份」的散文沒有任何會變紅的同步檢查）。
+    let contentConstraintCount = Mirror(reflecting: QueryFileReport()).children.count
+    let constraintSentence = "自動內容約束是 \(contentConstraintCount) 項"
+    #expect(readme.contains(constraintSentence) && testSource.contains(constraintSentence),
+            Comment(rawValue: "README 與 maxQueryScalars 的說明都要寫「\(constraintSentence)」（QueryFileReport 的欄位數）"))
+    // 逐欄位比對，不是數總數——`#expect(r.` 在這個檔裡也被 ScriptRun 的 `r` 用著，數量會對不上（R24 自己第一版就踩到）。
+    let unassertedFields = Mirror(reflecting: QueryFileReport()).children.compactMap(\.label).filter { !testSource.contains("#expect(r.\($0)") }
+    #expect(unassertedFields.isEmpty, Comment(rawValue: "QueryFileReport 的這些欄位在真檔那條測試裡沒有自己的 `#expect(r.…`：\(unassertedFields)"))
     // CHANGELOG 指名「檔頭第 4 點」：那一點的首句要真的是 re-exec（R23：指標沒有會變紅的檢查）。
     #expect(changelog.contains("以檔頭第 4 點為準") && script.contains("\n#   4. `builtin exec -c /usr/bin/env"), "CHANGELOG 指的「檔頭第 4 點」不是 re-exec 那一點")
     // README 的兩個數字（每條純量上限、目前條數）由這裡對照常數與真檔，不各存一份（R8）。
@@ -647,7 +692,9 @@ private struct ScriptRun {
     let stdout: String
     let stderr: String
     /// stdout 第一行是 set 行（格式以腳本檔頭為準；`setLine(_:k:)` 重算），之後才是列。
-    /// 實體行切分：`components(separatedBy:)` 保留空行（R23，codex：`split` 會靜默丟掉空白行，多印空行的退化看不見）；只容許正常結尾的一個尾端空元素。
+    /// 實體行切分：`components(separatedBy:)` 保留空行（R23，codex：`split` 會靜默丟掉空白行，多印空行的退化看不見）；
+    /// 丟掉的只有「正常結尾」造成的那一個尾端空元素——這是**正規化，不是約束**：stdout 沒有以換行收尾時，截斷的殘行會被當成完整的一列，
+    /// 這裡不檢查也不拒絕（R24 更正 R23 的「只容許…」，那句讀起來像一條會執行的約束）。臂：`physicalLinesKeepsBlankLines`。
     var physicalLines: [String] { let l = stdout.components(separatedBy: "\n"); return l.last == "" ? Array(l.dropLast()) : l }
     var setLine: String { physicalLines.first ?? "" }
     var rows: [String] { Array(physicalLines.dropFirst()) }
@@ -1221,7 +1268,11 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     let noClose = try mutantScript("no-close-loop") { $0.replacingOccurrences(of: closeLoop, with: "        for mb_fd in; do") }
     _ = try runScript(queries: twoQueries, stub: stub, pathPrefix: fd3Bin.path, scriptOverride: noClose, sentinelForged: true, forgedFd3Records: afterEndRecords)
     let leakSeen = probeLines()
-    #expect(leakSeen.contains { $0.contains("=X;") }, Comment(rawValue: "precondition: without the close loop the post-end record must be readable by some judge: \(leakSeen)"))
+    // 同一份 mutant 同時是 `exec 3<&-` 那一行的臂（R24：R23 放回它時標「無臂」，而這個世界正是它被放回的理由——迴圈 no-op 時
+    // 只有它會關掉 fd 3。DA 另量到它買的是**少一個別名、不是關掉通道**：fd 3 與 procsub 讀端（63）是同一條管線，上面那個 `=X;`
+    // 今天就在 63 上）。拿掉 `exec 3<&-` → 探針印 `fd3=open` → 紅。
+    #expect(leakSeen.contains { $0.contains("=X;") } && leakSeen.allSatisfy { $0.hasPrefix("fd3=closed;") },
+            Comment(rawValue: "precondition: without the close loop the post-end record must be readable by some judge, and `exec 3<&-` must still have closed fd 3: \(leakSeen)"))
     try? FileManager.default.removeItem(at: fd3Probe)
     // (2) 真腳本：每個 judge 的 fd 3 關、3 以外**沒有任何 fd**（R22：R21 版斷言「讀不出 bytes」——唯寫 fd、目錄 fd、讀失敗都會綠；`n>=3` 底線數的是
     // /dev/fd 總數、恆 ≥4、零鑑別力，拆掉；`n=` 只留作診斷）。探針對讀失敗印 `?`，任何 `fdN=` 條目都紅。
@@ -1247,7 +1298,8 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
         try scriptText.replacingOccurrences(of: redirect + marker, with: "done < /nonexistent/zqxj-mutant || { echo \"" + marker).write(to: mutant, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mutant.path)
         let broken = try runScript(queries: queries, stub: stub, scriptOverride: mutant)
-        #expect(broken.status == 70 && broken.stderr.contains(marker) && broken.rows.isEmpty && (broken.setLine.isEmpty != expectSetLine), Comment(rawValue: "\(label) redirect failure: rc=\(broken.status) out=\(broken.stdout) err=\(broken.stderr)"))
+        // 「沒有 set 行」判的是 stdout 整個空，不是 `setLine.isEmpty`——後者對「只印了一個空行」也為真，分不出來（R24；旁邊兩臂本來就用 stdout.isEmpty）。
+        #expect(broken.status == 70 && broken.stderr.contains(marker) && broken.rows.isEmpty && (broken.stdout.isEmpty != expectSetLine), Comment(rawValue: "\(label) redirect failure: rc=\(broken.status) out=\(broken.stdout) err=\(broken.stderr)"))
     }
     // 兩個迴圈看到的條數不同 → 70（R20：量測迴圈少跑時 R19 版是 rc 0 配完整集合的指紋與不完整的列，硬規則過）。mutant 複本讓量測迴圈印完第一列就 break。
     let rowLine = "    printf '#%d %sms %s\\n' \"$n\" \"${row%% *}\" \"${row#* }\" || { /bin/echo \"列寫不進 stdout\" >&2; exit 70; }\n"
@@ -1277,9 +1329,13 @@ func measureBaselineDoesNotLeakUnderXtrace() throws {
     }
     // re-exec 那一行的 `|| exit 70`（R23：R16–R22 標「無臂：重現不出來」，其實兩行 mutant 就驅動）：把 `3< <(…)` 換成不存在的路徑 → 70、零輸出。
     let reexecFrom = " 3< <(builtin printf '%s\\0' \"LTM_MB_FD3=$$\";"
+    let reexecTo = "LTM_MB_END=1) || exit 70 ;;"
     #expect(scriptText.components(separatedBy: reexecFrom).count == 2, "re-exec 那一行的 process substitution 找不到或不只一處")
+    // 第二個 anchor 也釘（R24：R23 版只釘了 `reexecFrom`，另一半漂掉時 guard 退回原文、紅燈由 fallback 扛——fail-closed、一定紅，
+    // 但「守衛被拿掉」與「anchor 漂掉」從訊息上分不出來。DA 更正 regression：這是可診斷性，不是「臂會空過」）。
+    #expect(scriptText.components(separatedBy: reexecTo).count == 2, "re-exec 那一行的尾標記分支（`\(reexecTo)`）找不到或不只一處")
     let reexecBroken = try mutantScript("reexec-redirect") { text in
-        guard let a = text.range(of: reexecFrom), let b = text.range(of: "LTM_MB_END=1) || exit 70 ;;", range: a.upperBound..<text.endIndex) else { return text }
+        guard let a = text.range(of: reexecFrom), let b = text.range(of: reexecTo, range: a.upperBound..<text.endIndex) else { return text }
         return text.replacingCharacters(in: a.lowerBound..<b.upperBound, with: " 3< /nonexistent/zqxj-reexec-mutant || exit 70 ;;")
     }
     let reexecRun = try runScript(queries: queries, stub: stub, scriptOverride: reexecBroken)

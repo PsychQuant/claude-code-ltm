@@ -70,11 +70,23 @@
 # 判準（re-exec 之後）是「每一個拿得到查詢內容的子行程，它的 stderr 都不是可能載內容的通道」：指紋 python、judge python、
 # ltm 的 stderr 都丟掉，judge 與 ltm 的 stdin 都接 /dev/null（judge 對 ltm 寫的 `close_fds=True` 是 Python 的預設值，寫出來是文件、
 # 無行為）；每一個餵 `$QF_CONTENT` 的 process substitution 子 shell 都只跑 builtin `printf`，運算元不會上 stderr——條件是寫成功：bash 對寫失敗
-# 的 printf 把緩衝留著、下一個 builtin 往別的 fd 寫時把它一起 flush 過去（R23 實測 payload 上 stderr），所以本腳本每個 printf 失敗當下就
-# 離開、訊息用外部 `/bin/echo` 印（set 行與每一列各有 `|| exit 70`，R22／R23；有臂：stderr 不得含 set 行）；那三個子 shell 寫的是管線、reader 是本腳本自己（有幾個由同步測試數
+# 的 printf 把緩衝留著、下一個 builtin 往別的 fd 寫時把它一起 flush 過去（R23 實測 payload 上 stderr）。**帶 `|| exit 70` 的只有兩個
+# printf**：set 行那一個與量測迴圈每一列那一個（R22／R23；訊息用外部 `/bin/echo`，有臂：stderr 不得含 set 行。查法：
+# `grep -vE '^\s*#' 本檔 | grep -cE "printf .*\|\| \{ /bin/echo"` → 2）。餵 `$QF_CONTENT` 的那幾個
+# 沒有，而它們正是運算元是查詢原文的那幾個——**在扛的是另一條性質：那些子 shell 裡沒有第二個 fd 的 builtin 寫入**，所以留著的緩衝沒有
+# 第二個出口，離開時只會對同一個壞掉的 fd 靜默 flush（查法：`grep -nE '< <\(printf .%s. "\$QF_CONTENT"\)' 本檔`，每一行的子 shell
+# 都只有那一個 `printf`、沒有第二個命令。**無臂**；R24 實測 138 KB 合成查詢檔＋SIGPIPE `SIG_IGN`＋stdout 早關：那個
+# procsub 的 printf 確實寫失敗、確實沒有「當下就離開」，而查詢原文沒有上 stderr。哪天有人在它們任一個後面加一句往 stderr 的 builtin
+# 寫入，這條性質就沒了——R23 版寫「本腳本每個 printf 失敗當下就離開」，全稱，而主詞正是沒被保護的那幾個，R24）。它們寫的是管線；
+# 量測迴圈與預數迴圈那兩個的 reader 是本腳本自己，**指紋那個的 reader 是本腳本不控制的獨立行程**（python3；它早退的情境見上方
+# PATH／cwd 那一段），而它的緩衝內容是整份查詢集——上面兩個 `|| exit 70` 對它一個字都不適用（R23 版寫「那三個子 shell 寫的是管線、
+# reader 是本腳本自己」，對三個中的那一個為假，而且同句括號才剛寫過「這裡不寫數字」，R24，DA；有幾個由同步測試數
 # `< <(printf '%s' "$QF_CONTENT")` 的出現次數，這裡不寫數字——R18 加了第三個而檔頭還寫「兩個」，R19）。繼承的描述子：讀到尾標記之後
-# 腳本先無條件 `exec 3<&-`（builtin、不需要空閒 fd；**無臂**——R22 以「關閉迴圈也關 3」為由拆掉，R23 實測 fd 壓力下 `/dev/fd/*` glob
-# 退化成字面、迴圈整個 no-op、fd 3 留給 judge，放回），再在 `/dev/fd` 列得出來的世界裡把 0、1、2 與 255 以外的**每一個**描述子關掉（255
+# 腳本先無條件 `exec 3<&-`（builtin、不需要空閒 fd；**有臂**——R22 以「關閉迴圈也關 3」為由拆掉，R23 實測 fd 壓力下 `/dev/fd/*` glob
+# 退化成字面、迴圈整個 no-op、fd 3 留給 judge，放回並標「無臂」；R24 用同一個世界的 mutant 複本把它驅動起來了：把迴圈退化成 no-op
+# 的複本上，judge 有沒有 fd 3 就分得出這一行在不在——`exec 3<&-` 拿掉時紅。它買到的是**少一個別名，不是關掉那條通道**：fd 3 與
+# re-exec procsub 的讀端（bash 3.2 配 63）是同一條管線的兩個別名，迴圈 no-op 時保留這一行、紀錄仍從 fd 63 讀得到（R24 實測，DA）），
+# 再在 `/dev/fd` 列得出來的世界裡把 0、1、2 與 255 以外的**每一個**描述子關掉（255
 # 是 bash 讀腳本用的描述子——只在 `RLIMIT_NOFILE` ≥ 256 時，見下；列舉 `/dev/fd`、只接受純數字的名字——不命中的 glob 字面 `*` 進 `eval`
 # 會 exec 到 cwd 第一個檔名，R21；純數字守衛**無臂**：macOS 上 `/dev/fd` 恆在，驅動不到；R20——R19 版只 `exec 3<&-`，
 # 那關的是 fd 3 這個別名，而 re-exec 那一行的 process substitution 讀端（bash 3.2 配 63）跨 execve 存活、每個 python 都繼承；R19 版寫
@@ -83,8 +95,11 @@
 # 結果觀察，分不出「bash 對一般檔案一次讀完、之後不再讀」與「這支剛好一次讀得完」，腳本內沒有查法能證明前者；查法（腳本 fd 的號碼，
 # 要用腳本檔運算元、`bash -c` 沒有腳本 fd）：`printf '#!/bin/bash\nfor f in /dev/fd/*; do echo $f; done\n' > p.sh; ( ulimit -n 100; /bin/bash p.sh )`
 # → 99。**跳過 255
-# 無臂**：把它也關掉今天沒有任何測試會紅、腳本也照跑（同一個理由）；留著是因為那是 bash 文件外的自保行為，不該靠它（R21）。所以偽造的
-# 寫端在尾標記之後塞的記錄到不了任何子行程。臂（R21 重寫）分三步：先對「拿掉關閉迴圈」的 mutant 複本跑同一支探針、證明那筆記錄讀得到
+# 無臂**：把它也關掉今天沒有任何測試會紅、腳本也照跑（同一個理由）；留著是因為那是 bash 文件外的自保行為，不該靠它（R21）。
+# **在 `/dev/fd` 列得出來的世界裡**（也就是上一句那個前提成立時），偽造的寫端在尾標記之後塞的記錄到不了 judge。列不出來時這句不成立：
+# `exec 3<&-` 只關掉 fd 3 這個別名，同一條管線的 fd 63 仍在，紀錄從那裡讀得到（R24 實測，DA；R23 把迴圈的前提縮成「列得出來的世界」
+# 卻把這句結論留成無條件，而它正好在被排除的那個世界裡為假）。量詞是 **judge**，不是「任何子行程」：探針只在 argv 第一個非 `-[ISEP]`
+# 是 `-c` 時跑，而指紋 python 的是 `-`，結構上不進探針（R24，DA）。臂（R21 重寫）分三步：先對「拿掉關閉迴圈」的 mutant 複本跑同一支探針、證明那筆記錄讀得到
 # （R20 版的紅燈只掛在 fixture 裡一個沒人斷言的字面上）；再對真腳本斷言 judge 那個行程大於 3 的 fd 一個都沒有（探針對每個 fd 先 `lseek` 回 0 再讀）——
 # R20 版的探針只從目前 offset 讀，開著整份查詢檔而 offset 在 EOF 的 fd 看不見（DA 用 `exec 9< "$QF"` 的 mutant 證偽），現在那種 mutant
 # 是第三步的負向臂——用一條查詢的檔，讀掉一行後 offset 才真的在 EOF（R22：R21 版餵兩條，`lseek` 零臂）；第二步斷言的是 judge **大於 3
@@ -169,8 +184,12 @@
 #      重導、兩個迴圈看到的條數一致、列寫得進 stdout——每一條的細節在它自己那一段，這裡是判準不是名目清單（R21：R20 版列七個名目對十三個
 #      站點，「沒有完整到達」描述不了「到達但不合規」的四處；R22 補「列寫得進 stdout」：R21 版把它掛在迴圈的 `||` 上，末行是註解時
 #      `continue` 的 0 蓋掉 printf 失敗、rc 0 少一列，現在每一列的 printf 自己 `|| exit 70`；R23 補 set 行自己的 `|| exit 70`——codex 抓到
-#      漏了它：stdout 關掉時 set 行寫失敗、腳本繼續、緩衝被 flush 進 process substitution 的子行程、set 行成了被量測的「查詢」。寫失敗只有
-#      EBADF 這種能走到 `||`：reader 早退的 EPIPE 在 SIGPIPE 預設處置下先把 shell 殺掉——rc 141、零訊息，不在集合內、無臂，硬規則擋得住）。
+#      漏了它：stdout 關掉時 set 行寫失敗、腳本繼續、緩衝被 flush 進 process substitution 的子行程、set 行成了被量測的「查詢」。走得到
+#      `||` 的判準不是成因而是一條性質：**寫失敗不會先把 shell 殺掉時就走得到**。EBADF 是這一類；reader 早退的 EPIPE 依呼叫端的信號
+#      處置分兩支——預設處置下 SIGPIPE 先殺掉 shell（rc 141、零訊息、不在集合內、硬規則擋得住），而 `SIG_IGN` 跨 execve 保留（信號處置
+#      就列在下方「白名單清不掉的行程狀態」裡，腳本前兩行只重設 DEBUG／ERR／RETURN／EXIT trap 與 xtrace、沒有碰 PIPE），EPIPE 因此回到
+#      `||`：**rc 70＋具名訊息**（R24 三家實測；R23 版寫「只有 EBADF 這種能走到 `||`」，全稱，在這一支上為假）。ENOSPC 同類，且它會讓
+#      下一句的「stdout 空」不成立——stdio 可能先寫進部分位元組才失敗。這兩支都**無臂**：驅動它們要呼叫端的信號處置或滿的檔案系統）。
 #      在 set 行印出**之後**才判定的離開碼：1、65、70（1 有列；65 無列；70 是量測迴圈那三條——管線建不出來、某一列寫不進 stdout、條數
 #      不同——stdout 有 set 行、可能有部分列，R21／R22），以及走到底的 0（set 行＋全列）；64、66、69 與 70 的其他成因（含 set 行自己寫
 #      不進 stdout）都在 set 行印出之前或當下判定、stdout 空（R22：R21 版寫「其餘 stdout 都是空的」，而「其餘」含 0）。這句由同步測試釘：
@@ -186,8 +205,9 @@
 #   運算元的順序解：`$0` 含斜線取其目錄；裸名先看 cwd、再沿 PATH 取第一個可讀的檔案）——LTM_BIN 是檔案路徑不是命令名：不含 `/` 的值
 #   固定成 `./` 相對（R22，codex）；兩者明確給空字串是錯（66／69），
 #   不是「用預設」（R14；k 同，R10）、k 1–1000（預設 5）。密鑰請用命令替換直接餵進環境，不要落地（.claude/rules/anchor-key-in-probes.md）。
-#   本腳本在第一列之前把 0、1、2、255 以外繼承的描述子全部關掉（255 是 bash 自己的，見防禦段）——不要用 `flock <file> 本腳本` 這種把鎖
-#   寄託在繼承 fd 上的呼叫法（R21）。
+#   本腳本在第一列之前把 0、1、2、255 以外繼承的描述子關掉——**前提是 `/dev/fd` 列得出來**（列不出來時關閉迴圈整個 no-op，只有
+#   `exec 3<&-` 那一行仍生效；255 是 bash 自己的，見防禦段。R24：R23 把防禦段的前提縮窄時沒有跟這一份，而下面那條 `flock` 建議是
+#   靠這句話立起來的）——所以不要用 `flock <file> 本腳本` 這種把鎖寄託在繼承 fd 上的呼叫法（R21）。
 builtin trap - DEBUG ERR RETURN EXIT
 builtin set +x
 LTM_MB_WHITELIST="HOME LC_ALL LANG TMPDIR LTM_BIN LTM_BASELINE_QUERIES CLAUDE_CONFIG_DIR LTM_ANCHOR_KEY LTM_ANCHOR_KEY_SERVICE LTM_BUILD_BATCH_CHUNKS LTM_BUILD_MEMORY_BUDGET_MB LTM_CORPUS_ROOT LTM_DERIVED_ROOT LTM_MEMORY_ROOT LTM_TEST_CLOCK_STEP_SECONDS"
@@ -311,8 +331,9 @@ done
 # locale 測試把 bash 這份數出的列數對 Swift 那份（R21：R20 版指到上方「第 N 條非註解行」段，那段的「三邊」是腳本／測試／檔案，另一組三，
 # 且沒有對帳方式）。預數的管線建不出來 → 70；量測迴圈的管線建不出來、或兩個迴圈
 # 看到的條數不同 → 70（R20：R19 只補了預數那條，量測迴圈少跑時 rc 0 配完整集合的指紋、管線失敗時 set 行後 exit 65 配一句被 n_pre 證偽的
-# 診斷）；set 行或某一列寫不進 stdout → 70（各自的 `|| exit 70`，R22／R23：掛在迴圈 `||` 上會被末行註解的 `continue` 蓋掉）——只有 EBADF
-# 走得到，reader 早退的 EPIPE 在 SIGPIPE 預設處置下先殺掉 shell（rc 141、零訊息、無臂）。管線那兩條 `||` 的自然成因（fd 耗盡）本機重現得
+# 診斷）；set 行或某一列寫不進 stdout → 70（各自的 `|| exit 70`，R22／R23：掛在迴圈 `||` 上會被末行註解的 `continue` 蓋掉）——走得到
+# `||` 的是「寫失敗不會先殺掉 shell」那一類（EBADF、ENOSPC、以及呼叫端把 SIGPIPE 設成 `SIG_IGN` 時的 EPIPE，後者 rc 70＋訊息）；
+# SIGPIPE 預設處置下的 EPIPE 先殺掉 shell（rc 141、零訊息、無臂）——同一個成因依呼叫端的信號處置落在兩邊，判準見上方（R24）。管線那兩條 `||` 的自然成因（fd 耗盡）本機重現得
 # 出來但走不到這裡（bash 自己印 dup 診斷後繼續、或直接結束 shell，見 rlimit）；分支本身由測試用改掉重導目標的 mutant 複本驅動（R20：R19
 # 版標「無臂：重現不出來」，兩半都不精確）。
 ws=$' \t\r\v\f'
@@ -326,7 +347,11 @@ done < <(printf '%s' "$QF_CONTENT") || { echo "行數預數的管線建不出來
 [ "$n_pre" -eq 0 ] || [ "$SETID" != e3b0c44298fc ] || { echo "查詢檔有內容但指紋是空集合的：指紋行程沒讀到查詢集" >&2; exit 70; }
 # k 也印在同一行：verdict 全是「前 k 名」的性質，兩份紀錄 k 不同就不能逐列對齊（R4）。
 # 寫失敗的訊息用外部 /bin/echo：bash 對寫失敗的 builtin 把緩衝留著、下一個 builtin 往別的 fd 寫時把它一起 flush 過去——用 builtin echo 印訊息
-# 會把 set 行（或那一列）連帶印上 stderr（R23 實測）；外部行程不碰那個緩衝、`exit` 時的 flush 對已關的 fd 1 靜默失敗。
+# 會把 set 行（或那一列）連帶印上 stderr（R23 實測）；`exit` 時的 flush 對已關的 fd 1 靜默失敗。真正在扛的判準是**「持有留存緩衝的
+# 行程，沒有任何一個會往別的 fd 寫」**——exec 成功的 `/bin/echo` 是它的一個實例，而 fork 成功、exec 失敗的子行程是它的反例：那個子
+# 行程仍是帶著父行程緩衝的 bash，它印的 `No such file or directory` 會把緩衝一起帶上 stderr（R24 實測，把 `/bin/echo` 換成不存在的
+# 絕對路徑即重現 R23 的洩漏；**離開碼相同**都是 70，差別只在 stderr 多一行——「只有 stderr 看得出來」那一族。`/bin/echo` 因此是繼
+# `/usr/bin/env`（不在 → 126）與 `python3`（有顯式閘）之後的第三個絕對路徑依賴，缺席時無閘、無自己的離開碼；**無臂**）。
 printf 'set sha256:%s k=%s\n' "$SETID" "$K" || { /bin/echo "set 行寫不進 stdout" >&2; exit 70; }
 
 # 一條查詢一個 python：起 ltm、用 monotonic 計時、解析 --json、只印一行「<ms> <verdict>」。
