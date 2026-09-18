@@ -72,11 +72,18 @@
 # 無行為）；每一個餵 `$QF_CONTENT` 的 process substitution 子 shell 都只跑 builtin `printf`，運算元不會上 stderr——條件是寫成功：bash 對寫失敗
 # 的 printf 把緩衝留著、下一個 builtin 往別的 fd 寫時把它一起 flush 過去（R23 實測 payload 上 stderr）。**帶 `|| exit 70` 的只有兩個
 # printf**：set 行那一個與量測迴圈每一列那一個（R22／R23；訊息用外部 `/bin/echo`，有臂：stderr 不得含 set 行。查法：
-# `grep -vE '^\s*#' 本檔 | grep -cE '^[[:space:]]*printf .*\|\|.*exit 70'` → 2，而 `grep -vE '^\s*#' 本檔 | grep -c printf` → 6
-# （帶守衛者／全部。行首錨點是必要的：不錨的話 `done < <(printf …) || { …; exit 70; }` 那兩行也會被算進來，回 5——**這條查法
-# 自己在 R25 verify-fix 寫出來時就是錯的，跑過才發現**。R25，DA：R24 版的查法數的是「用 `/bin/echo` 印訊息的 printf」，與句子
-# 講的「帶 `|| exit 70` 的」是兩個集合——插一行 `printf "zzz" || exit 70` 之後句子立刻為假而它仍回 2，**結構上不可能證偽它
-# 旁邊那句話**）。同步測試釘這兩個數（`guardedPrintfLines`／`printfLines`）。其餘的 printf 沒有守衛，而它們
+# `grep -vE '^\s*#' 本檔 | grep -cE '^[[:space:]]*printf .*\|\|.*exit 70'` → 2（帶守衛的行數），
+# `grep -vE '^\s*#' 本檔 | grep -o printf | wc -l` → 8（**出現次數**）。同步測試釘這兩個數（`guardedPrintfLines`／
+# `printfOccurrences`）。兩件事要一起讀：
+#   **(i) 數出現次數不是行數**（R26）：R25 版第二個數用 `grep -c printf` → 6 並標成「全部」，而 `grep -c` 數的是行；
+#     re-exec 那一行上有三個 `builtin printf`（同一份檔頭下面自己寫著這件事）。6 會讓這一段的算術不閉合——
+#     全部 6 − 帶守衛 2 ＝ 4，而下面那條性質涵蓋兩組共 6 個；2＋6＝8 才對。**同一個「數行不數出現次數」的錯誤，
+#     R25 在查法 (b) 修好了、在這一句留著。**
+#   **(ii) 行首錨點是必要的，也是有代價的**：不錨的話 `done < <(printf …) || { …; exit 70; }` 那兩行會被算進來（回 5）；
+#     錨了之後，**非行首**的帶守衛 printf（`x=1; printf 'y' || exit 70`）與 `builtin printf … || exit 70` 兩者都看不見，
+#     而句子會為假。所以這句話成立的較窄形式是「**以 `printf` 起始的行中**，帶 `|| exit 70` 的只有兩個」（R26）。
+#     R25，DA 記的是更早一層：R24 版的查法數的是「用 `/bin/echo` 印訊息的 printf」，與句子講的是兩個集合——
+#     插一行 `printf "zzz" || exit 70` 之後句子立刻為假而它仍回 2，**結構上不可能證偽它旁邊那句話**。其餘的 printf 沒有守衛，而它們
 # 正是運算元最敏感的那些——**在扛的是另一條性質：它們所在的子 shell 裡沒有第二個 fd 的 builtin 寫入**，所以留著的緩衝沒有第二個
 # 出口，離開時只會對同一個壞掉的 fd 靜默 flush。這條性質涵蓋**兩組**（R25，DA：R24 版的主詞只寫了第一組，而 commit message
 # 宣稱「其餘六個」——落地只涵蓋三個）：
@@ -363,9 +370,14 @@ done < <(printf '%s' "$QF_CONTENT") || { echo "行數預數的管線建不出來
 # 行程，沒有任何一個會往別的 fd 寫」**——exec 成功的 `/bin/echo` 是它的一個實例，而 fork 成功、exec 失敗的子行程是它的反例：那個子
 # 行程仍是帶著父行程緩衝的 bash，它印的 `No such file or directory` 會把緩衝一起帶上 stderr（R24 實測，把 `/bin/echo` 換成不存在的
 # 絕對路徑即重現 R23 的洩漏；**離開碼相同**都是 70，差別只在 stderr 多一行——「只有 stderr 看得出來」那一族。絕對路徑依賴共三個，
-# 缺席後果**逐個不同**（查法：`grep -vE '^[[:space:]]*#' 本檔 | grep -oE '(^|[^}])/(bin|usr/bin)/[A-Za-z0-9_.-]+' |
-# grep -oE '/(bin|usr/bin)/[A-Za-z0-9_.-]+' | sort -u` → 三個。前一個 `grep` 是為了把 `${HOME}/bin/ltm` 這個預設值的尾段
-# 排除掉——它不是依賴，而不排除的話查法會回四個）：`/bin/bash`
+# 缺席後果**逐個不同**。查法要看全部的絕對路徑、不要只看 `/bin` 與 `/usr/bin`（R26：R25 版的 regex 硬寫那兩個目錄，
+# 於是句子的界線由查法決定而不由它自稱的性質決定，漏掉 `/dev/null` 與 `/dev/fd` 兩個真正的依賴）：
+# `grep -vE '^[[:space:]]*#' 本檔 | grep -oE '/[A-Za-z0-9_.][A-Za-z0-9_./-]*' | sort -u` → 會看到 `/bin/bash`、
+# `/bin/echo`、`/usr/bin/env`、`/dev/fd/`、`/dev/fd/3`、`/dev/null`、`/nonexistent`（mutant 用的假路徑），
+# 外加兩個字串尾段（`${HOME}/bin/ltm` 與預設查詢檔名）——尾段與假路徑不是依賴。五個真的依賴：
+# `/dev/null`（judge 的 stdin、指紋與 judge 的 stderr 去處——整段隔離判準靠它；缺席時**無閘、無自己的離開碼**，
+# 與 `/bin/echo` 同一族）、`/dev/fd`（關閉迴圈與指紋 python 的 fd 3；**列不出來時關閉迴圈整個 no-op**，
+# 上面那一整段在講的就是這個後果），以及：`/bin/bash`
 # （shebang 與 re-exec 的 exec 目標；缺席時 re-exec 那一行的 `|| exit 70` 接住）、`/usr/bin/env`（不在 → 126）、`/bin/echo`
 # （缺席時**無閘、無自己的離開碼**，就是上面這一段）。`python3` **不在這個列舉裡**：它走裸名＋PATH，另有 `command -v` 的顯式閘
 # （R25，DA：R24 版寫「繼 `/usr/bin/env` 與 `python3` 之後的第三個」，漏了 `/bin/bash`——而同一份檔頭下方自己寫著「呼叫端用哪個
