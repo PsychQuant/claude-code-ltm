@@ -12,7 +12,8 @@
   `2026-09-01-noop-build-attribution.md` 誠實邊界補指回。
 
 - **基準查詢集與使用規則（#63）**：`scripts/baseline-queries.txt`（一行一條；檔頭以一行固定的終止符收尾，終止符之後
-  不得有註解、檔頭裡不得含這個檔在 git 歷史裡任一版本的查詢——退役只能刪除；檔頭寫明列舉會漏、
+  不得有註解、檔頭區塊去空白後的連接文字不得含這個檔任一 git 可達版本的查詢或退役清單的查詢——退役只能刪除；
+  真檔測試因此需要 git，取不到歷史時具名紅在環境側、其餘照跑；檔頭寫明列舉會漏、
   不得在 session 內顯示、輸出只印編號；`.gitattributes` 設 `-diff`）＋ `scripts/measure-baseline.sh`
   （stdout 第一行 `set sha256:<12 hex> k=<k>` 是查詢集指紋與 k、之後只有 `#N <ms>ms <verdict>`，verdict 是封閉字母表 `clean|self|empty` 加 `tool=<n>`
   或 `error(…)`，四處列舉由同步測試釘住；`self` = 前 k 名有 snippet 含這條查詢的原文（空白與

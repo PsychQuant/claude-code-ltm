@@ -113,7 +113,8 @@
   變乾淨了**（#62 自己的實作 session 就在談 self-hit 與工具 chunk，特別容易排進這些查詢的前 k 名）。
   另外，`tool=<n>` 也會數到**談論**這個標記的散文——純字串 `message.content` 不截斷、整段進索引；
   這種紀錄幾乎全是 #63 自己的 session 寫的，而且**會隨討論儀器的 session 增加**（verify 的兩輪之間就
-  多了一筆），所以這裡不給計數只給查法：掃 `~/.claude/projects/**/*.jsonl`，統計 user／assistant 紀錄裡
+  多了一筆），所以這裡不給計數只給查法：掃 `~/.claude/projects/**/*.jsonl`（計數這一句只關心 message 紀錄，spill 檔沒有
+  message 結構；副本掃描要掃**全部**檔案，見規則 1），統計 user／assistant 紀錄裡
   `message.content` 是純字串且含 `⟨tool ` 的筆數（只印計數）。
   第一版的判準是「含 `⟨tool ` 或含 `ltm query`」就 dirty；#63 verify R2 指出那量的是
   「有沒有工具 chunk」不是「這條查詢被自己污染了沒有」，於是改成把命中拿去跟查詢比對。
@@ -131,7 +132,10 @@
    Write 的 `content`、Edit 的 `toolUseResult.originalFile`（**整份檔案**，不是改到的那幾行）、Read／
    Edit 之後的 `attachment` 紀錄，每一次都把完整查詢集存進 jsonl 一份——而**印**與**讀**也會：一個 Bash
    命令把整份檔案印進 stdout 是一筆 `toolUseResult.stdout`，一次 `Read` 是一筆 `toolUseResult.file.content`。
-   判準是「這個動作會不會把整份檔案送進 jsonl」，上面是例子不是清單。#63 實作與 verify 期間就這樣存了
+   判準是「這個動作會不會把整份檔案落到 `~/.claude/projects/**` 底下的**任何檔案**」，上面是例子不是清單（R29，security：
+   R28 版寫「送進 jsonl」，而 Claude Code 今天會把大型 tool result **外溢**到 jsonl 旁邊的 `tool-results/*.txt` 與
+   `workflows/*.json`——本輪檔頭短語鍵命中 36 個這種檔、jsonl 34 個；判準鍵在「jsonl」這個**位置**上，位置已經分裂，
+   與 R27 的雜湊檔名同形。那 36 個檔逐檔核對含查詢的 0 個——今天沒漏，是查法的結構性盲區）。#63 實作與 verify 期間就這樣存了
    **至少 8 筆**含全部查詢的紀錄（2026-09-07 R3 verify 全語料數的：Write 2、Edit 3、attachment 1、
    Bash stdout 1、Read 1；R1 verify 的 `diff.patch` 另在該輪被讀進 agent 逐字稿）。這個數字**只會
    往上走**——R2b 寫「六份」的九分鐘前，另一個 session 剛 `Read` 過一次；所以它是下界不是計數，
@@ -152,11 +156,16 @@
    保證**單一 `#` 編輯**退不掉任何一行查詢——R26 版把約束綁在「第一條查詢之後」這個位置上，把**第一條**查詢註解掉時
    那一行會升格成檔頭而全綠（R27 四家實測），所以 R27 換成與位置無關的終止符；但終止符**放在哪一行**由作者自選，
    「加 `#` ＋ 把終止符往下挪一行」兩個編輯就全綠，而 `-diff` 讓 reviewer 只看得到 `Bin 4402 -> 44xx`、分不出一個
-   編輯與兩個（R28，DA 對真檔實測）——所以 R28 加了「檔頭不得含曾經是查詢的字串」：真檔測試從這個檔在 git 裡
-   **每一個版本**取出每一條查詢（含現行），檔頭區塊的任何一行含其中任何一條（同退役檢查的正規化、子字串包含）就紅。
-   它擋不住的是**從未 commit 過的**查詢（本機加一條、commit 前搬進檔頭，歷史裡沒有它）；除此之外檔頭區塊的內容
-   仍不受約束（長度、重複、純量上限一律不適用；R27 實測：塞 200 字元段落，八條全過）。所以**退役一條查詢必須
-   刪除**；搬進檔頭今天是機制紅的，不再只是人守。`rrf-tie-queries.txt` **一條內容約束都沒有**（`checkQueryFile` 只跑在
+   編輯與兩個（R28，DA 對真檔實測）——所以 R28 加了「檔頭不得含曾經是查詢的字串」。**它擋得住的，寫成性質（R29 更正
+   R28 版的封閉單項「擋不住的是從未 commit 過的查詢」與全稱「git 裡每一個版本」）**：一條查詢要是**曾以非註解行出現在
+   這個檔的任何一個 git 可達版本**（`git log --all --full-history -- <path>`；不跟改名、不看 reflog／懸空 commit、淺 clone
+   只看它有的）**或在退役清單裡**，且它的字元**依序連續**出現在檔頭區塊去空白後的連接文字裡（同退役檢查的正規化），
+   就紅——所以整條搬進一行、拆成兩行、字元間插空白、大小寫改寫都紅（R29 DA 對真檔盲測：R28 版逐行比對，拆成兩行相鄰
+   `# ` 全綠而 `grep '^#'` 相鄰印出、reviewer 一眼接回去）。**擋不住的**（各自量過）：字元間插**非空白**字元；從未進可達
+   歷史也不在退役清單的查詢；改名之後舊名下的版本。取不到歷史時真檔測試**具名紅在環境那一側**、其餘八條照跑
+   （R29 regression：R28 版把 `try` 放在引數位置，`.git` 不在時九條一條都不跑）。除此之外檔頭區塊的內容仍不受約束
+   （長度、重複、純量上限一律不適用；R27 實測：塞 200 字元段落，八條全過）。所以**退役一條查詢必須刪除**；搬進檔頭
+   今天是機制紅的，不再只是人守。這條真檔測試因此需要 git（在 PATH 上、且在 checkout 裡），R28 起。`rrf-tie-queries.txt` **一條內容約束都沒有**（`checkQueryFile` 只跑在
    baseline 上，全 repo 唯一碰它的測試是 `git check-attr`），對它 `grep '^#'` 的安全性零機制——它的處置追蹤於 #68。
    清「repo 之外的副本」的判準是**內容**，鍵不能是檔名、也不能只靠地點、也不能只鍵**現在這一版**：R25 用兩個地點的
    列舉漏掉 `~/.claude/jobs/**` 七棵 reviewer 樹，並把「repo 外零份」寫進了報告；R26 改成四個根目錄＋`-name "$(basename $f)"`
@@ -170,7 +179,12 @@
    `file-history`、`jobs`）、`/private/tmp`、`/private/var/folders`、`$TMPDIR`（`/tmp` 是 symlink，`find` 不跟隨，列了等於
    沒列）。第二把鍵是**檔頭的一句註解短語**（註解可以上命令列）：`grep -rlF "<檔頭第一行的一段>" <根目錄…>
    --exclude='*.jsonl'`——它找得到 size 鍵找不到的東西（被改過的副本、只抄了檔頭的檔），命中再各自判有沒有查詢
-   （只數不印）。**有限根目錄證不出「零副本」**，只證得出「這幾棵樹裡零份」——報告要寫後者。命中的 checkout **不要靜默
+   （只數不印）。**有限根目錄證不出「零副本」，有限時間也證不出**——掃描是對一棵會動的樹的一個時間點陳述（R29 security：
+   第一輪掃描回零份，十分鐘後定向重掃才抓到一棵掃描期間才建立的 reviewer worktree），報告要寫掃描時間，並在最後一個
+   讀者收工後補掃一次；只證得出「這幾棵樹在那個時刻零份」——報告要寫後者。**verify 的 worktree 指示本身會製造副本**
+   （`git worktree add` 依建構把兩個查詢檔 checkout 到 repo 之外，R3／R16／R29 三次同形）——建 worktree 要先
+   `git sparse-checkout set --no-cone '/*' '!scripts/baseline-queries.txt' '!scripts/rrf-tie-queries.txt'`，或改用
+   CLAUDE.md 指定的 `cp` 備份就地還原。命中的 checkout **不要靜默
    排除，要另列**：reviewer 的私有 worktree 就是「remote 指向本 repo 的 checkout」，R26 的排除子句把它要抓的那一類整個
    排掉（R27，security）；今天（2026-09-20）已知且接受的一份是 marketplace 的 clone（`~/.claude/plugins/marketplaces/claude-code-ltm/`）
    持有的 `rrf-tie-queries.txt`——那個 clone 停在 `7aab485`，**還沒有** `baseline-queries.txt`（R28，requirements；clone 更新後
@@ -252,8 +266,10 @@
   方向都有：fold 本身較窄（`lowercased()` ≠ `casefold()`：ß／ς／相容分解字元，**fail-open**，測試裡以 `withKnownIssue`
   標成已知缺口），比對本身較寬（Swift String 的正則等價，NFC/NFD 判相等而 judge 判不等，fail-closed）——查法與後果在
   測試的 `foldLikeJudge` 說明裡（R25 寫進來、R26 改寫時掉了、R27 補回——同一段第三次掉前輪的句子）。它們擋不住整段
-  文字（切成多條短行、**或放進 `#` 註解都過**——後半句 R26 以為第八條約束堵住了而刪掉，R27 實測它仍然為真：檔頭
-  區塊的內容不受約束，codex R22／R27），更分不出一句第三方逐字短句與自行撰寫的短語；作者自審是這個檔的防線。
+  文字（切成多條短行都過，codex R22；「或放進 `#` 註解都過」R26 以為第八條約束堵住了而刪掉、R27 實測仍為真而補回、
+  **R28 起為假**——`headerFormerQueries` 擋住曾經是查詢的字串，R29 regression／DA 指出這一句與 `checkQueryFile` 的註解在 R28
+  都沒跟著改；今天檔頭區塊仍不受約束的是**沒進過歷史也不在退役清單**的文字），更分不出一句第三方逐字短句與自行撰寫的
+  短語；作者自審是這個檔的防線。
 - 查詢原文**跨過**或落在 metadata 欄位 200 字元截斷之後的那種命令。完全落在之後：那段文字不在索引裡，
   `self` 看不到、它也不會靠那段文字排名。**跨過邊界**：查詢的前綴進了索引、會靠它排名，`self` 卻判
   `clean`——進索引的字元數 ＝ 上限（200 字元）− 查詢在該欄位裡的起始位置（`toolUseMetadata` 攤平換行後取
