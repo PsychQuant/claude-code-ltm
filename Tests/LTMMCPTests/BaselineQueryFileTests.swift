@@ -177,15 +177,24 @@ private let fixtureTestName = "queryFileChecksAreDrivenByTheirOwnFixture"
 ///      區塊（`outsideKnownIssueBlocks`）——**但 R28 版只關了一種排版、一種出口**：R29 logic／requirements 把 wrapper 排成多行
 ///      （`withKnownIssue(`／引數／`) {`）→ 全綠；R29 security 在訊息裡放一個 `}` → 全綠；R29 logic 在區塊裡多閉一層 → 之後每個
 ///      區塊都算進 driven；R29 DA 對 `throw` 出口做同一構造（那個分支沒套剔除）→ 三條全綠、非 UTF-8 拒答整條失效。**R29 起**：
-///      pending 狀態到第一個 `{`、剝字串字面後數、深度夾 0、兩個分支都剔（各有負向臂）。仍不在射程：`if false {`、永不呼叫的
-///      closure、多行字串字面 `"""` 裡的大括號（本檔 driven 臂沒有）——同第 1 條的同族。
+///      pending 狀態到第一個 `{`、剝字串字面後數、深度夾 0、兩個 driven 分支都剔。**R30 又找到四種**：logic／DA 把多行 wrapper 的
+///      引數行寫成含同行閉合的閉包（`Comment(rawValue: xs.map { $0 }.joined())`）→ pending 提早解除、本體漏出；requirements／logic
+///      在 `withKnownIssue` 前放一個屬於未追蹤外層的 `}`（`}; withKnownIssue("m") {`）→ 整行 delta 0 判成同行閉合；logic 在被包住的
+///      臂裡寫 `"\(flag ? "}" : "")"` → 插值裡的巢狀引號翻轉狀態機、字面 `}` 被當程式碼數；**DA 把真檔測試的 `#expect(r.X…)` 包進
+///      `withKnownIssue`** → 違規的查詢檔讓真檔測試 `passed with known issue`、`swift test` exit 0（第七、八把鍵都只裝在 driven
+///      本體上，smoke 本體沒剔）。**R30 起**：token 之後才數、本體的 `{` 是小括號深度回到 0 的那一個、插值以括號深度追蹤、
+///      **smoke 本體也剔**（四者各有負向臂）。仍不在射程：`if false {`、永不呼叫的 closure、多行字串字面 `"""` 與 raw string 裡的
+///      大括號（本檔 driven 臂沒有）、**把 wrapper 搬到被掃本體之外**（`knownGap { … }` 這種 helper——剔除只認出現在本體裡的
+///      token，R30 DA）——同第 1 條的同族。
 ///   7. **`).count` 被無關的 `.count` 滿足**（R28 DA 構造，對 R27 版）：刪掉 `.count == 2` 臂、換成
 ///      `#expect(requiredHeaderPhrases.joined(separator: " ").count > 0)` → 全綠。**R28 起 driven 行還必須含 `report(`**，
 ///      所以這個構造今天會紅；`#expect(try report("").count >= 0)` 仍過（那是第 1 條）。代價（R29 regression／requirements）：
 ///      直接呼叫 `checkQueryFile(`、跨行 `#expect(`、`#require(` 都會被報成「driven 缺」；`report(` 在字串字面裡也算數（第 2 條）。
 ///   8. **檔頭裡的查詢拆成兩行、或字元間插空白**（R29 DA 對真檔盲測；對 R28 版）：`headerFormerQueries` 逐行比對 → 全綠，
-///      而 `grep '^#'` 相鄰印出。**R29 起**比對整個檔頭區塊去空白後的連接文字，這兩個構造今天會紅（跨行記哨兵 0）。仍不在
-///      射程（R29 量過）：字元間插**非空白**字元；從未進 git 可達歷史、也不在退役清單裡的查詢。
+///      而 `grep '^#'` 相鄰印出。**R29 起**比對整個檔頭區塊去空白後的連接文字，這兩個構造今天會紅（跨行記哨兵 0）。射程寫成
+///      性質：一條查詢的字元要**依序連續**出現在連接文字裡才擋得住。仍不在射程：字元間插**非空白**字元（實作者在 R29
+///      verify-fix 的自測，不是讀者構造）；**把兩半的順序顛倒**放進檔頭（連接鍵順序敏感，`grep '^#'` 仍相鄰印出——R30 DA）；
+///      從未進 git 可達歷史、也不在退役清單裡的查詢；改名之後舊名下的版本（見 `historicalQueryFolds` 的射程）。
 ///   9. **`throw` 換行接型別**（R29 requirements 構造，對 R28 版）：(3) 逐行餵 regex，`throw`／換行／`X()` 整條看不見 → 全綠。
 ///      **R29 起**對整個本體連接後掃（`throwScanIsDrivenByItsOwnFixture`）。
 /// R24 版把數釘在 `Mirror` 的欄位數上，那是**儲存屬性數**不是約束數；這份清單讓漂移變貴，不是變不可能——
@@ -250,7 +259,8 @@ private func topLevelBodyLines(of name: String, in lines: [String], requireTest:
 }
 
 /// `formerQueries`：**曾經是查詢**的字串集合（已經過 `foldLikeJudge`），由呼叫端給——真檔測試從這個檔在 git 歷史裡的
-/// 每一個版本取（`historicalQueryFolds`），fixture 給合成集合。本體裡不得有 `try`（同步測試釘住），所以沒有第二種出口。
+/// 每一個**可達**版本取（`historicalQueryFolds`，射程寫在它自己的說明裡；R30 regression：R29 改了兩處、漏了這一處），fixture
+/// 給合成集合。本體裡不得有 `try`（同步測試釘住），所以沒有第二種出口。
 private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throws -> QueryFileReport {
     var r = QueryFileReport()
     // 檔首 BOM：`String(data:)` 會把它剝掉，bash 與 python 不會——第一行的 `#` 對它們不是行首，檔頭註解會被算成
@@ -315,13 +325,14 @@ private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throw
     let squash = { (s: String) -> String in String(s.filter { !$0.isWhitespace }) }
     let commentBody = { (line: String) -> String in String(line.trimmingCharacters(in: asciiWhitespace).drop { $0 == "#" }) }   // 去掉行首的 `#`，否則跨行連接時 `#` 會卡在中間
     let formerSquashed = formerQueries.map { squash(foldLikeJudge($0)) }.filter { !$0.isEmpty }
-    let perLine = headerIndices.filter { i in
-        let folded = squash(foldLikeJudge(commentBody(physical[i])))
-        return formerSquashed.contains { folded.contains($0) }
-    }.map { $0 + 1 }
+    let foldedHeaderLines = headerIndices.map { (index: $0, text: squash(foldLikeJudge(commentBody(physical[$0])))) }
+    let perLine = foldedHeaderLines.filter { line in formerSquashed.contains { line.text.contains($0) } }.map { $0.index + 1 }
     let wholeHeader = squash(foldLikeJudge(headerIndices.map { commentBody(physical[$0]) }.joined()))
-    let spansLines = perLine.isEmpty && formerSquashed.contains { wholeHeader.contains($0) }
-    r.headerFormerQueries = spansLines ? [0] : perLine
+    // 跨行命中記哨兵 0，**與單行命中並列**（R30 requirements：R29 版寫成 `perLine.isEmpty ? …`，只要有任何單行命中就把跨行那筆
+    // 藏起來，作者刪掉單行那條之後才看得到第二筆——判定不受影響，但要兩趟才報得完）。「跨行」的定義是**這一條**在連接文字裡
+    // 命中、卻不在任何單一行裡，不是「沒有任何單行命中」。
+    let spansLines = formerSquashed.contains { q in wholeHeader.contains(q) && !foldedHeaderLines.contains { $0.text.contains(q) } }
+    r.headerFormerQueries = perLine + (spansLines ? [0] : [])
     return r
 }
 
@@ -335,8 +346,9 @@ private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throw
 ///   - 淺 clone 只看得到它有的那幾個 commit。
 ///   - `git log` 回**零個版本**時 `throw NoHistory`（R29 logic：R28 版靜默退化成「只比工作樹」，而工作樹依定義不含被 `#`
 ///     退役的查詢——約束變恆真、測試綠）。`git show` 對某一版非 0（該版本沒有這個檔，例如刪檔重建那個 commit）→ 跳過那一版
-///     （R29 requirements／regression：R28 版一律 throw，訊息說「git 不可用」而成因是歷史裡有刪除節點）；`git log` 本身非 0
-///     → `throw GitFailed`。錯誤只帶子命令名與 status，**不帶 git 的 stderr**（`git show` 的 fatal 訊息含路徑不含內容，但這裡
+///     （R29 requirements／regression：R28 版一律 throw，訊息說「git 不可用」而成因是歷史裡有刪除節點）——判「有沒有這條路徑」
+///     用 `ls-tree`（只要 tree 物件），`show` 非 0 一律具名 throw（R30 DA：R29 版一律 `continue`，blobless partial clone 離線時
+///     每一版 `show` 都 128、集合靜默退化成只有工作樹）；`git log` 本身非 0 → `throw GitFailed`。錯誤只帶子命令名與 status，**不帶 git 的 stderr**（`git show` 的 fatal 訊息含路徑不含內容，但這裡
 ///     一律不轉述）。
 ///   - 子行程環境只留 `PATH`／`HOME`：清掉呼叫端的 `GIT_DIR`／`GIT_WORK_TREE` 等（R29 logic：那會讓 git 去查別的倉庫、回空、以 0 離開）。
 /// 臂：`historicalQueryFoldsIsDrivenByItsOwnFixture`（合成 repo：刪檔重建、側支版本、零歷史；R29 regression：R28 版整段
@@ -358,8 +370,15 @@ private func historicalQueryFolds(root: URL, relativePath: String) throws -> Set
     guard !hashes.isEmpty else { throw NoHistory(relativePath: relativePath) }
     var folds = Set(nonCommentLines(try String(contentsOf: root.appendingPathComponent(relativePath), encoding: .utf8)).map(foldLikeJudge))
     for h in hashes {
+        // 「該版本沒有這個檔」與「物件拿不到」要分開（R30 DA：R29 版對 `git show` 的任何非 0 一律 `continue`，於是 blobless
+        // partial clone 離線時——`log` 非空、每一版 `show` 都 128——集合靜默退化成只有工作樹、不 throw 不紅，R29 #6 的靜默縮小
+        // 沿另一條軸復活；同一條 `continue` 也吞物件損壞與權限）。`ls-tree` 只要 tree 物件（blobless clone 也有），所以它能
+        // 判「有沒有這條路徑」而不必取 blob：空輸出＝這一版沒有這個檔，其餘非 0 一律具名 throw。
+        let listing = try git(["ls-tree", "--name-only", h, "--", relativePath])
+        guard listing.status == 0 else { throw GitFailed(subcommand: "ls-tree", status: listing.status) }
+        if (String(data: listing.stdout, encoding: .utf8) ?? "").trimmingCharacters(in: asciiWhitespace).isEmpty { continue }   // 刪除節點
         let blob = try git(["show", "\(h):\(relativePath)"])
-        guard blob.status == 0 else { continue }   // 這一版沒有這個檔（刪除節點）
+        guard blob.status == 0 else { throw GitFailed(subcommand: "show", status: blob.status) }
         guard let text = String(data: blob.stdout, encoding: .utf8) else { continue }   // 非 UTF-8 的歷史版本：那一版的查詢在別的判準下已經不算查詢
         folds.formUnion(nonCommentLines(text).map(foldLikeJudge))
     }
@@ -368,16 +387,33 @@ private func historicalQueryFolds(root: URL, relativePath: String) throws -> Set
 
 private struct GitFailed: Error { let subcommand: String; let status: Int32 }
 
-/// 合成 repo（全部 `ZQXJ-*` 內容、用完即刪）：四次 commit（新增 A→改成 B→刪檔→重建 C）＋一條側支加 D 再切回主線。
-/// 期望：A、B、C、D 都在集合裡（刪除節點被跳過、側支靠 `--all`），零歷史的路徑 throw `NoHistory`，非 git 目錄 throw `GitFailed`。
-@Test("historicalQueryFolds 由合成 git repo 驅動：刪檔重建的節點跳過、側支版本靠 --all、零歷史具名 throw、非 git 目錄具名 throw")
+/// 合成 repo（全部 `ZQXJ-*` 內容、用完即刪）：A→B→刪檔→C（main）；側支 D **併回後刪掉分支**；main 再 E；另一條**還活著**的
+/// 側支 F。期望 {A,B,C,D,E,F}——**兩個 flag 各有自己的臂**（R30 regression：R29 版只有一條活側支，D 靠 `--all` 就到、沒有 merge
+/// 所以簡化沒東西可丟，單獨拿掉 `--full-history` 全綠，而 doc 與 commit message 把它的貢獻歸給了 `--full-history`）：
+/// 拿掉 `--all` → F 不見（未併回的活分支）；拿掉 `--full-history` → D 不見（併回後刪掉的分支，merge 對 parent 1 TREESAME）。
+/// 另外：刪除節點由 `ls-tree` 判掉，物件拿不到則具名 throw（刪掉 HEAD 版本的 loose blob 那一臂）。
+@Test("historicalQueryFolds 由合成 git repo 驅動：刪除節點跳過、併回後刪掉的分支靠 --full-history、未併回的活分支靠 --all、blob 缺失具名 throw、零歷史與非 repo 具名 throw")
 func historicalQueryFoldsIsDrivenByItsOwnFixture() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
     func git(_ args: String...) throws {
         let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/env"); p.currentDirectoryURL = dir
         p.arguments = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"] + args
+        // 環境比照生產側再收一層（R30 security：R29 版繼承完整環境，呼叫端的 `GIT_DIR`／`GIT_WORK_TREE`／`GIT_INDEX_FILE`
+        // 會讓這個 fixture 的 `init`／`commit` **寫進**別的倉庫，全域 `core.hooksPath`／`init.templateDir` 的 hook 也會執行）。
+        let inherited = ProcessInfo.processInfo.environment
+        p.environment = ["PATH": inherited["PATH"] ?? "/usr/bin:/bin", "HOME": inherited["HOME"] ?? "/",
+                         "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"]
         let r = try runDraining(p); try #require(r.status == 0, "git \(args.first ?? "") 以 \(r.status) 離開")
+    }
+    func gitOut(_ args: String...) throws -> Data {
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/env"); p.currentDirectoryURL = dir
+        p.arguments = ["git"] + args
+        let inherited = ProcessInfo.processInfo.environment
+        p.environment = ["PATH": inherited["PATH"] ?? "/usr/bin:/bin", "HOME": inherited["HOME"] ?? "/",
+                         "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"]
+        let r = try runDraining(p); try #require(r.status == 0, "git \(args.first ?? "") 以 \(r.status) 離開")
+        return r.stdout
     }
     let f = dir.appendingPathComponent("q.txt")
     func write(_ body: String) throws { try (headerTerminator + "\n" + body + "\n").write(to: f, atomically: true, encoding: .utf8) }
@@ -387,11 +423,19 @@ func historicalQueryFoldsIsDrivenByItsOwnFixture() throws {
     try git("rm", "-q", "q.txt"); try git("commit", "-qm", "3")
     try write("ZQXJ-C"); try git("add", "q.txt"); try git("commit", "-qm", "4")
     try git("checkout", "-qb", "side"); try write("ZQXJ-D"); try git("add", "q.txt"); try git("commit", "-qm", "5")
+    try git("checkout", "-q", "main"); try write("ZQXJ-E"); try git("add", "q.txt"); try git("commit", "-qm", "6")
+    try git("merge", "-q", "-s", "ours", "side", "-m", "merge"); try git("branch", "-qD", "side")   // D 只剩 merge 的第二 parent 可達
+    try git("checkout", "-qb", "side2"); try write("ZQXJ-F"); try git("add", "q.txt"); try git("commit", "-qm", "7")
     try git("checkout", "-q", "main")
     let folds = try historicalQueryFolds(root: dir, relativePath: "q.txt")
-    #expect(folds == Set(["ZQXJ-A", "ZQXJ-B", "ZQXJ-C", "ZQXJ-D"].map(foldLikeJudge)), Comment(rawValue: "\(folds.count) 條"))
+    #expect(folds == Set(["ZQXJ-A", "ZQXJ-B", "ZQXJ-C", "ZQXJ-D", "ZQXJ-E", "ZQXJ-F"].map(foldLikeJudge)), Comment(rawValue: "\(folds.count) 條"))
     try "x\n".write(to: dir.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
     #expect(throws: NoHistory.self) { try historicalQueryFolds(root: dir, relativePath: "untracked.txt") }
+    // 物件拿不到（≠ 該版本沒有這個檔）：刪掉 HEAD 版本的 loose blob → `ls-tree` 仍列得出路徑、`show` 非 0 → 具名 throw
+    // （R30 DA 的 blobless partial clone 離線那條路的可重現替身）。
+    let blobHash = try #require(String(data: gitOut("rev-parse", "HEAD:q.txt"), encoding: .utf8)?.trimmingCharacters(in: asciiWhitespace))
+    try FileManager.default.removeItem(at: dir.appendingPathComponent(".git/objects/\(blobHash.prefix(2))/\(blobHash.dropFirst(2))"))
+    #expect(throws: GitFailed.self) { try historicalQueryFolds(root: dir, relativePath: "q.txt") }
     let notRepo = try tempDir(); defer { try? FileManager.default.removeItem(at: notRepo) }
     try "x\n".write(to: notRepo.appendingPathComponent("q.txt"), atomically: true, encoding: .utf8)
     #expect(throws: GitFailed.self) { try historicalQueryFolds(root: notRepo, relativePath: "q.txt") }
@@ -402,10 +446,17 @@ private struct NoHistory: Error { let relativePath: String }
 func baselineQueryFileDocumentsItsContractAndRetiresThePollutedQueries() throws {
     let data = try Data(contentsOf: repoRoot().appendingPathComponent("scripts/baseline-queries.txt"))
     // git 歷史那一半失敗時具名紅在**環境**那一側、其餘八條照跑（R29 regression：R28 版把 `try` 放在引數位置，`.git` 不在時
-    // 九條 smoke 一條都不執行，訊息 `GitUnavailable(status: 128)` 也沒說是環境）；與 `.gitattributes` 那條同一套處置。
+    // 這八條 smoke 一條都不執行，訊息 `GitUnavailable(status: 128)` 也沒說是環境。**八不是九**——九是 `contentConstraints`
+    // 的項數，第九項 `throw NotUTF8` 依設計沒有 smoke 臂；查法：`sed -n '<本測試本體>' | grep -c '#expect(r\.'` → 8，R30
+    // regression 指出 R29 把 report 的「nine smoke arms」抄進兩份 artifact 而沒帶查法）；與 `.gitattributes` 那條同一套處置。
+    // 只接住 git 那一側的具名錯誤：R30 requirements 指出 R29 版 `catch` 吃掉所有錯誤，而工作樹檔案非 UTF-8 時
+    // `String(contentsOf:encoding:)` 丟的是 Cocoa 解碼錯誤——那是**檔案**錯了，訊息卻說「是環境」。其餘錯誤照常傳出。
+    // **無臂**（R30 實測：換回 `catch { … }`，六條測試全綠）——要驅動它得讓**真檔**變成非 UTF-8，而那正是規則 1 禁止的
+    // 就地改動；方向 fail-closed（多一個具名錯誤，不會少紅）。
     let history: Set<String>?
     do { history = try historicalQueryFolds(root: repoRoot(), relativePath: "scripts/baseline-queries.txt") }
-    catch { history = nil; Issue.record(Comment(rawValue: "取不到查詢檔的 git 歷史（\(error)）：`headerFormerQueries` 這一條只對照退役清單、沒有對照歷史——是環境（不在 git checkout、PATH 上沒有 git），不是檔案錯了")) }
+    catch let error as GitFailed { history = nil; Issue.record(Comment(rawValue: "取不到查詢檔的 git 歷史（\(error)）：`headerFormerQueries` 這一條只對照退役清單、沒有對照歷史——是環境（不在 git checkout、PATH 上沒有 git、物件拿不到），不是檔案錯了")) }
+    catch let error as NoHistory { history = nil; Issue.record(Comment(rawValue: "取不到查詢檔的 git 歷史（\(error)）：這個路徑在 git 裡沒有任何可達版本——是環境，不是檔案錯了")) }
     let r = try checkQueryFile(data, formerQueries: (history ?? []).union(retired.map(foldLikeJudge)))
     #expect(r.missingHeaderPhrases.isEmpty, Comment(rawValue: "檔頭缺：\(r.missingHeaderPhrases)"))
     #expect(r.count >= 6, "基準查詢至少 6 條，得 \(r.count)")
@@ -451,7 +502,9 @@ func queryFileChecksAreDrivenByTheirOwnFixture() throws {
     // **不存在**時的值，`withKnownIssue` 把它今天的失敗記成已知問題。**缺口被修掉時這條會紅**——swift-testing 預設
     // `isIntermittent: false`，body 沒記錄任何 issue 就記一筆 `Known issue was not recorded`——屆時拆掉包裝即可；**不要**
     // 改成 `isIntermittent: true`，那會讓兩個方向都靜默過（R28 security／regression 各自實測，更正 R27 版這裡與
-    // `ecf3aef` commit message 的「自動轉綠、不用刪」；R27，DA：R26 版寫成 `== 0` 的正向 fixture，等於把缺口釘死——
+    // `ecf3aef` **測試檔註解**（:305）的「自動轉綠、不用刪」——R29 的替換句把載體寫成 commit message，而那裡的計數是 0
+    // （R30 security；`issuecomment-5754103526` 更正的正是這個誤歸，R30 的 errata 再更正這一行）；R27，DA：R26 版寫成
+    // `== 0` 的正向 fixture，等於把缺口釘死——
     // 照文件說的方向修好 fold，三條就一起紅，維護者最可能的反應是把修法退回去）。
     let foldGap = try (report("ZQXJ-\u{00DF}\nZQXJ-SS\n").duplicateCount,          // ß vs SS
                        report("ZQXJ-\u{03C2}\nZQXJ-\u{03C3}\n").duplicateCount,   // ς vs σ
@@ -500,6 +553,9 @@ func queryFileChecksAreDrivenByTheirOwnFixture() throws {
     // 比對單位是整個檔頭去空白後的連接文字（R29 DA：R28 版逐行，拆成兩行或插一個空格就穿透）。跨行命中記哨兵 0。
     let split = headerNoTerm + "# ZQX\n# J-LONG\n" + headerTerminator + "\nZQXJ-B\n"
     #expect(try report(split, former: [foldLikeJudge("ZQXJ-LONG")]).headerFormerQueries == [0])
+    // 單行命中與跨行命中並存 → 兩筆都報（R30 requirements：R29 版只報單行那筆，要兩趟才看得完）
+    let bothShapes = headerNoTerm + "# ZQXJ-A\n# ZQX\n# J-LONG\n" + headerTerminator + "\nZQXJ-B\n"
+    #expect(try report(bothShapes, former: [foldLikeJudge("ZQXJ-A"), foldLikeJudge("ZQXJ-LONG")]).headerFormerQueries == [2, 0])
     #expect(try report(headerNoTerm + "# Z Q X J-A\n" + headerTerminator + "\nZQXJ-B\n", former: [foldLikeJudge("ZQXJ-A")]).headerFormerQueries == [2])   // 插空白仍命中
     #expect(try report(headerNoTerm + "# ZQX-J-A\n" + headerTerminator + "\nZQXJ-B\n", former: [foldLikeJudge("ZQXJ-A")]).headerFormerQueries.isEmpty)   // 插非空白字元：擋不住（量過、未關）
     #expect(try report(moved, former: [""]).headerFormerQueries.isEmpty)   // 空針不得命中任何行（R29：Swift 的 `contains("")` 本來就 false，這條守的是換容器之後）
@@ -882,7 +938,7 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     let sourcesText = ((FileManager.default.enumerator(at: root.appendingPathComponent("Sources"), includingPropertiesForKeys: nil)?.allObjects as? [URL]) ?? [])
         .filter { $0.pathExtension == "swift" }.compactMap { try? String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
     // 掃全檔（R23：R22 版在「三條規則」截斷，而同一 commit 把 `maxQueryScalars` 寫進那一節之後）；jsonl 欄位名是封閉例外、不得類推。
-    let jsonlFieldNames: Set<String> = ["isCompactSummary", "toolUseResult"]
+    let jsonlFieldNames: Set<String> = ["isCompactSummary", "toolUseResult", "bashEditDiff"]   // R30：Bash 編輯的 unified diff 欄位（security 量到它帶 3 行 context）
     let readmeIdentifiers = Set(matches(#"`([a-z][a-z0-9]*[A-Z][A-Za-z0-9]*)`"#, in: readme)).subtracting(jsonlFieldNames)
     let orphanIdentifiers = readmeIdentifiers.filter { !testSource.contains($0) && !sourcesText.contains($0) }
     #expect(readmeIdentifiers.count >= 3 && orphanIdentifiers.isEmpty, Comment(rawValue: "README 的 camelCase 識別碼在測試檔與 Sources 都找不到：\(orphanIdentifiers.sorted())（掃到 \(readmeIdentifiers.count) 個）"))
@@ -948,6 +1004,16 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // `outsideKnownIssueBlocks` 有臂，生產路徑那一行換回 `drivenBody` 五條測試全綠——CLAUDE.md 記過的「回歸鎖全測在 helper 上」）。
     let smokeBody = try #require(topLevelBodyLines(of: realFileTestName, in: sourceLines, requireTest: true), "找不到 \(realFileTestName) 的唯一頂層 `@Test` 宣告或其收尾 `}`")
     let drivenBody = try #require(topLevelBodyLines(of: fixtureTestName, in: sourceLines, requireTest: true), "找不到 \(fixtureTestName) 的唯一頂層 `@Test` 宣告或其收尾 `}`")
+    // 剔掉 `withKnownIssue` 之後兩個本體都不該是空的——空表示某個 wrapper 的 `{` 沒閉合（pending 吞掉其後全部），
+    // 而那會讓下一條斷言對**每個**出口都報缺、看不出成因（R30 logic）。
+    // **無臂**（R30 實測：換成恆真，六條測試全綠）——這是診斷用的，真本體裡沒有未閉合的 wrapper，fixture 也驅動不到
+    // 這條讀真原始碼的斷言；`outsideKnownIssueBlocks` 對「pending 未閉合 → 全吞」本身有臂。
+    #expect(!outsideKnownIssueBlocks(drivenBody).isEmpty && !outsideKnownIssueBlocks(smokeBody).isEmpty,
+            "剔掉 withKnownIssue 之後 smoke 或 driven 本體為空——多半是某個 wrapper 的 `{` 被行尾 `//` 或 `/* */` 吃掉、pending 未閉合")
+    // 真檔測試餵給 `checkQueryFile` 的兩個來源要釘住：只有 fixture 臂的話，把 `∪ retired`（或 `historicalQueryFolds`）從呼叫點
+    // 整段拿掉零測試紅，而 README／CHANGELOG／清單三處都把這條接線寫成事實（R30 regression；R29 #8 的同一個形狀）。
+    let wiring = ["historicalQueryFolds(", "union(retired.map(foldLikeJudge))"].filter { needle in !smokeBody.contains { $0.contains(needle) } }
+    #expect(wiring.isEmpty, Comment(rawValue: "真檔測試本體要同時餵 git 可達歷史與退役清單，缺：\(wiring)"))
     let unassertedOutlets = unassertedOutlets(contentConstraints, smokeBody: smokeBody, drivenBody: drivenBody)
     #expect(unassertedOutlets.isEmpty, Comment(rawValue: "contentConstraints 的這些出口缺 smoke（真檔測試 `#expect(r.X`）或 driven（fixture 測試 `#expect(… ).X …`）斷言：\(unassertedOutlets)"))
     // 帶 `|| exit 70` 的 printf 只有兩個：檔頭那句與它的兩個數由這裡釘（R25，DA：R24 的查法數的是「用 `/bin/echo` 印訊息的
@@ -1149,46 +1215,70 @@ private func hasIdentifierBounded(_ line: String, _ needle: String) -> Bool {
 }
 private func isIdentifierChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
 
-/// 剔掉 `withKnownIssue` 區塊裡的行：從含 `withKnownIssue` 的那一行起進入 **pending**，直到第一個 `{` 才開始數深度、到收平為止
-/// （R29 logic／requirements：R28 版只在含 `withKnownIssue` 的那一行數大括號，`withKnownIssue(` ／ 引數 ／ `) {` 排成多行時 depth
-/// 停在 0、只丟掉第一行，區塊內的 driven 臂照樣算——配對變異：多行綠／單行紅）。大括號在**剝掉字串字面之後**數（R29 security／
-/// logic：訊息裡一個 `}` 就讓深度提早收平，而本檔的 `withKnownIssue` 訊息習慣引程式碼片段），深度夾在 0 以上（R29 logic：多閉一層
-/// 後 `depth == -1`，重入條件 `depth == 0` 永遠不成立，之後每一個區塊都被算進 driven）。這是 driven 掃描**唯一**跳過的容器——本檔
-/// 自己用的那一個；其他容器見 `contentConstraints` 說明「買不到什麼」。**擋不住**：`withKnownIssue` 這個字出現在字串字面或
-/// 註解殘留裡（那一行起會被當成區塊開頭，fail-closed）；`{` 與 `}` 出現在剝不掉的地方（例如 `\u{…}` 逃脫**在字串裡**——已剝；
-/// 但多行字串字面 `"""` 這裡不處理，本檔 driven 臂裡沒有）。
+/// 剔掉 `withKnownIssue` 區塊裡的行。掃描從**那一行的 `withKnownIssue` token 之後**開始（R30 requirements／logic：R29 版數整行的
+/// 大括號，於是 `}; withKnownIssue("m") {` 這種行 delta == 0 被判成「同行閉合」，區塊本體漏出），本體的 `{` 是 token 之後**小括號
+/// 深度回到 0** 的第一個（R30 logic／DA：R29 版在 pending 期間見到任何 `{` 就解除，多行 wrapper 的引數行含一個同行閉合的閉包
+/// ——`Comment(rawValue: xs.map { $0 }.joined())`，本檔既有慣用法——就讓 pending 提早解除、`) {` 與整個本體落回 driven）。
+/// 大括號與 token 都在**剝掉字串字面之後**的文字上找（R29 security／logic：訊息裡一個 `}` 會讓深度提早收平；R30：字面裡的
+/// `withKnownIssue` 因此不會被當成區塊開頭——R29 的 doc 把這個方向寫反了），深度夾在 0 以上（R29 logic）。
+///
+/// **射程**：它只認**出現在被掃本體裡**的 `withKnownIssue` token。把 wrapper 搬到本體外（`private func knownGap(_ body: () throws -> Void)`
+/// 裡呼叫 `withKnownIssue`，本體寫 `knownGap { … }`）不在射程內——那條臂執行期仍被記成 known issue 而掃描看不見（R30 DA；列在
+/// `contentConstraints` 說明「買不到什麼」第 6 條）。`/* withKnownIssue */` 區塊註解會進 pending（`topLevelBodyLines` 只剝行尾 `//`），
+/// 方向 fail-closed；pending 到本體結束都沒閉合時其後每一行都被吞掉，同步測試因此對每個出口都報缺——`verdictAlphabetIsStatedIdenticallyEverywhere`
+/// 另有一條具名斷言指出這個成因（R30 logic）。
 private func outsideKnownIssueBlocks(_ body: [String]) -> [String] {
-    var depth = 0, pending = false, out: [String] = []
+    var depth = 0, pending = false, parens = 0, out: [String] = []
+    /// 掃一段文字，更新 (pending, parens, depth)。pending 期間只找本體的 `{`；進入本體之後純數大括號。
+    func scan(_ text: Substring) {
+        for c in text {
+            if pending {
+                if c == "(" { parens += 1 }
+                else if c == ")" { parens = max(0, parens - 1) }
+                else if c == "{", parens == 0 { pending = false; depth = 1 }
+                continue
+            }
+            if c == "{" { depth += 1 } else if c == "}" { depth = max(0, depth - 1) }
+        }
+    }
     for line in body {
         let code = stripStringLiterals(line)
-        let delta = code.filter { $0 == "{" }.count - code.filter { $0 == "}" }.count
-        if depth == 0, !pending, code.contains("withKnownIssue") {
-            if delta > 0 { depth = delta } else if code.contains("{") { depth = 0 } else { pending = true }
-            continue   // 同行閉合（delta == 0 且有 `{`）：整行跳過；還沒看到 `{`：pending
-        }
-        if pending {
-            if code.contains("{") { pending = false; depth = max(0, delta) }
+        if depth == 0, !pending {
+            guard let hit = code.range(of: "withKnownIssue") else { out.append(line); continue }
+            pending = true; parens = 0
+            scan(code[hit.upperBound...])
             continue
         }
-        if depth > 0 {
-            depth = max(0, depth + delta)
-            continue
-        }
-        out.append(line)
+        scan(Substring(code))
     }
     return out
 }
 
-/// 把一行裡的雙引號字串字面換成 `""`（處理 `\"` 逃脫；不處理多行 `"""`）。給大括號計數用。
+/// 把一行裡的字串字面（含插值與插值裡的巢狀字串）整段換成 `""`。給 `outsideKnownIssueBlocks` 數大括號用：字面與插值裡的
+/// 大括號都不是本體的界線（插值裡的程式碼必然自成平衡），所以整段丟掉是對的。
+///
+/// **性質**：只認 `"…"` 與 `\"` 逃脫，並在 `\(` 之後以小括號深度追蹤插值、插值裡再遇到 `"` 就再開一層（R30 logic：R29 版只認
+/// `\"`，`"\(flag ? "}" : "")"` 會讓狀態翻轉、字面的 `}` 被當程式碼數進 delta，區塊提早收平、其後的臂漏出——fail-open）。
+/// **不認**：多行字串 `"""`、raw string `#"…"#`（`\"#` 會被當逃脫、整行其餘被吞，方向 fail-closed）、字元字面。三者本檔的
+/// driven 本體都沒有（查法：對 `topLevelBodyLines(of: fixtureTestName…)` 的結果 grep `\"\"\"`／`#\"` → 0）。
 private func stripStringLiterals(_ line: String) -> String {
-    var out = "", inString = false, escaped = false
+    enum Mode { case string, interpolation(Int) }
+    var out = "", stack: [Mode] = [], escaped = false
     for c in line {
-        if inString {
-            if escaped { escaped = false } else if c == "\\" { escaped = true } else if c == "\"" { inString = false; out.append("\"\"") }
+        guard let top = stack.last else {                     // 程式碼
+            if c == "\"" { stack.append(.string); out.append("\"\"") } else { out.append(c) }
             continue
         }
-        if c == "\"" { inString = true; continue }
-        out.append(c)
+        switch top {
+        case .string:
+            if escaped { if c == "(" { stack.append(.interpolation(1)) }; escaped = false }
+            else if c == "\\" { escaped = true }
+            else if c == "\"" { stack.removeLast() }
+        case .interpolation(let n):
+            if c == "(" { stack[stack.count - 1] = .interpolation(n + 1) }
+            else if c == ")" { if n == 1 { stack.removeLast() } else { stack[stack.count - 1] = .interpolation(n - 1) } }
+            else if c == "\"" { stack.append(.string) }
+        }
     }
     return out
 }
@@ -1233,6 +1323,24 @@ func drivenNeedleShapeIsDrivenByItsOwnFixture() {
     let overClosed = ["withKnownIssue(\"m\") { if true {", "    #expect(a)", "} } }", "withKnownIssue(\"n\") {", "    #expect(try report(\"\").tooLong == [1])", "}"]
     #expect(outsideKnownIssueBlocks(overClosed).isEmpty)
     #expect(stripStringLiterals("#expect(x == \"{\", \"a\\\"}b\")") == "#expect(x == \"\", \"\")")
+    // R30：wrapper 多行**且**引數行含同行閉合的閉包（本檔既有的訊息組裝慣用法）——R29 版在那一行解除 pending，本體整段漏出
+    let closureInArgs = ["withKnownIssue(", "    Comment(rawValue: [\"m\"].map { $0 }.joined())", ") {", "    #expect(try report(\"\").tooLong == [1])", "}", "#expect(after)"]
+    #expect(outsideKnownIssueBlocks(closureInArgs) == ["#expect(after)"])
+    // R30：外層的 `{` 排在同一行、且**比 wrapper 晚收**——掃描要從 token 之後開始，否則外層那個 `{` 先解除 pending，
+    // wrapper 的 `}` 之後仍留在深度 1，後面的臂被多吞掉（fail-closed，會誤報「driven 缺」）
+    let outerOnSameLine = ["if x { withKnownIssue(\"m\") {", "    #expect(try report(\"\").tooLong == [1])", "}", "    #expect(try report(\"\").duplicateCount == 1)", "}", "#expect(after)"]
+    #expect(outsideKnownIssueBlocks(outerOnSameLine) == ["    #expect(try report(\"\").duplicateCount == 1)", "}", "#expect(after)"])
+    // R30：`withKnownIssue` 之前有一個屬於**未追蹤外層**的 `}`——R29 版數整行 delta == 0，判成「同行閉合」
+    let precedingClose = ["if x {", "    foo()", "} ; withKnownIssue(\"m\") {", "    #expect(try report(\"\").tooLong == [1])", "}", "#expect(after)"]
+    #expect(outsideKnownIssueBlocks(precedingClose) == ["if x {", "    foo()", "#expect(after)"])
+    // R30：插值裡的巢狀引號包著一個字面 `}`——R29 版的狀態機在 `\(` 之後翻轉，把它當程式碼數進 delta、區塊提早收平
+    let interpolatedBrace = ["withKnownIssue(\"m\") {", "    #expect(try report(\"\\(flag ? \"}\" : \"\")\").count == 2)", "    #expect(try report(\"\").duplicateCount == 1)", "}", "#expect(after)"]
+    #expect(outsideKnownIssueBlocks(interpolatedBrace) == ["#expect(after)"])
+    #expect(stripStringLiterals("f(\"\\(g(\"}\"))\") {") == "f(\"\") {")
+    // R30：字串字面裡的 `withKnownIssue` **不會**開區塊（R29 的 doc 把方向寫反了）
+    #expect(outsideKnownIssueBlocks(["#expect(x, \"withKnownIssue {\")", "#expect(after)"]) == ["#expect(x, \"withKnownIssue {\")", "#expect(after)"])
+    // R30：pending 到本體結束都沒閉合（`{` 被行尾 `//` 吃掉）→ 其後全吞（fail-closed）；同步測試對這個成因另有具名斷言
+    #expect(outsideKnownIssueBlocks(["withKnownIssue(\"m\")   // {", "#expect(after)"]).isEmpty)
     // hasNeedle 左邊界與多重出現（R29 logic）
     #expect(!hasNeedle(["#expect(subreport(\"\").count == 0)"], ").count", expectOnly: true))                  // `report(` 要有左邊界
     #expect(hasNeedle(["#expect(try report(\"\").countX == 0 || report(\"\").count == 2)"], ").count", expectOnly: true))   // 第二個出現位置才乾淨
@@ -1247,19 +1355,21 @@ func byteOccurrencesIsDrivenByItsOwnFixture() {
     #expect(byteOccurrences(of: "", in: ["abc"]) == 0)     // 空針不是無窮迴圈（R29 logic）
 }
 
-/// 同步檢查 (4) 的判定本體。欄位型出口：smoke 在真檔測試本體找 `#expect(r.<欄位>`；driven 在 fixture 測試本體、剔掉
-/// `withKnownIssue` 區塊之後找 `).<欄位>`（`expectOnly`）。`throw` 型只有 driven，needle 是 `#expect(throws: X.self)`——**也**
-/// 剔掉 `withKnownIssue` 區塊（R29 DA：R28 版只在欄位分支套 `outsideKnownIssueBlocks`，`throw` 分支餵原始本體，把非 UTF-8 的
-/// driven 臂包進 `withKnownIssue` ＋ 放寬解碼，三條測試全綠、拒答整條失效——第七把鍵只裝在一半的出口上）。
-/// 臂：`unassertedOutletsIsDrivenByItsOwnFixture`。
+/// 同步檢查 (4) 的判定本體。欄位型出口：smoke 在真檔測試本體找 `#expect(r.<欄位>`；driven 在 fixture 測試本體找 `).<欄位>`
+/// （`expectOnly`）。`throw` 型只有 driven，needle 是 `#expect(throws: X.self)`。**兩個本體、兩種出口都先剔掉 `withKnownIssue`
+/// 區塊**（R28 DA：driven 臂包進 `withKnownIssue` 就永遠不紅；R29 DA：R28 版只在欄位分支剔，`throw` 分支餵原始本體；R30 DA：
+/// R29 版兩個分支都剔了 driven，**smoke 本體沒剔**——把真檔測試的 `#expect(r.X…)` 包進 `withKnownIssue`，違規的查詢檔會讓真檔
+/// 測試 `passed with known issue`、`swift test` exit 0，而真檔測試正是讓違規檔在 CI 變紅的那一道閘。三輪都是同一個形狀：
+/// **數出口的時候要連本體一起數**）。臂：`unassertedOutletsIsDrivenByItsOwnFixture`。
 private func unassertedOutlets(_ constraints: [(name: String, outlet: String)], smokeBody: [String], drivenBody: [String]) -> [String] {
     let drivenOutside = outsideKnownIssueBlocks(drivenBody)
+    let smokeOutside = outsideKnownIssueBlocks(smokeBody)
     return constraints.compactMap { c -> String? in
         if c.outlet.hasPrefix("throw ") {
             let needle = "#expect(throws: \(c.outlet.dropFirst("throw ".count)).self)"
             return hasNeedle(drivenOutside, needle, expectOnly: true) ? nil : "\(c.outlet)（driven 缺）"
         }
-        let smoke = hasNeedle(smokeBody, "#expect(r.\(c.outlet)", expectOnly: false)
+        let smoke = hasNeedle(smokeOutside, "#expect(r.\(c.outlet)", expectOnly: false)
         let driven = hasNeedle(drivenOutside, ").\(c.outlet)", expectOnly: true)
         return (smoke && driven) ? nil : "\(c.outlet)（\(smoke ? "" : "smoke 缺")\(!smoke && !driven ? "、" : "")\(driven ? "" : "driven 缺")）"
     }
@@ -1282,6 +1392,8 @@ func unassertedOutletsIsDrivenByItsOwnFixture() {
     #expect(unassertedOutlets(cs, smokeBody: [], drivenBody: []) == ["count（smoke 缺、driven 缺）", "throw NotUTF8（driven 缺）"])
     let wrapped = ["withKnownIssue(\"m\") {", "    " + driven[0], "    " + driven[1], "}"]
     #expect(unassertedOutlets(cs, smokeBody: smoke, drivenBody: wrapped) == ["count（driven 缺）", "throw NotUTF8（driven 缺）"])   // R28／R29 DA 構造：兩個分支都要剔
+    let wrappedSmoke = ["withKnownIssue(\"m\") {", "    " + smoke[0], "}"]
+    #expect(unassertedOutlets(cs, smokeBody: wrappedSmoke, drivenBody: driven) == ["count（smoke 缺）"])   // R30 DA 構造：smoke 本體也要剔
     let wrappedMultiline = ["withKnownIssue(", "    \"m\"", ") {", "    " + driven[0], "}", driven[1]]
     #expect(unassertedOutlets(cs, smokeBody: smoke, drivenBody: wrappedMultiline) == ["count（driven 缺）"])   // R29 logic 構造：多行 wrapper
     #expect(unassertedOutlets(cs, smokeBody: smoke, drivenBody: ["let x = try report(\"\").count", driven[1]]) == ["count（driven 缺）"])   // 非 #expect 行不算（生產路徑上的 expectOnly）
