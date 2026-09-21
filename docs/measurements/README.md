@@ -132,8 +132,11 @@
    Write 的 `content`、Edit 的 `toolUseResult.originalFile`（**整份檔案**，不是改到的那幾行）、Read／
    Edit 之後的 `attachment` 紀錄，每一次都把完整查詢集存進 jsonl 一份——而**印**與**讀**也會：一個 Bash
    命令把整份檔案印進 stdout 是一筆 `toolUseResult.stdout`，一次 `Read` 是一筆 `toolUseResult.file.content`。
-   **Bash 對查詢檔的任何編輯也會落一筆**：Claude Code 把該次編輯的 unified diff 記進 `toolUseResult.bashEditDiff`，
-   而 unified diff 帶前後各 3 行 **context**——所以「只改註解行」不保證不帶查詢（R30，security＋DA）。
+   **Bash 對 project root 底下檔案的編輯也會落一筆**：Claude Code 把那次 Bash call 對 project root 底下檔案造成的變更記成
+   unified diff 進 `toolUseResult.bashEditDiff`（量到的觸發條件，R30 自檢：全語料 2,324 筆 file entry **全部**在 project root
+   底下、`/tmp`／`$TMPDIR` 0 筆；主 session 與 subagent 都會產生；480/480 個 hunk 前置 context 都是 3 行），所以「只改註解行」
+   不保證不帶查詢（R30，security＋DA）。**一次 call 內改完又還原是否為零筆——推論、未證**（兩處探針都在 project root 之外，
+   settle 不了；要驗得在 repo 內建合成檔）。
    判準是「這個動作會不會把整份檔案落到 `~/.claude/projects/**` 底下的**任何檔案**」，上面是例子不是清單（R29，security：
    R28 版寫「送進 jsonl」，而 Claude Code 今天會把大型 tool result **外溢**到 jsonl 旁邊的 `tool-results/*.txt` 與
    `workflows/*.json`——本輪檔頭短語鍵命中 36 個這種檔、jsonl 34 個；判準鍵在「jsonl」這個**位置**上，位置已經分裂，
@@ -141,14 +144,17 @@
    **至少 8 筆**含全部查詢的紀錄（2026-09-07 R3 verify 全語料數的：Write 2、Edit 3、attachment 1、
    Bash stdout 1、Read 1；R1 verify 的 `diff.patch` 另在該輪被讀進 agent 逐字稿）。這個數字**只會
    往上走**——R2b 寫「六份」的九分鐘前，另一個 session 剛 `Read` 過一次；所以它是下界不是計數，
-   要現值就跑查法。查法（只印計數、執行期讀查詢檔、不上命令列）：掃
-   `~/.claude/projects/**/*.jsonl`，對每筆遞迴走訪所有字串葉節點，數「同時含全部 N 條查詢」**與「含 ≥1 條」**的紀錄與其
-   json 路徑——**兩個都要數**：`bashEditDiff` 那一筆只帶 3 條，只數「全部 N 條」的話它結構上不會出現，而「至少 8 筆」
+   要現值就跑查法。查法（只印計數、執行期讀查詢檔、不上命令列）：掃 `~/.claude/projects/**` 底下的**全部檔案**——`*.jsonl`
+   逐筆遞迴走訪所有字串葉節點、其餘檔（`tool-results/*.txt`、`workflows/*.json`……）直接比對 bytes（R30 自檢：R29 版判準已改成
+   「任何檔案」而查法還只掃 jsonl，外溢的 payload 在 jsonl 裡連檔名都查不到），數「同時含全部 N 條查詢」**與「含 ≥1 條」**的
+   紀錄與其 json 路徑——**兩個都要數**：`bashEditDiff` 那一筆只帶 3 條，只數「全部 N 條」的話它結構上不會出現，而「至少 8 筆」
    少算的是一個**類別**不只是一個時點（R30，security）。所以 **#6 一旦把 tool payload 收進索引，這一組查詢集就整份作廢**——這是已經發生的曝險，
    不是 if。第一版把 Write／Edit 與外部編輯器並列，理由是索引層的；本規則的邊界在 jsonl，兩者不等價。
    （本段與檔頭的第二版是在 session 內用 Bash 跑一支只改註解行的 python 改的。**R29 版在這裡寫「所以沒有再多一筆」，
    那是假的**：R30 security 量到 2026-09-19T11:10:46Z 那次「加終止符」的 Bash 產生了一筆 `toolUseResult.bashEditDiff`，
-   hunk 的 context 行裡有**三條活查詢**（全語料 1,602 筆 `bashEditDiff` 裡恰這一筆帶查詢）。而且這是**依建構**為假——
+   hunk 的 context 行裡有**三條活查詢**（帶查詢的 `bashEditDiff` 全語料恰一筆；查法：走訪 `~/.claude/projects/**/*.jsonl`
+   的每筆紀錄，取 `toolUseResult.bashEditDiff.files[].filePath` 以查詢檔結尾者、對其 `hunks[].lines[]` 在行程內數命中的查詢
+   條數——分母「全語料幾筆 `bashEditDiff`」是會漲的時點數字，R30 當日 1,602、兩天後 1,642，不寫進句子）。而且這是**依建構**為假——
    終止符是檔頭最後一行、下一行就是第 1 條查詢，任何動到檔頭尾端的 Bash 編輯都會把最多 3 條當 context 帶出去，
    除非編輯點離終止符 ≥ 3 行。**推論**：變異測試的「`cp` 備份 → 改 → 跑 → 還原」若分成多次 Bash call，每一次
    call 結束時檔案是 modified 狀態、就會落一個帶查詢的 hunk——所以**那四步必須在同一個 Bash call 內完成**
@@ -171,8 +177,9 @@
    就紅——所以整條搬進一行、拆成兩行、字元間插空白、大小寫改寫都紅（R29 DA 對真檔盲測：R28 版逐行比對，拆成兩行相鄰
    `# ` 全綠而 `grep '^#'` 相鄰印出、reviewer 一眼接回去）。**擋不住的**（各自量過）：字元間插**非空白**字元；從未進可達
    歷史也不在退役清單的查詢；改名之後舊名下的版本。取不到歷史時真檔測試**具名紅在環境那一側**、其餘八條照跑
-   （R29 regression：R28 版把 `try` 放在引數位置，`.git` 不在時這八條一條都不跑。**八**是這條測試裡的 smoke 斷言數，查法
-   `grep -c '#expect(r\.'`；九是約束項數，第九項 `throw NotUTF8` 依設計沒有 smoke 臂——R30 regression 指出 R29 把 report 的
+   （R29 regression：R28 版把 `try` 放在引數位置，`.git` 不在時這八條一條都不跑。**八**是這條測試裡的 smoke 斷言數，查法要帶
+   範圍——`awk '/^func baselineQueryFileDocumentsItsContractAndRetiresThePollutedQueries/,/^}/' <測試檔> | grep -c '#expect(r\.'`
+   → 8（整檔不切範圍是 22，R30 自檢）；九是約束項數，第九項 `throw NotUTF8` 依設計沒有 smoke 臂——R30 regression 指出 R29 把 report 的
    「nine smoke arms」抄進兩份 artifact 而沒帶查法）。除此之外檔頭區塊的內容仍不受約束
    （長度、重複、純量上限一律不適用；R27 實測：塞 200 字元段落，八條全過）。所以**退役一條查詢必須刪除**；搬進檔頭
    今天是機制紅的，不再只是人守。這條真檔測試因此需要 git（在 PATH 上、且在 checkout 裡），R28 起。`rrf-tie-queries.txt` **一條內容約束都沒有**（`checkQueryFile` 只跑在
@@ -190,13 +197,15 @@
    `for h in $(git log --all --full-history --format=%h -- "$f"); do sz=$(git cat-file -s "$h:$f"); find <根目錄…> -type f
    -size "${sz}c" 2>/dev/null | while read -r c; do git cat-file -p "$h:$f" | cmp -s "$c" - && echo COPY "$c"; done; done`
    （非要落地就加 `trap 'rm -rf "$T"' EXIT`——R30 的第一次掃描跑超過 550 秒被 `timeout` 殺掉，只有 trap 救得回來）。
-   根目錄至少含 `~/.claude`（含 `file-history`、`jobs`）、`/private/tmp`、`$TMPDIR`——**`$TMPDIR` 在 `/private/var/folders`
-   底下，兩個都列會把每筆報兩次**；`/tmp` 是 symlink，`find` 不跟隨，列了等於沒列；`~/.claude/jobs` 是 150 GB 且含 FIFO／
+   根目錄至少含 `~/.claude`（含 `file-history`、`jobs`）、`/private/tmp`、`/private/var/folders`——**`$TMPDIR` 在它底下，
+   不要兩個都列（每筆會報兩次），也不要只列 `$TMPDIR`**（R30 自檢：R30 verify-fix 一度為了去重砍掉大的那個，`/private/var/folders`
+   底下有 39 個 per-user 的 `T/`，只掃自己那一個）；`/tmp` 是 symlink，`find` 不跟隨，列了等於沒列；`~/.claude/jobs` 是 150 GB 且含 FIFO／
    socket（`grep -r` 會卡住），要用 `find -type f` 餵 `xargs` 並加 size 界。第二把鍵是**檔頭的一句註解短語**（註解可以上命令列）：`grep -rlF "<檔頭第一行的一段>" <根目錄…>
    --exclude='*.jsonl'`——它找得到 size 鍵找不到的東西（被改過的副本、只抄了檔頭的檔），命中再各自判有沒有查詢
-   （只數不印）。**短語要指名**——用 `requiredHeaderPhrases` 那六個常數之一或檔頭終止符，不要寫「檔頭第一行的一段」：
-   R30 security 用第一行的字面段掃 2,482 個 spill 檔回 **0**，換成「不得在 Claude Code session 內顯示」回 37——同一棵樹、
-   同一時刻，兩個照做的人得到不同答案。這把鍵找到的是**談這個檔的文字**（diff、測試、報告）也找到副本，兩者都要逐檔判。
+   （只數不印）。**短語要指名到逐字**——用 `requiredHeaderPhrases` 的任一個常數（例如「不得在 Claude Code session 內顯示」）
+   或整行 `headerTerminator`，不要寫「檔頭第一行的一段」：R30 security 用「基準查詢集（#63）」掃本 project 目錄下 2,482 個
+   spill 檔回 **0**、換成那個常數回 37；R30 自檢用「第一行前 14 個字元」掃全部 project 的 10,158 個 spill 檔回 25——**鍵與母體
+   任一沒指名，兩個照做的人就得到不同答案**。這把鍵找到的是**談這個檔的文字**（diff、測試、報告）也找到副本，兩者都要逐檔判。
    **有限根目錄證不出「零副本」，有限時間也證不出**——掃描是對一棵會動的樹的一個時間點陳述（R29 security：
    第一輪掃描回零份，十分鐘後定向重掃才抓到一棵掃描期間才建立的 reviewer worktree），報告要寫掃描時間，並在最後一個
    讀者收工後補掃一次；只證得出「這幾棵樹在那個時刻零份」——報告要寫後者。**verify 的 worktree 指示本身會製造副本**
@@ -210,14 +219,20 @@
    git -C "$W" sparse-checkout set --no-cone '/*' '!scripts/baseline-queries.txt' '!scripts/rrf-tie-queries.txt'
    git -C "$W" checkout -q HEAD
    { grep '^#' scripts/baseline-queries.txt; printf 'ZQXJ-%d\n' 1 2 3 4 5 6 7 8; } > "$W/scripts/baseline-queries.txt"
-   git -C "$W" update-index --skip-worktree scripts/baseline-queries.txt   # 寫替身會把 S 位元清掉，這一行放回去
+   git -C "$W" config sparse.expectFilesOutsideOfPatterns true      # 沒有這行，下一行在 sparse worktree 裡是 rc 0 的靜默 no-op
+   git -C "$W" update-index --skip-worktree scripts/baseline-queries.txt
+   git -C "$W" ls-files -v scripts/baseline-queries.txt | grep -q '^S ' || echo 'FAIL: S 位元沒設上，不要在這棵樹裡 checkout/restore'
+   # …變異、測試…
+   git worktree remove --force "$W"; rm -rf "$W"                     # 用完立刻刪（CLAUDE.md）
    ```
 
    **寫替身之後那個檔就不再是 sparse 的**（`ls-files -v` 從 `S` 變 `H`、`git status` 顯示 ` M`），此時 worktree 裡任何
    `git checkout -- .`／`git checkout .`／`git restore .`／`git checkout HEAD -- .` 都會把**真檔 blob 實體化到 repo 之外**
    ——而拋棄式 worktree 裡沒有未 commit 的工作，`git checkout .` 正是最自然的還原動作（R30 DA；R3／R16／R29 同形第四次）。
-   所以：補上 `--skip-worktree`，**還原測試檔只准指名路徑**（`git checkout HEAD -- Tests/…`），不准對 `.` 或 `scripts/` 做
-   checkout／restore。也可以改用 CLAUDE.md 指定的 `cp` 備份就地還原（但那條有 `bashEditDiff` 的要求，見規則 1）。
+   **`update-index --skip-worktree` 在 `core.sparseCheckout=true` 的樹裡是 rc 0 的靜默 no-op**（R30 自檢逐字跑配方量到：
+   `ls-files -v` 仍是 `H`、`checkout .` 之後真檔 blob 實體化；加 `sparse.expectFilesOutsideOfPatterns true` 之後 S 位元才設得上，
+   四個還原命令全部保住替身——我在拋棄式 repo 重跑過一次，同）。所以配方帶自檢那一行；還是**還原測試檔只准指名路徑**
+   （`git checkout HEAD -- Tests/…`），不准對 `.` 或 `scripts/` 做 checkout／restore。也可以改用 CLAUDE.md 指定的 `cp` 備份就地還原（但那條有 `bashEditDiff` 的要求，見規則 1）。
    附帶：`git sparse-checkout set` 會把 `extensions.worktreeConfig = true` 寫進**共用的** `.git/config`。命中的 checkout **不要靜默
    排除，要另列**：reviewer 的私有 worktree 就是「remote 指向本 repo 的 checkout」，R26 的排除子句把它要抓的那一類整個
    排掉（R27，security）；今天（2026-09-20）已知且接受的一份是 marketplace 的 clone（`~/.claude/plugins/marketplaces/claude-code-ltm/`）
