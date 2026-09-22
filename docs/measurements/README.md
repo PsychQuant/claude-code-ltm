@@ -135,22 +135,37 @@
    Edit 之後的 `attachment` 紀錄，每一次都把完整查詢集存進 jsonl 一份——而**印**與**讀**也會：一個 Bash
    命令把整份檔案印進 stdout 是一筆 `toolUseResult.stdout`，一次 `Read` 是一筆 `toolUseResult.file.content`。
    **Bash 對 project root 底下檔案的編輯也會落一筆**：Claude Code 把那次 Bash call 對 project root 底下檔案造成的變更記成
-   unified diff 進 `toolUseResult.bashEditDiff`。量到的觸發條件（R30 自檢、R31 security 重量，**母體逐句指名**——R30 版把本
-   project 的 hunk 數放在「全語料」開頭的句子裡，R31 抓到）：全語料 2,632 筆 file entry **全部**在 project root 底下（2,544 在該筆
-   的 `cwd` 底下、88 不在該筆 `cwd` 底下但在 jsonl 目錄名解回的 project root 底下——其中 77 筆的目錄名解碼有歧義，是把路徑同樣編碼後比前綴確認的）、`/tmp`／`$TMPDIR`／`/private/var/folders` 0 筆；
-   主 session 1,411 筆與 subagent 431 筆都會產生（jsonl 紀錄的 `isSidechain` 欄位；subagent 逐字稿在 `<session>/subagents/**`，
-   走訪要遞迴——只掃頂層 `*.jsonl` 會數到 0 筆 subagent）；context **最多 3 行**（unified diff 預設）——全語料 5,061 個 hunk
-   的前置 context 分佈 {0: 567, 1: 19, 2: 157, 3: 4,318}、**後置** {0: 784, 1: 56, 2: 52, 3: 4,169}（檔首、新檔、EOF 的 hunk 少於 3），
-   本 project 535/535 前置都是 3。數字是 2026-09-22T03:56+08:00 的快照（R31 verify-fix 重跑；R31 security 的快照較小、形狀相同），
-   語料會長，重跑只會變大，**宣稱的是形狀**（全在 root 底下、tmp 0、兩種 session 都有、≤3 且 <3 存在）。終止符那個威脅靠的是**後置** context（終止符是檔頭最後一行、第 1 條在後），所以「編輯點離
+   unified diff 進 `toolUseResult.bashEditDiff`。量到的觸發條件（R30 自檢、R31 security、R32 verify-fix 各重量一次，**每個數字都標單位**——
+   R30 版把本 project 的 hunk 數放在「全語料」開頭的句子裡，R31 抓到；R31 verify-fix 版又把**紀錄**數放進以 **file entry**
+   為單位的句子裡，R32 三家抓到）。單位有三層：**紀錄**（一筆 `toolUseResult.bashEditDiff`）⊇ **file entry**（`files[]` 的一個
+   元素）⊇ **hunk**。2026-09-22T11:16+08:00 的快照：
+   帶 `bashEditDiff` 的**紀錄** 1,986（主 session 1,504／subagent 482，`isSidechain` 欄位；subagent 逐字稿在
+   `<session>/subagents/**`，走訪要遞迴——只掃頂層 `*.jsonl` 會數到 0 筆 subagent）。**「都會產生」只對鍵成立，對 hunk 不成立**：
+   564 筆的 `files[]` 是**空的**（subagent 436／主 session 128——subagent 的 482 筆裡只有 46 筆帶 file entry），另有 34 筆帶
+   `unavailable` 旗標（Claude Code 算不出 diff 的情況），`files[]` 最多 5 個元素、285 筆帶 `moreFiles > 0`。
+   **file entry** 2,847 筆**全部**在 project root 底下（2,754 在該筆 `cwd` 底下、93 不在 `cwd` 底下但在 jsonl 目錄名解回的
+   project root 底下——目錄名把非字母數字都編成 `-`，比對時要把路徑同樣編碼）、`/tmp`／`$TMPDIR`／`/private/var/folders` 0 筆。
+   **hunk** 5,321 個，context **最多 3 行**（unified diff 預設）：前置 {0: 708, 1: 20, 2: 171, 3: 4,422}、**後置**
+   {0: 942, 1: 58, 2: 56, 3: 4,265}（檔首、新檔、EOF 的 hunk 少於 3），本 project 565/565 前置都是 3。
+   語料會長，重跑只會變大，**宣稱的是形狀**（全在 root 底下、tmp 0、兩種 session 都有、≤3 且 <3 存在、有空 `files[]`）。終止符那個威脅靠的是**後置** context（終止符是檔頭最後一行、第 1 條在後），所以「編輯點離
    終止符 ≥ 3 行」這個上界成立、「都是 3 行」不成立。查法（只印計數）：遞迴走訪 `~/.claude/projects/**/*.jsonl`，取 `toolUseResult.bashEditDiff.files[].hunks[].lines[]`，
    數每個 hunk 前置／後置以空白開頭的連續行數；file entry 的路徑對該筆 `cwd` 與 jsonl 目錄名解回的 project root 比前綴（目錄名把非字母數字都編成 `-`，比對時要把路徑同樣編碼）。所以「只改註解行」不保證不帶查詢（R30，security＋DA）。**一次 call 內改完又還原
-   → 零筆——主 session 量到了**（R31 verify-fix，2026-09-22：同一個主 session 裡 3 個「備份→變異→跑→還原」全在一次 Bash call 內的呼叫，
-   `toolUseResult.bashEditDiff` 0 筆；正向對照組是同 session 裡 69 個離開時檔案有變的編輯呼叫，其中 40 個帶 `bashEditDiff`。查法：
-   在該 session 的 jsonl 裡由 assistant 的 `tool_use.id` 對回 user 的 `tool_result.tool_use_id`，看那筆有沒有 `toolUseResult.bashEditDiff`，
-   只印計數。**n = 3**，量的是「離開時無變動就不記」這條規則，不是每種還原寫法）。這件事在 R30／R31 都寫「推論、未證」：兩處探針
-   都在 project root 之外，settle 不了；R31 security 在 project root 建了合成檔驗，**Workflow-harness 的 subagent transcript 根本不寫
-   `toolUseResult`**——正向對照組也 0 筆——所以那種 session 驗不了，「主 session 與 subagent 都會產生」沒區分這第三種 session。
+   → 零筆——主 session 量到了，但那是與規則一致、不是隔離了規則**（R31 verify-fix 量了 3 筆；R32 改成可重跑的機械規則重量，
+   2026-09-22：實作者的主 session `…/-Users-che-Developer-claude-code-ltm/61707b35-….jsonl`，**往返**＝一次 Bash call 的命令裡
+   有 `cp X Y` 且其後另有 `cp Y X` → **8 個、全部 0 筆**；**正向對照**＝命令含就地寫入（`open(p,'w')`／`sed -i`／`tee`／`> Tests|docs/…`）
+   而不是往返的呼叫 → 118 個，其中 66 個帶非空 hunk、2 個只有鍵、50 個沒有紀錄。查法：在該 session 的 jsonl 裡由 assistant 的
+   `tool_use.id` 對回 user 的 `tool_result.tool_use_id`，看那筆的 `toolUseResult.bashEditDiff.files[]` 是否非空，只印計數；
+   兩條選取規則如上，腳本 `measure_roundtrip.py` 的形狀寫在這段裡、可重打。
+   **怎麼讀**：對照組說「離開時有改動也只有約 58% 留下紀錄」，所以在「記不記與有沒有改」獨立這個虛無假設下，8 個往返
+   全部為零的機率約 (50/118)^8 ≈ 0.001——比 R31 的 n = 3（≈ 0.07）強，但它**證的是一致、不是機制**：對照組的 50 筆「沒紀錄」
+   是用命令文字的 regex 挑的，可能含根本沒改到檔案的呼叫（那會高估「不記」的基準率），而往返規則也只涵蓋 `cp` 這一種
+   還原寫法。要真的隔離「離開時無變動就不記」，得在 project root 內建合成檔、同一 call 內改回去並對照不改回去的版本。）這件事在 R30／R31 都寫「推論、未證」：兩處探針
+   都在 project root 之外，settle 不了；R31 security 在 project root 建了合成檔驗，而那是在 **Workflow-harness 的 subagent
+   session** 裡——那種逐字稿**不寫結構化的 `toolUseResult`**，所以驗不了（R32 security／regression 更正 R31 verify-fix 寫的
+   「根本不寫 `toolUseResult`」那句全稱：它**會**寫，只是只在 `is_error` 的結果上、而且值是**字串**，沒有 `bashEditDiff` 這個
+   欄位——4,087 個 workflow 逐字稿 345,035 筆裡 2,015 筆有，全是字串、0 筆是 dict；本輪五個 agent 逐字稿 11/11 個 `is_error`
+   結果有、0/221 個 OK 結果有。那些字串是失敗命令的 stdout／stderr 副本，所以**錯誤路徑不是隱私豁免**）。
+   「主 session 與 subagent 都會產生」沒區分這第三種 session。
    判準是「這個動作會不會把整份檔案落到 `~/.claude/projects/**` 底下的**任何檔案**」，上面是例子不是清單（R29，security：
    R28 版寫「送進 jsonl」，而 Claude Code 今天會把大型 tool result **外溢**到 jsonl 旁邊的 `tool-results/*.txt` 與
    `workflows/*.json`——本輪檔頭短語鍵命中 36 個這種檔、jsonl 34 個；判準鍵在「jsonl」這個**位置**上，位置已經分裂，
@@ -215,6 +230,9 @@
    `for h in $(git log --all --full-history --format=%h -- "$f"); do sz=$(git cat-file -s "$h:$f"); find <根目錄…> -type f
    -size "${sz}c" 2>/dev/null | while read -r c; do git cat-file -p "$h:$f" | cmp -s "$c" - && echo COPY "$c"; done; done`
    （非要落地就加 `trap 'rm -rf "$T"' EXIT`——R30 的第一次掃描跑超過 550 秒被 `timeout` 殺掉，只有 trap 救得回來）。
+   **這段是 bash 寫法，在 zsh 下要改**（本機的 Bash 工具跑在 zsh）：把版本的 size 收成一趟 `find`（八趟掃 150 GB 太慢）時，
+   `-size` 條件要放進**陣列**（`SIZES=(-size 1669c -o -size 2930c …)` 再 `find … \( "${SIZES[@]}" \)`）——zsh 不對未加引號的
+   `$SIZES` 做 word-split，寫成純量會靜默回 0 個候選（R32 security 第一趟就這樣，與 CLAUDE.md 記過的 `$LOCK` 同一個坑）。
    根目錄至少含 `~/.claude`（含 `file-history`、`jobs`）、`/private/tmp`、`/private/var/folders`——**`$TMPDIR` 在它底下，
    不要兩個都列（每筆會報兩次），也不要只列 `$TMPDIR`**（R30 自檢：R30 verify-fix 一度為了去重砍掉大的那個，`/private/var/folders`
    底下有 39 個 per-user 的 `T/`，只掃自己那一個）；`/tmp` 是 symlink，`find` 不跟隨，列了等於沒列；`~/.claude/jobs` 是 150 GB 且含 FIFO／
@@ -232,17 +250,24 @@
    checkout 跑會把兩個查詢檔從**使用者的工作樹**移除，無警告）：
 
    ```bash
+   # 整段（含變異與測試）必須在**同一個 Bash call** 裡：這個 harness 每次 call 是新 shell，EXIT trap 在 call 結束就 fire，
+   # 第二個 call 進去時樹已經被刪（fail-safe，但不寫出來會被當成配方壞了——R32 regression 實測）。
    W=$(mktemp -d)
-   git worktree add --no-checkout "$W" HEAD
-   git -C "$W" sparse-checkout set --no-cone '/*' '!scripts/baseline-queries.txt' '!scripts/rrf-tie-queries.txt'
-   git -C "$W" checkout -q HEAD
+   trap 'git worktree remove --force "$W" 2>/dev/null; rm -rf "$W"' EXIT   # **第一件事**：後面任何一步失敗都還清得掉
+                                                                           # （R31 DA 找到一棵孤兒；R32 四家指出 trap 排在四個可失敗命令之後，防不到自己前面）
+   git worktree add --no-checkout "$W" HEAD \
+     && git -C "$W" sparse-checkout set --no-cone '/*' '!scripts/baseline-queries.txt' '!scripts/rrf-tie-queries.txt' \
+     && git -C "$W" checkout -q HEAD || { echo 'FAIL: 建樹失敗，不要往下走'; exit 1; }
+   # **在寫替身之前**先確認兩個查詢檔都沒落地：`sparse-checkout set` 若失敗（舊 git 沒有 `--no-cone`、打錯、少貼一行），
+   # 上一行的 `checkout` 就是完整 checkout、兩個真檔都實體化；替身只蓋掉 baseline 那一個，而 S 位元與下面的自檢**照樣通過**
+   # （R32 security 在合成 repo 逐字跑過：自檢印 S set、姊妹檔還在樹裡——自檢證的是「S 設上了」，不是「真檔沒落地」）。
+   [ ! -e "$W/scripts/baseline-queries.txt" ] && [ ! -e "$W/scripts/rrf-tie-queries.txt" ] || { echo 'FAIL: 真檔落地了'; exit 1; }
    { grep '^#' scripts/baseline-queries.txt; printf 'ZQXJ-%d\n' 1 2 3 4 5 6 7 8; } > "$W/scripts/baseline-queries.txt"
-   trap 'git worktree remove --force "$W" 2>/dev/null; rm -rf "$W"' EXIT   # 收尾綁在 EXIT——父 repo 先被刪時第一個命令跑不了、第二個仍會跑（R31 DA 找到一棵這樣的孤兒）
    git -C "$W" config --worktree sparse.expectFilesOutsideOfPatterns true   # 沒有這行，下一行在 sparse worktree 裡是 rc 0 的靜默 no-op；`--worktree` 讓它不寫進共用 .git/config（R31 regression）
    git -C "$W" update-index --skip-worktree scripts/baseline-queries.txt
    git -C "$W" ls-files -v scripts/baseline-queries.txt | grep -q '^S ' || echo 'FAIL: S 位元沒設上'
    # S 位元只擋「從索引還原」——這棵樹裡一律不對 `.`／`scripts/` 做 checkout／restore，跨 rev 尤其不行（見下）
-   # …變異、測試…
+   # …變異、測試…（同一個 call 內）
    ```
 
    **寫替身之後那個檔就不再是 sparse 的**（`ls-files -v` 從 `S` 變 `H`、`git status` 顯示 ` M`），此時 worktree 裡任何
@@ -253,7 +278,9 @@
    四個還原命令全部保住替身——我在拋棄式 repo 重跑過一次，同）。**但 S 位元只擋「從索引還原」**（R31 DA 逐字跑配方、八個自然
    動作各用一棵新 worktree：`checkout .`／`checkout HEAD -- .`／`restore .`／`checkout HEAD -- scripts/`／`restore scripts/`／
    `reset --hard`／`stash`／切 commit 都保住替身；**`checkout <別的 rev> -- .`、`checkout <別的 rev> -- scripts/`、
-   `restore --source=<別的 rev> .`／`scripts/` 全部把真檔 blob 實體化**，前兩個還把 S 清成 H——指定別的 rev 是「先寫索引再寫工作樹」，
+   `restore --source=<別的 rev> .`／`scripts/`——只要那一版的 blob 與 HEAD 不同——就把真檔 blob 實體化**（R32 requirements
+   在拋棄式 repo 兩種都跑過：blob 相同時這三個命令都保住替身、S 位元也還在，本輪比較的 `a3c7233..88f29fa` 正是這種；
+   但這個檔有 7 個歷史版本，對更早的 rev 危險是真的，所以禁令照樣是「任何 rev 都不准」——fail-closed），前兩個還把 S 清成 H——指定別的 rev 是「先寫索引再寫工作樹」，
    位元擋不住；而 verify 每一輪的標題都是「對 `<上一個 fix>`」，`git checkout <prev> -- .` 正是最省事的對照寫法）。所以自檢那一行
    證明的只是「S 設上了」，**不是**「可以 checkout」；真正在守的是這句禁令：**還原測試檔只准指名路徑**（`git checkout HEAD -- Tests/…`），
    不准對 `.` 或 `scripts/` 做任何 checkout／restore，任何 rev 都不准。也可以改用 CLAUDE.md 指定的 `cp` 備份就地還原（但那條有

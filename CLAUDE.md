@@ -317,10 +317,15 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 正確做法：`cp <file> /tmp/x.good` → 改 → 跑 → `cp /tmp/x.good <file>`。判準不是
 「有沒有 commit」，是**還原的目標是不是我手上這一份**。**這四步要在同一個 Bash call 內完成**——Claude Code 把一次
 Bash call 對 project root 底下檔案造成的變更記成 unified diff 進 `toolUseResult.bashEditDiff`（量到的觸發條件：全語料的 file
-entry 全部在 project root 底下、`/tmp` 零筆；主 session 與 subagent 都會產生；hunk 的 context **最多**前後各 3 行——unified diff 預設，檔首／新檔／EOF 的 hunk 少於 3，R31 security 量全語料分佈），所以拆成多次 call
+entry 全部在 project root 底下、`/tmp` 零筆；主 session 與 subagent 都會落**紀錄**，但 subagent 的紀錄多半 `files[]` 是空的
+（R32：482 筆裡只有 46 筆帶 file entry）——「會產生」對鍵成立、對 hunk 要另外看；hunk 的 context **最多**前後各 3 行
+——unified diff 預設，檔首／新檔／EOF 的 hunk 少於 3。三層單位與逐項計數在 `docs/measurements/README.md` 規則 1），所以拆成多次 call
 時，「改」那一次與「還原」那一次各落一個帶受限內容（連同 context）的 hunk。**單一 call 內改完又還原 → 零筆，
-主 session 量到了**（#63 R31 verify-fix：同一 session 3 個這種呼叫 0 筆、同 session 69 個離開時有變的編輯呼叫 40 個帶 diff 當正向對照；
-n = 3，查法與邊界在 `docs/measurements/README.md` 規則 1。R28–R30 只寫「推論、未證」，因為那時的探針都在 project root 之外）。（#63 R30，security＋DA：
+主 session 量到了——但那是「與規則一致」，不是「隔離了規則」**（#63 R32：機械規則重量，同一 session 裡 `cp X Y … cp Y X`
+的單次 call 往返 8 個、全部 0 筆；正向對照是同 session 118 個就地編輯呼叫、66 個帶非空 hunk。對照組說有改動也只有約
+58% 留下紀錄，所以 8 個全零在「記不記與有沒有改無關」的虛無假設下約 0.001——比 R31 的 n = 3（≈0.07）強，但對照組是用
+命令文字挑的、往返規則也只涵蓋 `cp`。查法、選取規則與邊界在 `docs/measurements/README.md` 規則 1。R28–R30 只寫
+「推論、未證」，因為那時的探針都在 project root 之外）。（#63 R30，security＋DA：
 2026-09-19 那次「只改註解行」的 Bash 就把三條活查詢當 context 記了進去，而 README 當時寫著「沒有再多一筆」。）**任何在 repo 之外複製出受限內容（基準
 查詢檔、任何第三方逐字內容）的動作——備份、worktree、job tmp、reviewer 的私有複本——用完立刻刪**；
 判準是「內容」不是「它叫什麼」。#63 verify R3 在 job tmp 找到一份忘了刪的 `bq.good`，R16 在
