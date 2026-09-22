@@ -321,11 +321,12 @@ entry 全部在 project root 底下、`/tmp` 零筆；主 session 與 subagent �
 （R32：482 筆裡只有 46 筆帶 file entry）——「會產生」對鍵成立、對 hunk 要另外看；hunk 的 context **最多**前後各 3 行
 ——unified diff 預設，檔首／新檔／EOF 的 hunk 少於 3。三層單位與逐項計數在 `docs/measurements/README.md` 規則 1），所以拆成多次 call
 時，「改」那一次與「還原」那一次各落一個帶受限內容（連同 context）的 hunk。**單一 call 內改完又還原 → 零筆，
-主 session 量到了——但那是「與規則一致」，不是「隔離了規則」**（#63 R32：機械規則重量，同一 session 裡 `cp X Y … cp Y X`
-的單次 call 往返 8 個、全部 0 筆；正向對照是同 session 118 個就地編輯呼叫、66 個帶非空 hunk。對照組說有改動也只有約
-58% 留下紀錄，所以 8 個全零在「記不記與有沒有改無關」的虛無假設下約 0.001——比 R31 的 n = 3（≈0.07）強，但對照組是用
-命令文字挑的、往返規則也只涵蓋 `cp`。查法、選取規則與邊界在 `docs/measurements/README.md` 規則 1。R28–R30 只寫
-「推論、未證」，因為那時的探針都在 project root 之外）。（#63 R30，security＋DA：
+主 session 量到了，而且有反面對照**（#63 R33 重量：同一 session 裡 `cp X Y … cp Y X` 的單次 call 往返，**純往返 17 個全部
+0 筆**；「備份之前先有一次真的修改」的 3 個裡 2 個各落一個 hunk、大小正是那次修改——記錄的是 call 進入與離開時的差。
+正向對照是提到 root 內路徑的就地編輯 159 個、117 個帶非空 hunk。**仍只是一致、不是隔離**：對照組用命令文字挑、往返規則
+只涵蓋 `cp` 且不驗還原真的跑了。兩條 regex、查法與邊界逐字在 `docs/measurements/README.md` 規則 1——R32 版的 regex 讓
+路徑吃進 `;` 而漏了兩個、正向對照的 pattern 沒寫成 regex 而重打不出來。R28–R30 只寫「推論、未證」，因為那時的探針都在
+project root 之外）。（#63 R30，security＋DA：
 2026-09-19 那次「只改註解行」的 Bash 就把三條活查詢當 context 記了進去，而 README 當時寫著「沒有再多一筆」。）**任何在 repo 之外複製出受限內容（基準
 查詢檔、任何第三方逐字內容）的動作——備份、worktree、job tmp、reviewer 的私有複本——用完立刻刪**；
 判準是「內容」不是「它叫什麼」。#63 verify R3 在 job tmp 找到一份忘了刪的 `bq.good`，R16 在
