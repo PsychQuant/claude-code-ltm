@@ -152,15 +152,19 @@
    語料會長，重跑只會變大，**宣稱的是形狀**（全在 root 底下、tmp 0、兩種 session 都有、≤3 且 <3 存在、有空 `files[]`）。終止符那個威脅靠的是**後置** context（終止符是檔頭最後一行、第 1 條在後），所以「編輯點離
    終止符 ≥ 3 行」這個上界成立、「都是 3 行」不成立。查法（只印計數）：遞迴走訪 `~/.claude/projects/**/*.jsonl`，取 `toolUseResult.bashEditDiff.files[].hunks[].lines[]`，
    數每個 hunk 前置／後置以空白開頭的連續行數；file entry 的路徑對該筆 `cwd` 與 jsonl 目錄名解回的 project root 比前綴（目錄名把非字母數字都編成 `-`，比對時要把路徑同樣編碼）。所以「只改註解行」不保證不帶查詢（R30，security＋DA）。**一次 call 內改完又還原
-   → 零筆**——與「記錄的是這個 call 進入與離開時的差」一致，而且同一個 session 裡有**反面對照**（R33 重量，2026-09-23T04:53+08:00，
+   → 零筆**——與「記錄的是這個 call 進入與離開時的差」一致，而且同一個 session 裡有**反面對照**（R33 重量；**截止點**是 jsonl 的 `timestamp` ≤ `2026-09-22T20:53:30Z`（字串比較，即 04:53:30+08:00——之後這個 session 還在長，
+   不帶截止點重跑只會變大；R34 requirements 就是因為截止點與下面的 root 內規則都沒寫而重打不出 159／39），
    實作者的主 session `~/.claude/projects/-Users-che-Developer-claude-code-ltm/61707b35-201e-4d2b-9cd2-0a578445d3f1.jsonl`）：
    - **往返**＝一次 Bash call 的命令裡 `cp X Y` 與其後的 `cp Y X` 都在（regex 逐字：`\bcp\s+(?:-\w+\s+)*("?[^\s";&|]+"?)\s+("?[^\s";&|]+"?)`，
      兩組捕獲互換都出現）。**R32 版的 regex 讓路徑吃進 `;`**（`cp $F $B;` 捕到 `$B;`），於是對不上而漏掉兩個——R33 修正後 20 個。
      再依「第一個 `cp` **之前**有沒有就地寫入」分兩群：**純往返 17 個、17 個都沒有紀錄**；**備份前先有一個真的修改**的 3 個裡
      2 個各落一個 hunk（+4/−0、+3/−2，正是備份之前那次修改的大小——離開時檔案確實不同於進入時），1 個沒有紀錄。
+     「正是那次修改」的查法（只用計數）：兩個 hunk 的 `+` 行都是**下一個** commit 那份檔案的子集、與**上一個** commit 那份不交
+     （R34 security 照此驗過成立）；另一種：變動行以子字串出現在命令裡第一個 `cp` **之前**的條數 vs 變異段裡的條數（R34 DA：7 條裡 5／0）。
    - **正向對照**＝命令含就地寫入（regex 逐字：`open\([^)]*['"]w['"]|sed -i |\btee\b|>>? *"?(?:Tests|docs|Sources|scripts)/`）
-     而不是往返：**命令裡提到 project root 內路徑的** 159 個——117 個帶非空 `files[]`、0 個只有鍵、42 個沒有紀錄；
-     **沒提到 root 內路徑的** 39 個（4／2／33）——寫在 root 之外的檔依建構永遠不會被記（上面量到 file entry 全在 root 底下），
+     而不是往返。再依命令文字分兩群，**root 內**＝配得上 `(?:^|[\s"'(=])(?:Tests|docs|Sources|scripts)/|CLAUDE\.md|/Developer/claude-code-ltm/`
+     （regex 逐字；R33 版沒寫出這條，R34 用三種自然讀法最接近的是 169／40）：**root 內** 159 個——117 個帶非空 `files[]`、0 個只有鍵、42 個沒有紀錄；
+     **其餘** 39 個（4／2／33）——寫在 root 之外的檔依建構永遠不會被記（上面量到 file entry 全在 root 底下），
      所以它們不該進基準率（R33 security 指出 R32 版把這一群混進去、低估了「有改就記」）。
    - 判定一律是「`toolUseResult.bashEditDiff.files[]` **非空**」——`files[]` 空與沒有這個鍵同算「沒記」（R33 logic：R32 版的
      基準率用「沒有紀錄」桶、判定卻用「非空」，兩桶不一致）。查法：在該 jsonl 裡由 assistant 的 `tool_use.id` 對回 user 的
@@ -169,7 +173,14 @@
    機率約 (42/159)^17 ≈ 2×10⁻¹⁰；而那 2 個「備份前先改」的往返**正好**記下了先前那次修改——這是同一個機制的正反兩面，比
    R31／R32 的單邊計數強。**仍然只是一致**：正向對照是用命令文字挑的（那 42 個「root 內卻沒記」沒有逐一查原因——可能是
    沒改到任何東西的替換、或改了又改回），往返規則只涵蓋 `cp`，而且**不驗還原真的跑了**（`cp F B && 改 && swift test && cp B F`
-   在測試如預期變紅時 `&&` 鏈中斷、永不還原——那時 0 筆會是反證；今天 20 個全是無條件還原的寫法，但規則本身不要求）。
+   在測試如預期變紅時 `&&` 鏈中斷、永不還原；今天 20 個全是無條件還原的寫法，但規則本身不要求）。
+   **call 出錯時，「同一個 call 內還原」擋不住 diff**（R34 security／DA；R33 版這裡寫「`&&` 中斷時 0 筆會是反證」，是假的）：
+   出錯的 Bash call **不帶** `bashEditDiff`（該 session 9 個 `is_error` 結果、0 筆 diff），所以中斷的那一次看起來是零筆，檔案卻停在
+   變異狀態，**差異落在下一個碰那個檔的 call 上**。實例：R33 fix 的一個變異 call 出錯、測試檔留在變異狀態而沒有紀錄；之後的
+   還原 call 記下 +1/−1 的 hunk 連同 context。對測試檔無害，**對查詢檔就是一筆受限內容**。一旦發生就**沒有不留紀錄的還原路徑**
+   ——任何把檔案改回去的 call，進入與離開時都不同。所以要防的是「離開這個 call 時沒還原」：還原不要接在 `&&` 後面，並在變異
+   **之前**掛 `trap '<還原>' EXIT`（與配方的 trap 同一個理由：它防不到排在它前面的東西）；行程被外部殺掉時 trap 不一定跑
+   （SIGKILL 一定不跑），所以對查詢檔的那一個 call 裡不要放可能逾時或被中斷的東西。17 個純往返裡 `is_error` 為 0，所以不影響 17/17。
    要真的隔離，得在 project root 內建合成檔、同一 call 內改回去並對照不改回去的版本。這件事在 R30／R31 都寫「推論、未證」：兩處探針
    都在 project root 之外，settle 不了；R31 security 在 project root 建了合成檔驗，而那是在 **Workflow-harness 的 subagent
    session** 裡——那種逐字稿**不寫結構化的 `toolUseResult`**，所以驗不了（R32 security／regression 更正 R31 verify-fix 寫的
@@ -276,7 +287,8 @@
    # **在寫替身之前**先確認兩個查詢檔都沒落地：`sparse-checkout set` 若失敗（舊 git 沒有 `--no-cone`、打錯、少貼一行），
    # 上一行的 `checkout` 就是完整 checkout、兩個真檔都實體化；替身只蓋掉 baseline 那一個，而 S 位元與下面的自檢**照樣通過**
    # （R32 security 在合成 repo 逐字跑過：自檢印 S set、姊妹檔還在樹裡——自檢證的是「S 設上了」，不是「真檔沒落地」，
-   也不是「替身寫進去了」：R33 security 在 `scripts/` 只含兩個被排除檔的合成 repo 裡量到寫替身失敗而 S 照設）。
+   # 也不是「替身寫進去了」：R33 security 在 `scripts/` 只含兩個被排除檔的合成 repo 裡量到寫替身失敗而 S 照設）。
+   # （上一行在 R33 少了 `#`，在 bash 區塊裡會被當命令執行、`set -e` 下在建樹後中止——R34 requirements／security／regression。）
    [ ! -e "$W/scripts/baseline-queries.txt" ] && [ ! -e "$W/scripts/rrf-tie-queries.txt" ] || { echo 'FAIL: 真檔落地了'; exit 1; }
    { grep '^#' scripts/baseline-queries.txt; printf 'ZQXJ-%d\n' 1 2 3 4 5 6 7 8; } > "$W/scripts/baseline-queries.txt"
    [ -s "$W/scripts/baseline-queries.txt" ] || { echo 'FAIL: 替身沒寫進去'; exit 1; }   # R33 security：`scripts/` 不存在時重導失敗，S 位元照樣設得上

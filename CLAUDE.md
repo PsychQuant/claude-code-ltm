@@ -324,8 +324,10 @@ entry 全部在 project root 底下、`/tmp` 零筆；主 session 與 subagent �
 主 session 量到了，而且有反面對照**（#63 R33 重量：同一 session 裡 `cp X Y … cp Y X` 的單次 call 往返，**純往返 17 個全部
 0 筆**；「備份之前先有一次真的修改」的 3 個裡 2 個各落一個 hunk、大小正是那次修改——記錄的是 call 進入與離開時的差。
 正向對照是提到 root 內路徑的就地編輯 159 個、117 個帶非空 hunk。**仍只是一致、不是隔離**：對照組用命令文字挑、往返規則
-只涵蓋 `cp` 且不驗還原真的跑了。兩條 regex、查法與邊界逐字在 `docs/measurements/README.md` 規則 1——R32 版的 regex 讓
-路徑吃進 `;` 而漏了兩個、正向對照的 pattern 沒寫成 regex 而重打不出來。R28–R30 只寫「推論、未證」，因為那時的探針都在
+只涵蓋 `cp` 且不驗還原真的跑了。三條 regex、截止時間戳、查法與邊界逐字在 `docs/measurements/README.md` 規則 1——R32 版的 regex 讓
+路徑吃進 `;` 而漏了兩個、正向對照的 pattern 沒寫成 regex 而重打不出來；R33 版沒寫 root 內的切法與截止點，R34 又重打不出 159。
+**call 出錯時這條規則擋不住 diff**（R34 security／DA）：出錯的 call 不帶 `bashEditDiff`，差異落在**下一個**改回那個檔的 call 上，
+而且沒有不留紀錄的還原路徑——所以在變異**之前**掛 `trap '<還原>' EXIT`，對查詢檔的那個 call 裡不放會逾時或被中斷的東西。R28–R30 只寫「推論、未證」，因為那時的探針都在
 project root 之外）。（#63 R30，security＋DA：
 2026-09-19 那次「只改註解行」的 Bash 就把三條活查詢當 context 記了進去，而 README 當時寫著「沒有再多一筆」。）**任何在 repo 之外複製出受限內容（基準
 查詢檔、任何第三方逐字內容）的動作——備份、worktree、job tmp、reviewer 的私有複本——用完立刻刪**；

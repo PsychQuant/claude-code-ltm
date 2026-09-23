@@ -131,13 +131,18 @@ private let realFileTestName = "baselineQueryFileDocumentsItsContractAndRetiresT
 private let fixtureTestName = "queryFileChecksAreDrivenByTheirOwnFixture"
 private let syncTestName = "verdictAlphabetIsStatedIdenticallyEverywhere"
 
-/// **編譯期證人**：兩條受保護測試的函式符號在**檔案層**被引用。宣告被條件編譯掉、註解掉、改名，這個檔就編不過。
+/// **編譯期證人**：兩條受保護測試的函式符號在**檔案層**被引用——一個不小心的改名或刪除讓這個檔編不過。**單獨不足**：它要的
+/// 只是「模組裡有一個叫這個名字、型別合得上的值」——真測試 `/* */` 包住、改放一個同名的檔案層
+/// `private let <name>: @Sendable () throws -> Void = {}` 照樣編得過（R34 regression），鄰檔的同名 `func` 也行（R34 requirements）。承重的是它與宣告計數
+/// （`uniqueDeclaration`：程式碼裡恰好一行以 `func NAME(`／`private func NAME(` 開頭）一起：註解包住讓計數歸零、同樣開頭的同名
+/// stub 讓計數成二。刻意湊出兩邊都滿足的寫法不在射程（「買不到什麼」的威脅模型與第 4 條）。
 ///
 /// 放在檔案層、不放在同步測試本體裡（R33 DA HIGH：R32 版把它寫成同步測試裡的區域 `let _: [...]`，於是在那個本體裡再加一行
 /// 區域 `let queryFileChecksAreDrivenByTheirOwnFixture: () throws -> Void = {}` 就把名字改綁——真測試 `/* */` 包住、pins 全綠、
-/// 測試不存在。鍵選在名字上，而名字在**使用點**可以重綁）。檔案層的引用只能由同一模組的**頂層**宣告滿足，而同名的第二個
-/// 頂層宣告是 `invalid redeclaration`（fail-closed）。`#if false … #else <同名 stub> #endif`（R33 regression）由同步測試對整檔的
-/// `#if` 禁令與 `topLevelBodyLines` 對任何縮排的同名宣告計數關掉。**買不到**：把這一行連同同步測試一起拿掉——見清單第 4 條。
+/// 測試不存在。鍵選在名字上，而名字在**使用點**可以重綁）。檔案層的查找只看得到頂層宣告，所以**使用點**的重綁關掉了；**宣告點**
+/// 的替換（另一個同名的頂層值）沒有——R34 regression 的構造就是那一種（R33 版這裡寫「只能由同一模組的頂層宣告滿足」並據此說
+/// 「註解掉就編不過」，後半是假的）。`#if false … #else <同名 stub> #endif`（R33 regression）由同步測試對整檔的 `#if` 禁令與
+/// 宣告計數關掉。
 private let protectedTestWitness: [@Sendable () throws -> Void] = [baselineQueryFileDocumentsItsContractAndRetiresThePollutedQueries, queryFileChecksAreDrivenByTheirOwnFixture]
 
 /// 自動內容約束的**具名清單**——散文那兩份列舉（README 與 `maxQueryScalars` 的說明）的權威來源。
@@ -167,7 +172,13 @@ private let protectedTestWitness: [@Sendable () throws -> Void] = [baselineQuery
 /// **買不到什麼——每一條標明誰在哪一輪構造了什麼、結果如何；沒有構造紀錄的不寫進來**（R27 版寫「每一條都是 R27
 /// 實際構造並量過」，R28 三家逐條核：四條裡只有第 1 條符合那句話——第 2 條是 R27 #20 的「屬潛在」、第 3 條是 R25
 /// 量的、第 4 條指著同一 commit 已刪的 `assertedIn` 且已被 `requireTest` 關掉。這份清單**依建構不完整**：它只列
-/// 構造過的，下一個容器一定還有）：
+/// 構造過的，下一個容器一定還有）。
+///
+/// **威脅模型（R34 定案）**：本檔的靜態 pin 防的是**不小心的漂移**——改名、搬動、順手加的 trait、順手寫的 `guard … return`、
+/// 順手包的 `withKnownIssue`。**刻意修改本檔或同一個 test target 的鄰檔**不在射程。這條界線是量出來的，不是讓步：R4→R34 每一輪
+/// 都在上一輪新裝的鍵上找到同形狀的洞，而 R34 的構造（第 4 條）顯示「測試註冊了卻不跑、或根本不存在」這一族**唯一**的共同觀測點
+/// 是**行程外**的逐條執行結果——`exit(0)` 之後行程內沒有見證者能執行，被取消的測試不回報自己。那個觀測點**未做**；在它存在之前，
+/// 再加一把靜態鍵是下一把鍵、不是修法，所以停止加鍵。以下各條的「仍買不到」都照這條讀——列出來是讓讀者知道邊界在哪：
 ///   1. **斷言存在但恆真**（R27 DA）：`#expect(r.X.isEmpty` → `#expect(r.X.count >= 0`，訊息、欄位名、`r` 都不動 →
 ///      needle 仍在、邊界檢查仍過，查詢檔裡留一條活的註解行而 614 條全綠。needle 是純文字比對，它認得「有沒有提到」，
 ///      認不得「有沒有牙」。同族：斷言在另一個 `r` 上（未構造）；**斷言在深度 0 但不執行／不編譯**（R31 DA 構造並在拋棄式
@@ -183,24 +194,30 @@ private let protectedTestWitness: [@Sendable () throws -> Void] = [baselineQuery
 ///      這三處——本條、第 7 條、`hasNeedle` 的 doc——當時都還寫著「字串字面裡也算數」，是 R31 改鍵時漏掉的過時句）。
 ///   3. **一條約束把違規記進既有的欄位**（R25 DA 對 `Mirror` 版構造，記進 `tooLong`）：項數不變、欄位不變、`throw`
 ///      集合不變。已實現的實例：檔首 BOM 有自己的判定、fixture 臂與哨兵值，卻摺進「禁用字元」那一項（R26）。
-///   4. **測試有註冊、runner 卻不跑它**（R28 requirements 構造 `.disabled`；R32 DA 另構造三種並在拋棄式包量到
-///      `skipped`／exit 0）：`@Test("…", .disabled("m4"))`、`.enabled(if: false)`、`@Test("…", arguments: [Int]())`
-///      （`skipped: "No test cases found."`——不是 trait，看起來像一條正常的參數化測試）、`@Test` 上一行的
-///      `@available(macOS 99, *)`。`requireTest` 只看「上一行以 `@Test(` 開頭」、`skippingControlFlow` 只看本體，都看不見。
-///      **R32 起** `disablingAttributeShape` 只允許一種形狀：`@Test(` 單行、只帶一個 display name 字串字面、上一行不是屬性
-///      （有臂）。寫成允許一種形狀而不是禁一份 trait 清單，下一種拼法才不必再列。（R27 版這裡寫的是「指到非 `@Test` 的
-///      頂層 func」——那個洞已被 `requireTest` 關掉。）
-///      **同族但不同表面**：把整條 `@Test` 用檔案層 `#if false … #endif` 或 `/* … */` 包住——三個 pin 全綠、測試根本不存在、
-///      `swift test` exit 0（R32 DA，同樣量過）。**R32 起**由**編譯期證人**（直接引用兩條測試的函式符號）關掉；**R33 起**證人在
-///      **檔案層**（`protectedTestWitness`）——R32 版寫在同步測試本體裡，R33 DA 在那個本體加一行區域 `let` 同名遮蔽、真測試
-///      `/* */` 包住，編得過、pins 全綠、測試不存在（鍵選在名字上，而名字在使用點可以重綁）。同一輪另補兩道：宣告在**程式碼**裡、
-///      **任何縮排**都算候選（`/* */` 裡的不算、`#else` 裡的縮排 stub 算第二個——R33 regression），以及整檔 `#if` 禁令。
-///      **仍買不到**：連同同步測試一起拿掉——**整個檔照樣編譯**、只少幾條測試、沒有任何訊息；或三條都掛
-///      `@available(macOS 99, *)`（可用性相同，證人的引用編得過）——三條都 skipped、`swift test` 印「passed」、**條數不變**
-///      （R33 requirements／DA 各自實測；R32 版這裡寫「整個檔都不編譯、條數會少」，兩半都錯，而且把殘留寫得比實際**響**）。
-///      同步測試自己的 `@Test` 行 R33 起由**真檔測試**反過來檢查（一條 disabled 的測試不能檢查自己——R33 verify-fix 第一版把它
-///      放進同步測試自己的清單，變異證明那是驅動不了的守衛），所以要讓兩邊都安靜，得把**兩條**都 disable 或都掛 `@available`。
-///      要買到它需要一個**檔案外**的見證者（未做）。
+///   4. **測試有註冊、runner 卻不跑它——或根本不存在**（R28 起逐輪構造；**R34 在這裡劃邊界**，見上方威脅模型）。
+///      **擋住的**（不小心就寫得出來的形狀）：`@Test` 的 trait 與引數——`.disabled("m")`、`.enabled(if: false)`、`arguments: [Int]()`
+///      （`skipped: "No test cases found."`，看起來像一條正常的參數化測試）——由 `disablingAttributeShape` 只允許一種形狀擋（R32 起；
+///      寫成允許一種形狀而不是禁一份 trait 清單）；`@Test` 之上的單行屬性，夾空行或註解行也算（R33 起）；宣告被改名、刪掉、用
+///      `/* */` 或 `#if` 包住——檔案層證人、宣告計數、整檔 `#if` 禁令一起擋（R32–R33；失敗史在證人的 doc 與同步測試的註解）；
+///      本體裡的 `return`／`guard`／`exit` 族（`skippingControlFlow`）；同步測試自己的 `@Test` 行由真檔測試反過來查（R33）。
+///      **構造過而擋不住的**（R34 各自實測；除註明外 `swift test` RC 0）：
+///      - 本體裡 `try Test.cancel()`——Swift Testing 公開的執行期 skip，測試 `was cancelled`、run passed（DA）。**注意**：它與
+///        `guard … return` 同一個動機（維護者想在某個條件下跳過），按威脅模型的字面其實落在「不小心」那一側；R34 依使用者
+///        「停止加鍵」的決定不補，這是那個決定的已知代價；
+///      - 受保護測試包進 `@Suite(.disabled("m"))` 的巢狀 struct、頂層再放一個 `fileprivate func` 同名 stub——宣告計數不看大括號
+///        深度、也不認 `fileprivate`，證人只要有一個同名的值（requirements，sparse worktree 端到端）；
+///      - 證人那一行改寫成仍含兩個名字、卻不直接引用函式的運算式——證人的 pin 是子字串檢查（requirements／logic）；
+///      - 跨行屬性 `@available(` ／ `macOS 99, *)`——往上走停在第二行（logic）；
+///      - 讓整檔 lexer 誤判，把 `#if` 與 stub 一起藏起來：R34 logic 用的是反引號識別碼（`endsOperand` 已修）、DA 用的是緊跟 `"` 的
+///        U+200D（`codeOnly` 以字形叢集切、Swift 以純量切——未修）。lexer 是啟發式，下一個誤判一樣能用；
+///      - 同 target 鄰檔的 `exit(0)`——整個行程結束，連已記錄的失敗也蓋掉（DA；移到另一個 test target 則 RC 1）；
+///      - 只關同步測試這一邊：`#if false` 包住、跨行 `@available`、包進停用的 suite——同步測試不跑，它扛的所有結構 pin 一起消失
+///        （requirements／regression）；
+///      - 把同步測試連同證人那一行一起拿掉——整個檔照樣編譯、只少幾條測試；或三條測試與證人**四處**都掛 `@available(macOS 99, *)`
+///        （R34 requirements：R33 把證人搬到檔案層之後，只掛三條會以可用性編譯錯誤擋下——R33 版這裡寫「三條都掛」，指的是舊佈局）。
+///      R33 版在這裡寫「要讓兩邊都安靜，得把**兩條**都 disable」——上面任一種單邊做法都更便宜，那句是假的。要買到這一族需要
+///      行程外的見證者：解析 `swift test` 的事件流或 xunit 輸出，斷言受保護的測試與同步測試是 passed、不是 cancelled／skipped／
+///      缺席。**未做**。
 ///   5. **driven 臂只斷言不違規的方向**（R28 DA 構造）：刪掉 `headerStructure` 所有 `== [n]` 臂、只留
 ///      `#expect(try report(header + "ZQXJ-A\nZQXJ-B\n").headerStructure.isEmpty)`，並把 `r.headerStructure` 神經化成 `[]`
 ///      → 三條全綠。driven needle 分不出「斷言 `== []`」與「斷言 `== [3]`」。
@@ -223,16 +240,21 @@ private let protectedTestWitness: [@Sendable () throws -> Void] = [baselineQuery
 ///      的程式碼——任何區塊裡的都不算，不再認容器名字，`if false {`／`knownGap { }`／巢狀 func／多行 wrapper 全部同一條規則
 ///      （各有臂）。**R31 對「每一種詞法模式」證偽了四次（三個 lens：logic、requirements、DA ×2）**——巢狀 `/* /* */ } */`、`#/}/#` 與裸 `/}/` regex（姊妹檔已在用）、
 ///      `#"""` 內層裸 `"""`、`\"""` 逃脫、raw 插值 `\#("#")`——**R31 起**全部建模（各有臂），`codeOnly` 的 doc 改成實際列舉。
-///      **R32 又證偽五種**（logic 三、DA 二，各自 `swiftc` 編譯過、都 fail-open、各有臂）：raw 的逃脫引號 `\#"`（R31 修插值時
-///      漏掉同一支分支的姊妹）、多行字串裡的**跨行插值**（插值裡再開 `"""`）、`#"""""#` 是合法的**單行** raw string（值 `"""`，
-///      舊版當多行而吃掉同行其後的 `{`）、插值裡的 raw string 與區塊註解。
+///      **R32 又證偽四種**（logic 三、DA 一，各自 `swiftc` 編譯過、都 fail-open、各有臂）：raw 的逃脫引號 `\#"`（R31 修插值時
+///      漏掉同一支分支的姊妹）、多行字串裡的**跨行插值**（插值裡再開 `"""`）、插值裡的 raw string 與區塊註解（以上 logic）、
+///      `#"""""#` 是合法的**單行** raw string（值 `"""`，舊版當多行而吃掉同行其後的 `{`，DA）。（R33 版這裡寫「五種、DA 二」，
+///      把下面判別方向的 `n!/2` 也算進來，與 `codeOnly` doc 的「R32 又四次」矛盾——R34 requirements／regression；歸屬對回 R32
+///      report 的 Source 欄：#5／#6／#17 logic、#13 DA。）
 ///      仍不在射程：一條臂**真的**在區塊裡而該算（會被報「缺」，fail-closed）；裸 regex 的判別是啟發式——**兩個方向都會錯**：
 ///      regex 被判成除法（字面裡的大括號漏出）與除法被判成 regex（吃掉同行其後的 `{`，R32 DA 用後綴 `!` 的 `n!/2` 構造）。
-///      R32 把判準從封閉的字元集合改成另一份**正向**清單（運算元位置含 `try`／`in`／`;`…），R33 兩個方向又各被打穿：`try?`／
-///      `try!` 被判成後綴（從 88f29fa 的正確判定退化，logic／regression）、`if`／`while`／`where` 不在清單（DA，拋棄式包實測
-///      passed with known issue）。**R33 起改成負向**（`endsOperand`）：前一個 token 結束一個運算元（識別碼、數字、`)`／`]`／`}`、
-///      字串收尾、`self`／`true`／`nil` 這類值關鍵字、接在運算元後的後綴 `!`／`?`）才是除法，其餘都是 regex——保留字清單是
-///      語言的封閉集合，不是觀察到的清單。仍是啟發式：上下文關鍵字（`open`／`some`／`any`…）被當識別碼。
+///      R32 把判準從封閉的字元集合改成另一份**正向**清單（運算元位置含 `try`／`in`／`;`…），R33 又被打穿兩次、**都是同一個方向**
+///      （regex 判成除法；R33 版這裡寫「兩個方向又各被打穿」，R34 requirements）：`try?`／`try!` 被判成後綴（從 88f29fa 的正確判定
+///      退化，logic／regression）、`if`／`while`／`where` 不在清單（DA，拋棄式包實測 passed with known issue）。**R33 起改成負向**
+///      （`endsOperand`）：前一個 token 結束一個運算元（識別碼、`.` 之後的成員名、反引號識別碼、`)`／`]`／`}`、字串收尾、
+///      `self`／`true`／`nil` 這類值關鍵字、接在運算元後的後綴 `!`／`?`）才是除法，其餘都是 regex——保留字與識別碼字元都照 TSPL
+///      的封閉集合，不是觀察到的清單。R34 又找到三個（`.default`、反引號、emoji 識別碼之後的除法被判成 regex；regression／DA）
+///      與同行收尾被行尾註解假冒（DA），各有臂。仍是啟發式：上下文關鍵字（`some`／`any`／`unsafe`…）被當識別碼——`unsafe` 會接
+///      運算式，其後的裸 regex 被判成除法（R34 DA，fdb3c37 起就 fail-open）；在射程外（威脅模型）。
 ///   7. **`).count` 被無關的 `.count` 滿足**（R28 DA 構造，對 R27 版）：刪掉 `.count == 2` 臂、換成
 ///      `#expect(requiredHeaderPhrases.joined(separator: " ").count > 0)` → 全綠。**R28 起 driven 行還必須含 `report(`**，
 ///      所以這個構造今天會紅；`#expect(try report("").count >= 0)` 仍過（那是第 1 條）。代價（R29 regression／requirements）：
@@ -303,19 +325,27 @@ private func runDraining(_ process: Process) throws -> (status: Int32, stdout: D
 private func topLevelBodyLines(of name: String, in lines: [String], requireTest: Bool = false) -> [String]? {
     // 宣告在**程式碼**裡找（整檔先過 `codeOnly`），且**任何縮排**都算一個候選（R33 DA／regression：R32 版在原始行裡只認第 0 欄——
     // 整條測試 `/* … */` 包住時仍從註解裡找到宣告；`#if false … #else` 裡一個縮排的同名 stub 讓證人編得過而掃描仍讀死分支。
-    // 現在：註解／字串裡的宣告不算，縮排的同名宣告讓 `decls.count == 1` 失敗——兩者都 fail-closed）。
-    let code = codeOnly(lines).map { $0.trimmingCharacters(in: asciiWhitespace) }
-    let decls = code.indices.filter { code[$0].hasPrefix("func \(name)(") || code[$0].hasPrefix("private func \(name)(") }
-    guard decls.count == 1, let end = lines[(decls[0] + 1)...].firstIndex(of: "}") else { return nil }
+    // 現在：註解／字串裡的宣告不算，縮排的同名宣告讓宣告不唯一——兩者都 fail-closed）。找法在 `uniqueDeclaration`，與
+    // `disablingAttributeShape` 共用一個寫者。
+    guard case let (code, decl)? = uniqueDeclaration(of: name, in: lines), let end = lines[(decl + 1)...].firstIndex(of: "}") else { return nil }
     // smoke／driven 那兩條的宣告行，上一行必須以 `@Test(` 開頭（R27，requirements：R26 版只認 `func NAME(`，指向一個含
     // needle 的 private helper 會全綠而那句斷言從不執行）。**這只證明它是 `@Test`，不證明它會被執行**：`@Test("…", .disabled(…))`
     // 照樣通過而那條測試不跑（R28 requirements 構造；`contentConstraints` 說明「買不到什麼」第 4 條）。
-    if requireTest, !(decls[0] > 0 && code[decls[0] - 1].hasPrefix("@Test(")) { return nil }   // 對程式碼看：註解裡的 `@Test(` 不算
+    if requireTest, !(decl > 0 && code[decl - 1].hasPrefix("@Test(")) { return nil }   // 對程式碼看：註解裡的 `@Test(` 不算
     // **不在這裡剝註解**——R31 requirements／logic：R26–R30 版在這裡用 `range(of: "//")` 裸剝、不看字串狀態，而 `codeOnly`
     // 又自己剝一次「行尾 `//`」：**同一件事兩個寫者**，生效的是先跑的裸剝——`withKnownIssue("see https://…") {` 的 `{` 被吃掉，
     // 深度停在 0，區塊裡兩條臂在兩個表面都算「有」（生產組合實測；上方 doc 引述的 R26 那句「那個方向 fail-closed」對 token 版
     // 成立、對深度版是假的）。現在只回**原始行**（含註解），註解與字串一律交給 `codeOnly`。
-    return Array(lines[(decls[0] + 1)..<end])
+    return Array(lines[(decl + 1)..<end])
+}
+
+/// 宣告搜尋的**唯一寫者**：整檔過 `codeOnly`、trim 後，以 `func NAME(` 或 `private func NAME(` 開頭的行恰好一行時，回傳那份
+/// 程式碼行與宣告的索引；否則 nil。R34 regression：`disablingAttributeShape` 與 `topLevelBodyLines` 各寫一份同樣的找法，
+/// 前者那一份退掉零測試變紅——兩份不會一起改的規格，抽成一份之後由 `topLevelBodyLines` 的臂一起扛。
+private func uniqueDeclaration(of name: String, in lines: [String]) -> (code: [String], index: Int)? {
+    let code = codeOnly(lines).map { $0.trimmingCharacters(in: asciiWhitespace) }
+    let decls = code.indices.filter { code[$0].hasPrefix("func \(name)(") || code[$0].hasPrefix("private func \(name)(") }
+    return decls.count == 1 ? (code, decls[0]) : nil
 }
 
 /// `formerQueries`：**曾經是查詢**的字串集合（已經過 `foldLikeJudge`），由呼叫端給——真檔測試從這個檔在 git 歷史裡的
@@ -588,7 +618,8 @@ func baselineQueryFileDocumentsItsContractAndRetiresThePollutedQueries() throws 
     #expect(r.headerStructure.isEmpty, Comment(rawValue: "檔頭結構違規行號（終止符後的註解行／終止符前的非註解行；0 ＝ 終止符缺少或重複。退役要刪除、不得註解保留）：\(r.headerStructure)"))
     #expect(r.headerFormerQueries.isEmpty, Comment(rawValue: "檔頭裡含曾經是查詢（git 任一可達版本、或退役清單）的字串的行號（0 ＝ 跨行拼出來的）——退役要刪除、不得搬進檔頭：\(r.headerFormerQueries)"))
     // 反過來守同步測試的 `@Test` 行（R33 DA：同步測試守這一條，但沒有人守同步測試；一條 disabled 的測試不能檢查自己）。
-    // 要讓兩邊都安靜，得把兩條都 disable——那時誰都不跑，這是「買不到什麼」第 4 條記下的殘留。
+    // 只擋不小心掛上的 trait／單行屬性。刻意讓同步測試不跑有好幾種單邊做法（`#if` 包住、跨行 `@available`、停用的 suite），
+    // 這一行都看不到（R34 requirements／regression；R33 版這裡寫「要讓兩邊都安靜，得把兩條都 disable」是假的）——「買不到什麼」第 4 條。
     let ownSource = try String(contentsOf: URL(fileURLWithPath: "\(#filePath)"), encoding: .utf8).components(separatedBy: "\n")
     #expect(disablingAttributeShape(of: syncTestName, in: ownSource) == nil, "同步測試的 `@Test` 屬性形狀不合格（會讓它註冊了卻不跑）")
 }
@@ -1132,15 +1163,16 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     let smokeBody = try #require(topLevelBodyLines(of: realFileTestName, in: sourceLines, requireTest: true), "找不到 \(realFileTestName) 的唯一頂層 `@Test` 宣告或其收尾 `}`")
     let drivenBody = try #require(topLevelBodyLines(of: fixtureTestName, in: sourceLines, requireTest: true), "找不到 \(fixtureTestName) 的唯一頂層 `@Test` 宣告或其收尾 `}`")
     // R32 DA 兩條 HIGH：上面兩個本體的 pin 表面都是**本體**——把整條 `@Test` 從外面關掉，它們一概看不到。
-    // (a) 檔案層 `#if false … #endif` 或 `/* … */` 包住整條測試 → 三個 pin 全綠、測試不存在、`swift test` exit 0。關掉它的是
-    //     `protectedTestWitness`（**檔案層**的編譯期證人，R33 起——R32 版寫在這個本體裡，被一行區域 `let` 遮蔽穿過）＋
-    //     `topLevelBodyLines` 只在程式碼裡、對任何縮排計數（`/* */` 裡的宣告不算、`#else` 裡的 stub 算第二個）＋下面這條
-    //     **整檔 `#if` 禁令**（本檔沒有任何條件編譯；零成本、fail-closed）。**買不到**：連同這條同步測試一起拿掉——整個檔
-    //     照樣編譯、只少幾條測試、沒有任何訊息；三條都掛 `@available(macOS 99, *)` 則三條 skipped、條數不變（R33 requirements／DA
-    //     實測；R32 版寫「整個檔都不編譯、條數會少」是錯的——見清單第 4 條）。
-    // (b) runner 註冊了卻不跑（`.disabled`／`.enabled(if: false)`／`arguments: [Int]()`／`@available`）：`disablingAttributeShape`。
+    // (a) 檔案層 `#if false … #endif` 或 `/* … */` 包住整條測試 → 三個 pin 全綠、測試不存在、`swift test` exit 0。擋它的是
+    //     `protectedTestWitness`（**檔案層**的編譯期證人，R33 起——R32 版寫在這個本體裡，被一行區域 `let` 遮蔽穿過）＋宣告計數
+    //     （`uniqueDeclaration`：只在程式碼裡、對任何縮排計數；`/* */` 裡的宣告不算、`#else` 裡的 stub 算第二個）＋下面這條
+    //     **整檔 `#if` 禁令**（本檔沒有任何條件編譯；零成本、fail-closed）。
+    // (b) runner 註冊了卻不跑（`.disabled`／`.enabled(if: false)`／`arguments: [Int]()`／`@Test` 之上的屬性）：`disablingAttributeShape`。
     //     這條同步測試自己的 `@Test` 行由**真檔測試**反過來檢查（R33 DA：原本沒有任何守衛；而一條被 disable 的測試不會執行，
     //     所以它不能檢查自己——R33 verify-fix 第一版把它放進這裡的清單，那是驅動不了的守衛）。
+    // 這些 pin 防的是**不小心的漂移**；刻意編輯本檔或同 target 的鄰檔不在射程。R34 的構造（`Test.cancel()`、停用的巢狀 suite
+    // ＋同名 stub、跨行屬性、鄰檔 `exit(0)`、只關同步測試這一邊……）與唯一的收斂點（行程外見證者，未做）都在「買不到什麼」第 4 條
+    // ——R33 版這裡還寫著「三條都掛 `@available` 則三條 skipped」，那是證人搬到檔案層之前的佈局。
     _ = protectedTestWitness
     let witnessLines = codeOnly(sourceLines).filter { $0.hasPrefix("private let protectedTestWitness") && $0.contains(realFileTestName) && $0.contains(fixtureTestName) }
     #expect(witnessLines.count == 1, "檔案層的 `protectedTestWitness` 要以程式碼存在且引用兩條受保護測試的符號（不在註解、不在 `#if` 裡）")
@@ -1364,9 +1396,13 @@ private func hasIdentifierBounded(_ line: String, _ needle: String) -> Bool {
 private func isIdentifierChar(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
 
 /// Swift 的**保留字**裡、之後接的是一個運算式（或宣告）的那些——`endsOperand` 用它分辨「識別碼結束運算元」與「關鍵字開啟運算式」。
-/// 這是語言的封閉集合（The Swift Programming Language, *Lexical Structure → Keywords and Punctuation* 的保留字），不是觀察到的
-/// 清單；刻意**不含**本身就是值的 `self`／`Self`／`super`／`true`／`false`／`nil`（它們結束運算元），也不含上下文關鍵字（`open`／
-/// `some`／`any`／`consume`…——它們也常是一般識別碼，當成識別碼是 R32 以前的行為）。
+/// 來源是 The Swift Programming Language, *Lexical Structure → Keywords and Punctuation* 的宣告、敘述、運算式與型別三組
+/// （查法：swift-book repo 的 `TSPL.docc/ReferenceManual/LexicalStructure.md`，三組逐字對本集合）。**刻意排除**其中十二個，
+/// 排除的方向都是「結束運算元」、其後的 `/` 判成除法：本身就是值或型別的 `self`／`Self`／`super`／`true`／`false`／`nil`／`Any`，
+/// 樣式組的 `_`，以及雖列在宣告組、實務上也是一般識別碼（`func open()`）的 `open`／`borrowing`／`consuming`／`nonisolated`
+/// （R34 logic：R33 版只寫了前六個，並把 `open` 稱為上下文關鍵字——與出處矛盾）。**上下文關鍵字**（`some`／`any`／`unsafe`…）
+/// 一律當識別碼：其中**會接運算式**的那些之後的裸 regex 因此被判成除法、字面裡的大括號漏出（R34 DA 以 `try unsafe /\}/…` 構造，
+/// swiftc 編得過，fdb3c37 與本版都 fail-open）——這是啟發式的已知錯法，在射程外（「買不到什麼」的威脅模型）。
 private let swiftStatementKeywords: Set<String> = [
     "as", "associatedtype", "await", "break", "case", "catch", "class", "continue", "default", "defer", "deinit", "do", "else",
     "enum", "extension", "fallthrough", "fileprivate", "for", "func", "guard", "if", "import", "in", "init", "inout", "internal",
@@ -1374,18 +1410,40 @@ private let swiftStatementKeywords: Set<String> = [
     "struct", "subscript", "switch", "throw", "throws", "try", "typealias", "var", "where", "while",
 ]
 
+/// Swift 的識別碼字元（`endsOperand` 用）：TSPL *Lexical Structure → Identifiers* 的 identifier-head 與 identifier-character
+/// 區段，逐字抄自 swift-book 的 `LexicalStructure.md`——語言的封閉集合（R34 regression／DA：R33 版用 `isIdentifierChar`，
+/// 即 `isLetter`／`isNumber`／`_`，emoji 識別碼 `🐶/2` 被當成 regex 開頭，從 fdb3c37 的正確判定退化）。一個字形叢集的**每個**純量
+/// 都要在區段裡才算。
+private let swiftIdentifierScalarRanges: [ClosedRange<UInt32>] = [
+    0x30...0x39, 0x41...0x5A, 0x5F...0x5F, 0x61...0x7A,
+    0xA8...0xA8, 0xAA...0xAA, 0xAD...0xAD, 0xAF...0xAF, 0xB2...0xB5, 0xB7...0xBA,
+    0xBC...0xBE, 0xC0...0xD6, 0xD8...0xF6, 0xF8...0xFF,
+    0x100...0x2FF, 0x300...0x36F, 0x370...0x167F, 0x1681...0x180D, 0x180F...0x1DBF, 0x1DC0...0x1DFF, 0x1E00...0x1FFF,
+    0x200B...0x200D, 0x202A...0x202E, 0x203F...0x2040, 0x2054...0x2054, 0x2060...0x206F,
+    0x2070...0x20CF, 0x20D0...0x20FF, 0x2100...0x218F, 0x2460...0x24FF, 0x2776...0x2793,
+    0x2C00...0x2DFF, 0x2E80...0x2FFF, 0x3004...0x3007, 0x3021...0x302F, 0x3031...0x303F, 0x3040...0xD7FF,
+    0xF900...0xFD3D, 0xFD40...0xFDCF, 0xFDF0...0xFE1F, 0xFE20...0xFE2F, 0xFE30...0xFE44, 0xFE47...0xFFFD,
+] + (UInt32(1)...14).map { ($0 << 16)...(($0 << 16) | 0xFFFD) }   // U+10000–U+1FFFD … U+E0000–U+EFFFD
+
+private func isSwiftIdentifierChar(_ c: Character) -> Bool {
+    c.unicodeScalars.allSatisfy { v in swiftIdentifierScalarRanges.contains { $0.contains(v.value) } }
+}
+
 /// 一段已輸出的程式碼（字面已收成 `""`）的結尾是不是「一個運算元的結束」——是的話，其後的裸 `/` 是除法。照 Swift lexer 的
-/// **負向**判別：識別碼（非保留字）、數字、`)`／`]`／`}`、字串字面的收尾引號 → 結束運算元；運算子、標點、保留字、行首 → 不是。
+/// **負向**判別：識別碼（非保留字；字元集見 `isSwiftIdentifierChar`）、`.` 之後的成員名（**即使是保留字**：`E.default/2`）、
+/// 反引號識別碼的收尾 `` ` ``、`)`／`]`／`}`、字串字面的收尾引號 → 結束運算元；運算子、標點、保留字、行首 → 不是。
 /// 後綴 `!`／`?` 接在運算元之後仍是運算元（`n!/2`、`f()!/2` 除法）；`try!`／`try?` 不需要特例——遞迴到 `try` 時它是保留字
 /// （R33 logic／regression：R32 版在這裡把它們判成後綴、從 88f29fa 的正確判定退化成 fail-open；R33 verify-fix 第一版另加的
-/// `try` 特例變異後全綠、由遞迴承重，拆掉）。
+/// `try` 特例變異後全綠、由遞迴承重，拆掉）。`.` 與反引號是 R34 regression 構造的回歸（`.default`／`.if` 與 `` `in` `` 之後的除法
+/// 被判成 regex、吃掉同行的 `{`）；`.in`／`.try`／`.case` 在 fdb3c37 就 fail-open（R34 DA 更正），同一條規則一起關掉。
+/// R33 版的「數字開頭的字」分支拆掉：沒有保留字以數字開頭，它與最後一行永遠同答（R34 regression，死碼）。
 private func endsOperand(_ before: String) -> Bool {
     guard let prev = before.last else { return false }
     if prev == "!" || prev == "?" { return endsOperand(String(before.dropLast())) }   // 後綴：看它接在什麼後面（`try` 是保留字，所以 `try!`／`try?` 不結束運算元）
-    if prev == ")" || prev == "]" || prev == "}" || prev == "\"" { return true }
-    guard isIdentifierChar(prev) else { return false }
-    let word = String(String(before.reversed().prefix(while: isIdentifierChar)).reversed())
-    if word.first?.isNumber == true { return true }
+    if prev == ")" || prev == "]" || prev == "}" || prev == "\"" || prev == "`" { return true }
+    guard isSwiftIdentifierChar(prev) else { return false }
+    let word = String(String(before.reversed().prefix(while: isSwiftIdentifierChar)).reversed())
+    if before.dropLast(word.count).last == "." { return true }   // 成員名：`.default`／`.in` 是識別碼，不是關鍵字
     return !swiftStatementKeywords.contains(word)
 }
 
@@ -1410,19 +1468,20 @@ private func wiringGaps(in smokeBody: [String]) -> [String] {
 /// `@available(macOS 99, *)` 與 `arguments:` 在真檔上由 `protectedTestWitness` 擋——deployment target `.macOS(.v14)` 之上的可用性
 /// 讓引用變成編譯錯誤、參數化讓簽章與 `() throws -> Void` 不合。所以「`@Test` 之上不得有屬性」這一半是防禦縱深；R32 版只看
 /// **緊鄰**的上一行，`@available` 與 `@Test` 之間夾一個空行或註解行就穿過（合法 Swift、語意不變）——R33 起往上跳過 `codeOnly`
-/// 後為空的行，遇到的第一個非空行不得以 `@` 開頭。
+/// 後為空的行，遇到的第一個非空行不得以 `@` 開頭。**證人那一半只在證人照原樣時成立**（R34 logic）：證人的 pin 是子字串檢查，
+/// 把那一行改寫成仍含兩個名字、只在 `#available` 分支裡引用的運算式，`@available` 就不再被擋；跨行屬性 `@available(` ／
+/// `macOS 99, *)` 讓往上走停在第二行。兩者都要刻意編輯，在射程外（「買不到什麼」第 4 條）。對同步測試（證人不引用它）這一半
+/// 本來就只有這個形狀在擋。宣告的找法在 `uniqueDeclaration`，與 `topLevelBodyLines` 共用。
 private func disablingAttributeShape(of name: String, in lines: [String]) -> String? {
-    let code = codeOnly(lines).map { $0.trimmingCharacters(in: asciiWhitespace) }
-    let decls = code.indices.filter { code[$0].hasPrefix("func \(name)(") || code[$0].hasPrefix("private func \(name)(") }
-    guard decls.count == 1, decls[0] > 0 else { return "\(name)：找不到唯一的宣告，或它上面沒有屬性行" }   // 與 topLevelBodyLines 同一種找法
-    let attr = code[decls[0] - 1]
+    guard case let (code, decl)? = uniqueDeclaration(of: name, in: lines), decl > 0 else { return "\(name)：找不到唯一的宣告，或它上面沒有屬性行" }
+    let attr = code[decl - 1]
     guard attr.hasPrefix("@Test("), attr.hasSuffix(")") else { return "\(name)：上一行不是單行的 `@Test(…)`" }   // 冗餘於 requireTest／args 檢查（R33 regression），留作訊息
     let args = String(attr.dropFirst("@Test(".count).dropLast())
     guard args.trimmingCharacters(in: asciiWhitespace) == "\"\"" else {
         return "\(name)：`@Test(…)` 只准帶一個 display name 字串字面（任何 trait／`arguments:` 都可能讓 runner 不跑它）"
     }
     // 往上跳過空行與整行註解（`codeOnly` 後為空），第一個非空行不得是屬性（R33：R32 版只看緊鄰的一行）
-    if let above = code[..<(decls[0] - 1)].lastIndex(where: { !$0.isEmpty }), code[above].hasPrefix("@") {
+    if let above = code[..<(decl - 1)].lastIndex(where: { !$0.isEmpty }), code[above].hasPrefix("@") {
         return "\(name)：`@Test` 之上還有一個屬性（`@available` 會讓 runner 跳過而註冊仍在）"
     }
     return nil
@@ -1430,8 +1489,10 @@ private func disablingAttributeShape(of name: String, in lines: [String]) -> Str
 
 /// 整檔裡的條件編譯行（對 `codeOnly` 後的文字找 `#if`／`#elseif`／`#else`／`#endif`，任何位置）。本檔一條都不准有：
 /// `#if false … #else <同名 stub> #endif` 讓「掃描到的宣告」與「編譯的宣告」分家（R33 regression）。
+/// `codeOnly` 只跑一次（R34 四家：R33 版在 `filter` 的閉包裡每行重跑一次整檔 lexer——平方，隨檔案每輪長大）。
 private func conditionalCompilationLines(in lines: [String]) -> [Int] {
-    codeOnly(lines).indices.filter { !matches(#"(?:^|[^A-Za-z0-9_#])#(if|elseif|else|endif)\b"#, in: codeOnly(lines)[$0]).isEmpty }.map { $0 + 1 }
+    let code = codeOnly(lines)
+    return code.indices.filter { !matches(#"(?:^|[^A-Za-z0-9_#])#(if|elseif|else|endif)\b"#, in: code[$0]).isEmpty }.map { $0 + 1 }
 }
 
 /// 把本體還原成**純程式碼**：剝掉字串字面與註解，每個字面換成 `""`。**狀態跨行**（多行字串、區塊註解、`#/…/#` regex），所以
@@ -1442,9 +1503,9 @@ private func conditionalCompilationLines(in lines: [String]) -> [Int] {
 /// 逃脫是 `\` ＋ n 個 `#` ＋ **任一字元**，`\#(…)` 是它的插值）；`"""`／`#"""` 多行（同樣的逃脫規則，所以 `\"""` 不收尾、
 /// `\(…)` 是插值**且可跨行**；`#"""` 只有在同一行其後只剩空白時才是多行，否則是單行 raw——`#"""""#` 合法，值是三個雙引號）；
 /// 行尾 `//`；`/* … */` **可巢狀**（深度計數）；`#/…/#` 擴充 regex（可跨行）；裸 `/…/` regex（Swift 6 語言模式，`Package.swift`
-/// 是 tools-version 6.0——**用啟發式判別**，R33 起是負向的：`/` 後面不是空白、同一行有收尾 `/`、且前一個 token **不**結束一個
-/// 運算元（`endsOperand`：識別碼（非保留字）、數字、`)`／`]`／`}`、字串收尾、值關鍵字、接在運算元後的後綴 `!`／`?` 才結束
-/// 運算元；`try!`／`try?` 是關鍵字），就是 regex，其餘當除法）。
+/// 是 tools-version 6.0——**用啟發式判別**，R33 起是負向的：`/` 後面不是空白、同一行、`//` 之前有收尾 `/`、且前一個 token **不**
+/// 結束一個運算元（`endsOperand`：識別碼（非保留字，字元集照 TSPL）、`.` 之後的成員名、反引號識別碼、`)`／`]`／`}`、字串收尾、
+/// 值關鍵字、接在運算元後的後綴 `!`／`?` 才結束運算元；`try!`／`try?` 是關鍵字），就是 regex，其餘當除法）。
 /// **沒建模、方向不保證**：字元字面沒有這種東西；`##"""…"""##` 以外的混合寫法走最近的模式；啟發式的**兩個方向**都會錯
 /// （regex 判成除法 → 字面裡的大括號漏出；除法判成 regex → 吃掉同行其後的 `{`）。
 ///
@@ -1453,7 +1514,9 @@ private func conditionalCompilationLines(in lines: [String]) -> [Int] {
 /// 裸 `"""`、`\"""`（requirements）、raw 插值 `#"\#("#" + "}")"#`（DA）；R32——raw 的逃脫引號 `#"x\#"#y"#`、多行字串裡的
 /// 跨行插值（插值裡再開 `"""`）（以上 logic）、`#"""""#` 單行 raw、後綴 `!` 的 `n!/2` 被判成 regex（以上 DA）、插值裡的
 /// raw string 與區塊註解（logic）；R33——`try?`／`try!` 與 `if`／`while`／`where` 之後的裸 regex（logic／regression／DA，
-/// 判別改成負向）。每一種各有臂。**八次修的都是同一句宣稱的反例**——所以上面那段是列舉、不是「每一種」。
+/// 判別改成負向）；R34——`.default`／反引號／emoji 識別碼之後的除法、行尾註解假冒同行收尾（regression／DA）。每一種各有臂。
+/// **R31 的四種與 R32 的四種修的都是同一句宣稱（「每一種詞法模式」）的反例**——所以上面那段是列舉、不是「每一種」；`n!/2` 與
+/// R33／R34 的是啟發式判別的錯法，另一回事。
 /// 查法：對兩個本體各跑 `codeOnly` 後 `grep -o '"' | wc -l` 是偶數且每對相鄰（`""`）；`grep -c '/\*\|\*/\|#/'` → 0。
 private func codeOnly(_ body: [String]) -> [String] {
     enum Mode { case string, interpolation(Int), raw(Int), multiline(Int), blockComment(Int), regex(Int) }
@@ -1467,14 +1530,16 @@ private func codeOnly(_ body: [String]) -> [String] {
         func restIsBlank(from j: Int) -> Bool { j >= c.count || c[j...].allSatisfy { $0 == " " || $0 == "\t" } }
         /// 裸 `/` 是不是 regex 字面的開頭：後面不是空白、**同一行有收尾 `/`**，且前一個 token **不**結束一個運算元
         /// （判別在 `endsOperand`，負向的——R33 DA：R32 版是正向的關鍵字清單，漏掉的 `if`／`while`／`where` 每一個都 fail-open）。
-        /// 同行收尾的掃描是 R33 放回來的（R33 logic：R32 版拿掉它而兩處 doc 還寫著；它只會減少「除法判成 regex」那個方向）。
+        /// 同行收尾的掃描是 R33 放回來的（R33 logic：R32 版拿掉它而兩處 doc 還寫著）。**遇到 `//` 就停、不算收尾**（R34 DA：行尾註解
+        /// `// a/b` 的第一個 `/` 被當收尾，任何帶行尾註解的行都讓這道掃描失效——R33 說它「只會減少除法判成 regex」，對這些行不成立）。
+        /// 代價：regex 本體緊接 `//` 的寫法（`/a//…`）被判成除法——啟發式兩個方向都會錯，這是其中一個具名的錯法。
         func bareRegexStarts(at i: Int) -> Bool {
             guard i + 1 < c.count, c[i + 1] != " ", c[i + 1] != "\t", c[i + 1] != "/", c[i + 1] != "*" else { return false }
             var j = i + 1, closed = false
-            while j < c.count { if c[j] == "\\" { j += 2; continue }; if c[j] == "/" { closed = true; break }; j += 1 }
+            while j < c.count { if c[j] == "\\" { j += 2; continue }; if c[j] == "/" { closed = !(j + 1 < c.count && c[j + 1] == "/"); break }; j += 1 }
             return closed && !endsOperand(s.trimmingCharacters(in: asciiWhitespace))
         }
-        /// 一個字面／註解的開頭。`case nil` 與 `.interpolation` 共用（R32 DA：`f("\(#"a"b"#)") {`、`f("\(1 /* " */ + 1)") {` 都合法，
+        /// 一個字面／註解的開頭。`case nil` 與 `.interpolation` 共用（R32 logic：`f("\(#"a"b"#)") {`、`f("\(1 /* " */ + 1)") {` 都合法，
         /// 舊版的插值只認 `"`）。行尾 `//` 兩邊各自處理；**裸 `/…/` 在插值裡沒有建模**——單行字串的插值裡放含 `"` 的裸 regex 是
         /// 編譯錯誤、多行的插值內容從不輸出，構造不出 fail-open（R33 logic／DA 各自量過）。
         func opener(at i: Int) -> (mode: Mode, width: Int)? {
@@ -1523,7 +1588,7 @@ private func codeOnly(_ body: [String]) -> [String] {
                 if c[i] == "\"" { stack.removeLast() }
                 i += 1
             case .interpolation(let n)?:
-                if c[i] == "/", i + 1 < c.count, c[i + 1] == "/" { i = c.count; continue }   // 多行字串的跨行插值裡可以有行尾註解（R33 logic）。**無臂**：插值內容從不輸出，沒有它時註解裡的 `)` 至多提早關掉插值、在真的 `)` 處重新同步——量不出差別（R33 verify-fix 變異全綠），只為忠實
+                if c[i] == "/", i + 1 < c.count, c[i + 1] == "/" { i = c.count; continue }   // 多行字串的跨行插值裡可以有行尾註解（R33 logic）。有臂（R34 logic／regression：R33 版標「無臂、量不出差別」是假的——註解裡帶 `"""` 或 `/*` 時，沒有這行會在插值裡開一個巢狀字面、吞掉其後本體）
                 if let o = opener(at: i) { stack.append(o.mode); i += o.width; continue }
                 if c[i] == "(" { stack[stack.count - 1] = .interpolation(n + 1) }
                 else if c[i] == ")" { if n == 1 { stack.removeLast() } else { stack[stack.count - 1] = .interpolation(n - 1) } }
@@ -1602,8 +1667,8 @@ private func topLevelCode(_ body: [String]) -> [String] {
     }
 }
 
-/// 本體裡**能讓後面的臂不執行或不編譯**的東西（對 `codeOnly` 之後的文字找，任何深度）：`return`／`guard`（Swift Testing 沒有執行期
-/// skip API，提前 `return` 正是它的慣用 skip 寫法——R31 DA 把真檔測試的 `do/catch` 改成 `guard let … else { return }`，git 不在時
+/// 本體裡**能讓後面的臂不執行或不編譯**的東西（對 `codeOnly` 之後的文字找，任何深度）：`return`／`guard`（提前 `return` 是不用
+/// API 的 skip 寫法——R31 DA 把真檔測試的 `do/catch` 改成 `guard let … else { return }`，git 不在時
 /// 八條 smoke 一條都不跑、測試綠；`guard` 的 else 必須 `return`／`throw`／`break`／`continue`，其中只有 `return` 會讓測試安靜地
 /// 綠），`#if`／`#else`／`#elseif`／`#endif`（條件編譯：`#if false` 裡的臂不編譯、連 known issue 都沒有——本檔對 producer 掃描早在
 /// R18 就記了這個容器），以及**識別碼** `exit`／`_exit`／`_Exit`／`pthread_exit`／`quick_exit`（行程直接結束；鍵是「以 `exit` 或
@@ -1620,10 +1685,12 @@ private func topLevelCode(_ body: [String]) -> [String] {
 ///     之間不成立）、`pthread_exit(`、`let quit: (Int32) -> Never = exit; quit(0)` 都繞過舊鍵，而執行期 `swift test` 仍 exit 0
 ///     ——且 DA 量到殺傷力更大：行程結束後**同一 run 裡其他已 started 的測試也沒有結果**（R32 logic／requirements／DA）。
 ///
-/// 判準是「會不會讓後面的臂不跑」，不是關鍵字清單的完整性——`throw` 至少讓測試紅、`break`／`continue` 要有迴圈而迴圈
-/// 裡的臂本來就在深度 1、`fatalError` 會 crash，所以不列。**誠實邊界**：這個守衛的表面是**本體**；把整條 `@Test` 從外面
+/// 判準是「會不會讓後面的臂不跑」，不是關鍵字清單的完整性——一般的 `throw` 讓測試紅、`break`／`continue` 要有迴圈而迴圈
+/// 裡的臂本來就在深度 1、`fatalError` 會 crash，所以不列。**例外，不在這裡擋**：`try Test.cancel()` 是 Swift Testing 公開的執行期
+/// skip——它是一個 `throw`，但被取消的測試不紅、run passed、RC 0（R34 DA；R33 版這裡與上面寫著「Swift Testing 沒有執行期 skip
+/// API」「`throw` 至少讓測試紅」，兩個前提都不成立）。它為什麼沒有被加進來、以及這個決定的代價，見「買不到什麼」第 4 條。**誠實邊界**：這個守衛的表面是**本體**；把整條 `@Test` 從外面
 /// 關掉（檔案層 `#if false`、`/* … */`、`.disabled`、`arguments: []`、`@available`）它一概看不到——那一族由同步測試的
-/// 編譯期證人與 `disablingAttributeShape` 守（R32 DA 兩條 HIGH）。
+/// 編譯期證人、宣告計數與 `disablingAttributeShape` 守（R32 DA 兩條 HIGH）——守的是不小心的形狀，刻意的構造見第 4 條。
 private func skippingControlFlow(in body: [String]) -> [String] {
     codeOnly(body).flatMap { line -> [String] in
         matches(#"\b(return|guard)\b"#, in: line)
@@ -1743,6 +1810,16 @@ func drivenNeedleShapeIsDrivenByItsOwnFixture() {
     #expect(!hasNeedle(topLevelCode(["withKnownIssue(\"m\") {", "    for x in [s] where /\\}/ ~= x { _ = x }", armLine, "}"]), ").count", expectOnly: true))
     #expect(codeOnly(["let t = f()!/2 + a[0]!/2", "let u = foo.in/2", "let v = self/2"]) == ["let t = f()!/2 + a[0]!/2", "let u = foo.in/2", "let v = self/2"])   // 運算元之後、沒有同行收尾：都是除法
     #expect(codeOnly(["let q = #\"\"\"", "  a \\#\"\"\"# b }", "  \"\"\"#", "x {"]) == ["let q = \"\"", "", "", "x {"])   // raw 多行裡的 `\#"""#` 是逃脫過的引號，不收尾（R33 regression：舊臂用 hasNeedle，變異下 fail-closed 而不紅）
+    // R34：`]`／`}`／`"` 各自單獨的臂（R33 版只有四個一起退時才紅——`a[0]!/2` 的 `/` 沒有同行收尾，`endsOperand` 根本沒被問）；
+    // `.` 之後的成員名、反引號識別碼、非 ASCII 識別碼結束運算元（regression／DA）；收尾掃描遇 `//` 停（DA）；插值裡的行尾註解（logic／regression）
+    #expect(codeOnly(["let t = a[0]!/2 + b/3"]) == ["let t = a[0]!/2 + b/3"])
+    #expect(codeOnly(["let v = xs.reduce(0) { $0 + $1 }/2 + b/3"]) == ["let v = xs.reduce(0) { $0 + $1 }/2 + b/3"])
+    #expect(codeOnly(["let u = \"a\"/2 + b/3"]) == ["let u = \"\"/2 + b/3"])
+    #expect(codeOnly(["let w = E.default/2 + b/3 {"]) == ["let w = E.default/2 + b/3 {"])
+    #expect(codeOnly(["let x = `in`/2 + b/3 {"]) == ["let x = `in`/2 + b/3 {"])
+    #expect(codeOnly(["let y = 🐶/2 + b/3 {"]) == ["let y = 🐶/2 + b/3 {"])
+    #expect(codeOnly(["  /2 + f { // a/b"]) == ["  /2 + f { "])
+    #expect(codeOnly(["let d = \"\"\"", "  \\(f( // a \"\"\" b", "     x))", "  \"\"\"", "y {"]) == ["let d = \"\"", "", "", "", "y {"])
     #expect(skippingControlFlow(in: ["guard x != nil else { return }", "#expect(try report(\"\").count == 2)"]) == ["guard", "return"])
     #expect(skippingControlFlow(in: ["if true { return }"]) == ["return"])
     #expect(skippingControlFlow(in: ["#if false", "#expect(try report(\"\").count == 2)", "#endif"]) == ["#if", "#endif"])
