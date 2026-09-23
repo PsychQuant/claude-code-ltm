@@ -314,7 +314,8 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 「先 commit」這條規則在它最該生效的地方剛好不適用，而 `git checkout` 把工作還原
 到了**上一版的實作**——測試照樣全綠，因為綠燈來自舊版而不是新版。
 
-正確做法：`cp <file> /tmp/x.good` → 改 → 跑 → `cp /tmp/x.good <file>`。判準不是
+正確做法：`cp <file> /tmp/x.good` → 掛 `trap 'cp /tmp/x.good <file>' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM`
+→ 改 → 跑（包內層 `timeout N`，N 低於 Bash 工具的逾時）→ `cp /tmp/x.good <file>`。判準不是
 「有沒有 commit」，是**還原的目標是不是我手上這一份**。**這四步要在同一個 Bash call 內完成**——Claude Code 把一次
 Bash call 對 project root 底下檔案造成的變更記成 unified diff 進 `toolUseResult.bashEditDiff`（量到的觸發條件：全語料的 file
 entry 全部在 project root 底下、`/tmp` 零筆；主 session 與 subagent 都會落**紀錄**，但 subagent 的紀錄多半 `files[]` 是空的
@@ -326,8 +327,12 @@ entry 全部在 project root 底下、`/tmp` 零筆；主 session 與 subagent �
 正向對照是提到 root 內路徑的就地編輯 159 個、117 個帶非空 hunk。**仍只是一致、不是隔離**：對照組用命令文字挑、往返規則
 只涵蓋 `cp` 且不驗還原真的跑了。三條 regex、截止時間戳、查法與邊界逐字在 `docs/measurements/README.md` 規則 1——R32 版的 regex 讓
 路徑吃進 `;` 而漏了兩個、正向對照的 pattern 沒寫成 regex 而重打不出來；R33 版沒寫 root 內的切法與截止點，R34 又重打不出 159。
-**call 出錯時這條規則擋不住 diff**（R34 security／DA）：出錯的 call 不帶 `bashEditDiff`，差異落在**下一個**改回那個檔的 call 上，
-而且沒有不留紀錄的還原路徑——所以在變異**之前**掛 `trap '<還原>' EXIT`，對查詢檔的那個 call 裡不放會逾時或被中斷的東西。R28–R30 只寫「推論、未證」，因為那時的探針都在
+**call 出錯或被轉到背景時這條規則擋不住 diff**（R34 security／DA；R35 更正三處）：出錯的 call 不帶 `bashEditDiff`（量到的、
+沒有文件保證）；紀錄的是 **call 視窗內 root 底下的變化、不論誰改**，所以背景裡的變異／還原會落在之後某個不相干的 call 上；
+harness 逾時是**轉背景、不殺行程**；zsh 下 `trap … EXIT` 遇 INT／TERM **不執行**——所以上面那行要把訊號轉成 exit、`swift test`
+包內層 `timeout`。還原方式的紀錄量不同：session 外 → 零；Bash `cp` → 一個 hunk；**Write／Edit 不要用**（整份檔進 jsonl，而且在
+`~/.claude/file-history/` 留一份 size 鍵找不到的變異檔）。R34 版寫「沒有不留紀錄的還原路徑」與「落在下一個改回那個檔的
+call」，兩句都不成立。R28–R30 只寫「推論、未證」，因為那時的探針都在
 project root 之外）。（#63 R30，security＋DA：
 2026-09-19 那次「只改註解行」的 Bash 就把三條活查詢當 context 記了進去，而 README 當時寫著「沒有再多一筆」。）**任何在 repo 之外複製出受限內容（基準
 查詢檔、任何第三方逐字內容）的動作——備份、worktree、job tmp、reviewer 的私有複本——用完立刻刪**；

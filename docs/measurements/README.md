@@ -81,7 +81,8 @@
   宣告行以「整行以 `func NAME(` 開頭且恰好一行」找、NAME 由 `#function` 取；標記後列的名字集合必須**等於**該行
   期望值側的 tail 集合）。它擋的是
   產生點被刪掉／改名／註解掉而清單沒跟著改；**它不證明那條斷言被執行**（`.disabled`、迴圈跳過看不到）
-  ——執行由整份測試檔綠保證。這一條的版本史（哪一輪、哪個 lens 抓到什麼）不在這裡複述——查 issue #63
+  ——**執行沒有機制保證**：綠不區分 passed 與 skipped／cancelled（`.disabled`、`Test.cancel()`、同 target 鄰檔的 `exit(0)` 都讓
+  run 綠，#63 R34），見測試檔「買不到什麼」第 4 條（R35 requirements：這句原寫「執行由整份測試檔綠保證」）。這一條的版本史（哪一輪、哪個 lens 抓到什麼）不在這裡複述——查 issue #63
   各輪的 verify comment（輪次編號是那些 comment 的索引，可以留；誰抓到、幾個讀者不寫）。
   同一條測試還同步了：退役清單（README 與測試）、七個 metadata 欄位名（`toolMetadataFields` 常數、
   README 表、查詢檔檔頭）、離開碼（腳本檔頭與程式碼裡的 `exit N`）、三個 verdict 詞（README 與腳本檔頭）、
@@ -174,13 +175,30 @@
    R31／R32 的單邊計數強。**仍然只是一致**：正向對照是用命令文字挑的（那 42 個「root 內卻沒記」沒有逐一查原因——可能是
    沒改到任何東西的替換、或改了又改回），往返規則只涵蓋 `cp`，而且**不驗還原真的跑了**（`cp F B && 改 && swift test && cp B F`
    在測試如預期變紅時 `&&` 鏈中斷、永不還原；今天 20 個全是無條件還原的寫法，但規則本身不要求）。
-   **call 出錯時，「同一個 call 內還原」擋不住 diff**（R34 security／DA；R33 版這裡寫「`&&` 中斷時 0 筆會是反證」，是假的）：
-   出錯的 Bash call **不帶** `bashEditDiff`（該 session 9 個 `is_error` 結果、0 筆 diff），所以中斷的那一次看起來是零筆，檔案卻停在
-   變異狀態，**差異落在下一個碰那個檔的 call 上**。實例：R33 fix 的一個變異 call 出錯、測試檔留在變異狀態而沒有紀錄；之後的
-   還原 call 記下 +1/−1 的 hunk 連同 context。對測試檔無害，**對查詢檔就是一筆受限內容**。一旦發生就**沒有不留紀錄的還原路徑**
-   ——任何把檔案改回去的 call，進入與離開時都不同。所以要防的是「離開這個 call 時沒還原」：還原不要接在 `&&` 後面，並在變異
-   **之前**掛 `trap '<還原>' EXIT`（與配方的 trap 同一個理由：它防不到排在它前面的東西）；行程被外部殺掉時 trap 不一定跑
-   （SIGKILL 一定不跑），所以對查詢檔的那一個 call 裡不要放可能逾時或被中斷的東西。17 個純往返裡 `is_error` 為 0，所以不影響 17/17。
+   **call 出錯或被轉到背景時，「同一個 call 內還原」擋不住 diff**（R34 security／DA；R33 版這裡寫「`&&` 中斷時 0 筆會是反證」，是假的）。
+   量到的三件事（只印計數）：
+   (a) **出錯的 Bash call 不帶 `bashEditDiff`**——全語料 5,339 筆出錯的 Bash 結果、帶這個鍵的 0 筆（R35 security，2026-09-23）；
+   實作者主 session 截至上面的截止點是 8 筆、0 筆帶鍵（R34 版寫「9 個」而沒寫時間點，照這一段自己的截止點重跑是 8——R35 四家）。
+   這是量測所得、依賴沒有文件保證的 harness 行為，不是規格。
+   (b) **記的是這個 call 視窗內 project root 底下的變化，不論是誰改的**——不是「下一個碰／改回那個檔的 call」（R34 版這裡寫「碰」、
+   CLAUDE.md 寫「改回」，兩種都不對）。R35 DA：2026-09-21T19:41:11Z 的變異 call 在 19:51:16Z 被轉到背景，之後八個 call 都 +0/−0，
+   而 19:55:25Z 那個只改 job tmp 檔、命令裡沒有測試檔的 call，記下了測試檔 +1/−1。查法：對每筆非空 `bashEditDiff`，看
+   `files[].filePath` 的 basename 有沒有出現在該 call 的命令文字裡（該 session 144 筆裡 2 筆沒出現）。
+   (c) **harness 逾時不殺行程，是把 call 轉到背景**（R35 DA：`trap …; sleep 20` 配 3 秒 timeout，轉背景、跑完、trap 照樣執行；
+   全語料主 session 轉背景的 Bash 結果 326 筆、帶 `bashEditDiff` 0 筆）。所以逾時的風險是剩下的變異／測試／還原在背景跑、
+   被記到之後某個不相干的前景 call 上。
+   **所以**：還原不要接在 `&&` 後面；變異**之前**掛 trap，**而且把訊號轉成 exit**——在 Claude Code 的 zsh（`/opt/homebrew/bin/zsh -c`，
+   5.9.1）下，`trap '<還原>' EXIT` 遇 SIGINT、SIGTERM 都**不執行**（R35 security：送給 shell 或整個 process group 都一樣；bash 會執行；
+   R34 版寫「不一定跑（SIGKILL 一定不跑）」說輕了）。寫成 `trap '<還原>' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM`
+   （R35 security 量過：INT、TERM 下 EXIT trap 都執行；SIGKILL 仍不執行）；會久的那一步（`swift test`）包在內層 `timeout N` 裡、
+   N 低於 Bash 工具的逾時——外層拿到 rc 124、trap 照樣執行，call 也不會被轉到背景。
+   **還原方式的紀錄量不同**（R35 security；R34 版寫「一旦發生就沒有不留紀錄的還原路徑」，是假的——非零結束的還原 call 依 (a) 就不留）：
+   在沒有任何 session 開著這個 project 時，由使用者在外部還原 → 零紀錄；session 內用 Bash `cp` → 一個 hunk（變動行連同前後 ≤3 行
+   context）；**不要用 Write／Edit**——Write 的 tool_use 帶整份 `content`、toolUseResult 帶 `content`／`originalFile`／`structuredPatch`，
+   Edit 帶 `originalFile`，都落在 jsonl（依上面「什麼會進索引」不進索引，但在磁碟上），**而且會在 `~/.claude/file-history/<session>/`
+   留一份改動前的備份**——變異過的查詢檔不等於任何 commit 過的 blob，下面的 size＋`cmp` 掃描結構上找不到它（見掃描那段）。
+   17 個純往返裡 `is_error` 為 0，所以不影響 17/17；正向對照那 42 個「root 內沒記」裡有 1 個出錯、1 個轉背景（R35 DA），結構上本來
+   就記不了——扣掉之後基準率是 117/157。
    要真的隔離，得在 project root 內建合成檔、同一 call 內改回去並對照不改回去的版本。這件事在 R30／R31 都寫「推論、未證」：兩處探針
    都在 project root 之外，settle 不了；R31 security 在 project root 建了合成檔驗，而那是在 **Workflow-harness 的 subagent
    session** 裡——那種逐字稿**不寫結構化的 `toolUseResult`**，所以驗不了（R32 security／regression 更正 R31 verify-fix 寫的
@@ -208,8 +226,9 @@
    條數——分母「全語料幾筆 `bashEditDiff`」是會漲的時點數字，R30 當日 1,602、兩天後 1,642，不寫進句子）。而且這是**依建構**為假——
    終止符是檔頭最後一行、下一行就是第 1 條查詢，任何動到檔頭尾端的 Bash 編輯都會把最多 3 條當 context 帶出去，
    除非編輯點離終止符 ≥ 3 行。**推論**：變異測試的「`cp` 備份 → 改 → 跑 → 還原」若分成多次 Bash call，每一次
-   call 結束時檔案是 modified 狀態、就會落一個帶查詢的 hunk——所以**那四步必須在同一個 Bash call 內完成**
-   （CLAUDE.md 同步寫了這條）。R28／R29 的真檔盲測沒留下這種紀錄，與「都在單一 call 內完成」一致；R31 verify-fix 在主 session 直接量到 0 筆（見上、n = 3）。）
+   call 結束時檔案是 modified 狀態、就會落一個帶查詢的 hunk——所以**那四步必須在同一個 Bash call 內完成**，而且變異之前先掛
+   `trap '<還原>' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM`、`swift test` 包內層 `timeout`（理由見上方「call 出錯或被轉到背景時」；
+   CLAUDE.md 同步寫了這條——R35 regression：R34 版只把 trap 寫在後面的括號裡，照這一行做的人寫不出它）。R28／R29 的真檔盲測沒留下這種紀錄，與「都在單一 call 內完成」一致；R31 verify-fix 在主 session 直接量到 0 筆（見上、n = 3）。）
    要把 diff 交給 review agent，**給檔案路徑讓它自己 Read**，不要把 diff 內嵌進 prompt——agent 的
    prompt 是它逐字稿裡的 `text` block；而且 diff 要在設了 `-diff` 的 commit 之後產生（R1 verify 的
    `diff.patch` 產生於 `.gitattributes` 存在之前，查詢檔在裡面是明文）。唯獨查詢檔——**以及它的任何副本或備份**
@@ -258,6 +277,9 @@
    **第二個坑**（R33 security 第一趟又踩到）：把路徑寫死成 `"$h:scripts/…"` 時，zsh 把 `$h:s` 讀成歷史修飾詞 `:s/…/…/`、報
    `bad substitution`，`git cat-file` 根本沒執行、pipe 餵空給 `cmp -s`——每個候選都安靜回「不是副本」。寫成 `"${h}:scripts/…"`。
    上面那個範例能跑只因冒號後面接的是 `$f`。
+   **size 鍵找不到的一類**（R35 security）：Write／Edit 在 `~/.claude/file-history/` 留的是改動**前**的檔——若那是一份變異過的
+   查詢檔，它不等於任何 commit 過的 blob，size＋`cmp` 結構上找不到。這一類用內容鍵：對 `~/.claude/file-history` 逐檔在行程內
+   數含幾條查詢、只印計數（R35 fix 時跑過：5,433 個檔、0 個含查詢；R32–R34 的衛生掃描都只跑了 size 鍵）。
    根目錄至少含 `~/.claude`（含 `file-history`、`jobs`）、`/private/tmp`、`/private/var/folders`——**`$TMPDIR` 在它底下，
    不要兩個都列（每筆會報兩次），也不要只列 `$TMPDIR`**（R30 自檢：R30 verify-fix 一度為了去重砍掉大的那個，`/private/var/folders`
    底下有 39 個 per-user 的 `T/`，只掃自己那一個）；`/tmp` 是 symlink，`find` 不跟隨，列了等於沒列；`~/.claude/jobs` 是 150 GB 且含 FIFO／
@@ -281,6 +303,7 @@
    trap 'git worktree remove --force "$W" 2>/dev/null; rm -rf "$W"' EXIT   # **第一件事**：後面任何一步失敗都還清得掉；兩個命令都要——
                                                                            # 父 repo 先被刪時 `worktree remove` 跑不了、`rm -rf` 仍會跑
                                                                            # （R31 DA 找到一棵孤兒；R32 四家指出 trap 排在四個可失敗命令之後，防不到自己前面）
+   trap 'exit 130' INT; trap 'exit 143' TERM   # zsh 下 INT／TERM 不觸發 EXIT trap（R35 security），轉成 exit 才會清
    git worktree add --no-checkout "$W" HEAD \
      && git -C "$W" sparse-checkout set --no-cone '/*' '!scripts/baseline-queries.txt' '!scripts/rrf-tie-queries.txt' \
      && git -C "$W" checkout -q HEAD || { echo 'FAIL: 建樹失敗，不要往下走'; exit 1; }
