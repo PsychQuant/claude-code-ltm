@@ -314,9 +314,13 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 「先 commit」這條規則在它最該生效的地方剛好不適用，而 `git checkout` 把工作還原
 到了**上一版的實作**——測試照樣全綠，因為綠燈來自舊版而不是新版。
 
-正確做法：`cp <file> /tmp/x.good` → 掛 `trap 'cp /tmp/x.good <file>' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM`
-→ 改 → 跑（包內層 `timeout N`，N 低於 Bash 工具的逾時）→ `cp /tmp/x.good <file>`。判準不是
-「有沒有 commit」，是**還原的目標是不是我手上這一份**。**這四步要在同一個 Bash call 內完成**——Claude Code 把一次
+正確做法（全部在**同一個前景** Bash call 裡，**不要 `run_in_background`**）：
+`B=$(mktemp) && cp <file> "$B" || exit 1; trap 'cp "$B" <file>; rm -f "$B"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM`
+→ 改 → 跑（`timeout -s INT -k 10 N /usr/bin/swift test`，N 低於 Bash 工具的逾時）——還原與刪備份由 EXIT trap 做。逐項理由在
+`docs/measurements/README.md` 規則 1（`mktemp`：固定路徑讓並發的 reviewer 互相還原；trap 裡刪：用完立刻刪；訊號轉 exit：zsh 下
+INT／TERM 不觸發 EXIT trap；`-s INT -k 10`：預設的 TERM 留下孤兒 `swiftpm-testing-helper`；`|| exit 1`：`set -e` 在這個 harness
+裡無效）。**SIGKILL 下 trap 仍不執行**——對查詢檔的那個 call 裡不放會逾時或被中斷的東西。判準不是
+「有沒有 commit」，是**還原的目標是不是我手上這一份**。**備份、改、跑、還原要在同一個 Bash call 內完成**——Claude Code 把一次
 Bash call 對 project root 底下檔案造成的變更記成 unified diff 進 `toolUseResult.bashEditDiff`（量到的觸發條件：全語料的 file
 entry 全部在 project root 底下、`/tmp` 零筆；主 session 與 subagent 都會落**紀錄**，但 subagent 的紀錄多半 `files[]` 是空的
 （R32：482 筆裡只有 46 筆帶 file entry）——「會產生」對鍵成立、對 hunk 要另外看；hunk 的 context **最多**前後各 3 行
@@ -327,12 +331,14 @@ entry 全部在 project root 底下、`/tmp` 零筆；主 session 與 subagent �
 正向對照是提到 root 內路徑的就地編輯 159 個、117 個帶非空 hunk。**仍只是一致、不是隔離**：對照組用命令文字挑、往返規則
 只涵蓋 `cp` 且不驗還原真的跑了。三條 regex、截止時間戳、查法與邊界逐字在 `docs/measurements/README.md` 規則 1——R32 版的 regex 讓
 路徑吃進 `;` 而漏了兩個、正向對照的 pattern 沒寫成 regex 而重打不出來；R33 版沒寫 root 內的切法與截止點，R34 又重打不出 159。
-**call 出錯或被轉到背景時這條規則擋不住 diff**（R34 security／DA；R35 更正三處）：出錯的 call 不帶 `bashEditDiff`（量到的、
-沒有文件保證）；紀錄的是 **call 視窗內 root 底下的變化、不論誰改**，所以背景裡的變異／還原會落在之後某個不相干的 call 上；
-harness 逾時是**轉背景、不殺行程**；zsh 下 `trap … EXIT` 遇 INT／TERM **不執行**——所以上面那行要把訊號轉成 exit、`swift test`
-包內層 `timeout`。還原方式的紀錄量不同：session 外 → 零；Bash `cp` → 一個 hunk；**Write／Edit 不要用**（整份檔進 jsonl，而且在
-`~/.claude/file-history/` 留一份 size 鍵找不到的變異檔）。R34 版寫「沒有不留紀錄的還原路徑」與「落在下一個改回那個檔的
-call」，兩句都不成立。R28–R30 只寫「推論、未證」，因為那時的探針都在
+**call 出錯或被轉到背景時這條規則擋不住 diff**（R34 security／DA；R35、R36 更正）：出錯（`is_error`）的 call 不帶 `bashEditDiff`
+（量到的、沒有文件保證；**非零結束不一定是出錯**——`grep -q` 未命中、`diff -q` 不同會被判成不算出錯而照樣記）；紀錄的是 **call
+視窗內 root 底下的變化、不論誰改**，所以背景裡的變異／還原會落在之後某個不相干的 call 上；harness 逾時與明確的
+`run_in_background` 都是**轉背景**。**另一條管道**：任何讀過查詢檔的 session——包括規則 1 唯一允許的 `grep '^#'`——之後對它的改動會在
+下一次 model call 落一筆 `edited_text_file` attachment，帶前後各 8 行。還原方式的紀錄量不同，而且**只對沒讀過那個檔的 session
+成立**：沒有任何 session 讀過它、也沒有 Bash call 在跑時由使用者在外部還原 → 零 Claude Code 紀錄；Bash `cp`／`git restore` → 一個
+hunk；**Write／Edit 不要用**（整份檔進 jsonl，而且在 `~/.claude/file-history/` 留 size 鍵找不到的變異快照）。R34 版寫「沒有不留紀錄的
+還原路徑」與「落在下一個改回那個檔的 call」，兩句都不成立；R35 版的「session 外 → 零」丟了限定句，也漏了 attachment 那條管道。R28–R30 只寫「推論、未證」，因為那時的探針都在
 project root 之外）。（#63 R30，security＋DA：
 2026-09-19 那次「只改註解行」的 Bash 就把三條活查詢當 context 記了進去，而 README 當時寫著「沒有再多一筆」。）**任何在 repo 之外複製出受限內容（基準
 查詢檔、任何第三方逐字內容）的動作——備份、worktree、job tmp、reviewer 的私有複本——用完立刻刪**；
