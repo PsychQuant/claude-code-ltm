@@ -204,12 +204,7 @@ private let protectedTestWitness: [@Sendable () throws -> Void] = [baselineQuery
 ///      一種形狀擋（R32 起；寫成允許一種形狀而不是禁一份 trait 清單）；`@Test` 之上的單行屬性，夾空行或註解行也算（R33 起）；宣告
 ///      被改名、刪掉、用 `/* */` 或 `#if` 包住——檔案層證人、宣告計數、整檔 `#if` 禁令一起擋（R32–R33；證人換過兩次位置的經過在
 ///      證人的 doc，宣告計數與 `#if` 禁令的經過在同步測試的註解 (a)／(b)）；本體裡的 `return`／`guard`／`exit` 族（`skippingControlFlow`）。
-///      **真檔測試的接線沒守全**（R36 DA，helper 層；使用者決定寫進清單、不加鍵）：`wiringGaps` 只看兩個子字串有沒有出現在 smoke
-///      本體的程式碼裡，不看資料有沒有真的傳進 `checkQueryFile`。兩種自然的重構讓所有 pin 照綠——(A) 把 `historicalQueryFolds` 的
-///      do／四個具名 catch 收成 `let history = try? historicalQueryFolds(…)`：沒有編譯警告，沒有 git 時不再 `Issue.record`、測試全綠，
-///      README「取不到歷史時真檔測試具名紅」安靜地變假；(B) 抽成區域變數卻忘了傳（`let former = …; let r = try checkQueryFile(data)`）：
-///      真檔的 `headerFormerQueries` 恆空（會有 unused 警告）。`wiringGaps` 的 doc 同樣記著。（R27 版這裡寫的是「指到非 `@Test` 的頂層
-///      func」——那個洞已被 `requireTest` 關掉。）
+///      （R27 版這一條寫的是「指到非 `@Test` 的頂層 func」——那個洞已被 `requireTest` 關掉。）
 ///      **同步測試本身只守了一半**（R35 requirements／DA；R36 requirements 更正範圍）：真檔測試的交叉守衛先過 `uniqueDeclaration`，
 ///      所以同步測試被改名、搬出本檔、刪掉、`/* */` 包住都會紅；它也擋 trait 與單行屬性（R33 起）。沒人守的是這四種**不小心就寫得出來**
 ///      的形狀——`#if false` 包住整條（requirements，verbatim helper：交叉守衛回 nil，`#if` 禁令只在同步測試裡跑、它已經被編譯掉；
@@ -221,6 +216,12 @@ private let protectedTestWitness: [@Sendable () throws -> Void] = [baselineQuery
 ///      requirements／regression，拋棄式包實測；只在 `-c release` 下才安靜）；預設的 `withKnownIssue` 同樣說寬了。
 ///      `skippingControlFlow` 套不上它的本體：巢狀 helper `gitResolves` 今天就有 `guard`／`return`。R35 依「停止加鍵」不補；替代方案
 ///      是讓 `conditionalCompilationLines` 也在真檔測試裡跑，只擋得住 `#if` 那一種。
+///      **真檔測試的接線沒守全**（R36 DA，helper 層；使用者決定寫進清單、不加鍵）：`wiringGaps` 只看兩個子字串有沒有出現在 smoke
+///      本體的程式碼裡，不看資料有沒有真的傳進 `checkQueryFile`。兩種自然的重構讓所有 pin 照綠——(A) 把 `historicalQueryFolds` 的
+///      do／四個具名 catch 收成 `let history = try? historicalQueryFolds(…)`：沒有編譯警告，沒有 git 時不再 `Issue.record`、測試全綠，
+///      README「取不到歷史時真檔測試具名紅」安靜地變假；(B) 抽成區域變數卻忘了傳（`let former = …; let r = try checkQueryFile(data)`）：
+///      真檔的 `headerFormerQueries` 恆空（會有 unused 警告）。`wiringGaps` 的 doc 同樣記著。（R37 regression：R36 版把這一段插在
+///      上面「擋住的」清單裡，一個沒人守的項目落在「擋住的」底下，也把 R27 那句註擠到它後面、讀起來像在註解接線缺口。）
 ///      **構造過而擋不住的**（R34；每一點標實測層級）：
 ///      - 本體裡 `try Test.cancel()`（DA，拋棄式包 swift test：`was cancelled`、run passed、RC 0）。**注意**：它與 `guard … return`
 ///        同一個動機（維護者想在某個條件下跳過），按威脅模型的字面其實落在「不小心」那一側；R34 依使用者「停止加鍵」的決定不補，
@@ -338,8 +339,13 @@ private func runDraining(_ process: Process) throws -> (status: Int32, stdout: D
 
 /// 取一個宣告的函式本體（不含宣告行與收尾大括號）。宣告要在程式碼裡**唯一**，但**不限頂層**——任何縮排都算候選、只有一個時就用它
 /// （`uniqueDeclaration`；R35 requirements：這一行原寫「頂層」，而 R34 #2 的巢狀 suite 構造正是靠「一個巢狀宣告也算唯一」）。
-/// **但本體只對頂層宣告切得對**（R36 DA）：下面的結尾判準對縮排的宣告會一路延伸到外層型別的收尾、把兄弟成員也算進本體（fail-open）；
-/// 巢狀化會讓檔案層證人編不過，所以只在證人也被改寫時才到得了，屬刻意那側。
+/// **縮排的宣告切不對**（R36 DA）：下面的結尾判準對它會一路延伸到外層型別的收尾、把兄弟成員也算進本體（fail-open）。對兩條
+/// 受保護測試，巢狀化會讓檔案層證人編不過，所以只在證人也被改寫時才到得了，屬刻意那側；**第三個呼叫者 `checkQueryFile` 不在證人
+/// 裡**，巢狀成 extension 的成員不會讓任何東西編不過——它的兩個消費者多半 fail-closed（多吸進來的行讓 throw 集合不相等、無 `try`
+/// 檢查變紅），只有「清單列了本體裡沒有的 throw」那個方向 fail-open。**頂層宣告也不是一定切得對**：收尾那一行要恰為 `}`，帶行尾
+/// 註解或尾隨空白就被跳過，真檔測試的本體會安靜地吸進其後整條 fixture 測試（那條沒有 `return`／`guard`，`skippingControlFlow` 不紅，
+/// smoke 側的 contains 類 pin 可由 fixture 的行滿足）。兩種都不讓受保護測試停跑，約定寫在下一段（R37 logic，INFO：R36 版寫「本體
+/// 只對頂層宣告切得對」，兩頭都說寬了）。
 ///
 /// 結尾判準是「第一個在第 0 欄、內容恰為 `}` 的行」——那是本檔每個頂層宣告的收尾形狀，**不是一份會漏的
 /// 終止符列舉**（R26：R25 版用 `@Test(`／`private func ` 兩個前綴，漏掉 `private struct`／`enum`／`let`／
@@ -472,14 +478,20 @@ private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throw
 ///     `ORIG_HEAD` 這類 pseudo-ref 可達的版本也**不在**（R30 自檢；R31 requirements：R30 只寫進 README，這裡漏了）。
 ///     `--full-history` 關掉 merge 處的歷史簡化（併回後刪掉的分支那一版才會列——臂 D）；`--all` 買的是還活著的側支（臂 F）。
 ///   - **不跟隨改名**（無 `--follow`）：改名之後舊名下的版本消失。`relativePath` 是寫死的常數，改名時要一併決定歷史怎麼接。
-///   - 淺 clone 只看得到它有的那幾個 commit。
+///   - 淺 clone 只看得到它有的那幾個 commit——而且**不對稱**：零個 commit 會 `throw NoHistory`（fail-closed），`fetch-depth: 1` 這類
+///     仍有一個邊界 commit 的淺 clone 不會，淺邊界之前才有的退役查詢安靜地不在集合裡、`headerFormerQueries` 讓它搬進檔頭也照綠
+///     （fail-open；R37 codex）。補法是一次 `git rev-parse --is-shallow-repository`，但那是一把新鍵，依威脅模型「停止加鍵」不補、
+///     使用者決定寫進清單；本 repo 沒有 CI，淺 clone 今天是假設情境。
+///   - **線上的** blobless／promisor clone：`git show` 會自己去遠端抓缺的物件（lazy fetch），可能卡在憑證提示——子行程沒有逾時、
+///     stdin 繼承呼叫端、沒設 `GIT_NO_LAZY_FETCH`／`GIT_TERMINAL_PROMPT=0`，所以症狀是測試掛住而不是具名紅（R37 codex；下一條
+///     寫的是**離線**的情形）。本 checkout 不是淺也不是 blobless；寫進射程、不改程式碼。
 ///   - `git log` 回**零個版本**時 `throw NoHistory`（R29 logic：R28 版靜默退化成「只比工作樹」，而工作樹依定義不含被 `#`
 ///     退役的查詢——約束變恆真、測試綠）。`git show` 對某一版非 0（該版本沒有這個檔，例如刪檔重建那個 commit）→ 跳過那一版
 ///     （R29 requirements／regression：R28 版一律 throw，訊息說「git 不可用」而成因是歷史裡有刪除節點）——判「有沒有這條路徑」
 ///     用 `ls-tree`（只要 tree 物件），`show` 非 0 一律具名 throw（R30 DA：R29 版一律 `continue`，blobless partial clone 離線時
 ///     每一版 `show` 都 128、集合靜默退化成只有工作樹）；`git log` 本身非 0 → `throw GitFailed`。錯誤只帶子命令名與 status，**不帶 git 的 stderr**（`git show` 的 fatal 訊息含路徑不含內容，但這裡
 ///     一律不轉述）。
-///   - 子行程環境只留 `PATH`／`HOME`：清掉呼叫端的 `GIT_DIR`／`GIT_WORK_TREE` 等（R29 logic：那會讓 git 去查別的倉庫、回空、以 0 離開）。
+///   - 子行程環境只留 `PATH`／`HOME`（外加下面兩個設定變數）：清掉呼叫端的 `GIT_DIR`／`GIT_WORK_TREE` 等（R29 logic：那會讓 git 去查別的倉庫、回空、以 0 離開）。
 /// 臂：`historicalQueryFoldsIsDrivenByItsOwnFixture`（合成 repo：刪檔重建、側支版本、零歷史；R29 regression：R28 版整段
 /// `for h in hashes` 拔掉五條測試全綠，而它正是這條約束對它建出來的那個威脅唯一還握有查詢的一半）。
 private func historicalQueryFolds(root: URL, relativePath: String) throws -> Set<String> {
@@ -1458,12 +1470,18 @@ private let swiftStatementKeywords: Set<String> = [
 /// emoji 識別碼 `🐶/2` 被當成 regex 開頭，從 fdb3c37 的正確判定退化）。**TSPL 不等於 swiftc**（R35 logic）：swiftc 接受識別碼裡的
 /// `$`（`a$in/2` 在這裡被切成 `in`、判成 regex）、拒絕 TSPL 列入的 U+FFF9–FFFD——兩處差都在射程外（刻意的寫法）。數字結尾的
 /// 運算元（`10/2`）也靠這張表：R34 拆掉數字分支之後，`0x30...0x39` 就是它唯一的判定（R35 regression：當時無臂，現在有）。
-/// 一個字形叢集的**每個**純量都要在區段裡才算。**`allSatisfy` 無臂**（R35 regression：換成 `contains` 或 `.first` 全綠）——三種寫法只在
-/// 混合運算子與識別碼純量的 ZWJ 序列上答得不同（🏴‍☠️ ＝ 1F3F4＋200D＋2620＋FE0F），而**swiftc 在那種叢集內部以純量切 token**：
-/// `prefix operator ❤️` 加上 `let ‍🔥 = 4` 之後，`❤️‍🔥/2` 編得過、是真除法（R36 logic）——沒有任何以叢集為單位的規則對，這一類在射程外。
-/// R35 版寫的兩個理由都不成立（「以識別碼開頭的叢集三種寫法同答」只在非 ZWJ 的叢集成立；「Swift 把 `/` 併進運算子」是錯的，R36 logic）。
-/// **也無臂**：`0x41...0x5A`（A–Z）與 `0x5F`（`_`）現在各有一條臂（R36 regression：當時單獨拿掉 0 條紅、而效果是 fail-open——
-/// `N/2`、`a_/2` 被判成 regex）；Latin-1 各段、結合用各段、其餘 BMP 與平面 2–14 的區段單獨拿掉仍然 0 條紅，無臂。
+/// 一個字形叢集的**每個**純量都要在區段裡才算。**`allSatisfy` 無臂**（R35 regression：換成 `contains` 或 `.first` 全綠）。三種寫法
+/// 在叢集**混有表內與表外的純量**時就會答得不同，而兩種情形 Swift 各自不同（R37 requirements／logic／regression 各自量）：運算子開頭
+/// 加 VS／keycap／膚色（`❤️` ＝ 2764＋FE0F、`⭐️`、`#️⃣`、`✌🏻`；FE0F 在 `0xFDF0...0xFE1F`、基底不在表）分出 `contains`，而 Swift 在
+/// 那裡把 `/` 併進運算子（沒宣告時 `x❤️/2` 報 `cannot find operator '❤️/'`，宣告 `infix operator ❤️/` 後印 9）；ZWJ 序列可能分出
+/// `.first`（🏴‍☠️ ＝ 1F3F4＋200D＋2620＋FE0F），而 swiftc 在那種叢集內部以純量切 token（`prefix operator ❤️` 加 `let ‍🔥 = 4` 之後
+/// `❤️‍🔥/2` 是真除法，R36 logic）。沒有任何以叢集為單位的規則兩種都對，這一類在射程外；「無臂」的結論不受影響。R35 的兩個理由：
+/// 「以識別碼開頭的叢集三種寫法同答」只在非 ZWJ 的叢集成立（R36 logic）；「Swift 把 `/` 併進運算子」對非 ZWJ 對、對 ZWJ 錯——R36
+/// 說它「是錯的」、又說只有 ZWJ 序列會分出，是錯在另一個方向（R37）。
+/// **哪幾段有臂**（R37 regression 以 57 次單區段拿掉量）：`0x30...0x39`（`10/2`）、`0x41...0x5A`（`N/2`）、`0x5F`（`a_/2`）、
+/// `0x61...0x7A`、`0x3040...0xD7FF`（`名前/2`）、平面 1（`🐶/2`）——恰好這六段，其餘單獨拿掉 0 條紅、無臂；**沒有任何一段在真實
+/// 語料上承重**（113 個輸入的輸出逐位元組相同）。R36 版寫「其餘 BMP … 無臂」把有臂的 `0x3040...0xD7FF` 也涵蓋了，而那句的開頭
+/// 「也無臂」接著說 A–Z 與 `_` 各有一條臂，自相矛盾（R37 regression；A–Z 與 `_` 的臂是 R36 加的，當時單獨拿掉 0 條紅、效果 fail-open）。
 private let swiftIdentifierScalarRanges: [ClosedRange<UInt32>] = [
     0x30...0x39, 0x41...0x5A, 0x5F...0x5F, 0x61...0x7A,
     0xA8...0xA8, 0xAA...0xAA, 0xAD...0xAD, 0xAF...0xAF, 0xB2...0xB5, 0xB7...0xBA,
