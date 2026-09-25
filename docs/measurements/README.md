@@ -128,7 +128,8 @@
    不在 Bash 命令列上帶查詢、不放進 `Grep` 工具的 `pattern`、不餵給 `ltm_query` MCP 工具、不寫進
    任何工具的 `description`、不貼進對話、不在回覆裡引述——連「第 N 條是『…』」這種半句都不行。
    `cat`／`Read`／`git blame` 查詢檔也不做（理由見上表下方那一段）。
-   **編輯查詢檔在 Claude Code 之外的編輯器做**——**且沒有在線的 session 讀過這個檔**：Claude Code 對它讀過的檔（以絕對路徑為鍵、
+   **編輯查詢檔在 Claude Code 之外的編輯器做**——**且沒有任何讀過這個檔的 session 還會再跑**（在線、之後被 resume、或之後還會 compaction——
+   R40 requirements：這句原寫「沒有在線的 session 讀過這個檔」，R39 只在下面改了措辭）：Claude Code 對它讀過的檔（以絕對路徑為鍵、
    記在那個 session 的 read-state 裡）的任何改動——外部編輯器、Bash、背景行程都算——會在**那個** session 的下一次 model call 落一筆
    `attachment.type = "edited_text_file"`。**帶不帶內容看檔案被讀的當下有多大**（R37 security 量、DA 從 2.1.281 的程式碼確認；R38 logic
    在 2.1.282 的程式碼再確認是 `Buffer.byteLength ≤ 4096`——以 **bytes** 計、含等號。R38 security 用 CJK 檔量過：以 bytes 計，不是字元；
@@ -148,38 +149,54 @@
    R38 security 2026-09-25 重數是 1,939）裡沒有一筆的前置接觸只有 Read。R38 security 在 2.1.282 把「不會」這 16 種逐一重跑、0 筆；
    另外量到也**不會**的：`grep '^#' <f> 2>/dev/null`、`> /dev/null`、`{ grep '^#' <f>; printf …; } > out`（worktree 配方的替身行）、
    `cp`、`cmp -s`（就地配方自己的讀）、`tail`、`cat <f> | wc -l`、`wc -c < <f>`、`grep -rlF`。R39 security 在 2.1.282 再量到：**會**——
-   `true && cat <f>`、`cat <f>; cat <f>`、`cd <dir> && grep '^#' <f>`、`LC_ALL=C grep '^#' <f>`、`egrep`、`grep -F`／`-h`／`-E`、`cat -n`、`nl`、
+   `true && cat <f>`、`cat <f>; cat <f>`、`cd <session cwd> && grep '^#' <f>`（只有這個目標，見下）、`LC_ALL=C grep '^#' <f>`、`egrep`、`grep -F`／`-h`／`-E`、`cat -n`、`nl`、
    `rg`；**不會**——`grep '^#' <f>; echo done`、`grep … && wc -l <f>`、`grep '^#' a b`、`sed -n '/re/p'`、`cat <f> 2>&1`、`grep … || true`、
-   `grep -m1`、`rg -c`、`F='…'; grep '^#' "$F"`、`git hash-object`。**2.1.282 的登記規則**（R38 logic、R39 logic／security／DA 讀程式碼，
-   與上面的量測一致；讀程式碼得到的、綁在這一版，不是規格）：命令字串含 `|`、`<`、`>` 就不登記；`cd` 與環境變數前綴不算一段；`cat`（只准
-   `-n`）、`nl`（不准旗標）、`bat`（`-n`／`-p`）、`head`、`tail`、`sed -n` 的行號範圍可以與 `echo`／`printf`／`true`／`:` 的段並列；`grep`／`egrep`／
-   `fgrep`／`rg` **只在整條命令只有一段時**才算，而且旗標要在白名單（`-[niwxEFGPHh]+`、`-A`／`-B`／`-C N`、部分長選項）、恰好一個 pattern
-   與一個檔、路徑不含 `*?[{`、命令以 0 結束；`head`／`tail`／`sed -n` 登記成帶範圍的項目、不產生 attachment；已經在 read-state 的項目
+   `grep -m1`、`rg -c`、`F='…'; grep '^#' "$F"`、`git hash-object`。R40 security 再量到**不會**：`cd <別的目錄> && grep '^#' <f>`
+   （相對與絕對路徑各一，0/2）、`timeout 5 grep …`、`cat <f> > /dev/null`、`head -n 50`。**2.1.282 的登記規則**（R38 logic、R39 logic／security／DA 讀程式碼，
+   與上面的量測一致；讀程式碼得到的、綁在這一版，不是規格）：命令字串含 `|`、`<`、`>` 就不登記；環境變數前綴不算一段；`cd` **只有一種形狀**會被剝掉——恰好是
+   `cd <session cwd> && ` 的前綴（不加引號、不含特殊字元的絕對路徑；在執行與登記之前就剝掉，逐字稿裡也看不到），其他 `cd` 都是一段，整條命令
+   因此不登記；`cat`（只准 `-n`／`--number`）、`nl`（不准旗標）、`bat`／`batcat`（`-n`／`-p`／`--number`／`--plain`）、`head`、`tail`、`sed -n` 的行號
+   範圍可以與 `echo`／`printf`／`true` 的段並列（正則寫的是 `(echo|printf|true|:)\b`，但 `:` 後面沒有字母時 `\b` 不成立，所以 `:` 實際上不行）；`grep`／`egrep`／
+   `fgrep`／`rg` **只在整條命令只有一段時**才算，而且旗標要在白名單（`-[niwxEFGPHh]+`、`-A`／`-B`／`-C N`、部分長選項；`rg` 有自己的一組 `-[iSswxFnNHUP]+`）、
+   恰好一個 pattern 與一個檔、路徑不含 `*?[{`、命令以 0 結束（其他讀取命令非零結束時整個 call 算出錯，也不登記）；`head`／`tail`／`sed -n` 登記成帶範圍的項目、不產生 attachment；已經在 read-state 的項目
    不會被之後的讀覆寫；被中斷或轉背景的 call 不登記。（R39 五個 lens：R38 版把這段寫成「其餘每一段都要是已知的讀取命令…單獨成命令的
    grep 家族」，照字面會推出 `grep -c`／`-q` 會登記、`cat <f>; echo x` 不會，與量測相反。DA 讀程式碼推 `cd … && grep` 不登記，security
-   量到會，以量測為準。）
+   量到會，以量測為準——R40 logic／security／DA 更正：兩個都對，差在 `cd` 的目標；`:` 與 `cd` 兩句也是 R40 改的。）
+   **第三條管道：compaction**（R40 DA 讀 2.1.282 的程式碼並用合成檔量過）：full compaction 先把 read-state 整份快照、清空，再依
+   timestamp 取最新的 5 個檔，對每個檔**不帶 offset／limit** 走 Read，把**整份**內容寫成 `{type:"file", content}` attachment（單檔約
+   5,000 tokens 上限）——**不看**這個項目當初帶不帶範圍，而那次 Read 又會重新登記這個檔，所以之後每次 compaction 都可能再寫一次。DA 量到：
+   帶 offset／limit 的 Read、或 Bash `head -3` 之後 `/compact`，都出現含**全部**行的 `file` attachment。**語料裡已經發生過一次**：
+   `3a2ceb7e…` 在 2026-09-07T00:25:35Z 的 auto compaction 之後，有一筆查詢檔的 `file` attachment（19 行註解＋8 行查詢；那份 jsonl 本來就在
+   內容鍵的 5 筆預期命中裡，所以命中數沒變）。所以上面「不會」清單裡的 Read、`head`、`tail`、`sed -n`（任何帶範圍的讀）只是不發
+   `edited_text_file`，**仍然登記進 read-state**，compaction 時會被整份重讀——**要避開兩條管道，只能用不登記的讀法**（命令含 `|`、`<`、`>`，
+   例如 `grep '^#' <f> | cat`；或 `git`、`python3 open()` 這類不是讀取命令的形式）。R37–R39 只量了「讀檔之後改檔」會帶出什麼，沒有人量過
+   compaction。
    所以**規則 1 原本寫的檔頭讀法 `grep '^#'` 就會打開這條管道**，改成 `grep '^#' <f> | cat` 就不會（依賴 harness 怎麼解析命令；
    規則 1 下面那句現在寫的是後者——R38 四個 lens：R37 只改了這一段，規則句沒跟著改）；允許的
    計數類讀法今天量到的都不會（R37 requirements：R36 版寫「規則 1 唯一允許的 `grep '^#'`」，與規則 1 自己「與統計非註解行」矛盾）。
    R36 security 最先量到的是：`grep '^#' A` 之後、下一個 call 對 A `sed -i` → 寫下 attachment；只 `sed -i`、`wc -l` 之後 `sed -i`、
    `grep` 之後接一個 call 內的 `cp; sed; cp` 往返 → 都沒有——也就是這條建議原本帶著一個沒寫出來的前提（沒人讀過），而規則 1
    自己允許的讀法就會打破它；當時其他讀法沒量，R37 補齊上面那份清單。
-   前提寫「在線，**或之後被 resume**」：照字面「沒有任何 session 讀過」在這個 repo 已不可能滿足（37 輪的 reviewer 都 grep 過）。
+   前提寫「在線，**或之後被 resume 或 compact**」：照字面「沒有任何 session 讀過」在這個 repo 已不可能滿足（37 輪的 reviewer 都 grep 過）。
    **resume 會重建 read-state，但只從 Read／Write／Edit**（R39 security 讀 2.1.282 的程式碼並量過：重建 read-state 的那個函式在 resume
    與 print 模式啟動時從逐字稿播種，每個檔只取最近的一次工具呼叫）：Bash 讀不重建（R38、R39 security 各一個資料點，0 筆）；Read 重建但帶
    offset、不產生 attachment（R39 requirements 一個資料點，0 筆）；Edit 在 resume 當下讀磁碟，今天 4,402 B、只記檔名；**Write 用逐字稿裡的
    舊 `content`**——≤ 4096 B 就保留內容、diff 從 Write 起整段累積、時間戳舊所以 resume 後第一次 model call 就發（不必再有改動），**4096 門檻
    與 ±8 距離兩道防線都擋不住**（R39 security 用合成檔量到 8 條替身全在 snippet 裡；再 resume 一次會再寫一次）。今天的語料：Read／Write／
    Edit 過查詢檔的 session 有 3 個，唯一有 Write 的 `3a2ceb7e…` 最後一次碰是 Edit，所以只記檔名——**今天沒有實際外洩**，但它是一個
-   resume 了就重新在線的讀者（R39 security 報 MEDIUM，DA 以今天的語料更正為 LOW。R38 版寫「resume 之後沒有重建 read-state」，只對 Bash 讀成立；R37 版寫「沒量」）。**task 1b 的寫回是安全的**：它改的是檔頭**第 1 條**（第 5–12 行，會過時的句子在第 7–10 行——R39 requirements 更正「7–9」），離終止符（第 43 行）
-   ≥ 31 行，在下面的 ≥ 8 行界之外——即使有在線讀者、即使檔案縮到 4096 以下也一樣（R38 regression／requirements／security：R37 版寫
-   「檔頭第 1 行、約 40 行」，第 1 行是標題）。R35 以前這裡寫的前提是「Claude Code 沒在跑、或那個 session 不在這個 project」；R36 把整句說成「不對」說過頭
+   resume 了就重新在線的讀者，**而且 resume 之後的 compaction 可能把今天那份全檔寫回**（它若排在 read-state 最新的 5 個檔之內；R40 DA，見上「第三條管道」）——不要 resume 它（R39 security 報 MEDIUM，DA 以今天的語料更正為 LOW。R38 版寫「resume 之後沒有重建 read-state」，只對 Bash 讀成立；R37 版寫「沒量」）。**task 1b 的寫回**：它改的是檔頭**第 1 條**（第 5–12 行，會過時的句子在第 7–10 行——R39 requirements 更正「7–9」）與第 24 行（R39 #13
+   加的），離終止符（第 43 行）分別 ≥ 31 行與 19 行，在下面的 ≥ 8 行界之外——這對 `edited_text_file` 成立（前提：沒有 Write 播種的 resume
+   讀者，今天沒有）；**對 compaction 不成立**：外部編輯之後，任何 read-state 裡有這個檔的 session 會重讀它、把它排到最新，下一次 compaction
+   就把整份新檔寫回，距離不相干。所以 task 1b 的前提是**沒有任何 read-state 含這個檔的 session 之後會再 compact 或被 resume**（R40 DA；
+   R39 版寫「即使有在線讀者、即使檔案縮到 4096 以下也一樣」，R38–R39 只算了 ±8，也沒提第 24 行——R40 requirements）（R38
+   regression／requirements／security：R37 版寫「檔頭第 1 行、約 40 行」，第 1 行是標題）。R35 以前這裡寫的前提是「Claude Code 沒在跑、或那個 session 不在這個 project」；R36 把整句說成「不對」說過頭
    （R37 regression）——它量到的是觸發條件在 read-state，這讓「不在這個 project」變得不相干（一個在別的 project、以絕對路徑讀過這個檔
    的 session 算不算，沒量）；「沒在跑」那一半與上面的「在線」同義。那時的實例（R31 security：全語料含 ≥1 條的 11 筆裡有一筆是它，
    1,752 個字元長、2/8 條，2026-09-07T04:52:11Z）是一次外部編輯，兩種寫法都解釋得了。在 session 裡用 Write／Edit 工具是**今天**索引安全
    的（`content`／`old_string`／`new_string` 不在那七個欄位裡），但它不守本規則劃的 jsonl 邊界：
    Write 的 `content`、Edit 的 `toolUseResult.originalFile`（**整份檔案**，不是改到的那幾行），每一次都把完整查詢集存進 jsonl 一份；
-   讀過之後的 `attachment` 紀錄帶多少見上方（≤ 4096 B 時前後各 8 行、否則只有檔名；Read 本身不進 read-state——R38 regression：這一句
+   讀過之後的 `attachment` 紀錄帶多少見上方（≤ 4096 B 時前後各 8 行、否則只有檔名；Read 會進 read-state（帶 offset），平時不發 `edited_text_file`，但 compaction
+   會把它整份重讀——R40 regression／requirements：R38 版寫「Read 本身不進 read-state」。R38 regression：這一句
    原寫「Read／Edit 之後的 `attachment` 紀錄，每一次都把完整查詢集」，R37 改上方時沒跟著改）——而**印**與**讀**也會：一個 Bash
    命令把整份檔案印進 stdout 是一筆 `toolUseResult.stdout`，一次 `Read` 是一筆 `toolUseResult.file.content`。
    **Bash 對 project root 底下檔案的編輯也會落一筆**：Claude Code 把那次 Bash call 對 project root 底下檔案造成的變更記成
@@ -252,20 +269,25 @@
    而且**這份列舉不封閉**。探針：`trap …; sleep 20` 配 3 秒 timeout，轉背景、跑完、trap 照樣執行。風險都一樣：剩下的變異／測試／還原在背景
    跑、被記到之後某個不相干的前景 call 上。真正殺掉的路徑對 process group 與列舉到的子孫送 TERM、1.5 秒後 SIGKILL（同上，原始碼層級）。
    **所以**，變異一律這樣寫：
-   `F='<file 的絕對路徑>'; B=$(mktemp) && cp "$F" "$B" || exit 1; trap "cp '$B' '$F' && rm -f '$B' || echo 'restore or cleanup failed; backup at $B' >&2" EXIT && trap 'exit 130' INT && trap 'exit 143' TERM || exit 1`
+   `F='<file 的絕對路徑>'; B=$(mktemp) && cp "$F" "$B" || exit 1; trap "cp '$B' '$F' && rm -f '$B' || echo 'restore or cleanup failed; backup at $B' >&2" EXIT && trap 'exit 130' INT && trap 'exit 143' TERM && trap 'exit 141' PIPE || exit 1`
    → 改 → `cmp -s "$B" "$F"; [ $? -eq 1 ] || { echo 'FAIL: 變異沒生效或 cmp 出錯'; exit 1; }` → 跑（`timeout -s INT -k 10 N /usr/bin/swift test`）
    ——還原與刪備份由 EXIT trap 做。前提與逐項理由：
    - **一個 shell 只有一個 EXIT trap**：`trap … EXIT` 是取代，不是疊加（R38 logic／requirements／security）。所以**一個 call 只用一次這一行**：
      同一個 call 裡用第二次，第二次備份時檔案還是第一次的變異，call 結束時被「還原」成變異 1，原檔只剩在第一次的備份裡——`cmp` 抓不到
      （logic 在 zsh 5.9.1 量）；在下方 worktree 配方的 call 裡直接用，它會取代那裡的清除 trap，檔案有還原、樹卻留下來（requirements／security
      在 zsh 與 bash 重現：`git worktree list` 多一筆）——**worktree 裡不要用這一行**（下一條）。要迴圈，每一輪包進 subshell `( … )`；要同時保護
-     **兩個檔**，用巢狀 `( 配方 f1; ( 配方 f2; 變異; 測試 ) )`——平鋪用兩次會讓第一個檔安靜地停在變異，變異後的 `cmp` 只比第二個檔（R39 DA）。
-     子 shell 的 EXIT trap 在子 shell 結束時觸發、不動外層的（R38 logic 驗過迴圈每輪都還原、不留備份；子 shell 與外層的 EXIT trap 在 zsh 與
-     bash 各觸發一次）。**用 subshell 時，call 開頭要先放 `trap 'exit 130' INT; trap 'exit 143' TERM`**：配方的訊號 trap 裝在子 shell 裡，外層
+     **兩個檔**，用巢狀 `( 配方 f1; 改 f1; cmp f1; ( 配方 f2; 改 f2; cmp f2; 測試 ) )`——每個檔在自己的配方之後改、之後 `cmp`（R40 requirements：
+     R39 版寫成 `( 配方 f1; ( 配方 f2; 變異; 測試 ) )`，兩個變異都在配方 f2 之後，`cmp` 只驗 f2）；平鋪用兩次會讓第一個檔安靜地停在變異，
+     變異後的 `cmp` 只比第二個檔（R39 DA）。
+     子 shell 的 EXIT trap 在子 shell 結束時觸發、不動外層的（R38 logic 驗過迴圈每輪都還原、不留備份；實作者自己驗過子 shell 與外層的 EXIT
+     trap 在 zsh 與 bash 各觸發一次）。**用 subshell 時（迴圈與巢狀都算），call 開頭要先放 `trap 'exit 130' INT; trap 'exit 143' TERM`，
+     而且要放在跑迴圈的那一個 shell**——bash 在 `( … )` 裡會重設已設的 trap，把整個迴圈再包一層 `( … )`，bash 5.3 與 3.2 收到 INT 會跑完所有輪
+     （R40 logic）：配方的訊號 trap 裝在子 shell 裡，外層
      shell 沒有——沒有外層 trap 時，bash 收到 INT 迴圈會繼續跑下一輪，zsh 與 bash 收到 TERM 外層在 0 秒就死、檔案還在變異、子 shell 約 2 秒後
      才以孤兒身分還原，已不在這個 call 裡；加了之後三種 shell（zsh 5.9.1、bash 5.3、bash 3.2）都會停，而且等子 shell 還原完才離開（R39 logic
      量；R38 版寫「被訊號中斷時外層迴圈會不會繼續，沒量」）。逾時預算算的是**整個 call**：迴圈 K 輪要 K×（N＋10＋餘裕）低於工具逾時，超過就拆成
-     多個 call、每個 call 一輪（R39 DA：超過的 call 會被轉到背景，也就是 (c) 的風險）。
+     多個 call、每個 call 一輪（R39 DA：超過的 call 會被轉到背景，也就是 (c) 的風險）。**不要把配方的子 shell、群組或迴圈接進會提早結束的讀者**（`| head -N`、
+     `| grep -m1`）：只 pipe 測試命令本身。這一行加了 `trap 'exit 141' PIPE` 就是為了這個——見下面 zsh 訊號那條。
    - **只保證單一寫者**（R37 DA：兩個 reviewer 同時變異同一個檔——A 備份原檔、B 在 A 還原前備份到 A 的變異——最後檔案停在 A 的變異；
      `mktemp` 在那種情形沒作用，固定路徑也一樣。最容易留下的正好是 0 條紅的變異，而那種沒人會發現）。verify 本來就是多個 reviewer 同時跑，
      所以**reviewer 一律在自己的 worktree 裡變異**（下方「要建 worktree 就**三步**」那段的配方），不在共用樹就地變異；**worktree 裡不用這一行**：
@@ -274,7 +296,9 @@
      在拋棄式 repo 量到；requirements 量到照抄成 `F='$W/…'` 會 fail-closed）。共用樹只給實作者一個人用。
      確認回到原樣要對**變異前**的身分比，不是對 HEAD：變異前印一次 `git hash-object "$F"`（只印雜湊），**EXIT trap 跑完之後**再印一次、兩者
      相同——也就是下一個 call，或包住配方的 `( … )` 關閉之後；同一個 call 的最後印的是**變異後**的雜湊，必定不同（R39 logic／requirements／
-     security／DA 各自量；R38 版寫「跑完再印一次」，沒寫要在還原之後）
+     security／DA 各自量；R38 版寫「跑完再印一次」，沒寫要在還原之後）。第二次要寫出**字面路徑**：`F` 是配方那一行在子 shell 或那個 call 裡設的，
+     那兩個位置都已經沒有它，照抄 `"$F"` 會變成 `git hash-object ""`、rc 128；而「下一個 call」只在上一個 call 是在前景跑完時成立——被轉到
+     背景的 call，trap 還沒跑（R40 logic／requirements）
      （R38 四個 lens：R37 版寫「對 HEAD 的 blob `cmp`」——未 commit 的檔還原正確也一定不等於 HEAD，而對 mismatch 最自然的補救
      `git checkout` 正是本節開頭禁的；R37 #1 的建議原文就這樣寫，修法照抄）。`git hash-object` 不在登記規則裡，不會打開 attachment 管道。
    - **沒有其他讀過這個檔的 session 在線、之後也不會被 resume**：attachment 管道看的是每一個讀過它的 session（上方「編輯查詢檔」那段），不只執行還原的那一個
@@ -284,19 +308,20 @@
    - `F` 用**加引號**的絕對路徑（`F='…'`：不加引號時空白會切字、`$x` 在 `cp` 之前就展開——R38 logic）、trap 用雙引號在**設的當下**綁定
      兩個路徑、`&&` 讓**還原成功才刪備份**，還原失敗時印出備份路徑（R38 logic：R37 版什麼都不印，隨機檔名從沒出現過）（R37 logic／regression：R36 版
      `trap 'cp "$B" <file>; rm -f "$B"'` 用 `;` 串——相對路徑之後 `cd`、路徑含空白或 `$`、`$B` 被重用、目的檔唯讀，都讓還原失敗而備份照刪；
-     R35 版的固定路徑只還原不刪，在這些情形反而留著）。三個 trap 用 `&&` 串、失敗就 `exit 1`（R37 DA：寫錯引號時 trap 沒裝上、變異照樣
+     R35 版的固定路徑只還原不刪，在這些情形反而留著）。四個 trap 用 `&&` 串、失敗就 `exit 1`（R37 DA：寫錯引號時 trap 沒裝上、變異照樣
      執行）——擋得到的是**回非零**的 `trap`（訊號名寫錯、zsh 解析不了的動作）；**擋不到**的是 zsh 對**單一參數**的 `trap` 回 0 卻什麼都
-     沒裝：把收尾的雙引號放到 `EXIT` 後面就是這個形狀，鏈照走、變異執行、沒有還原（R38 logic 在 zsh 5.9.1 量；bash 會拒絕，rc 2）。`$(trap)` 與管線
-     會 fork、列不出外層的 trap；重導到檔案的 `trap > f` 在當前 shell 執行、列得出，單參數寫錯之後則什麼都不寫——所以正向檢查做得到
-     （R39 logic／requirements／DA；R38 版由前半推出「沒有便宜的正向檢查」，推論錯了），但它要一個還得清掉的暫存檔，沒有加進這一行：
+     沒裝：把收尾的雙引號放到 `EXIT` 後面就是這個形狀，鏈照走、變異執行、沒有還原（R38 logic 在 zsh 5.9.1 量；bash 會拒絕，rc 2）。zsh 的 `$(trap)` 與管線
+     會 fork、列不出外層的 trap（bash 3.2 與 5.3 的 `$(trap)` 都列得出來——R40 regression／requirements：R39 版拿掉了「zsh 的」）；重導到檔案的 `trap > f` 在當前 shell 執行、列得出，單參數寫錯之後則什麼都不寫——所以正向檢查做得到
+     （R39 logic／requirements／DA；R38 版由前半推出「沒有便宜的正向檢查」，推論錯了），但在 zsh 它要一個還得清掉的暫存檔，沒有加進這一行：
      **照抄這一行，不要手打**（R37 版寫「沒裝上就不變異」，只對 bash 成立）。
      路徑不得含單引號：直接貼上的話整條命令在解析時就失敗、什麼都沒跑、不留備份；跳脫過的 `'` 在 zsh 安裝 trap 時被拒（鏈 exit 1、沒有
-     變異、備份留著），在 bash 則 trap 裝得上、變異照跑、還原時語法錯誤、什麼都不印（R39 logic／security／requirements）。**會留下整份備份
-     的情形**（對查詢檔就是 repo 外的受限內容，只有內容鍵掃得到；**這份列舉不封閉**——R37 版只列 `cp` 失敗那一種，R38 版補成四種並寫成完整清單，R39 又找到三種）：
+     變異、備份留著），在 bash 則 trap 裝得上、變異照跑、還原時只印語法錯誤、不印備份路徑（R39 logic／security／requirements；R40 logic 更正 R39 版的
+     「什麼都不印」）。**會留下整份備份
+     的情形**（對查詢檔就是 repo 外的受限內容，只有內容鍵掃得到——R38 logic；**這份列舉不封閉**——R37 版只列 `cp` 失敗那一種，R38 版補成四種並寫成完整清單，R39 又找到三種）：
      EXIT trap 因訊號名寫錯而裝不上（`|| exit 1` 在 trap 存在之前就離開）；跳脫過的 `'`；上面那個 zsh 單參數 trap；trap 裡的還原 `cp` 失敗
      （刻意保留，會印出路徑）；還原成功但刪備份失敗（也會印那句訊息，所以訊息寫「還原或刪備份失敗」——R39 logic：R38 版寫「restore
      failed」，這種情形是假訊息）；同一個 call 裡不包 subshell 用第二次（第一次的備份，路徑從不印出）；kill 路徑（SIGKILL，連變異都留下，
-     見下）。收到那句訊息之後怎麼還原，看下面「還原方式的紀錄量不同」那段。`cp` 失敗時留下的是空檔——trap 不能放在 `cp` 之前（那會把
+     見下）；R40 之前的寫法在 zsh 下接進提早結束的讀者（SIGPIPE，**連原檔都丟**，見下）。收到那句訊息之後怎麼還原，看下面「還原方式的紀錄量不同」那段。`cp` 失敗時留下的是空檔——trap 不能放在 `cp` 之前（那會把
      空備份蓋回原檔）。
    - 變異後的 `cmp`：確認變異真的改了檔（R37 logic：`sed -i ''` 沒命中也回 0，no-op 變異讀起來就是「0 條紅 → 無臂」）。只有「不同」（rc 1）
      才算生效，相同（0）與出錯（2，例如變異把 `F` 刪掉或改名）都停（R38 logic：R37 版的 `! cmp -s … ||` 在 rc 2 時判成生效）。**紅要是某一條
@@ -304,8 +329,11 @@
      Homebrew 的 GNU coreutils 9.11，不是 macOS 自帶）。
    - 備份路徑用 `mktemp`（R36 security：固定的 `/tmp/x.good` 讓並發、目標**不同**的 reviewer 互相還原對方的檔）、trap 裡刪備份（「用完
      立刻刪」；R35 版的配方只還原不刪）。
-   - 在 Claude Code 的 zsh（`/opt/homebrew/bin/zsh -c`，5.9.1）下 `trap '<還原>' EXIT` 遇 SIGINT、SIGTERM 都**不執行**，要轉成 exit 才會
-     （R35 security：送給 shell 或整個 process group 都一樣；bash 會執行；R34 版寫「不一定跑（SIGKILL 一定不跑）」說輕了。R36 logic 量過：
+   - 在 Claude Code 的 zsh（`/opt/homebrew/bin/zsh -c`，5.9.1）下 `trap '<還原>' EXIT` 遇 SIGINT、SIGTERM、**SIGPIPE** 都**不執行**，要轉成 exit
+     才會。SIGPIPE 是 R40 找到的（logic；DA 更正歸屬：只有 zsh，bash 3.2／5.3 有 EXIT trap 時會接住它、照樣還原）：把配方的子 shell 或
+     迴圈接進 `| head` 這類提早結束的讀者，裡面的 builtin 再寫就以 141 結束、EXIT trap 不跑——單一子 shell 時檔案停在變異、備份留著；迴圈
+     形式時第二輪把第一輪的變異當成原檔備份，**原檔就丟了**。加了 `trap 'exit 141' PIPE`，三種 shell 都還原、不留備份（R40 logic 量；實作者
+     在 zsh 5.9.1、bash 3.2、bash 5.3 重現：沒有它時 zsh 停在變異，有它時還原）。（R35 security：送給 shell 或整個 process group 都一樣；bash 會執行；R34 版寫「不一定跑（SIGKILL 一定不跑）」說輕了。R36 logic 量過：
      INT、TERM、正常結束、`exit 3` 下 EXIT trap 都恰好執行一次；trap 會等前景 job 結束才跑）。
    - `timeout -s INT -k 10 N`（R36 logic：預設的 SIGTERM 碰不到 SwiftPM 放在自己 process group 的 `swiftpm-testing-helper`，rc 124 之後它
      變成孤兒繼續跑；SIGINT 讓 SwiftPM 自己收掉它）。**牆鐘上限是 N＋10**（kill-after），所以**整個 call 的 N＋10＋備份還原的餘裕要低於 Bash 工具的
@@ -322,7 +350,7 @@
    ——R36 版寫「出錯或轉背景的變異 call」說寬了）：
    沒有**在線**的 session 讀過這個檔、也沒有 Bash call 在跑時，由使用者在外部還原 → 零 Claude Code 紀錄（Spotlight 對它有內容索引，與 repo
    本身一樣——R36 security）；session 內用 Bash `cp` → 一個 hunk（變動行連同前後 ≤3 行 context）；`git checkout -- <file>`／`git restore <file>`
-   的紀錄量與 `cp` 相同，**但變異測試不用它們**——它們還原到 HEAD，不是你手上那一份（CLAUDE.md「工作流程」開頭那條；未 commit 的修法、task 1b
+   的紀錄量與 `cp` 相同，**但變異測試不用它們**——它們還原到 HEAD，不是你手上那一份（CLAUDE.md「工作流程」開頭那條——那條唯一的例外是拋棄式 worktree 裡的**測試檔**；未 commit 的修法、task 1b
    待寫回的檔頭都會被安靜丟掉——R37 regression）；`git stash` 之後再 `drop` 會在 `.git/objects` 留一個含變異內容的懸空 blob，壓縮、不在掃描根、
    gc 前都在（R36 DA）；**不要用 Write／Edit**——Write 的 tool_use 帶整份 `content`、toolUseResult 帶 `content`／`originalFile`／`structuredPatch`，
    Edit 帶 `originalFile`，都落在 jsonl（依上面「什麼會進索引」不進索引，但在磁碟上），**而且會在 `~/.claude/file-history/<session>/`
@@ -468,12 +496,15 @@
    [ ! -e "$W/scripts/baseline-queries.txt" ] && [ ! -e "$W/scripts/rrf-tie-queries.txt" ] || { echo 'FAIL: 真檔落地了'; exit 1; }
    { grep '^#' scripts/baseline-queries.txt; printf 'ZQXJ-%d\n' 1 2 3 4 5 6 7 8; } > "$W/scripts/baseline-queries.txt"
    [ -s "$W/scripts/baseline-queries.txt" ] || { echo 'FAIL: 替身沒寫進去'; exit 1; }   # R33 security：`scripts/` 不存在時重導失敗，S 位元照樣設得上
-   git -C "$W" config --worktree sparse.expectFilesOutsideOfPatterns true   # 沒有這行，下一行在 sparse worktree 裡是 rc 0 的靜默 no-op；`--worktree` 讓它不寫進共用 .git/config（R31 regression）
-   git -C "$W" update-index --skip-worktree scripts/baseline-queries.txt
-   git -C "$W" ls-files -v scripts/baseline-queries.txt | grep -q '^S ' || echo 'FAIL: S 位元沒設上'
+   # 下面三步用 `&&` 串、失敗就中止（R40 codex：R39 以前最後一步只 echo、照常往下走，是這個區塊裡唯一 fail-open 的閘）。
+   # 第一步沒有的話，第二步在 sparse worktree 裡是 rc 0 的靜默 no-op；`--worktree` 讓它不寫進共用 .git/config（R31 regression）
+   git -C "$W" config --worktree sparse.expectFilesOutsideOfPatterns true \
+     && git -C "$W" update-index --skip-worktree scripts/baseline-queries.txt \
+     && git -C "$W" ls-files -v scripts/baseline-queries.txt | grep -q '^S ' || { echo 'FAIL: S 位元沒設上'; exit 1; }
    # S 位元只擋「從索引還原」——這棵樹裡一律不對 `.`／`scripts/` 做 checkout／restore，跨 rev 尤其不行（見下）
-   # …變異、測試…（同一個 call 內。這棵樹用完即丟，變異之間用 `git checkout HEAD -- <指名路徑>` 還原。**不要在這裡用規則 1 的就地配方**：
-   # 照抄 `F='…'` 只寫得出共用樹的路徑，變異會打在共用樹上、這棵樹的測試看不到（R39 DA）；直接用還會取代上面的清除 trap（R38））
+   # …變異、測試…（同一個 call 內。這棵樹用完即丟，變異之間用 `git checkout HEAD -- <指名路徑>` 還原**測試檔**；**替身**只能重跑上面那行
+   # 替身寫入來還原，兩個查詢檔不得出現在任何 checkout／restore 裡（R40 security，見下）。**不要在這裡用規則 1 的就地配方**：
+   # 照抄 `F='…'` 只寫得出共用樹的路徑，變異會打在共用樹上、這棵樹的測試看不到（R39 DA）；直接用還會取代上面的清除 trap（R38 requirements／security））
    ```
 
    **寫替身之後那個檔就不再是 sparse 的**（`ls-files -v` 從 `S` 變 `H`、`git status` 顯示 ` M`），此時 worktree 裡任何
@@ -488,8 +519,11 @@
    在拋棄式 repo 兩種都跑過：blob 相同時這三個命令都保住替身、S 位元也還在，本輪比較的 `a3c7233..88f29fa` 正是這種；
    但這個檔有 7 個歷史版本，對更早的 rev 危險是真的，所以禁令照樣是「任何 rev 都不准」——fail-closed），前兩個還把 S 清成 H——指定別的 rev 是「先寫索引再寫工作樹」，
    位元擋不住；而 verify 每一輪的標題都是「對 `<上一個 fix>`」，`git checkout <prev> -- .` 正是最省事的對照寫法）。所以自檢那一行
-   證明的只是「S 設上了」，**不是**「可以 checkout」；真正在守的是這句禁令：**還原測試檔只准指名路徑**（`git checkout HEAD -- Tests/…`），
-   不准對 `.` 或 `scripts/` 做任何 checkout／restore，任何 rev 都不准。**不要**改用規則 1 的就地配方（見上一段配方裡的註解；R37 版這裡寫
+   證明的只是「S 設上了」（R40 起它失敗會中止；R39 以前只 echo），**不是**「可以 checkout」；真正在守的是這句禁令：**還原測試檔只准指名路徑**（`git checkout HEAD -- Tests/…`），
+   不准對 `.` 或 `scripts/` 做任何 checkout／restore，任何 rev 都不准；**兩個查詢檔也不得被指名**在任何 checkout／restore 裡（任何 rev、
+   任何旗標，含 `--ignore-skip-worktree-bits`）——對 HEAD 指名時 skip-worktree 讓它 rc 1（`pathspec … did not match`）、替身維持變異、
+   `git status` 什麼都不顯示，安靜地沒還原；指名別的 rev 或加那個旗標就把真檔 blob 寫到 repo 外面（R40 security 逐一量過）。替身變異了就
+   重跑替身那一行。**不要**改用規則 1 的就地配方（見上一段配方裡的註解；R37 版這裡寫
    「改用 CLAUDE.md 指定的 `cp` 備份就地還原」，照做會讓樹留下來；R38 版改成「包進 subshell」，照抄的 `F='…'` 會讓變異打在共用樹上——R39 DA）。另：`sparse-checkout disable` 會讓從未 checkout 的 `rrf-tie-queries.txt` 實體化。
    附帶：`git sparse-checkout set` 會把 `extensions.worktreeConfig = true` 寫進**共用的** `.git/config`，teardown 不清（本 repo
    今天就帶著它）；`config sparse.expectFilesOutsideOfPatterns` 不加 `--worktree` 也會（R31 regression），所以配方帶 `--worktree`。命中的 checkout **不要靜默
@@ -538,7 +572,8 @@
   那不是污染，是正常召回；`self` 會把它標成 self，分不出來，讀結果時要在 session 之外看命中。
   反過來，空白與大小寫以外的改寫（全形／半形、標點、換序）`self` 看不到。
 - 查詢原文在執行期在 `python3` 與 `ltm` 的 argv 上（CLI 的查詢就是位置參數），同一帳號的行程 `ps -ww`
-  看得到（容器 PID namespace、Linux `hidepid` 下更窄），存活時間是那一列的 wall clock——這是作業系統的
+  看得到（容器 PID namespace、Linux `hidepid` 下更窄），存活時間是那一列的 wall clock（`ltm` 掛住時沒有上界：腳本不給 `ltm` 逾時，是 R37 使用者決定保留的取捨，見腳本檔頭；
+  R40 codex／requirements）——這是作業系統的
   可見面，不是本腳本的輸出通道；密鑰不在任何 argv 上（R14 版把它寫成 `env` 的 argv、execve 稽核會永久記下，R15 改走繼承的
   fd 3；但它在 re-exec 的 bash、judge 與 ltm 的**環境**裡整個 run，同帳號 `ps -E` 看得到——那正是密鑰該待的地方）；列在這裡是
   因為上一節的第一句是全稱。對照：呼叫端 shell 的環境經繼承進來的那一面，新行程拿到的只有 argv 上明示轉發的 PATH／HOME／哨兵與白名單經 fd 3 到達的名字（見檔頭），其餘 re-exec 之後全掉（R20：R19 版寫「除白名單之外全掉」，PATH 就是第一個未列的成員）——**哪些算「意外」、哪些落在邊界外，

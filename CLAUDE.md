@@ -307,6 +307,8 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 ## 工作流程
 
 本專案走 IDD（issue-driven development）：先開 issue、診斷、實作、驗證，commit 引用 `#N`。
+**commit message 裡只有 issue 本身寫成 `#N`**；verify finding 的編號寫成 `R40-3` 這種形狀——GitHub 把任何 `#3` 都當成 issue 參照，
+在不相干的 issue 上留 referenced 事件，一句 `fixes #3` 就會把它關掉（#63 R40：R37–R39 的三個 commit 各在 #1–#13 上留了一筆）。
 
 **變異測試的還原一律用檔案備份，不要用 `git checkout -- <file>`**（唯一的例外是 verify 的拋棄式 worktree：那裡沒有未 commit
 的工作，變異之間用指名路徑的 `git checkout HEAD -- <path>` 還原，見 `docs/measurements/README.md` 的 worktree 配方）。本 session
@@ -316,22 +318,26 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 到了**上一版的實作**——測試照樣全綠，因為綠燈來自舊版而不是新版。
 
 正確做法（全部在**同一個前景** Bash call 裡，**不要 `run_in_background`**，**不要包進 zsh 函式**——EXIT trap 會在函式返回時就還原）：
-`F='<file 的絕對路徑>'; B=$(mktemp) && cp "$F" "$B" || exit 1; trap "cp '$B' '$F' && rm -f '$B' || echo 'restore or cleanup failed; backup at $B' >&2" EXIT && trap 'exit 130' INT && trap 'exit 143' TERM || exit 1`
+`F='<file 的絕對路徑>'; B=$(mktemp) && cp "$F" "$B" || exit 1; trap "cp '$B' '$F' && rm -f '$B' || echo 'restore or cleanup failed; backup at $B' >&2" EXIT && trap 'exit 130' INT && trap 'exit 143' TERM && trap 'exit 141' PIPE || exit 1`
 → 改 → `cmp -s "$B" "$F"; [ $? -eq 1 ] || { echo 'FAIL: 變異沒生效或 cmp 出錯'; exit 1; }` → 跑（`timeout -s INT -k 10 N /usr/bin/swift test`，
 **N＋10＋備份還原的餘裕**低於 Bash 工具的逾時）——還原與刪備份由 EXIT trap 做；紅要是某一條**具名測試**失敗，不是非零 rc（逾時 124、
 kill-after 137 也是非零）。**一個 shell 只有一個 EXIT trap**（`trap … EXIT` 是取代）：**一個 call 只用一次這一行**——直接用第二次，
-檔案會停在第一次的變異、原檔只剩在第一次的備份裡（#63 R38）。要迴圈，每一輪包進 subshell `( … )`，**並在 call 開頭先放
-`trap 'exit 130' INT; trap 'exit 143' TERM`**（子 shell 裡的訊號 trap 保護不到外層：沒有它，bash 收到 INT 迴圈會繼續、TERM 會讓外層先死、
-子 shell 變成孤兒才還原——#63 R39）；逾時預算算整個 call，超過就拆成多個 call。要同時保護兩個檔，用巢狀 `( 配方 f1; ( 配方 f2; … ) )`
-——平鋪用兩次，第一個檔會安靜地停在變異。**verify 的 worktree 裡不用這一行**：照抄 `F='…'` 只寫得出共用樹的路徑，變異會打在共用樹上、
-worktree 的測試看不到（#63 R39），那裡用 `git checkout HEAD -- <指名路徑>`。**這一行照抄、不要手打**：zsh 對單一參數的 `trap`（收尾引號放到 `EXIT` 後面）回 0 卻什麼都沒裝，`&&`
+檔案會停在第一次的變異、原檔只剩在第一次的備份裡（#63 R38）。要迴圈，每一輪包進 subshell `( … )`；要同時保護兩個檔，用巢狀
+`( 配方 f1; 改 f1; cmp f1; ( 配方 f2; 改 f2; cmp f2; 測試 ) )`（每個檔在自己的配方之後改、之後 `cmp`——#63 R40）——平鋪用兩次，第一個檔會
+安靜地停在變異。**凡是用 subshell（迴圈與巢狀都算），call 開頭都先放 `trap 'exit 130' INT; trap 'exit 143' TERM`，而且放在跑迴圈的那一個
+shell**（子 shell 裡的訊號 trap 保護不到外層：沒有它，bash 收到 INT 迴圈會繼續、TERM 會讓外層先死、子 shell 變成孤兒才還原——#63 R39；
+bash 在 `( … )` 裡會重設已設的 trap，把迴圈再包一層就失效——#63 R40）；逾時預算算整個 call，超過就拆成多個 call。**不要把配方的子 shell、
+群組或迴圈接進 `| head` 這類提早結束的讀者**，只 pipe 測試命令本身：zsh 在 SIGPIPE 下不跑 EXIT trap，迴圈形式會丟掉原檔，這一行因此多了
+`trap 'exit 141' PIPE`（#63 R40）。**verify 的 worktree 裡不用這一行**：照抄 `F='…'` 只寫得出共用樹的路徑，變異會打在共用樹上、
+worktree 的測試看不到（#63 R39），那裡用 `git checkout HEAD -- <指名路徑>` 還原測試檔；替身只能重跑替身那一行，兩個查詢檔不得出現在
+任何 checkout／restore 裡（任何 rev、任何旗標——#63 R40）。**這一行照抄、不要手打**：zsh 對單一參數的 `trap`（收尾引號放到 `EXIT` 後面）回 0 卻什麼都沒裝，`&&`
 擋不到。**這個配方只保證單一寫者**：兩個 reviewer 同時變異同一個檔會把原檔弄丟（`mktemp` 在那種情形沒作用），所以 reviewer 在自己的
-worktree 裡變異，共用樹只給實作者；確認回到原樣是變異前印一次 `git hash-object "$F"`、**EXIT trap 跑完之後**（下一個 call，或 `( … )` 關閉之後）再印一次、兩者相同——
-同一個 call 的最後印的是變異後的雜湊，必定不同（#63 R39）；**不是對 HEAD 比**：未 commit 的檔還原正確也不等於 HEAD，而對那個 mismatch
+worktree 裡變異，共用樹只給實作者；確認回到原樣是變異前印一次 `git hash-object "$F"`、**EXIT trap 跑完之後**（下一個前景 call，或 `( … )` 關閉之後）用**字面路徑**再印一次、
+兩者相同——同一個 call 的最後印的是變異後的雜湊，必定不同（#63 R39）；那兩個位置都已經沒有 `F`，照抄 `"$F"` 會變成 `git hash-object ""`（#63 R40）；**不是對 HEAD 比**：未 commit 的檔還原正確也不等於 HEAD，而對那個 mismatch
 最自然的補救 `git checkout` 正是本節開頭禁的（#63 R38；R37 版寫「對 HEAD 的 blob `cmp`」）。
-另一個前提：**沒有其他讀過這個檔的 session 在線、之後也不會被 resume**（下面「另一條管道」那段）。逐項理由在 `docs/measurements/README.md` 規則 1（`mktemp`：固定
+另一個前提：**沒有其他讀過這個檔的 session 在線、之後也不會被 resume 或 compact**（下面「另一條管道」那段）。逐項理由在 `docs/measurements/README.md` 規則 1（`mktemp`：固定
 路徑讓目標不同的並發 reviewer 互相還原；`F` 加引號的絕對路徑＋雙引號在設定當下綁定＋`&&`：還原成功才刪備份、失敗時印出備份路徑；
-trap 用 `&&` 串：擋得到回非零的 `trap`；變異後 `cmp` 只認 rc 1：no-op 變異讀起來就是「無臂」、rc 2（檔被刪或改名）不算生效；訊號轉 exit：zsh 下 INT／TERM 不觸發 EXIT trap；`-s INT -k 10`：預設的 TERM 留下孤兒
+trap 用 `&&` 串：擋得到回非零的 `trap`；變異後 `cmp` 只認 rc 1：no-op 變異讀起來就是「無臂」、rc 2（檔被刪或改名）不算生效；訊號轉 exit：zsh 下 INT／TERM／PIPE 不觸發 EXIT trap；`-s INT -k 10`：預設的 TERM 留下孤兒
 `swiftpm-testing-helper`；`|| exit 1`：`set -e` 在這個 harness 裡無效）。**SIGKILL 下 trap 仍不執行**——對查詢檔的那個 call 裡不放會
 逾時或被中斷的東西。判準不是
 「有沒有 commit」，是**還原的目標是不是我手上這一份**。**備份、改、跑、還原要在同一個 Bash call 內完成**——Claude Code 把一次
@@ -355,7 +361,9 @@ entry 全部在 project root 底下、`/tmp` 零筆；主 session 與 subagent �
 無條件、把 `grep '^#'` 寫成「唯一允許」）。所以讀檔頭一律 `grep '^#' <f> | cat`（R38：README 規則句 R37 沒跟著改）。**resume 會重建
 read-state，但只從 Read／Write／Edit**：Bash 讀不重建、Read 重建但不產生 attachment、Edit 重建時讀磁碟；**Write 用逐字稿裡的舊內容重建，
 4096 門檻與 ±8 距離都擋不住**（R39 security；今天的語料沒有這種 session，唯一 Write 過查詢檔的那個最後一次碰是 Edit）——這也是 Write／Edit
-不要用在查詢檔上的另一個理由。還原方式的紀錄量不同，而且**只對沒讀過那個檔的 session 成立**：沒有**在線**的 session
+不要用在查詢檔上的另一個理由。**第三條管道是 compaction**（R40 DA）：compaction 會把 read-state 裡最新的 5 個檔**不帶範圍**整份重讀、寫成
+`file` attachment——帶範圍的 Read、`head`／`tail`／`sed -n` 平時不發 attachment，但一樣會被整份重讀，4096 與 ±8 都擋不住；語料裡已經發生過一次
+（`3a2ceb7e…`，2026-09-07）。所以**只有不登記的讀法是安全的**（命令含 `|`、`<`、`>`，例如 `grep '^#' <f> | cat`）。還原方式的紀錄量不同，而且**只對沒讀過那個檔的 session 成立**：沒有**在線**的 session
 讀過它、也沒有 Bash call 在跑時由使用者在外部還原 → 零 Claude Code 紀錄；Bash `cp` → 一個 hunk（`git restore` 紀錄量相同，但它
 還原到 HEAD，見本節開頭）；**Write／Edit 不要用**（整份檔進 jsonl，而且在 `~/.claude/file-history/` 留 size 鍵找不到的變異快照）。R34
 版寫「沒有不留紀錄的還原路徑」與「落在下一個改回那個檔的 call」，兩句都不成立；R35 版的「session 外 → 零」丟了限定句，也漏了 attachment 那條管道。R28–R30 只寫「推論、未證」，因為那時的探針都在
