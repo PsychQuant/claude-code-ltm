@@ -484,7 +484,9 @@ private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throw
 ///   - **不跟隨改名**（無 `--follow`）：改名之後舊名下的版本消失。`relativePath` 是寫死的常數，改名時要一併決定歷史怎麼接。
 ///   - 淺 clone 只看得到它有的那幾個 commit，而且**只會 fail open**：淺 clone 裡只要有這個檔，邊界 commit 就算「加入這個檔」的版本、
 ///     至少 1 個，所以不會 `throw NoHistory`；淺邊界之前才有的退役查詢安靜地不在集合裡、`headerFormerQueries` 讓它搬進檔頭也照綠
-///     （R37 codex）。零個版本只會出現在沒有任何 commit 的 repo（`git init` 之後，`throw NoHistory`，fail-closed），那不是淺 clone
+///     （R37 codex）。零個版本只會出現在這條路徑在任何可達 ref 上都沒有已 commit 的版本時（沒有 commit 的 repo、從未 commit 的檔——
+///     本檔 fixture 的 `untracked.txt` 就是後者；`throw NoHistory`，fail-closed；R39 regression：R38 版寫「只會出現在沒有任何 commit 的
+///     repo」，被本檔 fixture 反證），那不是淺 clone
 ///     （R38 requirements 用 `--depth 1` 的合成 clone 量；R37 版把兩者寫成淺 clone 的「不對稱」）。補法是一次 `git rev-parse --is-shallow-repository`，但那是一把新鍵，依威脅模型「停止加鍵」不補、
 ///     使用者決定寫進清單；本 repo 沒有 CI，淺 clone 今天是假設情境。
 ///   - **線上的** blobless／promisor clone：`git show` 會自己去遠端抓缺的物件（lazy fetch），可能卡在憑證提示——子行程沒有逾時、
@@ -496,7 +498,7 @@ private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throw
 ///     用 `ls-tree`（只要 tree 物件），`show` 非 0 一律具名 throw（R30 DA：R29 版一律 `continue`，blobless partial clone 離線時
 ///     每一版 `show` 都 128、集合靜默退化成只有工作樹）；`git log` 本身非 0 → `throw GitFailed`。錯誤只帶子命令名與 status，**不帶 git 的 stderr**（`git show` 的 fatal 訊息含路徑不含內容，但這裡
 ///     一律不轉述）。
-///   - 子行程環境只留 `PATH`／`HOME`（外加下面兩個設定變數）：清掉呼叫端的 `GIT_DIR`／`GIT_WORK_TREE` 等（R29 logic：那會讓 git 去查別的倉庫、回空、以 0 離開）。
+///   - 子行程環境只留 `PATH`／`HOME`（外加下面兩個設定變數——R38 補的，原寫「只留 `PATH`／`HOME`」，R39 regression 指出沒有標記）：清掉呼叫端的 `GIT_DIR`／`GIT_WORK_TREE` 等（R29 logic：那會讓 git 去查別的倉庫、回空、以 0 離開）。
 /// 臂：`historicalQueryFoldsIsDrivenByItsOwnFixture`（合成 repo：刪檔重建、側支版本、零歷史；R29 regression：R28 版整段
 /// `for h in hashes` 拔掉五條測試全綠，而它正是這條約束對它建出來的那個威脅唯一還握有查詢的一半）。
 private func historicalQueryFolds(root: URL, relativePath: String) throws -> Set<String> {
@@ -1477,13 +1479,18 @@ private let swiftStatementKeywords: Set<String> = [
 /// 運算元（`10/2`）也靠這張表：R34 拆掉數字分支之後，`0x30...0x39` 就是它唯一的判定（R35 regression：當時無臂，現在有）。
 /// 一個字形叢集的**每個**純量都要在區段裡才算。**`allSatisfy` 無臂**（R35 regression：換成 `contains` 或 `.first` 全綠）。三種寫法
 /// 在叢集**混有表內與表外的純量**時就會答得不同（`❤️` ＝ 2764＋FE0F、`⭐️`、`#️⃣`、`✌🏻` 都分出 `contains`：FE0F 在 `0xFDF0...0xFE1F`、
-/// 1F3FB 在平面 1、基底不在表），而 swiftc 對它們各自不同（R37 requirements／logic／regression、R38 logic 以 swiftc 量）：
-/// **只有 variation selector 那一類把 `/` 併進運算子**（沒宣告時 `x❤️/2`、`x⭐️/2` 報 `cannot find operator '❤️/'`，宣告
-/// `infix operator ❤️/` 後印 9）；**膚色**以純量切——`infix operator ✌` 加 `let 🏻 = 8` 之後 `x✌🏻/2` 印 404，`/` 是真除法；`#` 不是
-/// 運算子字元，`x#️⃣/2` 是巨集展開（`no macro named '️⃣'`）；ZWJ 序列可能分出 `.first`（🏴‍☠️ ＝ 1F3F4＋200D＋2620＋FE0F），也以純量切
-/// （`prefix operator ❤️` 加 `let ‍🔥 = 4` 之後 `❤️‍🔥/2` 是真除法，R36 logic）。沒有任何以叢集為單位的規則全部都對，這一類在射程外；
-/// 「無臂」的結論不受影響。R35 的兩個理由：「以識別碼開頭的叢集三種寫法同答」只在非 ZWJ 的叢集成立（R36 logic）；「Swift 把 `/` 併進
-/// 運算子」只對 VS 那一類成立——R36 說它「是錯的」，R37 改成「對非 ZWJ 對」，兩次都錯（R38 logic：四個非 ZWJ 的例子裡兩個不併）。
+/// 1F3FB 在平面 1、基底不在表），而 swiftc 對它們各自不同（R37 requirements／logic／regression、R38 logic、R39 logic 以 swiftc 量；
+/// 本套件是 `swift-tools-version: 6.0`，以下都是 `-swift-version 6`）：**VS 那一類在運算元之後把 `/` 併進運算子**（沒宣告時 `x❤️/2`、
+/// `x⭐️/2` 分別報 `cannot find operator '❤️/'`、`'⭐️/'`，宣告 `infix operator ❤️/` 後印 9）；**膚色**以純量切——`infix operator ✌:
+/// AdditionPrecedence` 加 `let 🏻 = 8` 之後 `x✌🏻/2` 印 404，`/` 是真除法（不給 precedence group 編不過）；`#` 不是運算子字元，`x#️⃣/2` 是
+/// 巨集展開（`no macro named '️⃣'`）；ZWJ 序列可能分出 `.first`（🏴‍☠️ ＝ 1F3F4＋200D＋2620＋FE0F），也以純量切（`prefix operator ❤️` 加
+/// `let ‍🔥 = 4` 之後 `❤️‍🔥/2` 是真除法，R36 logic）。**撐起「射程外」的是另一個情形**（R39 logic）：`endsOperand` 真正要回答的是「這個
+/// `/` 會不會開始一個 regex」，照這個問法上面四例加 ZWJ 那一例 `contains` 全都答對；答錯的是**前綴位置**——`prefix operator ❤️` 接受
+/// `Regex` 時，`(❤️/a/)` 在 Swift 6 模式印 7：VS 叢集被切開、`/a/` 是 regex 字面，`allSatisfy` 答對而 `contains` 答錯（Swift 5 模式則報
+/// `cannot find operator '❤️/'`）。所以沒有任何以叢集為單位的規則全部都對，這一類在射程外；「無臂」的結論不受影響。R35 的兩個理由：
+/// 「以識別碼開頭的叢集三種寫法同答」只在非 ZWJ 的叢集成立（R36 logic）；「Swift 把 `/` 併進運算子」只對 VS 那一類、而且只在運算元
+/// 之後成立——R36 說它「是錯的」，R37 改成「對非 ZWJ 對」，兩次都錯（R38 logic：四個非 ZWJ 的例子裡兩個不併）；R38 版把 `⭐️` 的訊息寫成
+/// `'❤️/'`、`✌` 少了 precedence group，並用這四例撐結論（R39 logic／regression）。
 /// **哪幾段有臂**（R37 regression 以 57 次單區段拿掉量）：`0x30...0x39`（`10/2`）、`0x41...0x5A`（`N/2`）、`0x5F`（`a_/2`）、
 /// `0x61...0x7A`、`0x3040...0xD7FF`（`名前/2`）、平面 1（`🐶/2`）——恰好這六段，其餘單獨拿掉 0 條紅、無臂；**沒有任何一段在真實
 /// 語料上承重**（113 個輸入的輸出逐位元組相同——輸入是兩個版本的本檔加上 Tests/ 與 Sources/ 底下 111 個 `.swift`，比的是

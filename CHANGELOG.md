@@ -14,7 +14,8 @@
 - **基準查詢集與使用規則（#63）**：`scripts/baseline-queries.txt`（一行一條；檔頭以一行固定的終止符收尾，終止符之後
   不得有註解、檔頭區塊去空白後的連接文字不得含這個檔任一 git 可達版本的查詢或退役清單的查詢——退役只能刪除；
   真檔測試因此需要 git（`git log --all --full-history`；該版本沒有這個檔由 `ls-tree` 判、物件拿不到則具名 throw），
-  取不到歷史時具名紅在環境側、其餘八條照跑；檔頭寫明列舉會漏、
+  取不到歷史時具名紅在環境側、其餘八條照跑——例外是 do／catch 被收成 `try?`（安靜變假）與線上 blobless clone 的 lazy fetch
+  （掛住而不是紅），淺 clone 則只會 fail open，見 `docs/measurements/README.md` 規則段；檔頭寫明列舉會漏、
   不得在 session 內顯示、輸出只印編號；`.gitattributes` 設 `-diff`）＋ `scripts/measure-baseline.sh`
   （stdout 第一行 `set sha256:<12 hex> k=<k>` 是查詢集指紋與 k、之後只有 `#N <ms>ms <verdict>`，verdict 是封閉字母表 `clean|self|empty` 加 `tool=<n>`
   或 `error(…)`，四處列舉由同步測試釘住；`self` = 前 k 名有 snippet 含這條查詢的原文（空白與
