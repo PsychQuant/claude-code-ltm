@@ -160,13 +160,15 @@
    範圍可以與 `echo`／`printf`／`true` 的段並列（正則寫的是 `(echo|printf|true|:)\b`，但 `:` 後面不是 word character（字母、數字、`_`）時 `\b` 不成立，所以常見的 `:`、`: ` 實際上不行——R41 logic：R40 版寫「沒有字母」）；`grep`／`egrep`／
    `fgrep`／`rg` **只在整條命令只有一段時**才算，而且旗標要在白名單（`-[niwxEFGPHh]+`、`-A`／`-B`／`-C N`、部分長選項；`rg` 有自己的一組 `-[iSswxFnNHUP]+`）、
    恰好一個 pattern 與一個檔、路徑不含 `*?[{`、命令以 0 結束（其他讀取命令非零結束時整個 call 算出錯，也不登記）；`head`／`tail`／`sed -n` 登記成帶範圍的項目、不產生 attachment；已經在 read-state 的項目
-   只在檔案的 mtime 比登記時新時才被之後的讀覆寫（R40 DA 讀程式碼；R41 regression：R40 版寫成無條件）；被中斷或轉背景的 call 不登記。（R39 五個 lens：R38 版把這段寫成「其餘每一段都要是已知的讀取命令…單獨成命令的
+   **不會被之後的 Bash 讀覆寫**（這個路徑已有項目就直接離開，不看 mtime）；Read 工具則不看 mtime 一律覆寫（只有同樣 offset／limit、mtime 沒變、
+   原項目也是 Read 登記的去重路徑例外）；「較新才覆寫」只在 resume 播種的合併裡（R42 logic 讀 2.1.282／2.1.283：R41 版把它寫成所有讀的條件，
+   R40 的無條件句對 Bash 讀本來就對）；被中斷或轉背景的 call 不登記。（R39 五個 lens：R38 版把這段寫成「其餘每一段都要是已知的讀取命令…單獨成命令的
    grep 家族」，照字面會推出 `grep -c`／`-q` 會登記、`cat <f>; echo x` 不會，與量測相反。DA 讀程式碼推 `cd … && grep` 不登記，security
    量到會，以量測為準——R40 logic／security／DA 更正：兩個都對，差在 `cd` 的目標；`:` 與 `cd` 兩句也是 R40 改的。）
    **第三條管道：compaction**（R40 DA 讀 2.1.282 的程式碼並用合成檔量過）：compaction 先把 read-state 整份快照、清空，再依
    項目的時間戳取最新的 5 個檔，對每個檔**不帶 offset／limit** 走 Read，把**整份**內容寫成 `{type:"file", content}` attachment（單檔上限約
-   5,000 tokens、五個檔合計 50,000；超過單檔上限時是截斷還是改成不帶內容的參照，R41 logic 與 DA 讀程式碼的結論不一致，沒有量）——**不看**這個項目當初帶不帶範圍，而那次 Read 又會重新登記這個檔，所以之後每次 compaction 都可能再寫一次。R41 logic／DA 對照 2.1.282 的程式碼補三件：**時間戳是登記當下檔案的 mtime**，不是讀的時間
-   （Edit 播種取 resume 當下的磁碟 mtime）；**不只 full**——partial 與 reactive compaction（prompt 太長時自動觸發）走同一條，只多排除保留訊息裡
+   5,000 tokens；超過時是不帶內容的 `compact_file_reference`，從不截斷，超過合計 50,000 的檔被濾掉——R42 logic 讀程式碼，R41 版寫「兩個讀者結論不一致」）——**不看**這個項目當初帶不帶範圍，而那次 Read 又會重新登記這個檔，所以之後每次 compaction 都可能再寫一次。R41 logic／DA 對照 2.1.282 的程式碼補三件：**時間戳看項目怎麼來的**：即時登記存登記當下檔案的
+   mtime；resume 播種時 Read 與 Write 用逐字稿的訊息時間、只有 Edit 用 resume 當下的磁碟 mtime（R42 logic：R41 版只寫 mtime，與下面 Write 播種那句矛盾）；**不只 full**——partial 與 reactive compaction（prompt 太長時自動觸發）走同一條，只多排除保留訊息裡
    Read 過的檔；另外排除 CLAUDE.md 一族、plan 檔與 `artifact-*`。R40 版寫「full compaction…依 timestamp」。DA 量到：
    帶 offset／limit 的 Read、或 Bash `head -3` 之後 `/compact`，都出現含**全部**行的 `file` attachment。**語料裡已經發生過一次**：
    `3a2ceb7e…` 在 2026-09-07T00:25:35Z 的 auto compaction 之後，有一筆查詢檔的 `file` attachment（19 行註解＋8 行查詢；那份 jsonl 本來就在
@@ -195,7 +197,9 @@
    決定刪除（R41 security／DA；R40 版只寫「有 3 個」，沒點名這兩個）。剩下的 `3a2ceb7e-41cf-41c1-ab0c-d1e197ad4beb`（2026-08-26 起的那份逐字稿）
    唯一有 Write、最後一次碰是 Edit，所以 `edited_text_file` 只記檔名；但**resume 它就會把全檔帶回 context**：2026-09-07 那筆全檔 `file`
    attachment 在最後一個 compact boundary 之後的鏈上（8/8），resume 載入的對話本來就含它，第一次 model call 就送出、不必等 compaction；之後的
-   compaction 也會再寫一次（DA 依程式碼的排序鍵算，查詢檔在它的 34 個候選裡排第 4；security 以訊息時間排是 37 個裡第 9——前一點讓排名不影響結論）。
+   compaction 也會再寫一次（R41 DA 算它在 34 個候選裡排第 4、security 算 37 個裡第 9，兩種算法對三種播種的時間戳各取一種——見上方排序鍵那句；前一點讓排名
+   不影響結論）。鏈上還有第 25001 行那筆 `edited_text_file`（2026-09-07T04:52Z，snippet 含現行 8 條中的 2 條，R42 logic），resume 一樣會帶回。
+   R39、R40 版在這裡寫「今天沒有實際外洩」——那時 09-07 的全檔 attachment 已在語料裡、兩個 reviewer session 也已讀過全檔，那句當時就不成立；R41 改寫時刪掉而沒留註（R42 regression）。
    R41 logic／DA：R40 的 amend 把這句改成「可能…若它排在 read-state 最新的 5 個檔之內」，沒有先算；R40 DA 原本的無條件說法才對。
    **不要 resume 這個 session**。daemon job `3a2ceb7e` 是另一回事：那個 job 的根 session 正是它，但 job 現在接續的是 `61707b35-201e-4d2b-9cd2-0a578445d3f1`，
    重啟 job 不會 resume 它（R41 requirements／logic）。（R39 security 報 MEDIUM，DA 以當時的語料更正為 LOW。R38 版寫「resume 之後沒有重建 read-state」，只對 Bash 讀成立；R37 版寫「沒量」）。**task 1b 的寫回**：它改的是檔頭**第 1 條**（第 5–12 行，會過時的句子在第 7–10 行——R39 requirements 更正「7–9」）與第 24 行（R39 #13
@@ -203,13 +207,17 @@
    讀者，今天沒有）；**對 compaction 不成立**：外部編輯之後，以不帶範圍的讀（`cat`、`grep`、Write、Edit）登記過這個檔的 session 會重讀它、以新的 mtime 排到最新，
    下一次 compaction 就把整份新檔寫回；帶範圍的項目（Read、`head`、`tail`、`sed -n`）不重讀、保留舊的 mtime，排在前 5 名才會被寫回（R41 logic 讀
    程式碼：R40 版寫「任何 read-state 裡有這個檔的 session 會重讀它」）——兩種都與距離不相干。所以 task 1b 的前提是**沒有任何 read-state 含這個檔的
-   session 之後會再 compact 或被 resume**。查法（R41 logic／DA）：逐 session 看最後一個 compact boundary 之後的紀錄——在線的 session 找對這個路徑
-   的 Read／Write／Edit tool_use、不含 `|`／`<`／`>` 的 `cat`／`grep`／`head`／`tail`／`sed -n`、以及這個路徑的 `file` attachment；已結束的 session
-   只看 Read／Write／Edit 與 boundary 之後的 `file` attachment；只數筆數。2026-09-26 的結果：只剩上面那個不要 resume 的 session，實作者 session
-   `61707b35…` 0 筆。寫回之後的 commit 可以在 Claude Code 裡做，前提是 security-guidance 的審查仍關著（見「它擋不住什麼」；R41 DA：原本 commit
-   會開一個會 Read 這個檔的 reviewer session）（R40 DA；
+   session 之後會再 compact 或被 resume**（R40 DA；
    R39 版寫「即使有在線讀者、即使檔案縮到 4096 以下也一樣」，R38–R39 只算了 ±8，也沒提第 24 行——R40 requirements）（R38
-   regression／requirements／security：R37 版寫「檔頭第 1 行、約 40 行」，第 1 行是標題）。R35 以前這裡寫的前提是「Claude Code 沒在跑、或那個 session 不在這個 project」；R36 把整句說成「不對」說過頭
+   regression／requirements／security：R37 版寫「檔頭第 1 行、約 40 行」，第 1 行是標題）。查法（R41 logic／DA；R42 logic／security／DA 補）：逐 session、
+   **連 `<session>/subagents/` 底下的逐字稿一起**（subagent 複製父 session 的 read-state、也會自己 compact）看最後一個 compact boundary 之後的紀錄——
+   在線的 session 找對這個路徑的 Read／Write／Edit tool_use、**照上方登記規則會登記的** Bash 命令（以規則為準，不要另列命令名——R41 版只列了五個，
+   漏了規則裡的其他讀取命令），以及鏈上提到這個路徑的 attachment（`file`、`edited_text_file`；超過上限時是 `compact_file_reference`）；已結束的
+   session 看 Read／Write／Edit 與 boundary 之後鏈上的這些 attachment；只數筆數。2026-09-26 的結果：只剩上面那個不要 resume 的 session（它的
+   subagent 另有一筆 2026-09-07T01:58:38Z 的 `edited_text_file`，R42 DA），實作者 session `61707b35…` 0 筆。寫回之後的 commit 可以在 Claude Code
+   裡做，條件是那個 session **在 repo 根開的**、`printenv ENABLE_COMMIT_REVIEW` 印 `0`（見「它擋不住什麼」）。只動查詢檔的 commit 本來就不會開
+   reviewer（沒有可審的原始碼，審查在開始前離開——R42 security 讀外掛程式碼；R41 版寫「原本 commit 會開一個會 Read 這個檔的 reviewer session」），
+   但 reflog 上還沒審過的 commit 會被一起交出去（同上）。R35 以前這裡寫的前提是「Claude Code 沒在跑、或那個 session 不在這個 project」；R36 把整句說成「不對」說過頭
    （R37 regression）——它量到的是觸發條件在 read-state，這讓「不在這個 project」變得不相干（一個在別的 project、以絕對路徑讀過這個檔
    的 session 算不算，沒量）；「沒在跑」那一半與上面的「在線」同義。那時的實例（R31 security：全語料含 ≥1 條的 11 筆裡有一筆是它，
    1,752 個字元長、2/8 條，2026-09-07T04:52:11Z）是一次外部編輯，兩種寫法都解釋得了。在 session 裡用 Write／Edit 工具是**今天**索引安全
@@ -307,9 +315,11 @@
      才以孤兒身分還原，已不在這個 call 裡；加了之後三種 shell（zsh 5.9.1、bash 5.3、bash 3.2）都會停，而且等子 shell 還原完才離開（R39 logic
      量；R38 版寫「被訊號中斷時外層迴圈會不會繼續，沒量」）。逾時預算算的是**整個 call**：迴圈 K 輪要 K×（N＋10＋餘裕）低於工具逾時，超過就拆成
      多個 call、每個 call 一輪（R39 DA：超過的 call 會被轉到背景，也就是 (c) 的風險）。**不要把配方的子 shell、群組或迴圈接進會提早結束的讀者**（`| head -N`、
-     `| grep -m1`）：只 pipe 測試命令本身，而且只接會讀完全部輸出的讀者（`tail`、不帶 `-m` 的 `grep`）——`| head -N` 對還原沒有影響，但 pipeline
-     的 rc 是 `head` 的 0、具名失敗那一行可能被截掉，讀起來就是「0 條紅 → 無臂」（R41 logic 在合成包上量到 `| head -50` 裡具名失敗行 0）。
-     這一行加了 `trap 'exit 141' PIPE` 就是為了這個——見下面 zsh 訊號那條；下方 worktree 區塊同理（R41）。
+     `| grep -m1`）：只 pipe 測試命令本身。要看判定，把輸出導到檔案再找逐條失敗行，或接一個讀完全部輸出、而且留下逐條失敗行的
+     `grep`（例如 `grep -E 'failed|recorded an issue'`，不帶 `-q`／`-l`／`-m`）；不要接 `head`、`tail`——它們對還原沒有影響，但 pipeline 的 rc 是
+     讀者的 0、具名失敗那一行會被截掉，讀起來就是「0 條紅 → 無臂」（R41 logic 量到 `| head -50` 裡具名失敗行 0；R42 logic 量到 `| tail -10`、
+     `| tail -20` 也是 0，結尾那幾行不點名測試；R41 版把 `tail` 與「不帶 `-m` 的 `grep`」寫成可以，而 `-q`／`-l` 看到第一個命中就結束——R42 DA）。
+     這一行加了 `trap 'exit 141' PIPE` 就是為了這個——見下面 zsh 訊號那條。下方 worktree 區塊的 PIPE trap 另有一個條件，寫在那裡的註解（R42）。
    - **只保證單一寫者**（R37 DA：兩個 reviewer 同時變異同一個檔——A 備份原檔、B 在 A 還原前備份到 A 的變異——最後檔案停在 A 的變異；
      `mktemp` 在那種情形沒作用，固定路徑也一樣。最容易留下的正好是 0 條紅的變異，而那種沒人會發現）。verify 本來就是多個 reviewer 同時跑，
      所以**reviewer 一律在自己的 worktree 裡變異**（下方「要建 worktree 就**三步**」那段的配方），不在共用樹就地變異；**worktree 裡不用這一行**：
@@ -345,8 +355,9 @@
      EXIT trap 因訊號名寫錯而裝不上（`|| exit 1` 在 trap 存在之前就離開）；跳脫過的 `'`；上面那個 zsh 單參數 trap；trap 裡的還原 `cp` 失敗
      （刻意保留，會印出路徑；整個 call 的 rc 仍是 0，唯一的訊號是 stderr 那一行——R41 requirements）；還原成功但刪備份失敗（也會印那句訊息，所以訊息寫「還原或刪備份失敗」——R39 logic：R38 版寫「restore
      failed」，這種情形是假訊息）；同一個 call 裡不包 subshell 用第二次（第一次的備份，路徑從不印出）；kill 路徑（SIGKILL，連變異都留下，
-     見下）；R40 之前的寫法在 zsh（與 bash 3.2 的 builtin 迴圈寫入）下接進提早結束的讀者（SIGPIPE；迴圈形式時原檔只剩在第一輪那份
-     路徑不印的備份裡，見下——R41：R40 版寫「連原檔都丟」）。收到那句訊息之後怎麼還原，看下面「還原方式的紀錄量不同」那段。`cp` 失敗時留下的是空檔——trap 不能放在 `cp` 之前（那會把
+     見下）；R40 之前的寫法在 zsh（與 bash 3.2 的某些寫入形狀）下接進提早結束的讀者（SIGPIPE；迴圈形式時原檔只剩在第一輪那份
+     路徑不印的備份裡，見下——R41：R40 版寫「連原檔都丟」）；R41 的寫法在 bash 5.3 下、配方放在頂層或 `{ … }` 群組且 stderr 併進管線時
+     （見下，R42 requirements）。收到那句訊息之後怎麼還原，看下面「還原方式的紀錄量不同」那段。`cp` 失敗時留下的是空檔——trap 不能放在 `cp` 之前（那會把
      空備份蓋回原檔）。
    - 變異後的 `cmp`：確認變異真的改了檔（R37 logic：`sed -i ''` 沒命中也回 0，no-op 變異讀起來就是「0 條紅 → 無臂」）。只有「不同」（rc 1）
      才算生效，相同（0）與出錯（2，例如變異把 `F` 刪掉或改名）都停（R38 logic：R37 版的 `! cmp -s … ||` 在 rc 2 時判成生效）。**紅要是某一條
@@ -358,9 +369,13 @@
      才會。SIGPIPE 是 R40 找到的（logic）：把配方的子 shell 或
      迴圈接進 `| head` 這類提早結束的讀者，裡面的 builtin 再寫就以 141 結束、EXIT trap 不跑——單一子 shell 時檔案停在變異、備份留著；迴圈
      形式時第二輪把第一輪的變異當成原檔備份，最後停在最後一輪的變異，**原檔只剩在第一輪那份路徑從不印出的備份裡**（R41 logic／requirements／DA
-     量；R40 版寫「原檔就丟了」）。**不只 zsh**：bash 3.2 在 SIGPIPE 發生於 builtin 迴圈的寫入時也不還原（R41 DA 的矩陣 12/12，單一子 shell 也一樣；
-     稀疏的寫入 12/12 還原），bash 5.3 24/24 還原（R41 DA／requirements：R40 版寫「只有 zsh，bash 3.2／5.3 有 EXIT trap 時會接住它」，只量了稀疏寫入）。加了 `trap 'exit 141' PIPE`，三種 shell 都還原、不留備份（R40 logic 量；實作者
-     在 zsh 5.9.1、bash 3.2、bash 5.3 重現：沒有它時 zsh 停在變異，有它時還原）。（R35 security：送給 shell 或整個 process group 都一樣；bash 會執行；R34 版寫「不一定跑（SIGKILL 一定不跑）」說輕了。R36 logic 量過：
+     量；R40 版寫「原檔就丟了」）。**不只 zsh**：沒有 PIPE trap 時 bash 3.2 也會不還原，**依寫入形狀而定、沒有完整刻畫**——R42 logic 量到各種 builtin 迴圈都還原，不還原的是
+     「被 SIGPIPE 打中的 builtin 寫入是子 shell 的最後一個命令」（後面接 `; true` 就還原）；R42 DA 另找到 `printf "%s\n" $(seq 1 50000)` 也不還原；
+     requirements 在單一子 shell 裡 11/11 還原（R40 版寫「只有 zsh」，R41 版寫「builtin 迴圈的寫入時、稀疏寫入還原」，兩次都只量了少數形狀）。bash 5.3 在
+     這些形狀下都還原。加了 `trap 'exit 141' PIPE`，**在子 shell 形式**（`( … ) | head`、`( … ) 2>&1 | head`）三種 shell 都還原、不留備份（R40 logic
+     量；實作者在三種 shell 重現；R42 DA 另跑三種寫入形狀 9/9）。**例外**（R42 requirements）：配方直接放在腳本或 `bash -c` 的頂層、或 `{ … }` 群組裡，
+     stderr 也併進管線（`2>&1 | head`）時，bash 5.3 停在變異、留下路徑不印的備份，而同樣形狀**沒有** PIPE trap 時反而還原——所以要 pipe 就只 pipe
+     測試命令本身（上面那條）。（R35 security：送給 shell 或整個 process group 都一樣；bash 會執行；R34 版寫「不一定跑（SIGKILL 一定不跑）」說輕了。R36 logic 量過：
      INT、TERM、正常結束、`exit 3` 下 EXIT trap 都恰好執行一次；trap 會等前景 job 結束才跑）。
    - `timeout -s INT -k 10 N`（R36 logic：預設的 SIGTERM 碰不到 SwiftPM 放在自己 process group 的 `swiftpm-testing-helper`，rc 124 之後它
      變成孤兒繼續跑；SIGINT 讓 SwiftPM 自己收掉它）。**牆鐘上限是 N＋10**（kill-after），所以**整個 call 的 N＋10＋備份還原的餘裕要低於 Bash 工具的
@@ -488,10 +503,12 @@
    除了上面那 5 筆 jsonl，0。）
    根目錄至少含 `~/.claude`（含 `file-history`、`jobs`）、`/private/tmp`、`/private/var/folders`——**`$TMPDIR` 在它底下，
    不要兩個都列（每筆會報兩次），也不要只列 `$TMPDIR`**（R30 自檢：R30 verify-fix 一度為了去重砍掉大的那個，`/private/var/folders`
-   底下有 39 個 per-user 的 `T/`，只掃自己那一個）；`/tmp` 是 symlink，`find` 不跟隨，列了等於沒列；`~/.claude/jobs` 是 150 GB 且含 FIFO／
+   底下有 39 個 per-user 的 `T/`，只掃自己那一個）；本 repo 裡 gitignored 的 `.remember/`（remember 外掛寫的）與 `.claude/worktrees/`（EnterWorktree 的
+   完整 checkout）也要列，它們不在前面那些根底下（R42 security；今天都是 0/8）；`/tmp` 是 symlink，`find` 不跟隨，列了等於沒列；`~/.claude/jobs` 是 150 GB 且含 FIFO／
    socket（`grep -r` 會卡住），要用 `find -type f` 餵 `xargs`——FIFO／socket 不只在 jobs，`/private/tmp` 也有，所有根都一樣處理
-   （R37 requirements／security；這裡原寫「並加 size 界」，對 size 鍵無妨、對內容鍵會看不到大檔，見上）。第二把鍵是**檔頭的一句註解短語**（註解可以上命令列）：`grep -rlF "<檔頭第一行的一段>" <根目錄…>
-   --exclude='*.jsonl'`——它找得到 size 鍵找不到的東西（被改過的副本、只抄了檔頭的檔），命中再各自判有沒有查詢
+   （R37 requirements／security；這裡原寫「並加 size 界」，對 size 鍵無妨、對內容鍵會看不到大檔，見上）。第二把鍵是**檔頭的一句註解短語**（註解可以上命令列）：`command grep -rlF "<檔頭第一行的一段>" <根目錄…>
+   --exclude='*.jsonl'`（**要寫 `command grep`**：Claude Code 的 zsh 裡 `grep` 是 shell 函式，實際跑 ugrep 並跳過 `.gitignore` 涵蓋的子樹與含 NUL 的檔，
+   R42 DA 的合成探針照原寫法只回 1/4——或改用 `find -type f` 餵 `xargs grep`）——它找得到 size 鍵找不到的東西（被改過的副本、只抄了檔頭的檔），命中再各自判有沒有查詢
    （只數不印）。**短語要指名到逐字**——用 `requiredHeaderPhrases` 的任一個常數（例如「不得在 Claude Code session 內顯示」）
    或整行 `headerTerminator`，不要寫「檔頭第一行的一段」：R30 security 用「基準查詢集（#63）」掃本 project 目錄下 2,482 個
    spill 檔回 **0**、換成那個常數回 37；R30 自檢用「第一行前 14 個字元」掃全部 project 的 10,158 個 spill 檔回 25——**鍵與母體
@@ -507,10 +524,15 @@
    # 整段（含變異與測試）必須在**同一個 Bash call** 裡：這個 harness 每次 call 是新 shell，EXIT trap 在 call 結束就 fire，
    # 第二個 call 進去時樹已經被刪（fail-safe，但不寫出來會被當成配方壞了——R32 regression 實測）。
    W=$(mktemp -d)
-   trap 'git worktree remove --force "$W" 2>/dev/null; rm -rf "$W"' EXIT   # **第一件事**：後面任何一步失敗都還清得掉；兩個命令都要——
+   trap '{ git worktree remove --force "$W"; } 2>/dev/null; rm -rf "$W"' EXIT   # **第一件事**：後面任何一步失敗都還清得掉；兩個命令都要——
                                                                            # 父 repo 先被刪時 `worktree remove` 跑不了、`rm -rf` 仍會跑
                                                                            # （R31 DA 找到一棵孤兒；R32 四家指出 trap 排在四個可失敗命令之後，防不到自己前面）
    trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 141' PIPE   # zsh 下 INT／TERM／PIPE 不觸發 EXIT trap（R35 security；PIPE 是 R41），轉成 exit 才會清
+   # 上一行 EXIT trap 的重導**一定要寫在 `{ … }` 外面**（R42 requirements／DA）：zsh 在打斷 `fflush` 的訊號處理裡跑 PIPE trap，EXIT trap 裡帶重導的
+   # 外部命令（R41 版的 `git worktree remove … 2>/dev/null`）fork 出來會等 stdout 的 FILE 鎖而死鎖，清除永遠卡住——實作者重現：12 秒逾時、樹留著，
+   # 還留下兩個卡死的行程要手動終止；換成群組重導之後 zsh、bash 3.2、bash 5.3 接進 `| head` 都 0–2 秒清掉。例外：bash 5.3 把 stderr 也併進
+   # 管線時（`( … ) 2>&1 | head` 與 `{ … } 2>&1 | head` 都是，各 2/2）EXIT trap 不跑、樹留著——是 PIPE trap 造成的，拿掉它 bash 5.3 會清掉，但 zsh 就
+   # 留下樹；harness 是 zsh，所以保留（R42 requirements、實作者重現）。這個區塊一樣不要接進提早結束的讀者。
    git worktree add --no-checkout "$W" HEAD \
      && git -C "$W" sparse-checkout set --no-cone '/*' '!scripts/baseline-queries.txt' '!scripts/rrf-tie-queries.txt' \
      && git -C "$W" checkout -q HEAD || { echo 'FAIL: 建樹失敗，不要往下走'; exit 1; }
@@ -596,17 +618,29 @@
   （`-diff` 屬性只擋 diff 生成這一條路，見上）。同類是腳本防禦邊界之外的那一整類——邊界句的權威在 `scripts/measure-baseline.sh`
   檔頭（「防禦邊界」那一段），這裡**只給指標**（「只有一份」這句 R19 在 CHANGELOG 證偽過：負向 pin 抓複述不抓改寫）：R14 寫成總括判準、R15 寫成封閉六項、R16 縮成只點名一個機制的一元全稱，三版都在
   第一個未列的成員上為假（R17）；R17 改了檔頭卻留下這裡與 CHANGELOG 的舊句（R18）——同步測試現在釘住被退回的拼法不得再出現。
-- **會自己跑起來的讀者：security-guidance 外掛的自動審查**（R41 security）。Bash 跑 `git commit`、`git -C … commit`、`git push`
-  時與 Stop 時，這個外掛開一個 Agent SDK session（`entrypoint` 是 `sdk-py`、不載 CLAUDE.md、工具只有 Read／Grep／Glob、cwd 是 repo），
-  逐字稿落在本 project 的語料目錄，prompt 請它讀改到的檔「與 repo 裡任何其他檔」——它不知道規則 1，「不登記的讀法」也管不到它。
-  2026-08-27 起本 project 有 105 個這種 session，其中 2 個（2026-09-07、09-09，commit 動到測試檔或 `measure-baseline.sh` 時）用 Read 讀了整份
-  查詢檔。被索引的欄位 0 筆，但 reviewer 的結論是 `text` block，也會被注入發起 commit 的 session，兩者都會進索引。R37 的內容鍵掃描已經數到這兩份，
-  當時歸為「預期中的語料命中」，沒有人追它們是誰。**處置**（2026-09-26，使用者決定）：`.claude/settings.json` 的 `env` 設
-  `ENABLE_COMMIT_REVIEW=0`（commit 與 push 的審查）與 `ENABLE_STOP_REVIEW=0`（Stop 的審查），外掛改檔時的 pattern 警告照舊；實作者在合成 repo
-  commit 過一次，hook 記下「Commit review: disabled, skipping」、沒有產生新 session；那兩份逐字稿依使用者決定刪除。**擋不住的**：這個設定
-  只對以本 repo 為 project 開的 session 生效——從別的目錄開的 Claude Code session 對本 repo commit，審查照開，reviewer 的 cwd 是本 repo、逐字稿
-  照樣落進本 project 的語料（由設定的作用範圍推得，沒量）；外掛改版也可能換掉開關。查法：commit 之後 `~/.claude/security/log.txt` 應有
-  「Commit review: disabled, skipping」；語料裡的 reviewer session 以紀錄的 `entrypoint` 是 `sdk-py` 辨認，看它有沒有對查詢檔的 Read（只數筆數）。
+- **會自己跑起來的讀者：security-guidance 外掛的自動 commit 審查**（R41 security；R42 logic／security 讀外掛 2.0.8 的程式碼更正）。Bash 跑
+  `git commit`、`git -C … commit`、`git push`、`git -C … push`、`gt create`／`gt modify`／`gt submit` 之後，外掛對這次 commit（push 時是推送範圍裡
+  還沒審過的 commit）開一個 Agent SDK session：`entrypoint` 是 `sdk-py`、不載 CLAUDE.md、工具只有 Read／Grep／Glob、cwd 是 repo 根，逐字稿落在
+  本 project 的語料目錄，prompt 請它讀改到的檔「與 repo 裡任何其他檔」——它不知道規則 1，「不登記的讀法」也管不到它。只動查詢檔的 commit
+  不會開（沒有可審的原始碼，審查在開始前離開）。**Stop／SubagentStop 的審查不是這種讀者**：它只把可審原始碼的 diff 直接送給 API，沒有工具、
+  沒有逐字稿，查詢檔不在 diff 裡（R42；R41 版把 Stop 也寫成會開能 Read 的 session）。2026-08-27 起本 project 有 105 個這種 session（2026-09-25 數；
+  刪掉兩份之後 103），其中 2 個用 Read 讀了整份查詢檔：`8f07b94b…`（2026-09-07 09:25 +08:00，由 `e5c664d` 觸發——那個 commit 同時動了
+  查詢檔本身與原始碼）與 `bc3b9a82…`（2026-09-10 05:54 +08:00，由 `1c6d2bc` 觸發；R41 版把它寫成 UTC 的 09-09）。被索引的欄位 0 筆，但
+  reviewer 的結論是 `text` block，也會被注入發起 commit 的 session，兩者都會進索引。R37 的內容鍵掃描已經數到這兩份，當時歸為「預期中的語料
+  命中」，沒有人追它們是誰。**處置**（使用者決定）：2026-09-26 在 `.claude/settings.json` 的 `env` 設 `ENABLE_COMMIT_REVIEW=0`——同一個開關
+  也關掉 push 的審查——那兩份逐字稿刪除；2026-09-27 拿掉 R41 一起加的 `ENABLE_STOP_REVIEW=0`，因為 Stop 審查不讀檔、關掉它只會失去本 repo 在
+  Stop 時的程式碼審查。外掛改檔時的 pattern 警告照舊。**代價**：本 repo 的 commit 與 push 不再有這個外掛的 LLM 安全審查。實作者在合成 repo commit 過，hook 記下
+  「Commit review: disabled, skipping」、沒有新 session。**擋不住的**（R42 security／DA 量到或讀程式碼得到，R41 版只寫了「從別的目錄開的 session」
+  而且標「沒量」）：
+  （a）**從 repo 子目錄開的 session**：cwd 是子目錄時 project 的 `.claude/settings.json` 不載入（R42 security 在 2.1.283 用合成 repo 與 headless
+  `claude -p` 量到），外掛靠 git toplevel 找到本 repo，reviewer 的 cwd 是 repo 根、逐字稿落進本 project 的語料；從任何目錄 `cd <repo> && git commit`
+  也一樣。至今 0 次。（b）**commit 不必成功**：stdout 找不到 `[branch sha]` 時，審查回頭看 reflog，最新那一筆不受 120 秒時限；關著開關做的 commit
+  不會記進 `.git/sg-reviewed-shas`，所以在不受保護的 session 裡，任何長得像 commit 的命令都會把最新那個沒審過的 commit 交給 reviewer；push 同理，
+  會審推送範圍裡沒審過的 commit（R42 DA 讀 `gitutil`；log 在 2026-09-26 23:22 與 23:24 各記過一次「reflog shows 1 fresh unreviewed commit」，
+  只因為那個 session 有開關才跳過）。（c）外掛改版可能換掉開關。**查法**：在 repo 根開的 session 裡 `printenv ENABLE_COMMIT_REVIEW` 印 `0`；
+  commit 之後 `~/.claude/security/log.txt`（約 1 MB 就輪替成 `log.txt.1`，要一起看；那一行沒有 session 或 repo id）應有「Commit review: disabled,
+  skipping」；push 關掉時不寫任何一行，只能看有沒有新的 reviewer session。語料裡的 reviewer session 以紀錄的 `entrypoint` 是 `sdk-py` 辨認，
+  看它有沒有對查詢檔的 Read 或 Grep，再用內容鍵掃一次（只數筆數；R42 security：R41 版只看 Read，而 Grep 的 content 模式會把命中行寫進 tool_result）。
 - 語料裡本來就有恰好逐字含該字串的**實質** turn（例如退役查詢裡的「資格考」有一則真的使用者 turn）——
   那不是污染，是正常召回；`self` 會把它標成 self，分不出來，讀結果時要在 session 之外看命中。
   反過來，空白與大小寫以外的改寫（全形／半形、標點、換序）`self` 看不到。

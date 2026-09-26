@@ -32,6 +32,8 @@
   `2026-09-01-noop-build-attribution.md` 另補一則（`query ×3` 欄的查詢字串未記、是否已污染無從判斷、耗時可比）。
   **這組查詢還沒在真實索引上驗過前 5 名**（使用者端步驟，#63 的 task 1b）：在那之前「乾淨」是宣稱不是量測（README「它擋不住什麼」
   最後一條；R41 codex）。
+  `.claude/settings.json` 關掉 security-guidance 外掛的 commit／push 審查（`ENABLE_COMMIT_REVIEW=0`）：它的 reviewer 會讀查詢檔、逐字稿進本 project
+  的語料；代價是本 repo 的 commit 與 push 不再有那個 LLM 審查（R41、R42；擋不住的範圍見 README「它擋不住什麼」）。
 
 ## [0.5.0] - 2026-09-05
 

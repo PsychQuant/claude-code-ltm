@@ -500,7 +500,8 @@ private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throw
 ///     一律不轉述）。
 ///   - 子行程環境只留 `PATH`／`HOME`（外加下面兩個設定變數——R37 補的是**這段註解**（`8913692`；查法取最早的一個：`git log --reverse --format=%h -S'…' | head -1`，
 ///     `…` 換成本句開頭括號裡從「外加」到「變數」那一串——不取最早的會連寫下查法的 commit 一起回，R41 requirements／logic／regression），原寫「只留 `PATH`／`HOME`」，R39
-///     regression 指出沒有標記；R40 regression 更正輪次：R39 版寫「R38 補的」。那兩個設定變數本身從 R30（`f7e5254`）起就在子行程環境裡——R41 DA）：清掉呼叫端的 `GIT_DIR`／`GIT_WORK_TREE` 等（R29 logic：那會讓 git 去查別的倉庫、回空、以 0 離開）。
+///     regression 指出沒有標記；R40 regression 更正輪次：R39 版寫「R38 補的」。那兩個設定變數本身從 R30 的 `9797763`（自檢修法）起就在這個函式的子行程環境裡——R41 DA；R42 requirements 更正 SHA：
+///     R41 版寫 `f7e5254`，那一版只把它們加進 fixture 的 `git()`／`gitOut()`）：清掉呼叫端的 `GIT_DIR`／`GIT_WORK_TREE` 等（R29 logic：那會讓 git 去查別的倉庫、回空、以 0 離開）。
 /// 臂：`historicalQueryFoldsIsDrivenByItsOwnFixture`（合成 repo：刪檔重建、側支版本、零歷史；R29 regression：R28 版整段
 /// `for h in hashes` 拔掉五條測試全綠，而它正是這條約束對它建出來的那個威脅唯一還握有查詢的一半）。
 private func historicalQueryFolds(root: URL, relativePath: String) throws -> Set<String> {
