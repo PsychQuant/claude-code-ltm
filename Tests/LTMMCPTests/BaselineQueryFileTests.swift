@@ -498,8 +498,9 @@ private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throw
 ///     用 `ls-tree`（只要 tree 物件），`show` 非 0 一律具名 throw（R30 DA：R29 版一律 `continue`，blobless partial clone 離線時
 ///     每一版 `show` 都 128、集合靜默退化成只有工作樹）；`git log` 本身非 0 → `throw GitFailed`。錯誤只帶子命令名與 status，**不帶 git 的 stderr**（`git show` 的 fatal 訊息含路徑不含內容，但這裡
 ///     一律不轉述）。
-///   - 子行程環境只留 `PATH`／`HOME`（外加下面兩個設定變數——R37 補的（`8913692`；`git log -S'外加下面兩個設定變數'` 只回這一個），原寫「只留 `PATH`／`HOME`」，R39
-///     regression 指出沒有標記；R40 regression 更正輪次：R39 版寫「R38 補的」）：清掉呼叫端的 `GIT_DIR`／`GIT_WORK_TREE` 等（R29 logic：那會讓 git 去查別的倉庫、回空、以 0 離開）。
+///   - 子行程環境只留 `PATH`／`HOME`（外加下面兩個設定變數——R37 補的是**這段註解**（`8913692`；查法取最早的一個：`git log --reverse --format=%h -S'…' | head -1`，
+///     `…` 換成本句開頭括號裡從「外加」到「變數」那一串——不取最早的會連寫下查法的 commit 一起回，R41 requirements／logic／regression），原寫「只留 `PATH`／`HOME`」，R39
+///     regression 指出沒有標記；R40 regression 更正輪次：R39 版寫「R38 補的」。那兩個設定變數本身從 R30（`f7e5254`）起就在子行程環境裡——R41 DA）：清掉呼叫端的 `GIT_DIR`／`GIT_WORK_TREE` 等（R29 logic：那會讓 git 去查別的倉庫、回空、以 0 離開）。
 /// 臂：`historicalQueryFoldsIsDrivenByItsOwnFixture`（合成 repo：刪檔重建、側支版本、零歷史；R29 regression：R28 版整段
 /// `for h in hashes` 拔掉五條測試全綠，而它正是這條約束對它建出來的那個威脅唯一還握有查詢的一半）。
 private func historicalQueryFolds(root: URL, relativePath: String) throws -> Set<String> {
@@ -1488,8 +1489,8 @@ private let swiftStatementKeywords: Set<String> = [
 /// `let ‍🔥 = 4` 之後 `❤️‍🔥/2` 是真除法，R36 logic）。**前綴位置**（R39 logic）：`endsOperand` 真正要回答的是「這個 `/` 會不會開始一個
 /// regex」，照這個問法上面四例加 ZWJ 那一例 `contains` 全都答對；答錯的是前綴位置——`prefix operator ❤️` 接受 `Regex` 時，`(❤️/a/)` 在
 /// Swift 6 模式印 7：VS 叢集被切開、`/a/` 是 regex 字面，`allSatisfy` 答對而 `contains` 答錯（Swift 5 模式則報 `cannot find operator '❤️/'`）。
-/// 這一例證明的是「換成 `contains` 不是嚴格改善」，支持保留程式碼與「無臂」的結論；**決定射程的不是它**：依本檔的威脅模型（無心 vs
-/// 刻意），這一類在射程外，是因為上面每一種構造都要**刻意宣告**一個以 emoji 開頭的運算子，不宣告就編不過——即使存在完全正確的叢集
+/// 這一例證明的是「換成 `contains` 不是嚴格改善」，所以不必換掉現行寫法；它與「無臂」（變異後全綠）這個經驗事實無關（R41 logic：R40 版寫「支持…無臂的結論」）；**決定射程的不是它**：依本檔的威脅模型（無心 vs
+/// 刻意），這一類在射程外，是因為上面每一種構造都要**刻意宣告**一個以 emoji 開頭的運算子（`#️⃣` 那一例要宣告的是巨集——R41 logic／regression），不宣告就編不過——即使存在完全正確的叢集
 /// 規則也一樣。現行的 `allSatisfy` 在這六個探針位置裡答錯五個（R40 logic；R39 版寫「撐起『射程外』的是另一個情形…所以沒有任何以叢集
 /// 為單位的規則全部都對，這一類在射程外」，把「不是嚴格改善」當成了射程的理由）。R35 的兩個理由：
 /// 「以識別碼開頭的叢集三種寫法同答」只在非 ZWJ 的叢集成立（R36 logic）；「Swift 把 `/` 併進運算子」只對 VS 那一類、而且只在運算元
