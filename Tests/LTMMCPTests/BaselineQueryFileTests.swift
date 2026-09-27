@@ -435,12 +435,14 @@ private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throw
     // **必須刪除**。這一段與下面那一段合起來才是規則 1 那句安全宣稱的確切射程。
     // 終止符**之前**也只准註解與空行——否則把檔頭整段搬到檔尾、查詢排在它前面，終止符仍然找得到、短語仍然
     // 「在檔頭裡」（R25 的那一臂就是防這個）。兩個方向合起來才是「檔頭 ＝ 終止符以前，且只有檔頭在那裡」。
+    // 終止符（含）以前的非空行必須從**第 0 欄**的 `#` 開始（R43 codex）：這裡與腳本的行定義都先 ASCII trim 再看 `#`，
+    // 核准的檔頭讀法 `grep '^#' <f> | cat` 與 worktree 替身那一行卻只認第 0 欄——縮排的檔頭行對前者是檔頭、對後者不存在，
+    // 兩份檔頭定義會漂移（方向是 fail-closed：替身少了短語或終止符會讓 worktree 那次跑紅；讀法少印，不會多印）。
     r.headerStructure = terminatorIndex.map { t in
         physical.enumerated().compactMap { i, line -> Int? in
             let c = line.trimmingCharacters(in: asciiWhitespace)
             if i > t { return c.hasPrefix("#") ? i + 1 : nil }
-            if i < t { return (c.isEmpty || c.hasPrefix("#")) ? nil : i + 1 }
-            return nil
+            return (c.isEmpty || line.hasPrefix("#")) ? nil : i + 1
         }
     } ?? [0]
     // **檔頭不得含曾經是查詢的字串**（R28，DA：終止符的位置由被約束方自選——第一條查詢就地加 `#` **並把終止符往下挪一行**，
@@ -756,6 +758,9 @@ func queryFileChecksAreDrivenByTheirOwnFixture() throws {
     #expect(try report("ZQXJ-A\nZQXJ-B\n" + headerNoTerm).missingHeaderPhrases.count == requiredHeaderPhrases.count)   // 沒有終止符時退回前導區塊：檔頭在檔尾 → 全缺
     let leadingBlank = try report("\n\n" + header + "ZQXJ-A\n")
     #expect(leadingBlank.missingHeaderPhrases.isEmpty && leadingBlank.headerStructure.isEmpty)   // 終止符之前准許空行（R28 logic：R27 版這一臂只斷短語，`c.isEmpty ||` 無臂）
+    // 檔頭行與終止符都要從第 0 欄的 `#` 開始（R43 codex）：縮排的檔頭行、縮排的終止符各記一筆結構違規。
+    #expect(try report("  " + header + "ZQXJ-A\n").headerStructure == [1])
+    #expect(try report(headerNoTerm + "  " + headerTerminator + "\nZQXJ-A\n").headerStructure == [2])
     #expect(try report("\n\n" + headerNoTerm + "ZQXJ-A\n").missingHeaderPhrases.isEmpty)   // 沒有終止符時的前導區塊也跳過前導空行（R28 logic：這條才走 `headerBlock` 的 fallback）
     // 檔頭不得含曾經是查詢的字串（R28，DA：`#` ＋ 挪終止符兩個編輯全綠）。集合由呼叫端給、已 fold；子字串包含；
     // 行號是檔頭區塊內的實體行號。空集合時永遠空（真檔測試餵的是 git 歷史，這裡餵合成）。
