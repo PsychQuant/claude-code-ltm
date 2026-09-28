@@ -42,14 +42,21 @@ private func nonCommentLines(_ text: String) -> [String] {
 /// 「以 `#` 開頭」看**第一個純量**，不看第一個 Character（R44 logic）：`String.hasPrefix` 比的是 grapheme，`#` 後面接 U+FE0F、
 /// U+20E3、U+0301 這類組合字元時整個叢集不等於 `#`，而 bash 的 `\#*`、python 的 `startswith('#')`、`grep '^#'` 都看第一個
 /// 純量或位元組。實測（對 R43 版）：終止符之後一行 `#` 加 U+FE0F 再接查詢，Swift 數成一條查詢、檔頭結構全綠，腳本與指紋數
-/// 不到它、`grep '^#' | cat` 把它印出來。查詢檔的行定義一律走這一支；`commentBody` 例外，理由寫在它旁邊。
+/// 不到它、`grep '^#' | cat` 把它印出來。查詢檔的行定義一律走這一支；R45 起剝 `#` 的 `commentBody` 也是（R46 regression：R45 版這裡還寫它是例外）。
 private func startsWithHash(_ s: String) -> Bool { s.unicodeScalars.first == "#" }
 
-/// 包含比對看 **UTF-8 bytes**（R45 DA）：Swift 的 `String.contains` 以 grapheme 比，一條舊查詢後面接一個組合字元（U+0301、U+FE0F、
-/// U+20E3——Mn／Me，不在 `isForbiddenScalar` 裡）就判不包含，而 judge 的 Python `in`、ltm 的 trigram 與 `grep '^#' | cat` 印出來的
-/// 純量都照樣連續。UTF-8 自同步，所以 bytes 子字串只會在純量邊界命中——等於以純量比；也不做正則等價，這一點與 judge 相同。
+/// 包含比對：兩邊先正規化成 **NFD**，再比 **UTF-8 bytes**。
+/// - bytes（R45 DA）：Swift 的 `String.contains` 以 grapheme 比，一條舊查詢後面接一個組合字元（U+0301、U+FE0F、U+20E3——Mn／Me，
+///   不在 `isForbiddenScalar` 裡）就判不包含，而 judge 的 Python `in`、ltm 的 trigram 與 `grep '^#' | cat` 印出來的純量都照樣連續。
+///   UTF-8 自同步，所以 bytes 子字串只會在純量邊界命中——等於以純量比。
+/// - NFD（R46 logic）：只比 bytes 時，`formerQueries`／`historicalQueryFolds`／`formerSquashed` 以 Swift 的正則等價去重、只留一種
+///   形式，檔頭放它的另一種形式（NFC 存、NFD 寫）就判不包含——而 ltm 的 unicode61 通道對 NFC／NFD 不敏感（R46 logic 以 SQLite 3.54
+///   FTS5 實測：NFD 文字被 NFC 查詢命中）。兩邊都分解之後兩種形式都命中，組合字元也仍在純量邊界上（分解不會把它併回前一個字元）。
+///   代價：比 judge 寬（`cafe` 會命中 `café`），方向 fail-closed。
 /// `headerFormerQueries` 與 `retiredOffenders` 的每一個包含判斷都走這一支。
-private func containsScalars(_ haystack: String, _ needle: String) -> Bool { byteOccurrences(of: needle, in: [haystack]) > 0 }
+private func containsScalars(_ haystack: String, _ needle: String) -> Bool {
+    byteOccurrences(of: needle.decomposedStringWithCanonicalMapping, in: [haystack.decomposedStringWithCanonicalMapping]) > 0
+}
 
 /// 查詢檔裡不准出現的純量——寫成**性質**不是清單（清單會漏：NUL 就不在舊清單裡）。兩條理由，各自導出一部分：
 /// (a) 行定義會分岔：能被 bash 的 read／python 的 split／Swift 的 components 或三邊的 ASCII trim 不同處理的字元
@@ -105,14 +112,18 @@ private struct NotUTF8: Error {}
 ///
 /// 1. **fold 本身比 judge 窄**：`lowercased()` ≠ Python `casefold()`。查法（三對輸入，兩支五行腳本）：
 ///    `ß`/`SS`、`ς`/`σ`、`ﬁle`(U+FB01)/`file` —— judge 的 `norm()` 判相等，這裡判不等。
-/// 2. **比對本身比 judge 寬**：`Set` 走 Swift String 的**正則等價**，而這個函式從不做 NFC/NFD 正規化。（R45 起包含比對不在這裡：
-///    `retiredOffenders` 與 `headerFormerQueries` 改走 `containsScalars`，以 bytes 比、不做正則等價，與 judge 同；R45 以前的
-///    `contains` 以 grapheme 比，對「後面接組合字元」那一形是**較窄、fail-open**——R45 DA。這一條現在只剩 `duplicateCount`。）
+/// 2. **比對本身比 judge 寬**：`Set` 走 Swift String 的**正則等價**，而這個函式從不做 NFC/NFD 正規化。（包含比對不在這裡：
+///    `retiredOffenders` 與 `headerFormerQueries` 走 `containsScalars`——R45 起以 bytes 比、R46 起先正規化成 NFD，所以同樣對
+///    正則等價不敏感、比 judge 寬，fail-closed。R45 版這裡寫「不做正則等價、與 judge 同、這一條現在只剩 `duplicateCount`」，
+///    漏了 `formerQueries` 這類 `Set` 的去重同樣走正則等價、只留一種形式，只比 bytes 時那是 fail-open——R46 logic。）
 ///    查法：`e`+U+0301 與 U+00E9 —— Swift `==` 為真、judge `norm()` 為假。**這一軸與 fold 函式無關**：改寫成手工
 ///    case fold 碰不到它（R25，security）。方向是 fail-closed（假紅、不是漏放）。
 ///
-/// 退役清單今天沒有第 1 條那類字元（查法：`retired` 陣列），但那只保護 `retiredOffenders`；`duplicateCount` 的輸入是
-/// 未來新增的查詢，不受該事實保護。臂：`foldLikeJudge` 摺成**什麼**由 `queryFileChecksAreDrivenByTheirOwnFixture`
+/// 方向一的缺口**兩條約束都有**（R46 codex，驗證者核實；R25–R45 版寫「退役清單今天沒有第 1 條那類字元，那只保護
+/// `retiredOffenders`」，方向錯了）：fail-open 發生在**新查詢**含有 casefold 的來源字元時——U+017F ſ→s、U+FB06 ﬆ→st、
+/// U+FB02 ﬂ→fl、U+00B5 µ→μ——要的前提是退役條目不含 casefold 之後的**目標序列**，而今天六條裡至少兩條含（只數、不印）。
+/// 所以一條把某段 `st`／`fl` 寫成連字的新查詢，judge 判它與那條退役查詢相等、`retiredOffenders` 放行；ﬁ／ﬂ 連字常從 PDF
+/// 貼上而來。與 `duplicateCount` 那一半一樣是已揭露的缺口（`foldGap`），修法同一個（完整的 Unicode default case folding）。臂：`foldLikeJudge` 摺成**什麼**由 `queryFileChecksAreDrivenByTheirOwnFixture`
 /// 的分隔符那一條釘住（R25：R24 版的兩條 fixture 只驅動「有沒有摺疊」，把分隔符改成 `""` 全綠）。
 private func foldLikeJudge(_ s: String) -> String { s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").lowercased() }
 
@@ -234,7 +245,9 @@ private let protectedTestWitness: [@Sendable () throws -> Void] = [baselineQuery
 ///      本體的程式碼裡，不看資料有沒有真的傳進 `checkQueryFile`。兩種自然的重構讓所有 pin 照綠——(A) 把 `historicalQueryFolds` 的
 ///      do／四個具名 catch 收成 `let history = try? historicalQueryFolds(…)`：沒有編譯警告，沒有 git 時不再 `Issue.record`、測試全綠，
 ///      README「取不到歷史時真檔測試具名紅」安靜地變假；(B) 抽成區域變數卻忘了傳（`let former = …; let r = try checkQueryFile(data)`）：
-///      真檔的 `headerFormerQueries` 恆空（會有 unused 警告）。`wiringGaps` 的 doc 同樣記著。（R37 regression：R36 版把這一段插在
+///      真檔的 `headerFormerQueries` 恆空（會有 unused 警告）。`wiringGaps` 的 doc 同樣記著。第三個接線點 (C) 是 R45 加的
+///      `retiredQueries`：R45 版給它預設值 `= retired`，真檔測試靠預設拿到退役清單，把預設改成 `[]` 0 條紅（R46 requirements／
+///      regression）；R46 拿掉預設、真檔測試明傳 `retired`，那種重構從此編不過。明寫的引數被改成 `[]` 仍全綠——那是刻意那一側。（R37 regression：R36 版把這一段插在
 ///      上面「擋住的」清單裡，一個沒人守的項目落在「擋住的」底下，也把 R27 那句註擠到它後面、讀起來像在註解接線缺口。）
 ///      **構造過而擋不住的**（R34；每一點標實測層級）：
 ///      - 本體裡 `try Test.cancel()`（DA，拋棄式包 swift test：`was cancelled`、run passed、RC 0）。**注意**：它與 `guard … return`
@@ -411,9 +424,11 @@ private func uniqueDeclaration(of name: String, in lines: [String]) -> (code: [S
 
 /// `formerQueries`：**曾經是查詢**的字串集合（已經過 `foldLikeJudge`），由呼叫端給——真檔測試從這個檔在 git 歷史裡的
 /// 每一個**可達**版本取（`historicalQueryFolds`，射程寫在它自己的說明裡；R30 regression：R29 改了兩處、漏了這一處），fixture
-/// 給合成集合。`retiredQueries` 預設是 `retired`；fixture 餵合成清單，好造出退役清單今天沒有的形狀（R45：組合字元）。
+/// 給合成集合。`retiredQueries` 沒有預設值，每個呼叫點都要明寫（真檔測試傳 `retired`，fixture 傳合成清單好造出退役清單今天沒有的
+/// 形狀）：R45 版的預設 `= retired` 讓真檔測試靠預設拿到退役清單，把預設改成 `[]`（與同一行的 `formerQueries` 對齊）0 條紅——R46
+/// requirements／regression。
 /// 本體裡不得有 `try`（同步測試釘住），所以沒有第二種出口。
-private func checkQueryFile(_ data: Data, formerQueries: Set<String> = [], retiredQueries: [String] = retired) throws -> QueryFileReport {
+private func checkQueryFile(_ data: Data, formerQueries: Set<String> = [], retiredQueries: [String]) throws -> QueryFileReport {
     var r = QueryFileReport()
     // 檔首 BOM：`String(data:)` 會把它剝掉，bash 與 python 不會——第一行的 `#` 對它們不是行首，檔頭註解會被算成
     // 第 1 條、也混進指紋。這是三邊分岔的唯一位置，而它對解碼後的字串不可見，所以看 bytes（R8）。
@@ -697,7 +712,7 @@ func baselineQueryFileDocumentsItsContractAndRetiresThePollutedQueries() throws 
     // ——那要動真的查詢檔。所以這個分支本身沒有臂，只有它依賴的判別值有）。
     catch let error as UndecodableHistory where error.hash == "WORKTREE" { history = nil; Issue.record(Comment(rawValue: "工作樹的查詢檔不是 UTF-8（\(error)）：**是現行檔案錯了**——下一行 `checkQueryFile` 會以 NotUTF8 具名紅（R31 requirements／security：R30 版把 WORKTREE 也說成「是歷史的問題」）")) }
     catch let error as UndecodableHistory { history = nil; Issue.record(Comment(rawValue: "查詢檔的某個歷史版本不是 UTF-8（\(error)）：那一版的查詢讀不到，`headerFormerQueries` 對歷史那一半沒有涵蓋——是歷史的問題，不是現行檔案錯了")) }
-    let r = try checkQueryFile(data, formerQueries: (history ?? []).union(retired.map(foldLikeJudge)))
+    let r = try checkQueryFile(data, formerQueries: (history ?? []).union(retired.map(foldLikeJudge)), retiredQueries: retired)
     #expect(r.missingHeaderPhrases.isEmpty, Comment(rawValue: "檔頭缺：\(r.missingHeaderPhrases)"))
     #expect(r.count >= 6, "基準查詢至少 6 條，得 \(r.count)")
     #expect(r.duplicateCount == 0, "查詢重複：\(r.duplicateCount) 條")
@@ -775,6 +790,8 @@ func queryFileChecksAreDrivenByTheirOwnFixture() throws {
     // 包含比對以純量為單位（R45 DA）：組合字元緊跟在後，以 grapheme 比會判不包含。兩個方向各一條。
     #expect(try report("ZQXJ-A\nZQXJ-WHOLE\u{0301}\n", retiredQueries: ["zqxj-whole"]).retiredOffenders == [2])
     #expect(try report("ZQXJ-A\nWQ-ABCE\n", retiredQueries: ["wq-abce\u{0301}f"]).retiredOffenders == [2])
+    #expect(try report("ZQXJ-A\nzqxj whole\n", retiredQueries: ["ZQXJ  Whole"]).retiredOffenders == [2])   // 退役側也要摺（R46 DA：R45 的合成清單全是已摺疊形，退役側的 fold 無臂）
+    #expect(try report("ZQXJ-A\nWQ-E\u{0301}T\n", retiredQueries: ["wq-\u{00E9}t"]).retiredOffenders == [2])   // NFC 存、NFD 寫（R46 logic）
     #expect(try report("ZQXJ-A\n").missingHeaderPhrases.count == requiredHeaderPhrases.count)
     #expect(throws: NotUTF8.self) { try report(bytes: Data([0xFF, 0xFE, 0x41])) }   // 非 UTF-8：拒答不猜
     // 終止符之後不得有註解行（R26 codex 提的是「第一條查詢之後」，R27 換成終止符：把一條查詢加 `#` 退役會讓它脫離其餘
@@ -820,6 +837,8 @@ func queryFileChecksAreDrivenByTheirOwnFixture() throws {
     // 比對以純量為單位（R45 DA）：舊查詢後面接組合字元，以 grapheme 比會整份全綠，而 `grep '^#' | cat` 仍把它的純量連續印出。
     #expect(try report(headerNoTerm + "# retired: ZQXJ-A\u{0301}\n" + headerTerminator + "\nZQXJ-B\n", former: [foldLikeJudge("ZQXJ-A")]).headerFormerQueries == [2])
     #expect(try report(headerNoTerm + "# retired: ZQXJ-A\u{FE0F}\n" + headerTerminator + "\nZQXJ-B\n", former: [foldLikeJudge("ZQXJ-A")]).headerFormerQueries == [2])
+    #expect(try report(headerNoTerm + "# retired: ZQXJ-E\u{0301}\n" + headerTerminator + "\nZQXJ-B\n", former: [foldLikeJudge("ZQXJ-\u{00E9}")]).headerFormerQueries == [2])   // NFC 存、NFD 寫（R46 logic）
+    #expect(try report(headerNoTerm + "# retired: ZQXJ-\u{00E9}\n" + headerTerminator + "\nZQXJ-B\n", former: [foldLikeJudge("ZQXJ-E\u{0301}")]).headerFormerQueries == [2])   // NFD 存、NFC 寫
     #expect(try report(headerNoTerm + "# ZQX\n# J-LONG\u{0301}\n" + headerTerminator + "\nZQXJ-B\n", former: [foldLikeJudge("ZQXJ-LONG")]).headerFormerQueries == [0])   // 跨行
     #expect(try report(headerNoTerm + "# ZQX\n#\u{FE0F}J-LONG\n" + headerTerminator + "\nZQXJ-B\n", former: [foldLikeJudge("ZQXJ-LONG")]).headerFormerQueries == [0])   // 續行以 `#️` 開頭（commentBody）
     #expect(try report(headerNoTerm + "# ZQX\n# J-LONG\n# ZQX\n# J-OTHER\n" + headerTerminator + "\nZQXJ-B\n", former: [foldLikeJudge("ZQXJ-LONG"), foldLikeJudge("ZQXJ-OTHER")]).headerFormerQueries == [0, 0])   // 兩條跨行 → 兩個 0
@@ -1330,7 +1349,7 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // CHANGELOG 指名「檔頭第 4 點」：那一點的首句要真的是 re-exec（R23：指標沒有會變紅的檢查）。
     #expect(changelog.contains("以檔頭第 4 點為準") && script.contains("\n#   4. `builtin exec -c /usr/bin/env"), "CHANGELOG 指的「檔頭第 4 點」不是 re-exec 那一點")
     // README 的兩個數字（每條純量上限、目前條數）由這裡對照常數與真檔，不各存一份（R8）。
-    let queryReport = try checkQueryFile(try Data(contentsOf: root.appendingPathComponent("scripts/baseline-queries.txt")))
+    let queryReport = try checkQueryFile(try Data(contentsOf: root.appendingPathComponent("scripts/baseline-queries.txt")), retiredQueries: retired)
     let readmeHasCap = readme.contains("每條不超過 \(maxQueryScalars) 個純量"), readmeHasCount = readme.contains("目前的 \(queryReport.count) 條")   // 先算成 Bool：失敗時不把整份 README 展開
     #expect(readmeHasCap, "README 的純量上限與 maxQueryScalars 不同")
     #expect(readmeHasCount, Comment(rawValue: "README 寫的目前條數與真檔（\(queryReport.count)）不同"))
