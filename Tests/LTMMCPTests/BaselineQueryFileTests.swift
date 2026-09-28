@@ -36,8 +36,14 @@ private let asciiWhitespace = CharacterSet(charactersIn: " \t\r\n\u{0B}\u{0C}")
 private func nonCommentLines(_ text: String) -> [String] {
     text.components(separatedBy: "\n")
         .map { $0.trimmingCharacters(in: asciiWhitespace) }
-        .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        .filter { !$0.isEmpty && !startsWithHash($0) }
 }
+
+/// 「以 `#` 開頭」看**第一個純量**，不看第一個 Character（R44 logic）：`String.hasPrefix` 比的是 grapheme，`#` 後面接 U+FE0F、
+/// U+20E3、U+0301 這類組合字元時整個叢集不等於 `#`，而 bash 的 `\#*`、python 的 `startswith('#')`、`grep '^#'` 都看第一個
+/// 純量或位元組。實測（對 R43 版）：終止符之後一行 `#` 加 U+FE0F 再接查詢，Swift 數成一條查詢、檔頭結構全綠，腳本與指紋數
+/// 不到它、`grep '^#' | cat` 把它印出來。查詢檔的行定義一律走這一支；`commentBody` 例外，理由寫在它旁邊。
+private func startsWithHash(_ s: String) -> Bool { s.unicodeScalars.first == "#" }
 
 /// 查詢檔裡不准出現的純量——寫成**性質**不是清單（清單會漏：NUL 就不在舊清單裡）。兩條理由，各自導出一部分：
 /// (a) 行定義會分岔：能被 bash 的 read／python 的 split／Swift 的 components 或三邊的 ASCII trim 不同處理的字元
@@ -82,7 +88,7 @@ private struct QueryFileReport: Equatable {
     var retiredOffenders: [Int] = []   // 條目序號
     var tooLong: [Int] = []            // 條目序號
     var forbiddenLines: [Int] = []     // 實體行號；檔首 BOM 記為 0
-    var headerStructure: [Int] = []   // 實體行號：終止符之後的註解行、終止符之前的非註解行；終止符缺少或重複記為 0
+    var headerStructure: [Int] = []   // 實體行號：終止符之後的註解行、終止符（含）以前不以第 0 欄 `#` 開頭的非空行；終止符缺少或重複記為 0
     var headerFormerQueries: [Int] = []   // 實體行號：檔頭區塊裡含任何一條「曾經是查詢」的字串的行（見 checkQueryFile）
 }
 
@@ -120,7 +126,7 @@ private func headerBlock(_ physical: [String]) -> (text: String, terminator: Int
     var block: [String] = []
     for line in physical {
         let t = line.trimmingCharacters(in: asciiWhitespace)
-        if t.hasPrefix("#") { block.append(line); continue }
+        if startsWithHash(t) { block.append(line); continue }
         if t.isEmpty { continue }
         break
     }
@@ -308,10 +314,10 @@ private let contentConstraints: [(name: String, outlet: String)] = [
     ("檔頭必備短語（只看終止符以前）", "missingHeaderPhrases"),
     ("條數下限", "count"),
     ("不得重複", "duplicateCount"),
-    ("退役查詢的子字串比對", "retiredOffenders"),
+    ("退役查詢的子字串比對（兩個方向：含退役查詢，或是退役查詢的一段）", "retiredOffenders"),
     ("非註解行的每條純量上限", "tooLong"),
     ("禁用字元（含檔首 BOM，見上方「買不到什麼」第 3 條）", "forbiddenLines"),
-    ("檔頭結構：終止符恰好一行、之前只有註解、之後沒有註解", "headerStructure"),
+    ("檔頭結構：終止符恰好一行、它（含）以前只有第 0 欄以 `#` 開頭的行與空行、之後沒有註解", "headerStructure"),
     ("檔頭不得含曾經是查詢的字串——比對整個檔頭區塊去空白後的連接文字（集合由呼叫端給——真檔測試餵 git 可達歷史 ∪ 退役清單）", "headerFormerQueries"),
     ("非 UTF-8 直接拒答", "throw NotUTF8"),
 ]
@@ -421,8 +427,14 @@ private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throw
     // `-diff`＋規則 1 讓 reviewer 不准讀內容。R26：R25 版在這裡寫了「六項」兩次、又說「六項列在 maxQueryScalars 的說明」，
     // 而同一個 commit 已把說明改成「不再複述」——以單一來源為目的的改動在同一個檔案裡留下第三份複本，而新 pin 是全檔
     // `contains` 所以看不見它）。
+    // **兩個方向都查**（R44 codex）：舊量測命令那則 turn 逐字含退役字串 R，所以 R 的任何一段 Q 也逐字在那則 turn 裡、
+    // 會被評判成 self——R43 版只查「Q 含 R」，縮短一條退役查詢當替代（自然的挑法）就放行。「Q 含 R」那一側舊 turn 不一定含 Q，
+    // 是 fail-closed，照留。
     let foldedRetired = retired.map(foldLikeJudge)
-    r.retiredOffenders = queries.indices.filter { i in foldedRetired.contains { foldLikeJudge(queries[i]).contains($0) } }.map { $0 + 1 }
+    r.retiredOffenders = queries.indices.filter { i in
+        let q = foldLikeJudge(queries[i])
+        return foldedRetired.contains { q.contains($0) || $0.contains(q) }
+    }.map { $0 + 1 }
     r.tooLong = queries.indices.filter { queries[$0].unicodeScalars.count > maxQueryScalars }.map { $0 + 1 }
     r.forbiddenLines += physical.enumerated()
         .filter { $0.element.unicodeScalars.contains(where: isForbiddenScalar) }.map { $0.offset + 1 }
@@ -437,12 +449,14 @@ private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throw
     // 「在檔頭裡」（R25 的那一臂就是防這個）。兩個方向合起來才是「檔頭 ＝ 終止符以前，且只有檔頭在那裡」。
     // 終止符（含）以前的非空行必須從**第 0 欄**的 `#` 開始（R43 codex）：這裡與腳本的行定義都先 ASCII trim 再看 `#`，
     // 核准的檔頭讀法 `grep '^#' <f> | cat` 與 worktree 替身那一行卻只認第 0 欄——縮排的檔頭行對前者是檔頭、對後者不存在，
-    // 兩份檔頭定義會漂移（方向是 fail-closed：替身少了短語或終止符會讓 worktree 那次跑紅；讀法少印，不會多印）。
+    // 兩份檔頭定義會漂移。讀法那一側少印、不會多印；替身那一側**不是** fail-closed（R44 logic 更正 R43 這裡的說法）：替身少了短語
+    // 或終止符時，worktree 裡的真檔測試不論變異什麼都紅——對「看紅燈判有沒有臂」這個用途，那是假的「有臂」。所以 README 的替身閘
+    // 數檔頭行、不只看 `-s`。「以 `#` 開頭」怎麼判見 `startsWithHash`。
     r.headerStructure = terminatorIndex.map { t in
         physical.enumerated().compactMap { i, line -> Int? in
             let c = line.trimmingCharacters(in: asciiWhitespace)
-            if i > t { return c.hasPrefix("#") ? i + 1 : nil }
-            return (c.isEmpty || line.hasPrefix("#")) ? nil : i + 1
+            if i > t { return startsWithHash(c) ? i + 1 : nil }
+            return (c.isEmpty || startsWithHash(line)) ? nil : i + 1
         }
     } ?? [0]
     // **檔頭不得含曾經是查詢的字串**（R28，DA：終止符的位置由被約束方自選——第一條查詢就地加 `#` **並把終止符往下挪一行**，
@@ -459,10 +473,13 @@ private func checkQueryFile(_ data: Data, formerQueries: Set<String> = []) throw
     // 檔頭區塊 ＝ 終止符（含）以前；終止符缺少或重複時是前導連續註解與空行（索引沿用 `physical`，行號是實體行號——R29 logic：
     // R28 版走 `headerBlock` 的壓縮陣列，空行會讓回報的行號往前位移）。
     let headerIndices: [Int] = terminatorIndex.map { Array(0...$0) } ?? Array(physical.indices.prefix { i in
-        let t = physical[i].trimmingCharacters(in: asciiWhitespace); return t.isEmpty || t.hasPrefix("#")
+        let t = physical[i].trimmingCharacters(in: asciiWhitespace); return t.isEmpty || startsWithHash(t)
     })
     let squash = { (s: String) -> String in String(s.filter { !$0.isWhitespace }) }
-    let commentBody = { (line: String) -> String in String(line.trimmingCharacters(in: asciiWhitespace).drop { $0 == "#" }) }   // 去掉行首的 `#`，否則跨行連接時 `#` 會卡在中間
+    // 去掉行首的 `#`，否則跨行連接時 `#` 會卡在中間。這裡**不**改看純量（R44）：`#` 加 U+FE0F 的行，剝掉 `#` 之後剩下的 U+FE0F
+    // 在連接文字裡會黏到上一行最後一個字元、成為它的組合字元，兩種剝法都拼不回那條查詢——那是「字元間插非空白字元」，射程外
+    // （見 README 規則 1 的「擋不住的」）；單行命中兩種剝法都照樣命中。改了也沒有任何一臂會紅，所以不改。
+    let commentBody = { (line: String) -> String in String(line.trimmingCharacters(in: asciiWhitespace).drop { $0 == "#" }) }
     let formerSquashed = Array(Set(formerQueries.map { squash(foldLikeJudge($0)) })).filter { !$0.isEmpty }   // 去重：歷史裡同一條改過內部空白的兩版 squash 後相同，跨行時不該記兩個 0（R31 logic）
     let foldedHeaderLines = headerIndices.map { (index: $0, text: squash(foldLikeJudge(commentBody(physical[$0])))) }
     let perLine = foldedHeaderLines.filter { line in formerSquashed.contains { line.text.contains($0) } }.map { $0.index + 1 }
@@ -676,7 +693,7 @@ func baselineQueryFileDocumentsItsContractAndRetiresThePollutedQueries() throws 
     #expect(r.retiredOffenders.isEmpty, Comment(rawValue: "含退役查詢的條目序號：\(r.retiredOffenders)"))
     #expect(r.tooLong.isEmpty, Comment(rawValue: "超過 \(maxQueryScalars) 個純量的條目序號：\(r.tooLong)"))
     #expect(r.forbiddenLines.isEmpty, Comment(rawValue: "含禁止純量（控制字元、非 ASCII 空白；0 = 檔首 BOM）的行號：\(r.forbiddenLines)"))
-    #expect(r.headerStructure.isEmpty, Comment(rawValue: "檔頭結構違規行號（終止符後的註解行／終止符前的非註解行；0 ＝ 終止符缺少或重複。退役要刪除、不得註解保留）：\(r.headerStructure)"))
+    #expect(r.headerStructure.isEmpty, Comment(rawValue: "檔頭結構違規行號（終止符後的註解行／終止符（含）以前不以第 0 欄 `#` 開頭的非空行——縮排的 `#` 也算；0 ＝ 終止符缺少或重複。退役要刪除、不得註解保留）：\(r.headerStructure)"))
     #expect(r.headerFormerQueries.isEmpty, Comment(rawValue: "檔頭裡含曾經是查詢（git 任一可達版本、或退役清單）的字串的行號（0 ＝ 跨行拼出來的）——退役要刪除、不得搬進檔頭：\(r.headerFormerQueries)"))
     // 反過來守同步測試的 `@Test` 行（R33 DA：同步測試守這一條，但沒有人守同步測試；一條 disabled 的測試不能檢查自己）。
     // 擋同步測試的宣告存在／唯一（`uniqueDeclaration` 找不到就紅：改名、搬走、刪掉、`/* */` 包住）與 trait／單行屬性。看不到的
@@ -739,6 +756,8 @@ func queryFileChecksAreDrivenByTheirOwnFixture() throws {
     #expect(try report("ZQXJ-e\u{0301}\nZQXJ-\u{00E9}\n").duplicateCount == 1)  // NFD vs NFC
     #expect(try report("ZQXJ-A\n" + retired[0] + "\n").retiredOffenders == [2])
     #expect(try report("ZQXJ-A\n" + retired[0].uppercased().replacingOccurrences(of: " ", with: "  \t") + "\n").retiredOffenders == [2])   // 大小寫與內部空白改寫也算退役（R17）
+    #expect(try report("ZQXJ-A\n" + String(retired[0].prefix(5)) + "\n").retiredOffenders == [2])   // 退役查詢的一段：舊 turn 也逐字含它（R44 codex）
+    #expect(try report("ZQXJ-A\nZQXJ " + retired[0] + " ZQXJ\n").retiredOffenders == [2])   // 含退役查詢（上面兩條相等的臂兩個方向都滿足，驅動不了這一側）
     #expect(try report("ZQXJ-A\n").missingHeaderPhrases.count == requiredHeaderPhrases.count)
     #expect(throws: NotUTF8.self) { try report(bytes: Data([0xFF, 0xFE, 0x41])) }   // 非 UTF-8：拒答不猜
     // 終止符之後不得有註解行（R26 codex 提的是「第一條查詢之後」，R27 換成終止符：把一條查詢加 `#` 退役會讓它脫離其餘
@@ -761,6 +780,13 @@ func queryFileChecksAreDrivenByTheirOwnFixture() throws {
     // 檔頭行與終止符都要從第 0 欄的 `#` 開始（R43 codex）：縮排的檔頭行、縮排的終止符各記一筆結構違規。
     #expect(try report("  " + header + "ZQXJ-A\n").headerStructure == [1])
     #expect(try report(headerNoTerm + "  " + headerTerminator + "\nZQXJ-A\n").headerStructure == [2])
+    // 「以 `#` 開頭」看第一個純量（R44 logic）：`#` 加 U+FE0F 對 bash、python、`grep '^#'` 都是註解。每個判斷點一條臂。
+    let vs16 = "#\u{FE0F}"
+    #expect(try report(header + "ZQXJ-A\n" + vs16 + "ZQXJ-B\n").count == 1)                   // nonCommentLines
+    #expect(try report(header + "ZQXJ-A\n" + vs16 + "ZQXJ-B\n").headerStructure == [4])       // 終止符之後
+    #expect(try report(vs16 + " x\n" + header + "ZQXJ-A\n").headerStructure.isEmpty)          // 終止符以前（第 0 欄）
+    #expect(try report(vs16 + " x\n" + headerNoTerm + "ZQXJ-A\n").missingHeaderPhrases.isEmpty)   // headerBlock 的前導區塊
+    #expect(try report(vs16 + " x\n" + headerNoTerm + "# retired: ZQXJ-A\nZQXJ-B\n", former: [foldLikeJudge("ZQXJ-A")]).headerFormerQueries == [3])   // headerIndices 的前導區塊
     #expect(try report("\n\n" + headerNoTerm + "ZQXJ-A\n").missingHeaderPhrases.isEmpty)   // 沒有終止符時的前導區塊也跳過前導空行（R28 logic：這條才走 `headerBlock` 的 fallback）
     // 檔頭不得含曾經是查詢的字串（R28，DA：`#` ＋ 挪終止符兩個編輯全綠）。集合由呼叫端給、已 fold；子字串包含；
     // 行號是檔頭區塊內的實體行號。空集合時永遠空（真檔測試餵的是 git 歷史，這裡餵合成）。
@@ -1015,8 +1041,9 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     let readmeFields = matches(#"`([a-z_]+)`"#, in: readmeFirstCell).filter { $0 != "tool_use" }
     let queryHeader = headerBlock(try String(contentsOf: root.appendingPathComponent("scripts/baseline-queries.txt"), encoding: .utf8)
         .components(separatedBy: "\n")).text   // 檔頭＝終止符（含）以前（R27；R25 版是前導連續註解、R24 版是全檔任意註解）
-    // 檔頭那一段的形狀是「`CorpusScanner.toolMetadataFields`：a / b / … / g，各取前 N 字元」，可能跨行（續行的 `#` 前可有縮排，
-    // 反折時一併剝掉——R10：先前只接欄首的 `#`，縮排續行會讓正確的檔頭紅在欄位名）。N 不寫死在 regex 裡（R10）：
+    // 檔頭那一段的形狀是「`CorpusScanner.toolMetadataFields`：a / b / … / g，各取前 N 字元」，可能跨行（續行的 `#` 在第 0 欄——
+    // R10 曾放寬成也接縮排的 `#`，R43 起檔頭行必須從第 0 欄開始、縮排的檔頭行由 `headerStructure` 判紅，R44 DA 指出那個放寬
+    // 從此服務一個會紅的形狀、而且是同一個檔裡的第三份檔頭定義，所以收回）。N 不寫死在 regex 裡（R10）：
     // 截斷長度 `toolMetadataFieldLimit` 從 CorpusScanner 讀，README、腳本檔頭、查詢檔檔頭三處各自對照它，紅在對的地方。
     let headerJoined = joinHeaderContinuations(queryHeader)
     let headerRe = try! NSRegularExpression(pattern: #"toolMetadataFields`：([a-z_/]+)，各取前([0-9]+)字元"#)
@@ -1409,16 +1436,17 @@ func producerLineChecksAreDrivenByTheirOwnFixture() {
     #expect(checkProducerLines([(line: 9, text: "    // #expect(x == \"error(judge)\") \(mk) judge")], marker: mk).unsplittable == [9])  // 整行註解掉的產生點也紅（R17）
 }
 
-/// 檔頭續行反折：下一行開頭（可有縮排）的 `#` 連同換行拿掉，再去掉所有空格。R10 放寬成也接縮排的 `#`，R11 指出它
-/// 無驅動（真檔頭沒有縮排續行）——所以抽出來、給它 fixture。
+/// 檔頭續行反折：下一行第 0 欄的 `#` 連同換行拿掉，再去掉所有空格。R10 放寬成也接縮排的 `#`，R11 指出它無驅動（真檔頭沒有縮排
+/// 續行）、抽出來給它 fixture；R44 收回
+/// （DA：R43 起縮排的檔頭行由 `headerStructure` 判紅，放寬留著就是同一個檔裡第三份檔頭定義，而且稱一個會紅的形狀「正確」）。
 private func joinHeaderContinuations(_ header: String) -> String {
-    header.replacingOccurrences(of: "\n[ \t]*#", with: "", options: .regularExpression).replacingOccurrences(of: " ", with: "")
+    header.replacingOccurrences(of: "\n#", with: "").replacingOccurrences(of: " ", with: "")
 }
 
-@Test("檔頭續行反折由 fixture 驅動：欄首與縮排的 `#` 續行都接得起來")
+@Test("檔頭續行反折由 fixture 驅動：只接第 0 欄的 `#` 續行")
 func headerContinuationJoiningIsDrivenByItsOwnFixture() {
     #expect(joinHeaderContinuations("# `x`：a / b /\n# c，各取前 200 字元") == "#`x`：a/b/c，各取前200字元")
-    #expect(joinHeaderContinuations("# `x`：a / b /\n   # c，各取前 200 字元") == "#`x`：a/b/c，各取前200字元")   // 縮排續行（R10 的放寬）
+    #expect(joinHeaderContinuations("# `x`：a / b /\n   # c，各取前 200 字元") == "#`x`：a/b/\n#c，各取前200字元")   // 縮排續行不接（R44 收回 R10 的放寬）
     #expect(joinHeaderContinuations("# a\nb") == "#a\nb")   // 不是 # 開頭的下一行不動（換行留著）
 }
 
