@@ -315,7 +315,7 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 `git merge-base --is-ancestor 1c6d2bc <commit>` 篩（2026-09-27 數）。R40 版寫「R37–R39 的三個 commit 各在 #1–#13 上留了一筆」，R41 版把全期總數接在「從 R7 起」後面，R42 版把 R7 起的總數全算成 finding 編號）。
 
 **變異測試的還原一律用檔案備份，不要用 `git checkout -- <file>`**（唯一的例外是 verify 的拋棄式 worktree：那裡沒有未 commit
-的工作，變異之間用指名路徑的 `git -C "$W" checkout HEAD -- <path>` 還原，見 `docs/measurements/README.md` 的 worktree 配方）。本 session
+的工作，變異之間用指名路徑的 `git -C "${W:?}" checkout HEAD -- <path>` 還原，見 `docs/measurements/README.md` 的 worktree 配方）。本 session
 踩了三次，每次都丟掉未 commit 的真實工作。第三次特別值得記，因為它發生在已經
 學到「變異前先 commit」之後：那次要變異的**就是還沒 commit 的修法本身**，於是
 「先 commit」這條規則在它最該生效的地方剛好不適用，而 `git checkout` 把工作還原
@@ -331,8 +331,9 @@ kill-after 137 也是非零）。**一個 shell 只有一個 EXIT trap**（`trap
 安靜地停在變異。**凡是用 subshell（迴圈與巢狀都算），call 開頭都先放 `trap 'exit 130' INT; trap 'exit 143' TERM`，而且放在跑迴圈的那一個
 shell（巢狀就是最外層）**（子 shell 裡的訊號 trap 保護不到外層：沒有它，bash 收到 INT 迴圈會繼續、TERM 會讓外層先死、子 shell 變成孤兒才還原——#63 R39；
 bash 在 `( … )` 裡會重設已設的 trap，把迴圈再包一層就失效——#63 R40）；逾時預算算整個 call，超過就拆成多個 call。**不要把配方的子 shell、
-群組或迴圈接進 `| head` 這類提早結束的讀者**，只 pipe 測試命令本身（群組接任何管線都不行：bash 3.2 對管線裡的 `{ … }` 群組，正常結束時不跑
-裡面設的 EXIT trap，`| cat` 也讓檔案停在變異——#63 R44 實作者自測）；要看判定就導到檔案，再用 `LC_ALL=C command grep -aE 'failed|recorded an issue' <檔>`
+群組或迴圈接進 `| head` 這類提早結束的讀者**，只 pipe 測試命令本身；**配方只能放在頂層、一個 `( … )` 的最外層或 `$( … )` 裡**——包進其他會 fork 的
+複合命令（管線元素、`&`、`<( … )`）時，bash 3.2 對 `{ … } | cat`、bash 3.2／5.3 對 `if`／`case`／`while … | cat`、harness 的 zsh 對 `while … | cat` 都不跑
+裡面設的 EXIT trap，檔案停在變異（#63 R44 實作者自測群組、R45 logic／DA 量到其餘；R44 版只寫「群組」）；要看判定就導到檔案，再用 `LC_ALL=C command grep -aE 'failed|recorded an issue' <檔>`
 找失敗行，或把測試命令接進同一條（不帶 `-q`／`-l`／`-m`；harness 的 `grep` 是 ugrep 的 `-I` 函式，經管線時輸入含 NUL、當檔案引數時含無效 UTF-8
 就一行都不印，`command grep` 在 `LANG=C.UTF-8` 下也漏含無效 UTF-8 的行——#63 R43、R44）——
 `head`、`tail` 都會截掉具名紅那一行，pipeline 的 rc 又是讀者的 0（#63 R41、R42）。zsh（以及 bash 3.2 的某些寫入形狀，沒有完整刻畫）在 SIGPIPE 下
@@ -340,9 +341,11 @@ bash 在 `( … )` 裡會重設已設的 trap，把迴圈再包一層就失效�
 bash 5.3 在配方放在頂層或 `{ … }` 群組、stderr 併進管線時反而因它停在變異（#63 R42）——所以只 pipe 測試命令。worktree 配方的清除 trap 也有 PIPE，
 而且它的 EXIT trap **不得帶任何重導**、以 `git -C` 執行、`R`／`W` 用雙引號在設定當下綁定、不跑 `worktree prune`（它作用於整個 repo——#63 R44）——帶重導時 zsh 下清除會死鎖、永遠卡住（#63 R42：R41 版就是這樣；R42 版的群組重導
 在 bash 5.3 還會留樹，#63 R43）；bash 5.3 把 stderr 併進管線、在頂層或 `{ … }` 群組裡跑時仍會留樹，bash 3.2 的 `{ … } | …` 也會。收尾要查卡死的行程：
-PPID 1、啟動早於本輪的 zsh／bash，逐一確認後 `kill -9`（TERM／INT／HUP 殺不掉；`pgrep -f` 比字串兩頭都錯——看不到腳本檔跑的、會比到別的 reviewer
-正在跑的區塊；#63 R43：R42 reviewer 留下的兩個掛了 23 小時，R44 改成性質）。**verify 的 worktree 裡不用這一行**：照抄 `F='…'` 只寫得出共用樹的路徑，變異會打在共用樹上、
-worktree 的測試看不到（#63 R39），那裡用 `git -C "$W" checkout HEAD -- <指名路徑>` 還原測試檔；替身只能重跑替身那一行（它讀 `$R`、寫 `$W`，不要重算 `R`），兩個查詢檔不得出現在
+候選是本輪開始**之後**啟動的 zsh／bash（PPID 1，或仍掛在活著的 `claude` 底下），用 `ps -axo pid=,ppid=,lstart=,comm=` 過濾、**不印 argv**（`ps … command`
+與 `pgrep -fl` 會把全機 argv——含跑中的查詢——印進逐字稿），以 `lsof -a -d cwd -p <pid>` 確認是本 repo、本輪 `$W` 或探針目錄的、`pgrep -P` 沒有子行程，
+對不上的一律不動，確認後才 `kill -9`（TERM／INT／HUP 殺不掉；#63 R43：R42 reviewer 留下的兩個掛了 23 小時；R45：R44 版把時間方向寫反、印全機 argv、
+丟了「本 repo 的清除行程」這個限定，照它會誤殺別的 repo 的活工作）。**verify 的 worktree 裡不用這一行**：照抄 `F='…'` 只寫得出共用樹的路徑，變異會打在共用樹上、
+worktree 的測試看不到（#63 R39），那裡用 `git -C "${W:?}" checkout HEAD -- <指名路徑>` 還原測試檔；替身只能重跑替身那一行與它的閘（它讀 `$R`、寫 `$W`，不要重算 `R`；#63 R45：R44 版漏了閘），兩個查詢檔不得出現在
 任何 checkout／restore 裡（任何 rev、任何旗標——#63 R40）。**這一行照抄、不要手打**：zsh 對單一參數的 `trap`（收尾引號放到 `EXIT` 後面）回 0 卻什麼都沒裝，`&&`
 擋不到。**這個配方只保證單一寫者**：兩個 reviewer 同時變異同一個檔會把原檔弄丟（`mktemp` 在那種情形沒作用），所以 reviewer 在自己的
 worktree 裡變異，共用樹只給實作者；確認回到原樣是變異前印一次 `git hash-object "$F"`、**EXIT trap 跑完之後**（下一個前景 call，或 `( … )` 關閉之後）用**字面路徑**再印一次、
@@ -382,8 +385,8 @@ context，下一次 compaction 摘要會被索引；語料裡已經發生過一�
 **第四個讀者是 security-guidance 外掛的自動 commit 審查**（#63 R41、R42）：commit 與 push 之後開的 sdk-py session 不載本檔、會 Read 查詢檔，
 已兩次讀進語料（Stop 審查只把 diff 送給 API，不讀檔）；`.claude/settings.json` 的 `env` 設 `ENABLE_COMMIT_REVIEW=0`（代價是本 repo 的 commit／push
 沒有這個外掛的 LLM 審查）。**擋不住**：不以本 repo 根為 project 開的 session 對本 repo commit／push（子目錄開的量過：project 設定不載入；別的目錄開的再 `cd`／`git -C`
-過來，沒量；只 Edit 過本 repo、從沒 commit 它的 session 也算——外掛會把本 repo 存成它的 `repo_root_hint`）；在那種 session 裡，hook 在輸出裡看不到
-成功 commit 的樣子時（失敗、沒東西可 commit、成功但用了 `-q` 或輸出被導走、hook 解析到別的 repo——例如探針 commit 之後把 repo 刪掉）就會把 reflog 最後 5 筆裡沒審過的 commit
+過來，沒量；只 Edit 過本 repo、從沒 commit 它的 session 也算——Stop 時 cwd 不是 git 目錄的話，外掛會把本 repo 存成它的 `repo_root_hint`）；在那種 session 裡，hook 在輸出裡看不到
+成功 commit 的樣子時（失敗、沒東西可 commit、成功但用了 `-q` 或輸出被導走、hook 解析到別的 repo——例如探針 commit 之後把 repo 刪掉）就會把 reflog 最後 5 筆裡沒審過的 commit（HEAD@{0} 以外要在 120 秒內）
 交給 reviewer（README「它擋不住什麼」；#63 R43 更正 R42 的「任何像 commit 的命令」，R44 更正 R43 的「沒有產生新 commit」並補上 hint）。在這裡 commit 之前確認 `printenv ENABLE_COMMIT_REVIEW` 印 `0`。還原方式的紀錄量不同，而且**只對沒讀過那個檔的 session 成立**：沒有**在線**的 session
 讀過它、也沒有 Bash call 在跑時由使用者在外部還原 → 零 Claude Code 紀錄；Bash `cp` → 一個 hunk（`git restore` 紀錄量相同，但它
 還原到 HEAD，見本節開頭）；**Write／Edit 不要用**（整份檔進 jsonl，而且在 `~/.claude/file-history/` 留 size 鍵找不到的變異快照）。R34
