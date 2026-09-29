@@ -6,10 +6,12 @@
 
 ### Added
 
-- **量測紀錄：no-op build 閘的行程內 vs CLI 2× 差距（#60）**：`docs/measurements/2026-09-07-gate-first-touch.md`
-  ——差距不在 SQL 執行，在同一連線的第一次觸碰（Q1＋Q2 第一次 1.86 s、第二次 0.15 s；`ltm` 每次
-  都是新連線）；`cache_size` 之類的連線設定救不了，只有 #61 的「不掃 N」會消掉它。
-  `2026-09-01-noop-build-attribution.md` 誠實邊界補指回。
+- **量測紀錄：no-op build 閘的第一次觸碰（#60）**：`docs/measurements/2026-09-07-gate-first-touch.md`
+  ——閘的成本由索引頁在不在 OS 頁快取決定（該紀錄表 1：冷 2,984 ms、11,338 次 major fault；暖約
+  0.23 s），與連線、行程無關；SQLite 私有快取在預設大小下不保留工作集。唯讀探針
+  `scripts/probes/gate-first-touch.c`，`GateProbeSQLSyncTests` 釘住它與閘同字面。第一版把差距歸給
+  「每連線私有快取從零暖起」並據此寫「連線設定救不了、只有 #61 會消掉它」——被 #60 verify R1 推翻，
+  紀錄與 `2026-09-01-noop-build-attribution.md` 的指回一併改寫。
 
 - **基準查詢集與使用規則（#63）**：`scripts/baseline-queries.txt`（一行一條；檔頭以一行固定的終止符收尾，終止符之後
   不得有註解、檔頭區塊去空白後的連接文字不得含這個檔任一 git 可達版本的查詢或退役清單的查詢——退役只能刪除；
