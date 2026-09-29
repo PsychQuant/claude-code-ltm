@@ -331,7 +331,7 @@ kill-after 137 也是非零）。**一個 shell 只有一個 EXIT trap**（`trap
 安靜地停在變異。**凡是用 subshell（迴圈與巢狀都算），call 開頭都先放 `trap 'exit 130' INT; trap 'exit 143' TERM`，而且放在跑迴圈的那一個
 shell（巢狀就是最外層）**（子 shell 裡的訊號 trap 保護不到外層：沒有它，bash 收到 INT 迴圈會繼續、TERM 會讓外層先死、子 shell 變成孤兒才還原——#63 R39；
 bash 在 `( … )` 裡會重設已設的 trap，把迴圈再包一層就失效——#63 R40）；逾時預算算整個 call，超過就拆成多個 call。**不要把配方的子 shell、
-群組或迴圈接進 `| head` 這類提早結束的讀者**，只 pipe 測試命令本身；**配方外面最近一層會 fork 的外殼必須是明寫的 `( … )`、`$( … )` 或頂層本身，不放背景**——包進其他會 fork 的
+群組或迴圈接進 `| head` 這類提早結束的讀者**，只 pipe 測試命令本身；**配方外面最近一層會 fork 的外殼必須是明寫的 `( … )`、`$( … )` 或頂層本身，不放背景，也不直接放在迴圈體裡**（一個 shell 只有一個 EXIT trap——#63 R47）——包進其他會 fork 的
 複合命令（管線元素、`&`、`<( … )`）時，bash 3.2 對 `{ … } | cat`、bash 3.2／5.3 對 `if`／`case`／`while … | cat`、harness 的 zsh 對 `while … | cat` 都不跑
 裡面設的 EXIT trap，檔案停在變異（#63 R44 實作者自測群組、R45 logic／DA 量到其餘；R44 版只寫「群組」；R46：`( … ) &` 的還原落在 call 回來之後）；要看判定就導到檔案，再用 `LC_ALL=C command grep -aE 'failed|recorded an issue' <檔>`
 找失敗行，或把測試命令接進同一條（不帶 `-q`／`-l`／`-m`；harness 的 `grep` 是 ugrep 的 `-I` 函式，經管線時輸入含 NUL、當檔案引數時含無效 UTF-8
@@ -341,10 +341,11 @@ bash 在 `( … )` 裡會重設已設的 trap，把迴圈再包一層就失效�
 bash 5.3 在配方放在頂層或 `{ … }` 群組、stderr 併進管線時反而因它停在變異（#63 R42）——所以只 pipe 測試命令。worktree 配方的清除 trap 也有 PIPE，
 而且它的 EXIT trap **不得帶任何重導**、以 `git -C` 執行、`R`／`W` 用雙引號在設定當下綁定、不跑 `worktree prune`（它作用於整個 repo——#63 R44）——帶重導時 zsh 下清除會死鎖、永遠卡住（#63 R42：R41 版就是這樣；R42 版的群組重導
 在 bash 5.3 還會留樹，#63 R43）；bash 5.3 把 stderr 併進管線、在頂層或 `{ … }` 群組裡跑時仍會留樹，bash 3.2 的 `{ … } | …` 也會。收尾要查卡死的行程：
-**只處理自己記下的**——worktree 區塊第一行印出自己的 PID 與啟動時間，收尾時在同一個 call 裡核對 `ps -o lstart= -p <pid>` 仍一致才 `kill -9`
-它與它的子孫（PID 會被重用；TERM／INT／HUP 殺不掉）；沒記下的一律不殺，只用 `ps -axo pid=,ppid=,lstart=,ucomm=` 列出回報——cwd、父行程、啟動時間都分不出
-並行 session 的活 shell（每個 harness shell 都掛在 `claude bg-spare` 底下、cwd 都被重設成 repo 根）；**不印 argv**（`ps … command`、`pgrep -fl`、`comm` 都會印出
-可改寫的 argv，含跑中的查詢）。#63 R43：R42 reviewer 留下的兩個掛了 23 小時，`pgrep -f` 比字串看不到腳本檔跑的區塊、也會比到別的 reviewer 正在跑的區塊；
+**只處理自己記下的**——worktree 區塊第一行印出自己的 PID 與啟動時間（在 `( … )` 裡 `$$` 是外層 shell），收尾時在同一個 call 裡核對那一行仍一致，
+**先收集整棵子孫**、送 TERM、等 2 秒、還活著的才 `kill -9`（先殺父行程，子行程會被 PID 1 收養而漏掉；PID 會被重用；卡住的對 TERM 不反應；命令在
+README 規則 1，三種 shell 驗過——#63 R47）；沒記下的一律不殺，只用 `ps -axo pid=,ppid=,lstart=,ucomm=` 列出回報——cwd、父行程、啟動時間都分不出
+並行 session 的活 shell（每個 harness shell 都掛在 `claude bg-spare` 底下、cwd 都被重設成 repo 根）；**不印 argv**（`ps … command`、`pgrep -fl` 會印出全機 argv，含跑中的
+查詢；`comm` 只印 argv[0]，但它可被 `exec -a` 改寫——#63 R47 更正 R46 的說法）。#63 R43：R42 reviewer 留下的兩個掛了 23 小時，`pgrep -f` 比字串看不到腳本檔跑的區塊、也會比到別的 reviewer 正在跑的區塊（harness 把每個 Bash call 跑成 `zsh -c '<全文>'`）；
 R44 把時間方向寫反；R45 以 cwd 判歸屬擋不住同一個 repo 的並行 session（R46）。**verify 的 worktree 裡不用這一行**：照抄 `F='…'` 只寫得出共用樹的路徑，變異會打在共用樹上、
 worktree 的測試看不到（#63 R39），那裡用 `git -C "${W:?}" checkout HEAD -- <指名路徑>` 還原測試檔；替身只能重跑替身那一行與它的閘（它讀 `$R`、寫 `$W`，不要重算 `R`；#63 R45：R44 版漏了閘），兩個查詢檔不得出現在
 任何 checkout／restore 裡（任何 rev、任何旗標——#63 R40）。**這一行照抄、不要手打**：zsh 對單一參數的 `trap`（收尾引號放到 `EXIT` 後面）回 0 卻什麼都沒裝，`&&`
@@ -386,7 +387,7 @@ context，下一次 compaction 摘要會被索引；語料裡已經發生過一�
 **第四個讀者是 security-guidance 外掛的自動 commit 審查**（#63 R41、R42）：commit 與 push 之後開的 sdk-py session 不載本檔、會 Read 查詢檔，
 已兩次讀進語料（Stop 審查只把 diff 送給 API，不讀檔）；`.claude/settings.json` 的 `env` 設 `ENABLE_COMMIT_REVIEW=0`（代價是本 repo 的 commit／push
 沒有這個外掛的 LLM 審查）。**擋不住**：不以本 repo 根為 project 開的 session 對本 repo commit／push（子目錄開的量過：project 設定不載入；別的目錄開的再 `cd`／`git -C`
-過來，沒量；只 Edit 過本 repo、或用 `git -C <本 repo>` 做過 commit／push 的 session 也算——外掛會把本 repo 存成它的 `repo_root_hint`，寫者有 commit review、push sweep、Stop 三個）；在那種 session 裡，hook 在輸出裡看不到
+過來，沒量；只 Edit 過本 repo、或用 `git -C <本 repo>` 做過 commit／push 的 session 也算——外掛會把本 repo 存成它的 `repo_root_hint`，寫者有 commit review（字面目標）、push sweep（字面目標）、Stop（Stop 時 cwd 不是 git 目錄）三個——#63 R47）；在那種 session 裡，hook 在輸出裡看不到
 成功 commit 的樣子時（失敗、沒東西可 commit、成功但用了 `-q` 或輸出被導走；hook 解析到別的 repo——例如探針 commit 之後把 repo 刪掉——只在輸出也被藏起來時才算，#63 R46）就會把 reflog 最後 5 筆裡沒審過的 commit（HEAD@{0} 以外要在 120 秒內）
 交給 reviewer（README「它擋不住什麼」；#63 R43 更正 R42 的「任何像 commit 的命令」，R44 更正 R43 的「沒有產生新 commit」並補上 hint）。在這裡 commit 之前確認 `printenv ENABLE_COMMIT_REVIEW` 印 `0`。還原方式的紀錄量不同，而且**只對沒讀過那個檔的 session 成立**：沒有**在線**的 session
 讀過它、也沒有 Bash call 在跑時由使用者在外部還原 → 零 Claude Code 紀錄；Bash `cp` → 一個 hunk（`git restore` 紀錄量相同，但它
