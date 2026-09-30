@@ -2,53 +2,75 @@
  * gate-first-touch —— no-op build 閘的唯讀探針（#60）。
  *
  * 以唯讀開索引，把 IndexDatabase.sourcesWithoutCursor() 的兩條閘查詢（Q1、Q2）
- * 分開跑，每一次呼叫印：耗時、SQLite 每連線私有快取的命中／未命中
+ * 分開跑。每條連線開好之後，先印讀回的 mmap_size、cache_size、page_size（實際生效
+ * 的值，不是請求的值）；每一次呼叫印：耗時、SQLite 每連線私有快取的命中／未命中
  * （sqlite3_db_status，每次呼叫前歸零）、major／minor page fault（getrusage）、
- * 回傳列數。跑之前與跑之後各印一次索引檔在 OS 頁快取裡常駐幾頁（對 PROT_READ
- * 映射做 mincore；只映射不觸碰，不會把頁讀進來）。**只印數字**——不印任何一列、
- * 不印 DB 裡的任何路徑。
+ * 行程從磁碟讀進來的 bytes（proc_pid_rusage 的 ri_diskio_bytesread）、回傳列數。
+ * 跑之前與跑之後各印一次索引檔在 OS 頁快取裡常駐幾頁（對 PROT_READ 映射做 mincore；
+ * 不觸碰頁，但 open 本身會刷新這個檔的 vnode 在 LRU 裡的位置——連續輪詢會讓檔案
+ * 看起來比較晚才變冷）。**只印數字**——不印任何一列、不印 DB 裡的任何路徑。
  *
- * 建置與執行（binary 放 repo 外）：
- *   cc -O2 -o "${TMPDIR:-/tmp}/gate-first-touch" scripts/probes/gate-first-touch.c -lsqlite3
- *   "${TMPDIR:-/tmp}/gate-first-touch" "$HOME/.claude-ltm/derived/index.sqlite3" [選項]
+ * 計數要注意的兩件事：
+ * - 走 mmap 取得的頁**不計入** sqlite3_db_status 的 hit／miss；--mmap 下的 miss 只算
+ *   映射視窗外、走 pread 的頁。
+ * - major fault 只記得到映射視窗內的讀盤；視窗外的讀盤看 diskread。
+ *
+ * 建置與執行（binary 放 repo 外，用完刪掉）：
+ *   D=$(mktemp -d) && cc -O2 -o "$D/gate-first-touch" scripts/probes/gate-first-touch.c -lsqlite3
+ *   "$D/gate-first-touch" "$HOME/.claude-ltm/derived/index.sqlite3" [選項]
+ *   rm -rf "$D"
  * 選項：
- *   --conns N        在同一行程裡依序開 N 條連線（預設 2）
- *   --reps N         每條連線呼叫幾次（預設 3）
- *   --mmap           每條連線下 PRAGMA mmap_size=4294967296，與 IndexDatabase 相同
- *   --cache-size N   每條連線下 PRAGMA cache_size=N（預設用 SQLite 的預設值）
+ *   --conns N        在同一行程裡依序開 N 條連線（1–1000，預設 2）
+ *   --reps N         每條連線呼叫幾次（1–1000，預設 3）
+ *   --mmap           每條連線下 MMAP_PRAGMA（與 IndexDatabase.init 同字面）；不給則下 mmap_size=0
+ *   --cache-size N   每條連線下 PRAGMA cache_size=N（正數是頁數、負數是 KiB；不給則用 SQLite 預設）
  *   --reuse-stmt     每條連線只 prepare 一次、呼叫之間 sqlite3_reset
  *                    （預設每次 prepare＋finalize，與 IndexDatabase.query 相同）
  *   --residency      只印 OS 快取常駐頁數就結束
  *
  * 它不是測試：不在 `swift test` 裡跑，本 repo 的測試不碰真索引。
  *
- * 前提：索引是 WAL 模式，而且 -wal、-shm 兩個檔都在——SQLITE_OPEN_READONLY
- * 建不出它們，缺檔時開檔失敗（"unable to open database file"）。**不要**為了
- * 繞過它改成讀寫開檔：這支探針不得寫索引。WAL 模式的讀者會更新 -shm 裡的
- * read-mark（跑完後 -shm 的 mtime 會變）；它碰的檔只有這一個。
+ * 寫入面：主檔與 -wal 永遠不寫。-shm 會被寫——WAL 模式的讀者會更新 read-mark；
+ * 只缺 -shm 而 -wal 還在時，會建出 -shm；-shm 被清零而 -wal 非空時，會做 WAL
+ * recovery、重建 wal-index，期間持有寫鎖，同時跑的 `ltm build` 可能短暫拿到 BUSY。
+ * -wal、-shm 兩個都缺時，第一次 prepare 就失敗（"unable to open database file"）。
+ * **不要**為了繞過任何一種失敗改成讀寫開檔：這支探針不得寫主檔。
  *
- * Q1／Q2 的字面與 sourcesWithoutCursor() 逐字相同（空白除外），由
- * Tests/LTMIndexTests/GateProbeSQLSyncTests.swift 守住。
+ * Q1／Q2 與 sourcesWithoutCursor() 的 SQL 逐項相等（空白除外）、MMAP_PRAGMA 與
+ * IndexDatabase.init 同字面，由 Tests/LTMIndexTests/GateProbeSQLSyncTests.swift 守住。
  */
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <libproc.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/resource.h>
 
-/* 與 IndexDatabase.sourcesWithoutCursor() 同字面；GateProbeSQLSyncTests 比對兩者。 */
+/* 與 IndexDatabase.sourcesWithoutCursor() 的 SQL 相等；GateProbeSQLSyncTests 比對兩者。 */
 static const char *Q1 = "SELECT COUNT(*) FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_sources)";
 static const char *Q2 = "SELECT source_key FROM chunk_sources EXCEPT SELECT source_key FROM scan_state";
+/* 與 IndexDatabase.init 的 mmap PRAGMA 同字面；同一條測試比對。 */
+static const char *MMAP_PRAGMA = "PRAGMA mmap_size=4294967296";
+
+static const char *USAGE =
+    "usage: %s <index.sqlite3> [--conns N] [--reps N] [--mmap] [--cache-size N] [--reuse-stmt] [--residency]\n";
 
 static double now_ms(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+}
+
+static unsigned long long disk_bytes_read(void) {
+    struct rusage_info_v4 ri;
+    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&ri) != 0) return 0;
+    return ri.ri_diskio_bytesread;
 }
 
 static int residency(const char *path, long *resident, long *total) {
@@ -79,12 +101,31 @@ static void print_residency(const char *when, const char *path) {
         printf("residency %s unavailable\n", when);
 }
 
+/* 讀一個整數型 PRAGMA 的實際值；失敗回 -1 並印錯誤。 */
+static int pragma_value(sqlite3 *db, const char *sql, long long *out) {
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+        fprintf(stderr, "%s: %s\n", sql, sqlite3_errmsg(db));
+        return -1;
+    }
+    int rc = sqlite3_step(st);
+    if (rc != SQLITE_ROW) {
+        fprintf(stderr, "%s: %s\n", sql, sqlite3_errmsg(db));
+        sqlite3_finalize(st);
+        return -1;
+    }
+    *out = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    return 0;
+}
+
 static int run(sqlite3 *db, const char *label, const char *sql, sqlite3_stmt **keep, int conn, int rep) {
     int cur = 0, hi = 0;
     sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_HIT, &cur, &hi, 1);   /* reset */
     sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_MISS, &cur, &hi, 1);
     struct rusage a, b;
     getrusage(RUSAGE_SELF, &a);
+    unsigned long long disk0 = disk_bytes_read();
     double t0 = now_ms();
     sqlite3_stmt *st = keep ? *keep : NULL;
     if (!st && sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
@@ -97,34 +138,50 @@ static int run(sqlite3 *db, const char *label, const char *sql, sqlite3_stmt **k
     if (keep) { sqlite3_reset(st); *keep = st; } else sqlite3_finalize(st);
     if (rc != SQLITE_DONE) { fprintf(stderr, "step %s: %s\n", label, sqlite3_errmsg(db)); return -1; }
     double ms = now_ms() - t0;
+    unsigned long long disk1 = disk_bytes_read();
     getrusage(RUSAGE_SELF, &b);
     int hit = 0, miss = 0;
     sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_HIT, &hit, &hi, 1);
     sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_MISS, &miss, &hi, 1);
-    printf("conn=%d rep=%d q=%s ms=%.1f cache_hit=%d cache_miss=%d majflt=%ld minflt=%ld rows=%ld\n",
-           conn, rep, label, ms, hit, miss, b.ru_majflt - a.ru_majflt, b.ru_minflt - a.ru_minflt, rows);
+    printf("conn=%d rep=%d q=%s ms=%.1f cache_hit=%d cache_miss=%d majflt=%ld minflt=%ld diskread_kib=%llu rows=%ld\n",
+           conn, rep, label, ms, hit, miss, b.ru_majflt - a.ru_majflt, b.ru_minflt - a.ru_minflt,
+           (disk1 - disk0) / 1024, rows);
+    return 0;
+}
+
+/* 整數參數：整段都要是數字，而且在 [lo, hi] 內；否則回 -1。 */
+static int parse_long(const char *s, long lo, long hi, long *out) {
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || v < lo || v > hi) return -1;
+    *out = v;
     return 0;
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "usage: %s <index.sqlite3> [--conns N] [--reps N] [--mmap] [--cache-size N] [--residency]\n", argv[0]); return 64; }
+    if (argc < 2) { fprintf(stderr, USAGE, argv[0]); return 64; }
     const char *path = argv[1];
-    int conns = 2, reps = 3, use_mmap = 0, residency_only = 0, have_cache = 0, reuse = 0;
-    long cache_size = 0;
+    long conns = 2, reps = 3, cache_size = 0;
+    int use_mmap = 0, residency_only = 0, have_cache = 0, reuse = 0;
     for (int i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "--conns") && i + 1 < argc) conns = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--reps") && i + 1 < argc) reps = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--mmap")) use_mmap = 1;
-        else if (!strcmp(argv[i], "--cache-size") && i + 1 < argc) { cache_size = atol(argv[++i]); have_cache = 1; }
+        if (!strcmp(argv[i], "--conns") && i + 1 < argc) {
+            if (parse_long(argv[++i], 1, 1000, &conns) != 0) { fprintf(stderr, "--conns 要 1–1000 的整數\n"); return 64; }
+        } else if (!strcmp(argv[i], "--reps") && i + 1 < argc) {
+            if (parse_long(argv[++i], 1, 1000, &reps) != 0) { fprintf(stderr, "--reps 要 1–1000 的整數\n"); return 64; }
+        } else if (!strcmp(argv[i], "--cache-size") && i + 1 < argc) {
+            if (parse_long(argv[++i], -100000000, 100000000, &cache_size) != 0 || cache_size == 0) {
+                fprintf(stderr, "--cache-size 要非零整數（正數是頁數、負數是 KiB）\n"); return 64;
+            }
+            have_cache = 1;
+        } else if (!strcmp(argv[i], "--mmap")) use_mmap = 1;
         else if (!strcmp(argv[i], "--reuse-stmt")) reuse = 1;
         else if (!strcmp(argv[i], "--residency")) residency_only = 1;
-        else { fprintf(stderr, "unknown option: %s\n", argv[i]); return 64; }
+        else { fprintf(stderr, "unknown option: %s\n", argv[i]); fprintf(stderr, USAGE, argv[0]); return 64; }
     }
     print_residency("before", path);
     if (residency_only) return 0;
-    char cache_label[32] = "default";
-    if (have_cache) snprintf(cache_label, sizeof cache_label, "%ld", cache_size);
-    printf("sqlite=%s mmap=%d cache_size=%s reuse_stmt=%d\n", sqlite3_libversion(), use_mmap, cache_label, reuse);
+    printf("sqlite=%s mmap=%d reuse_stmt=%d\n", sqlite3_libversion(), use_mmap, reuse);
     for (int c = 1; c <= conns; c++) {
         sqlite3 *db = NULL;
         if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) {
@@ -133,11 +190,28 @@ int main(int argc, char **argv) {
             return 1;
         }
         char pragma[64];
-        if (use_mmap) sqlite3_exec(db, "PRAGMA mmap_size=4294967296", NULL, NULL, NULL);
-        if (have_cache) { snprintf(pragma, sizeof pragma, "PRAGMA cache_size=%ld", cache_size); sqlite3_exec(db, pragma, NULL, NULL, NULL); }
+        const char *mmap_sql = use_mmap ? MMAP_PRAGMA : "PRAGMA mmap_size=0";
+        /* PRAGMA mmap_size 會回一列（生效值），所以用 pragma_value 執行，不用 sqlite3_exec 丟掉它。 */
+        long long ignored = 0;
+        if (pragma_value(db, mmap_sql, &ignored) != 0) { sqlite3_close_v2(db); return 1; }
+        if (have_cache) {
+            snprintf(pragma, sizeof pragma, "PRAGMA cache_size=%ld", cache_size);
+            if (sqlite3_exec(db, pragma, NULL, NULL, NULL) != SQLITE_OK) {
+                fprintf(stderr, "%s: %s\n", pragma, sqlite3_errmsg(db));
+                sqlite3_close_v2(db);
+                return 1;
+            }
+        }
+        long long mmap_size = 0, cache = 0, page = 0;
+        if (pragma_value(db, "PRAGMA mmap_size", &mmap_size) != 0 || pragma_value(db, "PRAGMA cache_size", &cache) != 0
+            || pragma_value(db, "PRAGMA page_size", &page) != 0) {
+            sqlite3_close_v2(db);
+            return 1;
+        }
+        printf("conn=%d mmap_size=%lld cache_size=%lld page_size=%lld\n", c, mmap_size, cache, page);
         sqlite3_stmt *k1 = NULL, *k2 = NULL;
-        for (int r = 1; r <= reps; r++) {
-            if (run(db, "Q1", Q1, reuse ? &k1 : NULL, c, r) != 0 || run(db, "Q2", Q2, reuse ? &k2 : NULL, c, r) != 0) {
+        for (long r = 1; r <= reps; r++) {
+            if (run(db, "Q1", Q1, reuse ? &k1 : NULL, c, (int)r) != 0 || run(db, "Q2", Q2, reuse ? &k2 : NULL, c, (int)r) != 0) {
                 sqlite3_finalize(k1); sqlite3_finalize(k2); sqlite3_close_v2(db); return 1;
             }
         }

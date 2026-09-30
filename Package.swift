@@ -95,7 +95,9 @@ let package = Package(
         // 量測腳本。**是一個 target 而不是 `swiftc` 單檔**：它要用索引層與評估層
         // 的型別，而單檔編譯只能把 source 檔複製進來——那就是同一件事的第二個
         // 寫者。`path`/`sources` 指名單一檔案，`scripts/` 下的其他探針不受影響
-        // （它們刻意保持可獨立 `swiftc`，因為那些只 shell out 到 `ltm`）。
+        // （Swift 的那些刻意保持可獨立 `swiftc`，因為它們只 shell out 到 `ltm`；
+        // `scripts/probes/gate-first-touch.c` 是 C，以唯讀直接開索引，用 `cc` 建置——
+        // 見它的檔頭，#60）。
         .executableTarget(
             name: "measure-retrieval",
             dependencies: ["LTMCore", "LTMEval", "LTMIndex", "LTMService"],
