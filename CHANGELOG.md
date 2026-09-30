@@ -8,9 +8,12 @@
 
 - **量測紀錄：no-op build 閘的第一次觸碰（#60）**：`docs/measurements/2026-09-07-gate-first-touch.md`
   ——一次閘的成本，數量級由索引頁在不在 OS 頁快取決定（該紀錄表 1、1b：冷約 3 s、11,338 次 major fault；
-  暖約 0.22–0.26 s）；ltm 自己的 `IndexDatabase` 路徑也一樣（表 6、表 7，負載約 30–50 的一個窗口）：暖態與
-  C 探針、CLI 同級，冷態與 C 探針同級（各一個樣本，約 4.1 s；CLI 沒有量冷態）。SQLite 私有快取在預設大小下
-  不保留工作集；暖態下 `cache_size` 調大不會讓第一次變快（表 2，C 探針；ltm 路徑上沒有量）。同一常駐狀態下新連線不會重付那個數量級，開 mmap 時每條新連線
+  暖約 0.22–0.26 s）；ltm 自己的 `IndexDatabase` 路徑也一樣：暖態與冷態都與 C 探針、CLI 同級（表 6、7、10；
+  冷態各一個樣本）。SQLite 私有快取在預設大小下不保留工作集；暖態下 `cache_size` 調大不會讓第一次變快，關掉 mmap
+  的第 1 次也沒有變快——C 探針與 ltm 路徑都量過（表 2、9）。照 #58 當時的條件重現（修正之前的 SQL、不開 mmap），
+  同一常駐狀態下 ltm 路徑與 CLI 同級、冷暖相差約九倍（表 11）：#58 那個約 2× 差距與常駐狀態不同相符，但 #58 當時的
+  狀態沒有紀錄，無法證實。閘的 harness 是 executable target `gate-harness`；表 9–11 由 `scripts/probes/gate-matrix.sh`
+  跑（每個冷樣本前 `sudo purge`，只問一次密碼）。同一常駐狀態下新連線不會重付那個數量級，開 mmap 時每條新連線
   多約 1.2 萬次 minor fault；要保留 mmap，只有重用同一條連線才省得掉。整檔會不會變冷，強候選是 vnode 回收——有沒有
   行程持有它（表 5）；持有不保證沒被引用的預讀頁留著（表 8，一次觀測）。唯讀探針 `scripts/probes/gate-first-touch.c`
   （每條連線開檔前做與 `IndexDatabase.init` 相同的 `lstat` 檢查）；`GateProbeSQLSyncTests` 比對閘的本體、

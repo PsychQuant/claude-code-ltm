@@ -1,6 +1,6 @@
 # no-op build 閘：第一次觸碰的成本跟著 OS 頁快取走（#60）
 
-**日期**：2026-09-29 改寫、2026-09-30 補量（第一版 2026-09-07 的機理被 #60 verify R1 推翻；之後幾輪 verify 又各抓到
+**日期**：2026-09-29 改寫、2026-09-30 與 10-01 補量（第一版 2026-09-07 的機理被 #60 verify R1 推翻；之後幾輪 verify 又各抓到
 一批說過頭的地方，見「第一版錯在哪」與誠實邊界）。**機器**：Apple M5 Max、128 GB、macOS 27。
 
 **DB**：`~/.claude-ltm/derived/index.sqlite3`，有兩個量測窗口，數字不互比。
@@ -11,24 +11,31 @@
   2,968,543,232 B（181,186 個 OS 頁）。窗口裡主檔 mtime 從 21:45:39 變成 21:49:19、`-wal` 21:49:20（讀自表 7
   那兩次冷跑之後的 `stat`，Claude Code 背景任務的輸出，repo 外、暫存），大小沒變——有別的 `ltm` 行程寫入或做了 checkpoint，分不出是哪一種。表 6 在 21:47:52 前跑完，前後讀到的主檔與
   `-wal` 都是 21:45:39。
+- **表 9–11**（2026-10-01 02:13:32–02:14:53）：同一個 2,968,543,232 B 的索引；每一步前後讀到的主檔與 `-wal` mtime
+  都是 2026-09-30 22:11:10（查法：`scripts/probes/gate-matrix.sh` 每一步都記一次 `stat`）。
 
-**負載**：表 1–5 都沒有記錄 load average；表 6–8 有記（1 分鐘平均約 30–53，機器上有別的工作在跑）。
+**負載**：表 1–5 都沒有記錄 load average；表 6–8 有記（1 分鐘平均約 30–53，機器上有別的工作在跑）；表 9–11 的
+負載極高（1 分鐘平均從 436 降到 159），那一段的絕對毫秒數不能和別的表比，只在窗口內交錯比較。
 
 **結論先講**：
 
 - 一次閘（`sourcesWithoutCursor()` 的 Q1＋Q2）要多久，數量級由**索引頁在不在 OS 頁快取裡**決定：0 頁
   常駐時第一次約 3 s（表 1、1b 兩個冷樣本 2,984 ms、3,226 ms），暖時約 0.22–0.26 s（ltm 的設定：開 mmap、預設
-  `cache_size`）。**ltm 自己的 `IndexDatabase` 路徑也一樣**：在負載約 30–50 的窗口裡，暖態三輪與 C 探針、
-  CLI 同級（ltm 路徑 0.29–0.33 s）；冷態各一個樣本，ltm 路徑 4,119 ms、C 探針 4,066 ms（表 6、表 7；CLI 沒有
-  量冷態）。
+  `cache_size`）。**ltm 自己的 `IndexDatabase` 路徑也一樣**，暖態與冷態都與 C 探針、CLI 同級：負載約 30–50 時
+  暖態三輪 0.29–0.33 s、冷態 4,119 ms 對 C 探針 4,066 ms（表 6、表 7）；另一個負載極高的窗口裡，冷態 ltm 路徑
+  4,714 ms、C 探針 3,769 ms、CLI 4.35 s（表 10，各一個樣本）。
 - 在同一個常駐狀態下，新連線與新行程不會重付那一個數量級；開著 mmap 時，每條新連線會多付約 1.2 萬次
   minor fault，多數比較裡慢幾到二十幾 ms（判讀 1）。要保留 mmap，這一份只有**重用同一條連線**才省得掉；關掉 mmap 也沒有這一份，但唯一的那次（第 1 次）呼叫沒有因此
-  變快，第 2 次還慢一成左右（判讀 4；表 2：C 探針、暖態、一個窗口，ltm 路徑上沒有量）。
+  變快，第 2 次還慢一成左右（判讀 4、判讀 7；暖態，C 探針與 ltm 路徑都量過）。
 - 索引**會不會整檔變冷**，量到的強候選是 vnode 回收：同一段時間裡，沒人開的檔在兩次讀數之間（2 分 33 秒）
   歸零，被一個行程持有唯讀 fd 的檔 10 分鐘都還常駐（表 5）；記憶體有 88–92% 空閒。持有 fd 也不保證預讀頁
   留著：表 8 在一個窗口裡看到，持有中的檔從 3,045 頁掉回觸碰次數 1,024（一次觀測，沒有逐頁確認）。
 - SQLite 的每連線私有頁快取不是機理：預設大小下第一次與第二次的 cache miss 幾乎相同，私有快取不保留
-  工作集。暖態下把 `cache_size` 調大，不會讓第一次變快（表 2；C 探針、一個窗口，ltm 路徑上沒有量）。
+  工作集。暖態下把 `cache_size` 調大，不會讓第一次變快，同一連線的第 2 次才快（表 2 的 C 探針、表 9 的 ltm 路徑與
+  C 探針，方向與大小相同，判讀 7）。
+- **#58 那個約 2× 差距**：照 #58 當時的條件重現（#58 修正之前的 SQL、不開 mmap），ltm 路徑與 CLI 在同一常駐狀態下
+  同級、冷與暖相差約九倍（表 11，判讀 8）。所以差距的主成分是量測時的常駐狀態；#58 當時的狀態沒有紀錄，這一點
+  永遠只能說是與資料一致。
 
 ## 為什麼要量
 
@@ -71,72 +78,31 @@ done
 rm -rf "${D:?}"
 ```
 
-**ltm 自己的路徑**（表 6、表 7）：探針是 C、唯讀開檔，不是 ltm 的程式碼。為了量 ltm 的路徑，在 repo 外的
-副本裡加一個只呼叫閘的執行檔：`IndexDatabase(path:)` 開索引，呼叫 `sourcesWithoutCursor()`，印耗時、
-major／minor fault、`ru_inblock` 與回傳的列**數**。它走的是 ltm 的 `init`（`lstat` 檢查、讀寫開檔、WAL／`synchronous`／
-mmap PRAGMA）與 `query()`（no-op 時 Q2 回 0 列，所以沒走到 `columnText`），不經過建置流程：它只呼叫閘——
-除了 `init` 本身的 PRAGMA，建置連線上閘之前的語句它都不跑，也不取鎖、不掃描語料。
+**ltm 自己的路徑**（表 6、7、9–11）：探針是 C、唯讀開檔，不是 ltm 的程式碼。量 ltm 的路徑用 executable target
+`gate-harness`（`scripts/gate-harness/main.swift`）：`IndexDatabase(path:)` 開索引，呼叫 `sourcesWithoutCursor()`，
+印讀回的 `mmap_size`／`cache_size`、耗時、major／minor fault 與回傳的列**數**。`--cache-size N`、`--no-mmap` 是在
+`init` 之後、同一條連線上用 `IndexDatabase.execute` 下 PRAGMA；`--old-sql` 改用 `IndexDatabase.query` 跑 #58 修正
+之前的兩條閘 SQL。它走的是 ltm 的 `init`（`lstat` 檢查、讀寫開檔、WAL／`synchronous`／mmap PRAGMA）與 `query()`
+（no-op 時 Q2 回 0 列，所以沒走到 `columnText`），不經過建置流程：它只呼叫閘——除了 `init` 本身的 PRAGMA，建置
+連線上閘之前的語句它都不跑，也不取鎖、不掃描語料。statement 重用在 ltm 路徑上**不是一個設定**：`query()` 每次都
+prepare＋finalize，要重用就得改 `Sources/`，所以這個旋鈕只在 C 探針上量（表 2）。
 **寫入面與 ltm 的一次查詢不同**：兩者都讀寫開檔、都有 `IndexDatabase.init` 的 `lstat` 檢查，關閉時若是最後一條
 連線、`-wal` 裡有還沒 checkpoint 的資料，都可能 checkpoint 進主檔並清空 `-wal`（R5 的 security 在合成 DB 上驗過）。
 不同的是：harness 不檢查檔案存不存在，路徑打錯會建出新的資料庫（查詢會先檢查、報錯），所以下面的命令先做
 `[ -f "$DB" ]`；查詢會併入新內容，harness 不會。表 6 前後主檔與 `-wal` 的 mtime 沒變；表 7 的冷跑沒有記開跑前的 mtime，跑後的 `stat` 顯示兩者仍是
 21:49:19／21:49:20（見 DB 段），所以兩次冷跑都沒有讓它們前進。
 
-副本**不得**含兩個受限查詢檔（`scripts/baseline-queries.txt`、`scripts/rrf-tie-queries.txt`，見
-`docs/measurements/README.md`）——兩個都排除、解開後以檔名確認沒落地；正常結束、出錯、INT／TERM 時都刪掉副本。
-R4 版這段只排除了第一個，副本因此把第二個帶到了 repo 外（R5 抓到，副本已刪）。先把下面那段 Swift 存成 repo 外的
-一個檔，設 `MAIN` 指向它，再從 repo 裡任何目錄執行：
+表 6、7 用的是較早的版本（沒有旗標、不讀回設定，在排除兩個受限查詢檔的 `git archive` 副本裡建置；原始碼見
+`git show 022dae2:docs/measurements/2026-09-07-gate-first-touch.md`），呼叫閘的方式相同。表 9–11 由
+`scripts/probes/gate-matrix.sh` 一次跑完（在自己的終端機執行；見下面的冷態段）。
 
 ```bash
-(                                                        # 整段在一個子 shell 裡跑
-  trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 141' PIPE
-  DB="$HOME/.claude-ltm/derived/index.sqlite3"; MAIN="${MAIN:?先把下面的 main.swift 存成檔、設 MAIN}"
-  [ -f "$DB" ] || { echo "找不到 $DB" >&2; exit 1; }
-  ROOT=$(git rev-parse --show-toplevel) || exit 1
-  H=$(mktemp -d) || exit 1
-  trap 'rm -rf "${H:?}"' EXIT
-  git -C "$ROOT" archive HEAD -- ':(top)' ':(top,exclude)scripts/baseline-queries.txt' ':(top,exclude)scripts/rrf-tie-queries.txt' | tar -x -C "$H"
-  [ -e "$H/Package.swift" ] && [ -z "$(find "$H" \( -name baseline-queries.txt -o -name rrf-tie-queries.txt \) -print)" ] \
-    || { echo 'FAIL: 副本不完整，或受限檔落地了' >&2; exit 1; }
-  mkdir "$H/Sources/gateharness" && cp "$MAIN" "$H/Sources/gateharness/main.swift" || exit 1
-  perl -0pi -e 's/(\n(\s*)\.executableTarget\(name: "ltm",)/\n$2.executableTarget(name: "gateharness", dependencies: ["LTMIndex"]),$1/' "$H/Package.swift"
-  command grep -q '"gateharness"' "$H/Package.swift" || { echo 'FAIL: Package.swift 沒改到' >&2; exit 1; }
-  (cd "$H" && swift build -c release --product gateharness) || exit 1
-  "$H/.build/release/gateharness" "$DB" 2 2              # 兩條連線、每條兩次
-)
-```
-
-```swift
-// #60 Expected 1：用 ltm 自己的 IndexDatabase 路徑跑閘。只印計數與時間，不印任何一列。
-import Darwin
-import Foundation
-import LTMIndex
-
-func usage() -> rusage { var u = rusage(); getrusage(RUSAGE_SELF, &u); return u }
-func nowMs() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1e6 }
-
-let args = CommandLine.arguments
-guard args.count == 4, let conns = Int(args[2]), let reps = Int(args[3]),
-      (1...20).contains(conns), (1...20).contains(reps) else {
-    FileHandle.standardError.write("usage: gateharness <index.sqlite3> <conns 1-20> <reps 1-20>\n".data(using: .utf8)!)
-    exit(64)
-}
-var load = [Double](repeating: -1, count: 3)
-_ = getloadavg(&load, 3)
-print(String(format: "harness loadavg=%.2f %.2f %.2f", load[0], load[1], load[2]))
-for c in 1...conns {
-    let t0 = nowMs()
-    let database = try IndexDatabase(path: args[1])
-    print(String(format: "conn=%d open_ms=%.1f", c, nowMs() - t0))
-    for r in 1...reps {
-        let a = usage(); let s = nowMs()
-        let missing = try database.sourcesWithoutCursor()
-        let ms = nowMs() - s; let b = usage()
-        print(String(format: "conn=%d rep=%d ms=%.1f majflt=%ld minflt=%ld inblock=%ld rows=%d",
-                     c, r, ms, b.ru_majflt - a.ru_majflt, b.ru_minflt - a.ru_minflt, b.ru_inblock - a.ru_inblock, missing.count))
-    }
-    database.close()
-}
+DB="$HOME/.claude-ltm/derived/index.sqlite3"
+[ -f "$DB" ] || echo "找不到 $DB"
+swift build -c release --product gate-harness
+.build/release/gate-harness "$DB" 2 2                    # 兩條連線、每條兩次
+.build/release/gate-harness "$DB" 1 2 --cache-size -1000000   # 表 9 的大 cache_size
+.build/release/gate-harness "$DB" 1 2 --old-sql --no-mmap      # 表 11 的 #58 條件
 ```
 
 **持有 fd 與預讀頁**（表 8）：一支 repo 外、用完即刪的小程式 `touch-pages`。`mk <檔> <MiB>` 以 `F_NOCACHE`
@@ -196,11 +162,13 @@ stat -f '%l %HT %u %N' "$DB" "$DB-wal" "$DB-shm" "$DB-journal" 2>/dev/null; id -
 
 **不要**為了繞過任何一種失敗改成讀寫開檔。
 
-**冷態無法直接強制**（清 OS 快取要 `sudo purge`，本紀錄沒有權限）。表 1、表 1b 是**自然冷**；表 7 是先用
+**冷態**：表 1、表 1b 是**自然冷**；表 10、11 在每個冷樣本前跑一次 `sudo purge`（`scripts/probes/gate-matrix.sh`
+開頭問一次密碼，只有 `purge` 用 sudo，整台機器的檔案快取都會被清掉）；表 7 是先用
 `find /System/Library /usr /Library /Applications /opt -xdev > /dev/null 2>&1` 走一遍系統目錄（只查 metadata、
 不讀內容），讓 vnode 表輪轉到索引被回收。它會增加全機的 vnode 回收壓力，可能逐出其他 session 的檔案快取或
-索引頁，干擾它們的效能與量測——不要在別人也在量的時候跑。兩種都是先 `--residency` 印出 0 頁常駐才開跑，等待期間不輪詢（輪詢會
-延後變冷，見判讀 6）。
+索引頁，干擾它們的效能與量測——不要在別人也在量的時候跑。每種都是先 `--residency` 印出 0 頁常駐才開跑，等待期間不輪詢（輪詢會
+延後變冷，見判讀 6）。`purge` 也會把 `sqlite3` 這類執行檔清出快取，所以 CLI 的冷態耗時含冷的行程啟動；探針與
+harness 只計閘本身的呼叫。
 
 ## 結果
 
@@ -406,6 +374,52 @@ load average（1 分鐘）31–53。這是一次、一個窗口裡的觀測。R5
 負載 9–32）以同樣步驟重做，逐頁看，觸碰後的 3,045 頁是被觸碰的 1,024 頁加上前後的鄰頁，但 200 秒內**沒有**
 回落（讀者回報，R5 報告第 7 列；本紀錄未量）。
 
+### 表 9：ltm 路徑上的兩個設定，暖態（2026-10-01 02:13:40–02:14:01，三輪交錯）
+
+每輪依序：ltm 路徑（預設、`--cache-size -1000000`、`--no-mmap`）、C 探針（`--mmap`、`--mmap --cache-size -1000000`、
+不開 mmap）、CLI Q1＋Q2。都是一個新行程、一條連線的第 1／2 次呼叫（Q1＋Q2，ms）。開跑前常駐 49,894 頁、全程不變，
+所有執行 major fault 0、讀盤 0；load average（1 分鐘）416、363、336（各輪開始時）。
+
+| 設定 | ltm 路徑 三輪 第 1／2 次 | C 探針 三輪 第 1／2 次 | 第 1 次 minor fault（ltm／探針） |
+|---|---|---|---|
+| mmap、`cache_size` 2000（ltm 的設定） | 476.7／454.7、472.1／454.3、492.1／468.7 | 478.3／491.2、471.8／459.4、485.4／462.7 | 11,929–11,932／11,930–11,931 |
+| mmap、`cache_size` −1000000 | 528.7／371.3、508.7／379.6、525.4／359.8 | 520.3／374.0、514.5／360.3、537.3／369.0 | 27,249–27,263／27,246–27,256 |
+| 不開 mmap、`cache_size` 2000 | 500.6／497.9、487.8／508.9、499.0／499.5 | 529.5／512.4、491.3／502.0、500.4／496.7 | 548–550／551–552 |
+
+CLI（`sqlite3`，含行程啟動）：0.55／0.57／0.56 s。讀回的設定都與旗標相符（ltm 路徑 `mmap_size` 1073741824 或 0、
+`cache_size` 2000 或 −1000000）。
+
+### 表 10：冷態，三條路徑（2026-10-01 02:14:06–02:14:35，各一個樣本）
+
+每個樣本前 `purge`，`--residency` 讀到 0 頁才開跑；ltm 路徑與 C 探針是第 1／2 次呼叫（Q1＋Q2），CLI 是 `time -p` 的
+real。
+
+| 時間 | 路徑與設定 | load | 第 1 次 | 第 2 次 | 第 1 次 major fault | 跑後常駐 |
+|---|---|---|---|---|---|---|
+| 02:14:06 | ltm 路徑，mmap、2000 | 266.88 | **4,713.9** | 458.1 | 11,381 | 50,323 |
+| 02:14:13 | ltm 路徑，mmap、−1000000 | 246.63 | 5,807.2 | 375.2 | 11,382 | 50,322 |
+| 02:14:20 | ltm 路徑，不開 mmap | 229.13 | 4,047.8 | 321.5 | 1 | 39,084 |
+| 02:14:25 | C 探針，mmap、2000 | 212.46 | **3,768.8** | 312.8 | 11,380 | 50,323 |
+| 02:14:30 | CLI（不開 mmap） | 199.37 | **4.35 s** | — | — | 39,084 |
+
+C 探針那次讀盤 548,048＋257,104 KiB（約 786 MiB）。開 mmap 的三次冷跑後常駐 50,322–50,323 頁，不開 mmap 的兩次
+都是 39,084 頁，約等於閘在 OS 頁上的足跡 38,831（表 7 之後）——多出的約 11,200 頁只在 mmap 缺頁時出現，與它們
+是預讀相符（頁數，沒有逐頁確認）。
+
+### 表 11：#58 當時的條件（#58 修正之前的 SQL、不開 mmap；2026-10-01 02:14:35–02:14:53）
+
+ltm 路徑用 `--old-sql --no-mmap`（Q1 與現在相同；Q2 是 `SELECT DISTINCT s.source_key FROM chunk_sources s LEFT JOIN
+scan_state c ON c.source_key = s.source_key WHERE c.source_key IS NULL`），CLI 跑同樣兩條 SQL。暖態開跑前常駐 39,084 頁。
+
+| 狀態 | load | ltm 路徑 第 1／2 次 | CLI |
+|---|---|---|---|
+| 暖，第 1 輪 | 181.98 | 478.9／493.9 | 0.57 s |
+| 暖，第 2 輪 | 181.98 | 504.7／495.6 | 0.54 s |
+| 暖，第 3 輪 | 181.98 | 480.8／489.2 | 0.54 s |
+| 冷（`purge` 後 0 頁），02:14:43／02:14:48 | 176.78／164.06 | **4,293.4**／477.7 | **4.41 s** |
+
+冷跑後常駐都是 39,083 頁；major fault 都是 0（不開 mmap，全部走 pread）。
+
 ## 判讀
 
 1. **一個數量級的差別來自 OS 頁快取。** 同一個 Q1＋Q2，0 頁常駐時 2,984／3,226 ms（表 1、表 1b），暖時
@@ -419,14 +433,15 @@ load average（1 分鐘）31–53。這是一次、一個窗口裡的觀測。R5
    較慢（+4.7 到 +87.3 ms）、兩條較快（−5.3、−5.6 ms），那時負載約 46。沒有 mmap 時沒有這筆 minor fault，表 2 第 2、3 輪都是
    第 1 次較快（−4.8、−9.4 ms）。**要保留 mmap，這一份只有重用同一條連線才省得掉**；只持有 fd、每次查詢仍開新
    連線，每條新連線都要重新映射。關掉 mmap 也沒有這一份，但唯一的那次（第 1 次）呼叫沒有因此變快（判讀 4），第 2 次
-   還慢一成左右——這是表 2 的 C 探針、暖態、一個窗口，ltm 路徑上沒有量。
+   還慢一成左右——暖態，表 2 的 C 探針與表 9 的 ltm 路徑都是這個方向（判讀 7）。
 2. **SQLite 私有頁快取在預設大小下不是機理。** 預設 2000 頁（約 8 MiB）；無 mmap 時 Q1 一次 43,426 次
    miss、Q2 29,246 次，與表 4 的頁數（42,583、29,246）相近、相同。第二次的 miss 與第一次幾乎相同（Q1
    33,283 對 33,323，Q2 相同）——私有快取沒有保留工作集。
 3. **暖態下，`cache_size` 調大不會讓第一次變快。** 表 2 的第 2、3 輪（完全暖）：調到約 1 GB 後，第 1 次在
    有 mmap 時 +5.3%、+7.0%（與判讀 4 的重複執行差距同一個大小，只能說沒有變快），無 mmap 時慢 13.7%、15.0%，多出的 minor fault 是配置私有快取的代價（表 2 最後
    一欄）；同一連線的第 2 次則快（有 mmap 22.3%、22.8%、26.2%，無 mmap 30.0%、28.7%、26.5%，三輪逐一配對）。
-   這些是暖態、C 探針、一個 9 秒窗口的讀數；**冷態下與 ltm 自己的路徑上沒有量**（R3 的 DA 在高負載下冷跑
+   這些是暖態、C 探針、一個 9 秒窗口的讀數；ltm 路徑上的暖態見表 9、判讀 7（方向與大小相同）；**冷態沒有可比的量測**
+   （表 10 各一個樣本、負載不同；R3 的 DA 在高負載下冷跑
    兩輪，有 mmap 時大快取反而快，n=2，不足以下結論——R3 報告 `issuecomment-5907951440` 第 5 列）。
 4. **statement 重用、mmap、`columnText`、syscall 都不是數量級的來源。** 第 1 次呼叫只看第 2、3 輪：statement 重用與
    每次 prepare 的第 1 次呼叫跑的是同一段程式碼（都是 prepare＋step），卻差了 +6.5%、+3.8%（276.7 對 259.9、
@@ -434,11 +449,13 @@ load average（1 分鐘）31–53。這是一次、一個窗口裡的觀測。R5
    259.9、259.4），與那個差距同一個大小；第 2 次呼叫三輪都慢（+9.6%、+15.9%、+10.5%，逐輪配對）。都是一成
    上下，不是 2×，更不是 13×。no-op 狀態下 Q2 回 0 列，`columnText` 沒被呼叫。R3 的 requirements 在另一個
    時段重跑，方向相同、大小不同（R3 報告第 12 列），所以這些百分比只代表這一個窗口。
-5. **暖態下 C 探針、CLI 與 ltm 自己的路徑同級；冷態下 C 探針與 ltm 路徑同級。** 表 1–5 的窗口：暖態 C 探針第一次 Q1＋Q2 為
+5. **暖態與冷態下，C 探針、CLI 與 ltm 自己的路徑都同級。** 表 1–5 的窗口：暖態 C 探針第一次 Q1＋Q2 為
    259–278 ms（表 2 第 2、3 輪的有 mmap 執行），CLI 含行程啟動 0.32–0.34 s（表 3）。表 6：ltm 路徑第 1 次
    298–331 ms、C 探針 315–398 ms、CLI 0.36–0.38 s。表 7 的冷態：ltm 路徑 4,119 ms、C 探針 4,066 ms，major
-   fault 都約 1.14 萬（11,381、11,380）；CLI 沒有量冷態。所以 #60 issue 記的那個約 2× 差距，在暖態下量不到；
-   冷態沒有 CLI 的讀數。
+   fault 都約 1.14 萬（11,381、11,380）。表 9 的暖態：ltm 路徑第 1 次 472–492 ms、C 探針 472–485 ms（逐輪只差
+   −0.3%、+0.1%、+1.4%），CLI 0.55–0.57 s。表 10 的冷態：ltm 路徑 4,714 ms、C 探針 3,769 ms、CLI 4.35 s（含冷的
+   行程啟動），各一個樣本、負載 199–267 各不相同。所以 #60 issue 記的那個約 2× 差距，暖態與冷態在同一常駐狀態
+   下都量不到。
 6. **整檔變冷的強候選是 vnode 回收；持有 fd 擋得住它，但不保證預讀頁留著。** 表 5 的前半是同時進行的對照：記憶體
    88–92% 空閒、每分鐘回收 5.6 萬–25 萬個 vnode 的時段，沒人開的 A 在兩次讀數之間（2 分 33 秒）從全常駐
    掉到 0；被持有的 B（每一頁都被引用過）與索引，在 10 分鐘裡每次讀數都一樣。這與 vnode 被回收時整份檔案
@@ -456,16 +473,29 @@ load average（1 分鐘）31–53。這是一次、一個窗口裡的觀測。R5
    歸零（R3 報告第 3 列）。所以沒人開的檔多快變冷，本紀錄沒有乾淨的量測；只知道在表 5 的回收速率下，
    2 分 33 秒內會發生。每種條件只量了一兩輪，**這是強候選，不是已證實的機理**。
 
-## #58 的「行程內 ~0.9s vs CLI 暖 0.44s」：沒有重現，也不重新解釋
+7. **兩個設定在 ltm 路徑上的效果與 C 探針相同。** 表 9 同一窗口交錯三輪，以同一路徑的預設設定為基準：
+   - 大 `cache_size`：第 1 次 ltm 路徑 +10.9%、+7.8%、+6.8%，C 探針 +8.8%、+9.1%、+10.7%；第 2 次 ltm 路徑
+     −18.3%、−16.4%、−23.2%，C 探針 −23.9%、−21.6%、−20.3%。多出的 minor fault（約 27,250 對 11,930）兩邊相同。
+   - 關掉 mmap：第 1 次 ltm 路徑 +5.0%、+3.3%、+1.4%，C 探針 +10.7%、+4.1%、+3.1%；第 2 次 ltm 路徑 +9.5%、+12.0%、
+     +6.6%，C 探針 +4.3%、+9.3%、+7.3%。預設設定的第 1 次三輪之間本身就差 4.2%（ltm 路徑）、2.9%（C 探針）。
+   方向與表 2（C 探針，另一個窗口）一致。冷態各只有一個樣本、負載不同（表 10），不比較設定的效果。statement 重用
+   在 ltm 路徑上不是設定（見方法段），只在 C 探針上量過（表 2、判讀 4）。
+8. **#58 那個約 2× 差距的主成分是常駐狀態。** 照 #58 當時的條件（修正之前的 SQL、不開 mmap）重現：同一常駐狀態
+   下，ltm 路徑與 CLI 同級——暖態 479–505 ms 對 0.54–0.57 s（CLI 含行程啟動），冷態 4,293 ms 對 4.41 s；同一條路徑
+   冷與暖相差約九倍（表 11）。#58 的 0.9 s 對 0.44 s 約 2×，落在這兩個狀態之間，與取樣當下索引只有部分常駐相符。
+   #58 當時的狀態沒有紀錄，所以這只能說是與資料一致、其他候選都已排除（私有快取、`cache_size`、mmap 與 syscall、
+   `columnText`、statement 重用——判讀 2、3、4、7），不能說是證實。
+
+## #58 的「行程內 ~0.9s vs CLI 暖 0.44s」：同一狀態下不重現，與狀態不同相符
 
 那兩個數字不是同一種量測。0.9 s 出自 #58 Diagnosis 候選表的一列：「Q1 行程內 | ~0.7–0.9s（sample
 推算；CLI 暖只要 0.21s）」——以 `sample`（1 ms 間隔）的樣本數推算，不是計時；當時是 #58 修法**之前**
 （舊的 DISTINCT＋LEFT JOIN Q2、沒有 mmap），取樣當下的 OS 快取狀態沒有紀錄。0.44 s 在 #58 的 comment
 與紀錄裡都沒有寫出怎麼來的；最接近的是同一張表的 CLI 暖跑 Q1 0.21 s 與舊 Q2 0.20 s，相加是 0.41 s。
-（查法：issue 58 的 Diagnosis comment，「候選」那張表與 Residue 段。）本紀錄能說的只有：同一常駐狀態下
-量時間，暖態下 C 探針、CLI 與 ltm 自己的路徑同級，冷態下 C 探針與 ltm 路徑同級（判讀 5）；而閘的成本隨常駐狀態差一個數量級，#58 沒有記錄那個
-狀態。所以兩次量測之間的快取狀態不同是**候選**解釋，不是已證實的解釋。本表與 #58 的表不同日、不同語料、
-不同設定，不互比。
+（查法：issue 58 的 Diagnosis comment，「候選」那張表與 Residue 段。）表 11 照 #58 當時的 SQL 與設定重現：同一
+常駐狀態下 ltm 路徑與 CLI 同級，冷與暖相差約九倍（判讀 8）。所以兩次量測之間的快取狀態不同，是與資料一致、其他
+候選都已排除的解釋；#58 沒有記錄那個狀態，所以不是已證實的解釋。本紀錄的表與 #58 的表不同日、不同語料，數值
+不互比。
 
 ## 第一版錯在哪
 
@@ -524,12 +554,13 @@ CLI 只跑過 Q1——但那個順序本紀錄沒有重跑。它的誠實邊界�
   - **重用同一條連線**（常駐行程每次查詢都用同一條碰過閘的連線）：要保留 mmap，只有它省得掉每條新連線約
     1.2 萬次 minor fault（判讀 1）；只持有 fd、每次查詢仍開新連線，這一份照付。重用連線時調大 `cache_size`，同一連線第 2 次
     起快兩到三成（判讀 3，暖態、C 探針）。
-  - 本紀錄**沒有量**這兩個槓桿對 ltm 查詢的效果。
+  - 表 9 在 ltm 路徑上量到的：重用同一條連線時，大 `cache_size` 讓第 2 次快 16–23%，第 1 次慢 7–11%；關掉 mmap
+    的第 1 次沒有變快。本紀錄**沒有量**這兩個槓桿對一次 ltm 查詢的整體效果。
 - 持有的正確性前提：`IndexBuilder.discardDerivedArtifacts()` 在 `--full` 或版本不符時會刪掉索引重建。持有者
   若一直抓著舊的 fd 或連線，就是抓著一個已被 unlink 的舊 inode——磁碟與快取都不會釋放，暖的也是舊檔。設計上
   要能發現索引換了（例如比對 inode）並重開。
 - 哪一種 SQL 改寫能降低冷成本、降多少，本紀錄沒有量。第一版「任何仍要掃 N 的做法（換 SQL 寫法、調
-  `cache_size`）都救不了」已撤回；量到的只有暖態下調大 `cache_size` 第一次不會變快（表 2，C 探針）。
+  `cache_size`）都救不了」已撤回；量到的只有暖態下調大 `cache_size` 第一次不會變快（表 2 的 C 探針、表 9 的 ltm 路徑）。
 - #61 改寫閘的時候：
   - 閘與探針的 SQL 要一起改（兩邊一致時 `GateProbeSQLSyncTests` 照綠；三個字面在 SHA 裡是佔位，只改 SQL 不必更新
     釘值）；改到閘本體的其他部分或探針的程式碼，它會紅，再更新骨架或釘值。
@@ -542,17 +573,18 @@ CLI 只跑過 Q1——但那個順序本紀錄沒有重跑。它的誠實邊界�
 
 - **ltm 自己的路徑是用一支 harness 量的**（表 6、表 7）：它直接呼叫 `IndexDatabase.sourcesWithoutCursor()`，
   不經過建置流程（它只呼叫閘：除了 `init` 本身的 PRAGMA，建置連線上閘之前的語句它都不跑，也不取鎖、不掃描語料），所以量到的是閘本身
-  在 ltm 程式碼上的成本，不是 `ltm build` 或一次查詢的總時間。它只在
-  2026-09-30 晚上的索引與負載下量過（暖三輪、冷一個樣本），與表 1–5 不直接比；冷態的比較各只有一個樣本，CLI
-  沒有量冷態。旋鈕（`cache_size`、關掉 mmap、statement 重用）只在 C 探針上量過。
-- **負載**：表 1–5 沒有記 load average；表 6–8 有，約 30–53，機器上有別的工作。表 2 的讀數比表 1、表 1b 高
+  在 ltm 程式碼上的成本，不是 `ltm build` 或一次查詢的總時間。表 6、7 在 2026-09-30 晚上、表 9–11 在
+  2026-10-01 凌晨的負載極高時量，與表 1–5 不直接比；冷態的比較都只有一個樣本。`cache_size` 與關掉 mmap 在 ltm
+  路徑上只量了暖態（表 9）；statement 重用在 ltm 路徑上不是設定，只在 C 探針上量過。
+- **負載**：表 1–5 沒有記 load average；表 6–8 有，約 30–53；表 9–11 是 159–436，機器上有別的工作。表 2 的讀數比表 1、表 1b 高
   （ltm 設定下第 2 次呼叫：表 1 第 2、3 次為 225.6／223.9 ms，表 1b 為 237.4，表 2 為 245.6–258.1），可能是
   負載或時段，不是日期；跨表只比量級。R3 的 DA 回報高負載下時間差 2–4 倍；R5 的 DA 在同樣大小的索引、負載約
   14 時冷跑一次約 3.1 s，major fault 與讀盤量與表 7 相同（R5 報告第 23 列）——都是讀者回報，與負載的方向一致；本紀錄
   沒有量負載的影響。
 - 單機、每個情形 1–3 次，沒有分佈統計。語料活著，數字只在同一個窗口內可比。
-- **冷態**：表 1、表 1b 兩個自然冷樣本（都開 mmap）；表 7 兩個以 `find` 讓 vnode 輪轉得到的冷樣本。冷態下
-  `cache_size`、關掉 mmap 的影響本紀錄沒有量——讀者回報過：R2 的 DA 量到無 mmap 的冷態 3.2–3.3 s、major fault
+- **冷態**：表 1、表 1b 兩個自然冷樣本（都開 mmap）；表 7 兩個以 `find` 讓 vnode 輪轉得到的冷樣本；表 10、11 七個
+  `purge` 之後的冷樣本。冷態下 `cache_size`、關掉 mmap 各只有 ltm 路徑的一個樣本（表 10），負載不同，本紀錄不拿
+  來比較設定的效果——讀者另回報過：R2 的 DA 量到無 mmap 的冷態 3.2–3.3 s、major fault
   為 0（R2 報告），R3 的 DA 量到無 mmap 冷跑讀盤約 560 MiB（R3 報告開頭）。
 - 逐出機理（判讀 6）是強候選：只量了一台機器、一兩輪；表 5 的讀數間隔不等，而 `--residency` 會刷新
   vnode 的位置，所以它量不出沒人開的檔多快變冷。

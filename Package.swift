@@ -112,6 +112,9 @@ let package = Package(
             // 目錄化把那個維護負擔整個拿掉：這個目錄下只有這一個檔，永遠不會有
             // 第二個東西掉進來。
             path: "scripts/measure-retrieval"),
+        // #60 的閘 harness：用 ltm 自己的 `IndexDatabase` 路徑跑閘（或 #58 之前的 SQL），只印計數與時間。
+        // 與上面同一個理由是 target 而不是 `swiftc` 單檔：它要 import LTMIndex。自己的目錄，只有一個檔。
+        .executableTarget(name: "gate-harness", dependencies: ["LTMIndex"], path: "scripts/gate-harness"),
         .testTarget(name: "LTMMemoryTests", dependencies: ["LTMCore", "LTMMemory"]),
         .testTarget(name: "LTMQueryTests", dependencies: ["LTMCore", "LTMQuery"]),
         .testTarget(name: "LTMMCPTests", dependencies: ["LTMMCP", "LTMCore", "LTMService"]),
