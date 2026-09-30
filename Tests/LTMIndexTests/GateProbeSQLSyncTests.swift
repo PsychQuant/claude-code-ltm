@@ -9,23 +9,24 @@ import Testing
 /// 但它是 C、不能引用 Swift 的字面——所以 SQL 有兩份。兩份不比對，閘或探針一改寫，探針就安靜地量
 /// 另一件事，量測紀錄照樣引用它。
 ///
-/// **這條測試比對的是文字**：去掉註解、壓縮空白之後的閘本體、探針的程式碼骨架、兩份 SQL。它看得到
-/// 讓那段文字改變的改動；看不到改變編譯器所見、卻不改變那段文字的改動。切詞器不是編譯器，兩者對
-/// 「哪些是程式碼」意見不同的地方都是盲點（#60 verify R4 找到的就是這一類）。已知的幾種直接拒絕，
-/// 不去模擬：CR 行尾、C 的反斜線續行、Swift 的條件編譯、raw string 與 `#/` regex literal——
-/// 這份清單不宣稱完整。它也看不到控制流（閘或建置呼叫被包進 `if false`）與別處另下的語句。
+/// **這條測試比對的是文字，防的是一般的編輯**：改 SQL、改閘的本體、改探針的程式碼，都會讓它紅。它不是對
+/// 刻意繞過的保證——切詞器不是編譯器，兩者對「哪些是程式碼」意見不同的地方都是盲點；它也看不到控制流（閘
+/// 或建置呼叫被包進 `if false`）與同一條連線上別處另下的語句。已知的幾種不一致直接拒絕、不去模擬：CR 行尾、
+/// C 的反斜線續行（反斜線後面可以有空白）、Swift 的條件編譯、raw string 與 `#/` regex literal。這份清單不宣稱
+/// 完整——#60 verify R4、R5 各又找到幾種。
 ///
 /// 守的是：
-/// - **閘**：`sourcesWithoutCursor()` 的本體骨架（SQL 換成佔位）；`sourcesWithoutCursor` 這個名字在
-///   IndexDatabase.swift 的程式碼裡只宣告一次（有參數的 overload 也算一次）。
-/// - **建置**：IndexBuilder.swift 的程式碼裡，含 `sourcesWithoutCursor` 的識別字只能是它本身、每次
-///   都是無參數呼叫，而且至少一次。呼叫在不在實際路徑上、結果有沒有被用，文字比對看不到。
-/// - **探針**：程式碼骨架的 SHA-256。這是變更偵測，不是性質：任何程式碼改動都會紅，包括無害的；
-///   紅了由人確認探針還在量同一件事，再照失敗訊息更新釘值。`#include` 以外的前置處理指令一律拒絕。
-/// - **兩邊的 SQL**：Q1／Q2 與閘的 SQL 逐項相等。
+/// - **閘**：`sourcesWithoutCursor()` 的本體骨架（SQL 換成佔位）；這個名字在 IndexDatabase.swift 的程式碼裡
+///   只出現一次，就是那個 `func` 宣告（反引號寫法也算）。
+/// - **建置**：IndexBuilder.swift 的程式碼裡，含這個名字的識別字只能是它本身，不得宣告它，每次出現都是無參數
+///   呼叫，而且至少一次。`Sources/` 其他 Swift 檔一律不得出現這個名字（連註解也算，寧可假紅）。呼叫在不在
+///   實際路徑上、結果有沒有被用，文字比對看不到。
+/// - **探針**：程式碼骨架的 SHA-256，Q1、Q2、`MMAP_PRAGMA` 三個字面換成佔位——Q1／Q2 另與閘的 SQL 逐項比對，
+///   `MMAP_PRAGMA` 由下一條測試照探針的方式執行並讀回。其餘程式碼的一般編輯都會紅，包括無害的；紅了由人確認
+///   探針還在量同一件事，再照失敗訊息更新釘值。`#include` 以外的前置處理指令一律拒絕。
 ///
 /// 切詞兩個核心檔的全檔，代價是它們日後若用到切詞器不支援的語法，這條 #60 的測試會紅（假紅，會安全地
-/// 失敗）。mmap 等連線設定改由下一條測試讀回有效值，不再比對字面。
+/// 失敗）。
 @Test("閘與探針的程式碼沒有變、Q1／Q2 與閘的 SQL 逐項相等、建置呼叫的是這個閘")
 func gateProbeMatchesSourcesWithoutCursor() throws {
     let probe = try readRepoFile("scripts/probes/gate-first-touch.c")
@@ -34,7 +35,9 @@ func gateProbeMatchesSourcesWithoutCursor() throws {
     for (name, source) in [("探針", probe), ("IndexDatabase.swift", databaseSource), ("IndexBuilder.swift", builderSource)] {
         #expect(!source.unicodeScalars.contains("\r"), "\(name) 含 CR：切詞器只把 LF 當行尾，編譯器兩者都認")
     }
-    #expect(!probe.contains("\\\n"), "探針含反斜線續行：C 會先接行再認註解，切詞器不會")
+    let splice = try NSRegularExpression(pattern: #"\\[ \t\f\x0B]*\n"#)
+    #expect(splice.firstMatch(in: probe, range: NSRange(probe.startIndex..., in: probe)) == nil,
+            "探針含反斜線續行（反斜線後可有空白）：C 會先接行再認註解，切詞器不會")
     let database = try lexSwift(databaseSource)
     let builder = try lexSwift(builderSource)
     for (name, tokens) in [("IndexDatabase.swift", database), ("IndexBuilder.swift", builder)] {
@@ -43,8 +46,10 @@ func gateProbeMatchesSourcesWithoutCursor() throws {
     }
 
     // ── 閘 ──
-    let declarations = codeMatches(of: identifierBoundary("func\\s+sourcesWithoutCursor"), in: database)
-    #expect(declarations.count == 1, "sourcesWithoutCursor 在 IndexDatabase.swift 裡要恰好宣告一次（overload 也算），實際 \(declarations.count) 次")
+    let nameInDatabase = codeMatches(of: identifierBoundary("sourcesWithoutCursor"), in: database)
+    let declarations = codeMatches(of: gateDeclaration, in: database)
+    #expect(nameInDatabase.count == 1 && declarations.count == 1,
+            "IndexDatabase.swift 的程式碼裡 sourcesWithoutCursor 只能出現一次、就是宣告：出現 \(nameInDatabase.count) 次、宣告 \(declarations.count) 次")
     let gate = try functionBody(of: "public func sourcesWithoutCursor()", in: database)
     var skeleton = ""
     var gateSQL: [String] = []
@@ -67,8 +72,12 @@ func gateProbeMatchesSourcesWithoutCursor() throws {
     let names = codeMatches(of: "\(identifierCharacter)*sourcesWithoutCursor\(identifierCharacter)*", in: builder)
     #expect(!names.isEmpty && names.allSatisfy { $0 == "sourcesWithoutCursor" },
             "IndexBuilder.swift 裡含 sourcesWithoutCursor 的識別字只能是它本身，而且至少一次：\(names)")
+    #expect(codeMatches(of: gateDeclaration, in: builder).isEmpty, "IndexBuilder.swift 不得宣告 sourcesWithoutCursor")
     let calls = codeMatches(of: identifierBoundary("sourcesWithoutCursor") + #"\s*\(\s*\)"#, in: builder)
     #expect(calls.count == names.count, "IndexBuilder 對 sourcesWithoutCursor 的每次引用都要是無參數呼叫：\(names.count) 次引用、\(calls.count) 次無參數呼叫")
+    let (walked, stray) = try strayGateMentions()
+    #expect(walked.isSuperset(of: ["LTMIndex/IndexDatabase.swift", "LTMIndex/IndexBuilder.swift"]), "走訪 Sources/ 沒走到兩個核心檔：\(walked.count) 個檔")
+    #expect(stray.isEmpty, "Sources/ 其他 Swift 檔出現了 sourcesWithoutCursor：\(stray)")
 
     // ── 探針 ──
     let probeTokens = try lexC(probe)
@@ -86,8 +95,9 @@ func gateProbeMatchesSourcesWithoutCursor() throws {
 }
 
 /// #60：探針的 `--mmap` 與預設 `cache_size` 被紀錄當成「ltm 的設定」。這裡不比對字面，而是讀回有效值：
-/// 用 `IndexDatabase(path:)` 開一條連線，和一條照探針 `--mmap` 設定的連線，兩者讀回的 `mmap_size`、
-/// `cache_size` 要相同，且 mmap 真的開著。只守 `init`：建置之後在同一條連線上另下的 PRAGMA，這裡看不到。
+/// 用 `IndexDatabase(path:)` 開一條連線，和一條照探針 `--mmap` 的方式設定的連線（`MMAP_PRAGMA` 必須是
+/// 單一語句），兩者讀回的 `mmap_size`、`cache_size` 要相同，且 mmap 真的開著。只守 `init`：建置之後在
+/// 同一條連線上另下的 PRAGMA、行程層級的 SQLite 設定，這裡看不到。
 @Test("IndexDatabase 開出的連線，mmap_size 與 cache_size 讀回來與探針 --mmap 的連線相同")
 func indexDatabaseSettingsMatchProbe() throws {
     let tokens = try lexC(try readRepoFile("scripts/probes/gate-first-touch.c"))
@@ -106,7 +116,17 @@ func indexDatabaseSettingsMatchProbe() throws {
     var raw: OpaquePointer?
     try #require(sqlite3_open_v2(path, &raw, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
     defer { sqlite3_close_v2(raw) }
-    try #require(sqlite3_exec(raw, mmapPragma, nil, nil, nil) == SQLITE_OK)
+    // 照探針的方式執行（`pragma_value`：prepare_v2＋step，只跑第一條語句），並要求它就是單一語句。
+    var mmapStatement: OpaquePointer?
+    try mmapPragma.withCString { sql in
+        var tail: UnsafePointer<CChar>?
+        try #require(sqlite3_prepare_v2(raw, sql, -1, &mmapStatement, &tail) == SQLITE_OK)
+        let rest = tail.map { String(cString: $0) } ?? ""
+        #expect(rest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "MMAP_PRAGMA 要是單一語句——探針只執行第一條，其餘被忽略：\(rest)")
+    }
+    let stepCode = sqlite3_step(mmapStatement)
+    sqlite3_finalize(mmapStatement)
+    try #require(stepCode == SQLITE_ROW || stepCode == SQLITE_DONE)
     var probeSide: [String: Int64] = [:]
     for pragma in ["mmap_size", "cache_size"] {
         var statement: OpaquePointer?
@@ -134,6 +154,37 @@ private let identifierCharacter = #"[^\s\x21-\x2F\x3A-\x40\x5B-\x5E\x60\x7B-\x7E
 
 private func identifierBoundary(_ pattern: String) -> String {
     "(?<!\(identifierCharacter))\(pattern)(?!\(identifierCharacter))"
+}
+
+/// `func sourcesWithoutCursor` 的宣告，反引號寫法也算。
+private let gateDeclaration = #"func\s+`?"# + identifierBoundary("sourcesWithoutCursor")
+
+/// 走訪 `Sources/` 底下的 Swift 檔（相對路徑），回傳走到的檔與兩個核心檔以外、原文含這個名字的檔。
+/// 走訪失敗要拋錯，不能安靜地變成「沒有檔」。
+private func strayGateMentions() throws -> (walked: Set<String>, stray: [String]) {
+    var root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    while !FileManager.default.fileExists(atPath: root.appendingPathComponent("Package.swift").path) {
+        root = root.deletingLastPathComponent()
+        try #require(root.path != "/")
+    }
+    let sources = root.appendingPathComponent("Sources")
+    var failures: [String] = []
+    let walker = FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil,
+                                                options: [], errorHandler: { url, error in
+        failures.append("\(url.lastPathComponent): \(error)")
+        return true
+    })
+    var walked: Set<String> = []
+    var stray: [String] = []
+    while let url = walker?.nextObject() as? URL {
+        guard url.pathExtension == "swift" else { continue }
+        let relative = String(url.standardizedFileURL.path.dropFirst(sources.standardizedFileURL.path.count + 1))
+        walked.insert(relative)
+        if relative == "LTMIndex/IndexDatabase.swift" || relative == "LTMIndex/IndexBuilder.swift" { continue }
+        if try String(contentsOf: url, encoding: .utf8).contains("sourcesWithoutCursor") { stray.append(relative) }
+    }
+    try #require(failures.isEmpty, "走訪 Sources/ 失敗：\(failures)")
+    return (walked, stray)
 }
 
 /// `sourcesWithoutCursor()` 去掉註解、壓縮空白、SQL 換成 `<SQL>` 之後的樣子。

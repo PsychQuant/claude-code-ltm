@@ -8,16 +8,16 @@
 
 - **量測紀錄：no-op build 閘的第一次觸碰（#60）**：`docs/measurements/2026-09-07-gate-first-touch.md`
   ——一次閘的成本，數量級由索引頁在不在 OS 頁快取決定（該紀錄表 1、1b：冷約 3 s、11,338 次 major fault；
-  暖約 0.22–0.26 s）；ltm 自己的 `IndexDatabase` 路徑也一樣，同一窗口裡與 C 探針、CLI 同級（表 6、表 7，
-  長大後的索引、較高負載：冷約 4.1 s、暖約 0.3 s）。SQLite 私有快取在預設大小下不保留工作集；暖態下
-  `cache_size` 調大不會讓第一次變快（表 2）。同一常駐狀態下新連線不會重付那個數量級，開 mmap 時每條新連線
-  多約 1.2 萬次 minor fault，只有重用同一條連線才省得掉。整檔會不會變冷，強候選是 vnode 回收——有沒有
-  行程持有它（表 5）；持有擋不住沒被引用的預讀頁（表 8）。唯讀探針 `scripts/probes/gate-first-touch.c`
+  暖約 0.22–0.26 s）；ltm 自己的 `IndexDatabase` 路徑也一樣（表 6、表 7，負載約 30–50 的一個窗口）：暖態與
+  C 探針、CLI 同級，冷態與 C 探針同級（各一個樣本，約 4.1 s；CLI 沒有量冷態）。SQLite 私有快取在預設大小下
+  不保留工作集；暖態下 `cache_size` 調大不會讓第一次變快（表 2，C 探針；ltm 路徑上沒有量）。同一常駐狀態下新連線不會重付那個數量級，開 mmap 時每條新連線
+  多約 1.2 萬次 minor fault；要保留 mmap，只有重用同一條連線才省得掉。整檔會不會變冷，強候選是 vnode 回收——有沒有
+  行程持有它（表 5）；持有不保證沒被引用的預讀頁留著（表 8，一次觀測）。唯讀探針 `scripts/probes/gate-first-touch.c`
   （每條連線開檔前做與 `IndexDatabase.init` 相同的 `lstat` 檢查）；`GateProbeSQLSyncTests` 比對閘的本體、
-  探針的程式碼骨架、兩邊的 SQL 與建置引用的閘名（比的是文字，盲點見測試說明），並讀回 `IndexDatabase`
-  連線的有效 `mmap_size`／`cache_size` 與探針 `--mmap` 比對。
+  探針的程式碼骨架、兩邊的 SQL 與建置引用閘的方式（比的是文字、防一般的編輯，不防刻意繞過，盲點見測試說明），
+  並照探針的方式執行 `MMAP_PRAGMA`、與 `IndexDatabase` 連線讀回的有效 `mmap_size`／`cache_size` 比對。
   **撤回**：本條目的第一版（已推送）寫差距在同一連線的第一次觸碰、`cache_size` 之類的連線設定救不了、只有
-  #61 的「不掃 N」會消掉它——被 #60 verify R1 推翻；之後三次改寫又各有說過頭的地方，被 R2–R4 抓到。
+  #61 的「不掃 N」會消掉它——被 #60 verify R1 推翻；之後四次改寫又各有說過頭的地方，被 R2–R5 抓到。
   `2026-09-01-noop-build-attribution.md` 的指回一併改寫。
 
 - **基準查詢集與使用規則（#63）**：`scripts/baseline-queries.txt`（一行一條；檔頭以一行固定的終止符收尾，終止符之後

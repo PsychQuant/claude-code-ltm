@@ -47,10 +47,11 @@
  * **不要**為了繞過任何一種失敗改成讀寫開檔：這支探針不得寫主檔。
  *
  * Tests/LTMIndexTests/GateProbeSQLSyncTests.swift 比對 Q1／Q2 與 sourcesWithoutCursor()
- * 的 SQL（空白除外逐項相等），並把這份程式碼去掉註解、壓縮空白之後的骨架以 SHA-256 釘住：
- * 改任何一行程式碼測試都會紅，確認探針仍量同一件事之後照失敗訊息更新釘值。--mmap 的效果
- * 由同一個檔的另一條測試比對：IndexDatabase 開出的連線，讀回的 mmap_size、cache_size 與
- * 照 --mmap 設定的連線相同。
+ * 的 SQL（空白除外逐項相等），並把這份程式碼去掉註解、壓縮空白、Q1／Q2／MMAP_PRAGMA 三個
+ * 字面換成佔位之後的骨架以 SHA-256 釘住：一般的程式碼編輯測試都會紅，確認探針仍量同一件事
+ * 之後照失敗訊息更新釘值。它比對的是文字，不防刻意繞過（盲點見測試說明）。MMAP_PRAGMA 由同
+ * 一個檔的另一條測試照這裡的方式執行（必須是單一語句）並讀回：IndexDatabase 開出的連線，
+ * mmap_size、cache_size 與它相同。
  */
 #include <sqlite3.h>
 #include <stdio.h>
