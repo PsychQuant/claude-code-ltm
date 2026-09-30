@@ -15,7 +15,8 @@
  * - 走 mmap 取得的頁**不計入** sqlite3_db_status 的 hit／miss；--mmap 下的 miss 只算
  *   映射視窗外、走 pread 的頁。
  * - major fault 只看得到映射視窗內：頁不在 OS 快取裡、或預讀進來後還沒被引用過時，第一次觸碰記
- *   major；已常駐、已被引用過的頁即使在新的映射裡也只記 minor。它不是讀盤次數，讀盤量一律看 diskread。
+ *   major（預讀那一半是讀者回報，量測紀錄未量）；已常駐、已被引用過的頁即使在新的映射裡也只記 minor。
+ *   它不是讀盤次數，讀盤量一律看 diskread。
  *
  * 建置與執行（binary 放 repo 外，用完刪掉；三行在同一個 shell 裡跑，否則 D 會丟掉）：
  *   D=$(mktemp -d) && cc -O2 -o "$D/gate-first-touch" scripts/probes/gate-first-touch.c -lsqlite3
@@ -51,7 +52,7 @@
  * 的 SQL（空白除外逐項相等），並把這份程式碼去掉註解、壓縮空白、Q1／Q2／MMAP_PRAGMA 三個
  * 字面換成佔位之後的骨架以 SHA-256 釘住：一般的程式碼編輯測試都會紅，確認探針仍量同一件事
  * 之後照失敗訊息更新釘值。它比對的是文字，不防刻意繞過（盲點見測試說明）。MMAP_PRAGMA 由同
- * 一個檔的另一條測試照這裡的方式執行（必須是單一語句）並讀回：IndexDatabase 開出的連線，
+ * 一個檔的另一條測試照這裡的方式執行（必須是單一條 PRAGMA mmap_size=<整數>）並讀回：IndexDatabase 開出的連線，
  * mmap_size、cache_size 與它相同。
  */
 #include <sqlite3.h>

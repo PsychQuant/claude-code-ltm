@@ -119,17 +119,12 @@ func indexDatabaseSettingsMatchProbe() throws {
     var raw: OpaquePointer?
     try #require(sqlite3_open_v2(path, &raw, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
     defer { sqlite3_close_v2(raw) }
-    // 照探針的方式執行（`pragma_value`：prepare_v2＋step，只跑第一條語句），並要求它就是單一語句。
+    // 照探針的方式執行（`pragma_value`：prepare_v2＋一次 step，要求那一次回一列）。它是單一條語句由上面的形狀檢查保證。
     var mmapStatement: OpaquePointer?
-    try mmapPragma.withCString { sql in
-        var tail: UnsafePointer<CChar>?
-        try #require(sqlite3_prepare_v2(raw, sql, -1, &mmapStatement, &tail) == SQLITE_OK)
-        let rest = tail.map { String(cString: $0) } ?? ""
-        #expect(rest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "MMAP_PRAGMA 要是單一語句——探針只執行第一條，其餘被忽略：\(rest)")
-    }
+    try #require(sqlite3_prepare_v2(raw, mmapPragma, -1, &mmapStatement, nil) == SQLITE_OK)
     let stepCode = sqlite3_step(mmapStatement)
     sqlite3_finalize(mmapStatement)
-    try #require(stepCode == SQLITE_ROW, "探針的 pragma_value 只接受回一列")
+    try #require(stepCode == SQLITE_ROW, "探針的 pragma_value 要求第一次 step 至少回一列")
     var probeSide: [String: Int64] = [:]
     for pragma in ["mmap_size", "cache_size"] {
         var statement: OpaquePointer?
