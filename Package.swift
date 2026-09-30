@@ -95,7 +95,8 @@ let package = Package(
         // 量測腳本。**是一個 target 而不是 `swiftc` 單檔**：它要用索引層與評估層
         // 的型別，而單檔編譯只能把 source 檔複製進來——那就是同一件事的第二個
         // 寫者。`path`/`sources` 指名單一檔案，`scripts/` 下的其他探針不受影響
-        // （Swift 的那些刻意保持可獨立 `swiftc`——它們不 import 本 package 的任何 module；
+        // （除了下面也是 target 的 `scripts/gate-harness`，Swift 的那些刻意保持可獨立 `swiftc`——
+        // 它們不 import 本 package 的任何 module；
         // `scripts/probes/gate-first-touch.c` 是 C，以唯讀直接開索引，用 `cc` 建置——
         // 見它的檔頭，#60）。
         .executableTarget(
