@@ -1,28 +1,33 @@
+import CryptoKit
 import Foundation
 import Testing
 
 /// #60：`scripts/probes/gate-first-touch.c` 量的是 `sourcesWithoutCursor()` 的兩條閘查詢，
-/// 但它是 C、不能引用 Swift 的字面——所以 SQL 有兩份。兩份不比對，閘一改寫，探針就安靜地量
+/// 但它是 C、不能引用 Swift 的字面——所以 SQL 有兩份。兩份不比對，閘或探針一改寫，探針就安靜地量
 /// 另一件事，量測紀錄照樣引用它。
 ///
-/// 第一版只查「探針的 SQL 是閘本體的子字串」，#60 verify R2 找到七種該紅卻綠的改法（在閘的 SQL
-/// 尾端加子句、前面加 `EXPLAIN QUERY PLAN`、把探針砍成前綴、舊 SQL 留在註解裡、`try self.query(`、
-/// `_ = try chunkCount()`、探針把 Q1 當 Q2 跑）。那是列舉式的防線，所以這一版不再列舉改法，改成
-/// 一條性質：**閘的函式本體（去掉註解、壓縮空白）有任何改動就紅**。改動可能無害——紅了就去確認
-/// 探針還在量同一件事，再更新下面的 `expectedGateSkeleton`。
-@Test("閘的本體沒有變、探針的 Q1／Q2 與閘的 SQL 逐項相等、--mmap 與 IndexDatabase 同字面")
+/// 這條測試的防線寫成性質，不列舉改法（#60 verify R2、R3 各找到一批列舉漏掉的改法）：
+/// - **閘**：`sourcesWithoutCursor()` 的本體（去掉註解、壓縮空白、SQL 換成佔位）一改就紅；宣告在
+///   去掉註解之後找，而且全檔只能有一個；`IndexBuilder` 呼叫的閘必須就是它。
+/// - **探針**：整份程式碼（去掉註解、壓縮空白、Q1／Q2／MMAP_PRAGMA 換成佔位）的 SHA-256 一變就紅；
+///   `#include` 以外的前置處理指令一律拒絕。
+/// - **兩邊的字面**：Q1／Q2 與閘的 SQL 逐項相等；`MMAP_PRAGMA` 與 IndexDatabase.swift 全檔唯一一條
+///   含 `mmap_size` 的字面（不分大小寫）相同。
+///
+/// 改動可能無害——紅了就去確認探針還在量同一件事，再照失敗訊息更新下面的釘值。
+@Test("閘與探針的程式碼沒有變、Q1／Q2 與閘的 SQL 逐項相等、--mmap 與 IndexDatabase 同字面、建置呼叫的是這個閘")
 func gateProbeMatchesSourcesWithoutCursor() throws {
     var root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     while !FileManager.default.fileExists(atPath: root.appendingPathComponent("Package.swift").path) {
         root = root.deletingLastPathComponent()
         try #require(root.path != "/")
     }
-    let probe = try String(
-        contentsOf: root.appendingPathComponent("scripts/probes/gate-first-touch.c"), encoding: .utf8)
-    let database = try String(
-        contentsOf: root.appendingPathComponent("Sources/LTMIndex/IndexDatabase.swift"), encoding: .utf8)
+    let read = { (path: String) in try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8) }
+    let probe = try read("scripts/probes/gate-first-touch.c")
+    let database = try lexSwift(try read("Sources/LTMIndex/IndexDatabase.swift"))
+    let builder = try lexSwift(try read("Sources/LTMIndex/IndexBuilder.swift"))
 
-    // 閘端：函式本體拆成程式碼與字串字面。`query(` 後面緊接的字面是 SQL，其餘字面留在骨架裡。
+    // ── 閘 ──
     let gate = try functionBody(of: "public func sourcesWithoutCursor()", in: database)
     var skeleton = ""
     var gateSQL: [String] = []
@@ -39,30 +44,39 @@ func gateProbeMatchesSourcesWithoutCursor() throws {
         }
     }
     #expect(squash(skeleton) == expectedGateSkeleton,
-            "sourcesWithoutCursor() 的本體變了——確認 scripts/probes/gate-first-touch.c 仍量同一件事，再更新 expectedGateSkeleton。目前是：\(squash(skeleton))")
+            "sourcesWithoutCursor() 的本體變了——確認探針仍量同一件事，再更新 expectedGateSkeleton。目前是：\(squash(skeleton))")
+    let builderCalls = codeMatches(of: #"sourcesWithoutCursor[A-Za-z0-9_]*\("#, in: builder)
+    #expect(!builderCalls.isEmpty && builderCalls.allSatisfy { $0 == "sourcesWithoutCursor(" },
+            "IndexBuilder 呼叫的閘不是 sourcesWithoutCursor()：\(builderCalls)")
 
-    // 探針端：Q1／Q2 的宣告，以及 main() 實際把哪個常數交給哪個標籤。
-    let probeSQL = try ["Q1", "Q2"].map { try squash(probeConstant($0, in: probe)) }
-    #expect(gateSQL == probeSQL, "探針的 SQL 與閘的 SQL 不是逐項相等：閘 \(gateSQL)，探針 \(probeSQL)")
-    let runPattern = try NSRegularExpression(pattern: #"run\(db, "(Q[0-9]+)", (Q[0-9]+),"#)
-    let runCalls = runPattern.matches(in: probe, range: NSRange(probe.startIndex..., in: probe)).map { match in
-        [1, 2].map { String(probe[Range(match.range(at: $0), in: probe)!]) }
+    // ── 探針 ──
+    let probeTokens = try lexC(probe)
+    let directives = probeTokens.code.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { $0.hasPrefix("#") && !$0.hasPrefix("#include <") }
+    #expect(directives.isEmpty, "探針不得用 #include 以外的前置處理指令：\(directives)")
+    let q1 = try probeConstant("Q1", in: probeTokens)
+    let q2 = try probeConstant("Q2", in: probeTokens)
+    let mmapPragma = try probeConstant("MMAP_PRAGMA", in: probeTokens)
+    #expect(gateSQL == [squash(q1), squash(q2)], "探針的 SQL 與閘的 SQL 不是逐項相等：閘 \(gateSQL)，探針 \([q1, q2])")
+    let probeSkeleton = squash(probeTokens.skeleton(replacing: [q1: "<Q1>", q2: "<Q2>", mmapPragma: "<MMAP>"]))
+    let digest = SHA256.hash(data: Data(probeSkeleton.utf8)).map { String(format: "%02x", $0) }.joined()
+    #expect(digest == expectedProbeSkeletonSHA256,
+            "探針的程式碼變了——確認它仍量 sourcesWithoutCursor() 的兩條查詢、--mmap 仍下 MMAP_PRAGMA，再把 expectedProbeSkeletonSHA256 更新成 \(digest)")
+
+    // ── mmap ──
+    let mmapLiterals = database.compactMap { token -> String? in
+        if case .literal(let text) = token, text.lowercased().contains("mmap_size") { return text }
+        return nil
     }
-    #expect(runCalls == [["Q1", "Q1"], ["Q2", "Q2"]], "探針 main() 跑的查詢與標籤對不上：\(runCalls)")
-
-    // --mmap：探針宣稱與 IndexDatabase.init 相同。init 本體（去掉註解）裡的 mmap PRAGMA 必須恰好一條且同字面。
-    let initLiterals = try functionBody(of: "public init(path: String)", in: database)
-        .compactMap { token -> String? in
-            if case .literal(let text) = token, text.hasPrefix("PRAGMA mmap_size") { return text }
-            return nil
-        }
-    #expect(initLiterals == [try probeConstant("MMAP_PRAGMA", in: probe)],
-            "IndexDatabase.init 的 mmap PRAGMA 與探針的 MMAP_PRAGMA 不同：\(initLiterals)")
+    #expect(mmapLiterals == [mmapPragma], "IndexDatabase.swift 裡含 mmap_size 的字面要恰好一條、且與探針的 MMAP_PRAGMA 相同：\(mmapLiterals)")
 }
 
-/// 目前 `sourcesWithoutCursor()` 去掉註解、壓縮空白、SQL 換成 `<SQL>` 之後的樣子。
+/// `sourcesWithoutCursor()` 去掉註解、壓縮空白、SQL 換成 `<SQL>` 之後的樣子。
 private let expectedGateSkeleton =
     #"var missing: [String] = [] var orphanChunks = 0 try query( <SQL> ) { statement in orphanChunks = Int(sqlite3_column_int64(statement, 0)) } if orphanChunks > 0 { missing.append("(\(orphanChunks) 個 chunk 沒有任何 source mapping)") } try query( <SQL> ) { statement in missing.append(columnText(statement, 0)) } return missing.sorted()"#
+
+/// 探針去掉註解、壓縮空白、三個字面換成佔位之後的 SHA-256。
+private let expectedProbeSkeletonSHA256 = "59f163d718e134282c7dd36fa5219429dccc0859315ba0a1c1c5238c3968b824"
 
 private enum SwiftToken: Equatable {
     case code(String)
@@ -73,48 +87,70 @@ private func squash(_ text: String) -> String {
     text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).joined(separator: " ")
 }
 
-/// `static const char *<name> = "…";` 那一行的字面。整行只能是這個形狀。
-private func probeConstant(_ name: String, in probe: String) throws -> String {
-    let prefix = "static const char *\(name) = \""
-    let lines = probe.components(separatedBy: "\n").filter { $0.hasPrefix(prefix) }
-    let line = try #require(lines.count == 1 ? lines.first : nil, "探針裡的 \(name) 要恰好宣告一次")
-    let body = line.dropFirst(prefix.count)
-    try #require(body.hasSuffix("\";"), "\(name) 那一行要以 \"; 結尾")
-    let value = String(body.dropLast(2))
-    try #require(!value.contains("\""), "\(name) 的字面不得含引號")
-    return value
+/// 只在程式碼（不含註解與字串）裡找符合 pattern 的片段。
+private func codeMatches(of pattern: String, in tokens: [SwiftToken]) -> [String] {
+    let regex = try! NSRegularExpression(pattern: pattern)
+    return tokens.flatMap { token -> [String] in
+        guard case .code(let text) = token else { return [] }
+        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            .map { String(text[Range($0.range, in: text)!]) }
+    }
 }
 
-/// 從宣告開始，到與第一個 `{` 配對的 `}` 為止的切詞結果（不含外層大括號）。切詞只走到那個 `}`，
-/// 不碰檔案其餘部分；回傳 token 而不是文字，免得多行字面被重新包成單行字面再切一次。
-private func functionBody(of declaration: String, in source: String) throws -> [SwiftToken] {
-    let start = try #require(source.range(of: declaration), "找不到 \(declaration)")
-    var tokens = try lexSwift(String(source[start.upperBound...]), untilBalancedBrace: true)
-    // 去掉宣告尾巴到第一個 `{`（含）。
-    let first = try #require(tokens.firstIndex { if case .code(let text) = $0 { return text.contains("{") } else { return false } },
-                             "\(declaration) 沒有本體")
-    guard case .code(let head) = tokens[first], let brace = head.firstIndex(of: "{") else { throw GateProbeSyncError.unterminated }
-    tokens[first] = .code(String(head[head.index(after: brace)...]))
-    tokens.removeFirst(first)
-    // 去掉最後那個 `}`。
-    guard case .code(let tail) = tokens.last, tail.hasSuffix("}") else { throw GateProbeSyncError.unterminated }
-    tokens[tokens.count - 1] = .code(String(tail.dropLast()))
-    return tokens
+/// 在去掉註解的 token 裡找宣告（全檔只能出現一次），取到與它後面第一個 `{` 配對的 `}` 為止，
+/// 回傳本體的 token（不含外層大括號）。宣告若只出現在註解裡，這裡找不到——那是對的。
+private func functionBody(of declaration: String, in tokens: [SwiftToken]) throws -> [SwiftToken] {
+    var hits: [(Int, String.Index)] = []
+    for (index, token) in tokens.enumerated() {
+        guard case .code(let text) = token else { continue }
+        var searchStart = text.startIndex
+        while let range = text.range(of: declaration, range: searchStart..<text.endIndex) {
+            hits.append((index, range.upperBound))
+            searchStart = range.upperBound
+        }
+    }
+    let (start, offset) = try #require(hits.count == 1 ? hits.first : nil, "\(declaration) 要在程式碼裡恰好出現一次，實際 \(hits.count) 次")
+    var body: [SwiftToken] = []
+    var depth = 0
+    for index in start..<tokens.count {
+        switch tokens[index] {
+        case .literal(let value):
+            if depth > 0 { body.append(.literal(value)) }
+        case .code(let full):
+            let text = index == start ? String(full[offset...]) : full
+            var chunk = ""
+            for character in text {
+                if character == "{" {
+                    depth += 1
+                    if depth == 1 { continue }
+                } else if character == "}" {
+                    depth -= 1
+                    if depth == 0 {
+                        if !chunk.isEmpty { body.append(.code(chunk)) }
+                        return body
+                    }
+                }
+                if depth > 0 { chunk.append(character) }
+            }
+            if !chunk.isEmpty { body.append(.code(chunk)) }
+        }
+    }
+    throw LexError.unbalanced(declaration)
 }
 
-private enum GateProbeSyncError: Error {
-    case unterminated
+private enum LexError: Error {
+    case unterminated(String)
+    case unbalanced(String)
 }
 
-/// 最小的 Swift 切詞：去掉 `//` 與 `/* */` 註解，把 `"…"` 與 `"""…"""` 字面分出來（保留內容原樣，
-/// 含 `\(…)` 插值）。只用在 `sourcesWithoutCursor()` 與 `init(path:)` 兩個本體上（`untilBalancedBrace`
-/// 讓它停在本體結束的 `}`）；切不動就拋錯——那也是紅燈，不會變成靜默通過。
-private func lexSwift(_ source: String, untilBalancedBrace: Bool = false) throws -> [SwiftToken] {
+/// 最小的 Swift 切詞：去掉 `//` 與（可巢狀的）`/* */` 註解，把 `"…"` 與 `"""…"""` 字面分出來（保留
+/// 內容原樣，含 `\(…)` 插值）。切不動就拋錯——那也是紅燈，不會變成靜默通過。
+private func lexSwift(_ source: String) throws -> [SwiftToken] {
     var tokens: [SwiftToken] = []
     var code = ""
     let chars = Array(source)
     var i = 0
-    var depth = 0
+    func context() -> String { String(chars[max(0, i - 30)..<min(chars.count, i + 30)]) }
     func flush() {
         if !code.isEmpty { tokens.append(.code(code)); code = "" }
     }
@@ -126,10 +162,15 @@ private func lexSwift(_ source: String, untilBalancedBrace: Bool = false) throws
             continue
         }
         if c == "/" && next == "*" {
+            var nesting = 1
             i += 2
-            while i + 1 < chars.count && !(chars[i] == "*" && chars[i + 1] == "/") { i += 1 }
-            guard i + 1 < chars.count else { throw GateProbeSyncError.unterminated }
-            i += 2
+            while nesting > 0 {
+                guard i + 1 < chars.count else { throw LexError.unterminated("區塊註解：" + context()) }
+                if chars[i] == "/" && chars[i + 1] == "*" { nesting += 1; i += 2 }
+                else if chars[i] == "*" && chars[i + 1] == "/" { nesting -= 1; i += 2 }
+                else { i += 1 }
+            }
+            code.append(" ")
             continue
         }
         if c == "\"" {
@@ -139,7 +180,7 @@ private func lexSwift(_ source: String, untilBalancedBrace: Bool = false) throws
             var value = ""
             var parenDepth = 0
             while true {
-                guard i < chars.count else { throw GateProbeSyncError.unterminated }
+                guard i < chars.count else { throw LexError.unterminated("字串：" + context()) }
                 let d = chars[i]
                 if parenDepth == 0 && d == "\\" && i + 1 < chars.count && chars[i + 1] == "(" {
                     value += "\\("
@@ -168,7 +209,7 @@ private func lexSwift(_ source: String, untilBalancedBrace: Bool = false) throws
                     i += 1
                     break
                 } else if d == "\n" {
-                    throw GateProbeSyncError.unterminated
+                    throw LexError.unterminated("單行字串跨行：" + context())
                 }
                 value.append(d)
                 i += 1
@@ -178,15 +219,92 @@ private func lexSwift(_ source: String, untilBalancedBrace: Bool = false) throws
         }
         code.append(c)
         i += 1
-        if untilBalancedBrace {
-            if c == "{" { depth += 1 }
-            if c == "}" {
-                depth -= 1
-                if depth == 0 { break }
-            }
-        }
     }
-    if untilBalancedBrace && depth != 0 { throw GateProbeSyncError.unterminated }
     flush()
     return tokens
+}
+
+/// C 原始碼去掉 `//`、`/* */` 註解之後的片段：程式碼與字串字面分開，才能把指定的字面換成佔位。
+private struct CTokens {
+    var segments: [SwiftToken] = []
+
+    /// 程式碼（字面以原樣、加引號放回）——用來掃前置處理指令。
+    var code: String {
+        segments.map { token -> String in
+            switch token {
+            case .code(let text): return text
+            case .literal(let value): return "\"" + value + "\""
+            }
+        }.joined()
+    }
+
+    func skeleton(replacing replacements: [String: String]) -> String {
+        segments.map { token -> String in
+            switch token {
+            case .code(let text): return text
+            case .literal(let value): return replacements[value] ?? "\"" + value + "\""
+            }
+        }.joined()
+    }
+}
+
+private func lexC(_ source: String) throws -> CTokens {
+    var out = CTokens()
+    var code = ""
+    let chars = Array(source)
+    var i = 0
+    while i < chars.count {
+        let c = chars[i]
+        let next: Character? = i + 1 < chars.count ? chars[i + 1] : nil
+        if c == "/" && next == "/" {
+            while i < chars.count && chars[i] != "\n" { i += 1 }
+            continue
+        }
+        if c == "/" && next == "*" {
+            i += 2
+            while i + 1 < chars.count && !(chars[i] == "*" && chars[i + 1] == "/") { i += 1 }
+            guard i + 1 < chars.count else { throw LexError.unterminated("C 區塊註解") }
+            i += 2
+            code.append(" ")
+            continue
+        }
+        if c == "\"" || c == "'" {
+            let quote = c
+            var value = ""
+            i += 1
+            while true {
+                guard i < chars.count, chars[i] != "\n" else { throw LexError.unterminated("C 字面") }
+                if chars[i] == "\\" && i + 1 < chars.count {
+                    value.append(chars[i]); value.append(chars[i + 1]); i += 2; continue
+                }
+                if chars[i] == quote { i += 1; break }
+                value.append(chars[i]); i += 1
+            }
+            if quote == "\"" {
+                if !code.isEmpty { out.segments.append(.code(code)); code = "" }
+                out.segments.append(.literal(value))
+            } else {
+                code += "'" + value + "'"
+            }
+            continue
+        }
+        code.append(c)
+        i += 1
+    }
+    if !code.isEmpty { out.segments.append(.code(code)) }
+    return out
+}
+
+/// `static const char *<name> = "…";`——在去掉註解的程式碼裡恰好一次。
+private func probeConstant(_ name: String, in tokens: CTokens) throws -> String {
+    var hits: [String] = []
+    for (index, token) in tokens.segments.enumerated() {
+        guard case .literal(let value) = token, index > 0, index + 1 < tokens.segments.count,
+              case .code(let before) = tokens.segments[index - 1],
+              case .code(let after) = tokens.segments[index + 1] else { continue }
+        if squash(before).hasSuffix("static const char *\(name) =") && squash(after).hasPrefix(";") {
+            hits.append(value)
+        }
+    }
+    return try #require(hits.count == 1 ? hits.first : nil, "探針裡的 \(name) 要恰好宣告一次，實際 \(hits.count) 次")
 }

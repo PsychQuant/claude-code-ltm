@@ -5,7 +5,8 @@
  * 分開跑。每條連線開好之後，先印讀回的 mmap_size、cache_size、page_size（實際生效
  * 的值，不是請求的值）；每一次呼叫印：耗時、SQLite 每連線私有快取的命中／未命中
  * （sqlite3_db_status，每次呼叫前歸零）、major／minor page fault（getrusage）、
- * 行程從磁碟讀進來的 bytes（proc_pid_rusage 的 ri_diskio_bytesread）、回傳列數。
+ * 行程從磁碟讀進來的 bytes（proc_pid_rusage 的 ri_diskio_bytesread；讀不到時印 unavailable）、
+ * 回傳列數。開頭印一次系統負載（getloadavg）——同一常駐狀態下，時間會隨 CPU 爭用差好幾倍。
  * 跑之前與跑之後各印一次索引檔在 OS 頁快取裡常駐幾頁（對 PROT_READ 映射做 mincore；
  * 不觸碰頁，但 open 本身會刷新這個檔的 vnode 在 LRU 裡的位置——連續輪詢會讓檔案
  * 看起來比較晚才變冷）。**只印數字**——不印任何一列、不印 DB 裡的任何路徑。
@@ -34,6 +35,10 @@
  * 只缺 -shm 而 -wal 還在時，會建出 -shm；-shm 被清零而 -wal 非空時，會做 WAL
  * recovery、重建 wal-index，期間持有寫鎖，同時跑的 `ltm build` 可能短暫拿到 BUSY。
  * -wal、-shm 兩個都缺時，第一次 prepare 就失敗（"unable to open database file"）。
+ * -shm 的寫入落在那個名字**指向的 inode**：它若是指向別檔的 hard link，寫入會穿過去
+ * 改掉那個檔（#60 verify R3 在合成 DB 上重現）。所以開檔前先對主檔與三個後綴做
+ * 與 IndexDatabase.init 相同的 lstat 檢查（一般檔、只有一個名字、擁有者是自己），
+ * 不過就不開。symlink 本來就會被 SQLite 拒絕，這裡一併擋。
  * **不要**為了繞過任何一種失敗改成讀寫開檔：這支探針不得寫主檔。
  *
  * Q1／Q2 與 sourcesWithoutCursor() 的 SQL 逐項相等（空白除外）、MMAP_PRAGMA 與
@@ -67,10 +72,37 @@ static double now_ms(void) {
     return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
 }
 
-static unsigned long long disk_bytes_read(void) {
+/* 讀不到就回 -1——失敗與「真的沒有讀盤」要分得開，不能都印成 0。 */
+static int disk_bytes_read(unsigned long long *out) {
     struct rusage_info_v4 ri;
-    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&ri) != 0) return 0;
-    return ri.ri_diskio_bytesread;
+    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&ri) != 0) return -1;
+    *out = ri.ri_diskio_bytesread;
+    return 0;
+}
+
+/* 與 IndexDatabase.init 相同的四個名字、相同的三個條件。不存在的後綴沒問題。 */
+static int sidecars_safe(const char *path) {
+    const char *suffixes[] = { "", "-wal", "-shm", "-journal" };
+    for (size_t i = 0; i < sizeof suffixes / sizeof *suffixes; i++) {
+        char candidate[4096];
+        if (snprintf(candidate, sizeof candidate, "%s%s", path, suffixes[i]) >= (int)sizeof candidate) {
+            fprintf(stderr, "路徑太長\n");
+            return -1;
+        }
+        struct stat st;
+        if (lstat(candidate, &st) != 0) continue;
+        const char *reason = NULL;
+        if (S_ISLNK(st.st_mode)) reason = "是符號連結";
+        else if (!S_ISREG(st.st_mode)) reason = "不是一般檔案";
+        else if (st.st_nlink > 1) reason = "有不只一個名字（hard link）";
+        else if (st.st_uid != getuid()) reason = "擁有者不是你";
+        if (reason) {
+            fprintf(stderr, "不開：主檔或後綴 \"%s\" %s——SQLite 會寫它，寫入會落到別處\n",
+                    suffixes[i][0] ? suffixes[i] : "（主檔）", reason);
+            return -1;
+        }
+    }
+    return 0;
 }
 
 static int residency(const char *path, long *resident, long *total) {
@@ -125,7 +157,8 @@ static int run(sqlite3 *db, const char *label, const char *sql, sqlite3_stmt **k
     sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_MISS, &cur, &hi, 1);
     struct rusage a, b;
     getrusage(RUSAGE_SELF, &a);
-    unsigned long long disk0 = disk_bytes_read();
+    unsigned long long disk0 = 0, disk1 = 0;
+    int disk_ok = disk_bytes_read(&disk0) == 0;
     double t0 = now_ms();
     sqlite3_stmt *st = keep ? *keep : NULL;
     if (!st && sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
@@ -138,14 +171,15 @@ static int run(sqlite3 *db, const char *label, const char *sql, sqlite3_stmt **k
     if (keep) { sqlite3_reset(st); *keep = st; } else sqlite3_finalize(st);
     if (rc != SQLITE_DONE) { fprintf(stderr, "step %s: %s\n", label, sqlite3_errmsg(db)); return -1; }
     double ms = now_ms() - t0;
-    unsigned long long disk1 = disk_bytes_read();
+    disk_ok = disk_ok && disk_bytes_read(&disk1) == 0 && disk1 >= disk0;
     getrusage(RUSAGE_SELF, &b);
     int hit = 0, miss = 0;
     sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_HIT, &hit, &hi, 1);
     sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_MISS, &miss, &hi, 1);
-    printf("conn=%d rep=%d q=%s ms=%.1f cache_hit=%d cache_miss=%d majflt=%ld minflt=%ld diskread_kib=%llu rows=%ld\n",
-           conn, rep, label, ms, hit, miss, b.ru_majflt - a.ru_majflt, b.ru_minflt - a.ru_minflt,
-           (disk1 - disk0) / 1024, rows);
+    char disk[32] = "unavailable";
+    if (disk_ok) snprintf(disk, sizeof disk, "%llu", (disk1 - disk0) / 1024);
+    printf("conn=%d rep=%d q=%s ms=%.1f cache_hit=%d cache_miss=%d majflt=%ld minflt=%ld diskread_kib=%s rows=%ld\n",
+           conn, rep, label, ms, hit, miss, b.ru_majflt - a.ru_majflt, b.ru_minflt - a.ru_minflt, disk, rows);
     return 0;
 }
 
@@ -181,7 +215,11 @@ int main(int argc, char **argv) {
     }
     print_residency("before", path);
     if (residency_only) return 0;
-    printf("sqlite=%s mmap=%d reuse_stmt=%d\n", sqlite3_libversion(), use_mmap, reuse);
+    if (sidecars_safe(path) != 0) return 1;
+    double load[3] = { -1, -1, -1 };
+    if (getloadavg(load, 3) != 3) load[0] = load[1] = load[2] = -1;
+    printf("sqlite=%s mmap=%d reuse_stmt=%d loadavg=%.2f %.2f %.2f\n", sqlite3_libversion(), use_mmap, reuse,
+           load[0], load[1], load[2]);
     for (int c = 1; c <= conns; c++) {
         sqlite3 *db = NULL;
         if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) {
