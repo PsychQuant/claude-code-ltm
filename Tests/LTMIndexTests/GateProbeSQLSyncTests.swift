@@ -9,7 +9,8 @@ import Testing
 /// 但它是 C、不能引用 Swift 的字面——所以 SQL 有兩份。兩份不比對，閘或探針一改寫，探針就安靜地量
 /// 另一件事，量測紀錄照樣引用它。
 ///
-/// **這條測試比對的是文字，防的是一般的編輯**：改 SQL、改閘的本體、改探針的程式碼，都會讓它紅。它不是對
+/// **這條測試比對的是文字，防的是一般的編輯**：只改一邊的 SQL（兩邊不一致）、改閘本體的其他部分、改探針的程式碼，
+/// 都會讓它紅；兩邊一起改 SQL 照綠，那是設計上該有的（三個字面在 SHA 裡是佔位，只改 SQL 也不必更新釘值）。它不是對
 /// 刻意繞過的保證——切詞器不是編譯器，兩者對「哪些是程式碼」意見不同的地方都是盲點；它也看不到控制流（閘
 /// 或建置呼叫被包進 `if false`）與同一條連線上別處另下的語句。已知的幾種不一致直接拒絕、不去模擬：CR 行尾、
 /// C 的反斜線續行（反斜線後面可以有空白）、Swift 的條件編譯、raw string 與 `#/` regex literal。這份清單不宣稱
@@ -26,8 +27,8 @@ import Testing
 ///   探針還在量同一件事，再照失敗訊息更新釘值。`#include` 以外的前置處理指令一律拒絕。
 ///
 /// 切詞兩個核心檔的全檔，代價是它們日後若用到切詞器不支援的語法，這條 #60 的測試會紅（假紅，會安全地
-/// 失敗）。
-@Test("閘與探針的程式碼沒有變、Q1／Q2 與閘的 SQL 逐項相等、建置呼叫的是這個閘")
+/// 失敗）。同檔新增一個呼叫閘的函式也會紅（閘名只能出現一次）——同樣是假紅，改完再更新這條規則。
+@Test("閘與探針的文字骨架沒有變、Q1／Q2 與閘的 SQL 逐項相等、建置以無參數呼叫引用這個閘")
 func gateProbeMatchesSourcesWithoutCursor() throws {
     let probe = try readRepoFile("scripts/probes/gate-first-touch.c")
     let databaseSource = try readRepoFile("Sources/LTMIndex/IndexDatabase.swift")
@@ -95,13 +96,15 @@ func gateProbeMatchesSourcesWithoutCursor() throws {
 }
 
 /// #60：探針的 `--mmap` 與預設 `cache_size` 被紀錄當成「ltm 的設定」。這裡不比對字面，而是讀回有效值：
-/// 用 `IndexDatabase(path:)` 開一條連線，和一條照探針 `--mmap` 的方式設定的連線（`MMAP_PRAGMA` 必須是
-/// 單一語句），兩者讀回的 `mmap_size`、`cache_size` 要相同，且 mmap 真的開著。只守 `init`：建置之後在
-/// 同一條連線上另下的 PRAGMA、行程層級的 SQLite 設定，這裡看不到。
+/// 用 `IndexDatabase(path:)` 開一條連線，和一條照探針 `--mmap` 的方式設定的連線（`MMAP_PRAGMA` 必須是單一條
+/// `PRAGMA mmap_size=<整數>`），兩者讀回的 `mmap_size`、`cache_size` 要相同，且 mmap 真的開著。它只比這兩個值：
+/// `init` 裡其他的 PRAGMA 與開檔旗標、建置之後在同一條連線上另下的 PRAGMA、行程層級的 SQLite 設定，這裡都看不到。
 @Test("IndexDatabase 開出的連線，mmap_size 與 cache_size 讀回來與探針 --mmap 的連線相同")
 func indexDatabaseSettingsMatchProbe() throws {
     let tokens = try lexC(try readRepoFile("scripts/probes/gate-first-touch.c"))
     let mmapPragma = try probeConstant("MMAP_PRAGMA", in: tokens)
+    try #require(mmapPragma.range(of: #"^PRAGMA mmap_size=[0-9]+$"#, options: .regularExpression) != nil,
+                 "MMAP_PRAGMA 要是單一條 PRAGMA mmap_size=<整數>：\(mmapPragma)")
     let path = FileManager.default.temporaryDirectory
         .appendingPathComponent("ltm-gate-settings-\(UUID().uuidString).sqlite3").path
     defer {
@@ -126,7 +129,7 @@ func indexDatabaseSettingsMatchProbe() throws {
     }
     let stepCode = sqlite3_step(mmapStatement)
     sqlite3_finalize(mmapStatement)
-    try #require(stepCode == SQLITE_ROW || stepCode == SQLITE_DONE)
+    try #require(stepCode == SQLITE_ROW, "探針的 pragma_value 只接受回一列")
     var probeSide: [String: Int64] = [:]
     for pragma in ["mmap_size", "cache_size"] {
         var statement: OpaquePointer?
@@ -169,8 +172,10 @@ private func strayGateMentions() throws -> (walked: Set<String>, stray: [String]
     }
     let sources = root.appendingPathComponent("Sources")
     var failures: [String] = []
+    // 相對路徑在遍歷當下由起點構造（`.producesRelativePathURLs`），不用字串前綴去算——FileManager 回的路徑形式
+    // 與起點不一定一致（CLAUDE.md 技術要點）。
     let walker = FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil,
-                                                options: [], errorHandler: { url, error in
+                                                options: [.producesRelativePathURLs], errorHandler: { url, error in
         failures.append("\(url.lastPathComponent): \(error)")
         return true
     })
@@ -178,7 +183,7 @@ private func strayGateMentions() throws -> (walked: Set<String>, stray: [String]
     var stray: [String] = []
     while let url = walker?.nextObject() as? URL {
         guard url.pathExtension == "swift" else { continue }
-        let relative = String(url.standardizedFileURL.path.dropFirst(sources.standardizedFileURL.path.count + 1))
+        let relative = url.relativePath
         walked.insert(relative)
         if relative == "LTMIndex/IndexDatabase.swift" || relative == "LTMIndex/IndexBuilder.swift" { continue }
         if try String(contentsOf: url, encoding: .utf8).contains("sourcesWithoutCursor") { stray.append(relative) }

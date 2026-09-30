@@ -6,7 +6,7 @@
  * 的值，不是請求的值）；每一次呼叫印：耗時、SQLite 每連線私有快取的命中／未命中
  * （sqlite3_db_status，每次呼叫前歸零）、major／minor page fault（getrusage）、
  * 行程從磁碟讀進來的 bytes（proc_pid_rusage 的 ri_diskio_bytesread；讀不到時印 unavailable）、
- * 回傳列數。開頭印一次系統負載（getloadavg）——同一常駐狀態下，時間會隨 CPU 爭用差好幾倍。
+ * 回傳列數。開頭印一次系統負載（getloadavg）——負載對時間的影響，量測紀錄沒有量，只有讀者回報。
  * 跑之前與跑之後各印一次索引檔在 OS 頁快取裡常駐幾頁（對 PROT_READ 映射做 mincore；
  * 不觸碰頁，但 open 本身會刷新這個檔的 vnode 在 LRU 裡的位置——連續輪詢會讓檔案
  * 看起來比較晚才變冷）。**只印數字**——不印任何一列、不印 DB 裡的任何路徑。
@@ -14,7 +14,8 @@
  * 計數要注意的兩件事：
  * - 走 mmap 取得的頁**不計入** sqlite3_db_status 的 hit／miss；--mmap 下的 miss 只算
  *   映射視窗外、走 pread 的頁。
- * - major fault 只記得到映射視窗內的讀盤；視窗外的讀盤看 diskread。
+ * - major fault 只看得到映射視窗內：頁不在 OS 快取裡、或預讀進來後還沒被引用過時，第一次觸碰記
+ *   major；已常駐、已被引用過的頁即使在新的映射裡也只記 minor。它不是讀盤次數，讀盤量一律看 diskread。
  *
  * 建置與執行（binary 放 repo 外，用完刪掉；三行在同一個 shell 裡跑，否則 D 會丟掉）：
  *   D=$(mktemp -d) && cc -O2 -o "$D/gate-first-touch" scripts/probes/gate-first-touch.c -lsqlite3
