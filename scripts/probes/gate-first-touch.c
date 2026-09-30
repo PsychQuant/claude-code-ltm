@@ -16,33 +16,41 @@
  *   映射視窗外、走 pread 的頁。
  * - major fault 只記得到映射視窗內的讀盤；視窗外的讀盤看 diskread。
  *
- * 建置與執行（binary 放 repo 外，用完刪掉）：
+ * 建置與執行（binary 放 repo 外，用完刪掉；三行在同一個 shell 裡跑，否則 D 會丟掉）：
  *   D=$(mktemp -d) && cc -O2 -o "$D/gate-first-touch" scripts/probes/gate-first-touch.c -lsqlite3
  *   "$D/gate-first-touch" "$HOME/.claude-ltm/derived/index.sqlite3" [選項]
- *   rm -rf "$D"
+ *   rm -rf "${D:?}"
  * 選項：
  *   --conns N        在同一行程裡依序開 N 條連線（1–1000，預設 2）
  *   --reps N         每條連線呼叫幾次（1–1000，預設 3）
- *   --mmap           每條連線下 MMAP_PRAGMA（與 IndexDatabase.init 同字面）；不給則下 mmap_size=0
+ *   --mmap           每條連線下 MMAP_PRAGMA；不給則下 mmap_size=0
  *   --cache-size N   每條連線下 PRAGMA cache_size=N（正數是頁數、負數是 KiB；不給則用 SQLite 預設）
  *   --reuse-stmt     每條連線只 prepare 一次、呼叫之間 sqlite3_reset
- *                    （預設每次 prepare＋finalize，與 IndexDatabase.query 相同）
- *   --residency      只印 OS 快取常駐頁數就結束
+ *                    （預設每次 prepare＋finalize，與目前的 IndexDatabase.query 相同；這一點沒有測試守）
+ *   --residency      只印 OS 快取常駐頁數就結束（路徑必須是一般檔、不是 symlink；可用在任何檔上）
  *
  * 它不是測試：不在 `swift test` 裡跑，本 repo 的測試不碰真索引。
  *
  * 寫入面：主檔與 -wal 永遠不寫。-shm 會被寫——WAL 模式的讀者會更新 read-mark；
  * 只缺 -shm 而 -wal 還在時，會建出 -shm；-shm 被清零而 -wal 非空時，會做 WAL
  * recovery、重建 wal-index，期間持有寫鎖，同時跑的 `ltm build` 可能短暫拿到 BUSY。
- * -wal、-shm 兩個都缺時，第一次 prepare 就失敗（"unable to open database file"）。
+ * -wal 不在時（-shm 在或不在），第一條需要讀資料庫的語句就失敗（"unable to open
+ * database file"；實測是讀回 cache_size 那一條），不建任何檔。
  * -shm 的寫入落在那個名字**指向的 inode**：它若是指向別檔的 hard link，寫入會穿過去
- * 改掉那個檔（#60 verify R3 在合成 DB 上重現）。所以開檔前先對主檔與三個後綴做
- * 與 IndexDatabase.init 相同的 lstat 檢查（一般檔、只有一個名字、擁有者是自己），
- * 不過就不開。symlink 本來就會被 SQLite 拒絕，這裡一併擋。
+ * 改掉那個檔（#60 verify R3 在合成 DB 上重現）。所以**每條連線開檔前**都先對主檔與三個
+ * 後綴做與 IndexDatabase.init 相同的 lstat 檢查（一般檔、只有一個名字、擁有者是自己），
+ * 不過就不開；量常駐頁的 open 之前也先確認主檔是一般檔、不是 symlink。檢查與開檔之間
+ * 仍有 TOCTOU 窗口，與 IndexDatabase.init 相同。
+ * 主檔的 symlink 檢查是承重的：SQLite 會拒絕 symlink 的 -shm，卻會跟隨主檔的 symlink，
+ * 把 -wal／-shm 建在目標旁邊（#60 verify R4 實測）——擋住主檔的 symlink，對後綴的檢查
+ * 查的才是 SQLite 會開的那幾個名字。
  * **不要**為了繞過任何一種失敗改成讀寫開檔：這支探針不得寫主檔。
  *
- * Q1／Q2 與 sourcesWithoutCursor() 的 SQL 逐項相等（空白除外）、MMAP_PRAGMA 與
- * IndexDatabase.init 同字面，由 Tests/LTMIndexTests/GateProbeSQLSyncTests.swift 守住。
+ * Tests/LTMIndexTests/GateProbeSQLSyncTests.swift 比對 Q1／Q2 與 sourcesWithoutCursor()
+ * 的 SQL（空白除外逐項相等），並把這份程式碼去掉註解、壓縮空白之後的骨架以 SHA-256 釘住：
+ * 改任何一行程式碼測試都會紅，確認探針仍量同一件事之後照失敗訊息更新釘值。--mmap 的效果
+ * 由同一個檔的另一條測試比對：IndexDatabase 開出的連線，讀回的 mmap_size、cache_size 與
+ * 照 --mmap 設定的連線相同。
  */
 #include <sqlite3.h>
 #include <stdio.h>
@@ -60,7 +68,7 @@
 /* 與 IndexDatabase.sourcesWithoutCursor() 的 SQL 相等；GateProbeSQLSyncTests 比對兩者。 */
 static const char *Q1 = "SELECT COUNT(*) FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_sources)";
 static const char *Q2 = "SELECT source_key FROM chunk_sources EXCEPT SELECT source_key FROM scan_state";
-/* 與 IndexDatabase.init 的 mmap PRAGMA 同字面；同一條測試比對。 */
+/* --mmap 用；IndexDatabase 連線讀回的有效值與它相同，由同一個測試檔比對。 */
 static const char *MMAP_PRAGMA = "PRAGMA mmap_size=4294967296";
 
 static const char *USAGE =
@@ -105,11 +113,22 @@ static int sidecars_safe(const char *path) {
     return 0;
 }
 
+/* 量常駐頁之前：路徑必須是一般檔、不是 symlink（FIFO 會讓 open 卡住）。 */
+static int main_file_ok(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) { fprintf(stderr, "不開：%s\n", strerror(errno)); return -1; }
+    if (S_ISLNK(st.st_mode) || !S_ISREG(st.st_mode)) {
+        fprintf(stderr, "不開：主檔%s\n", S_ISLNK(st.st_mode) ? "是符號連結" : "不是一般檔案");
+        return -1;
+    }
+    return 0;
+}
+
 static int residency(const char *path, long *resident, long *total) {
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return -1;
     struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size == 0) { close(fd); return -1; }
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size == 0) { close(fd); return -1; }
     void *map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
     if (map == MAP_FAILED) return -1;
@@ -213,15 +232,20 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--residency")) residency_only = 1;
         else { fprintf(stderr, "unknown option: %s\n", argv[i]); fprintf(stderr, USAGE, argv[0]); return 64; }
     }
-    print_residency("before", path);
-    if (residency_only) return 0;
+    if (residency_only) {
+        if (main_file_ok(path) != 0) return 1;
+        print_residency("before", path);
+        return 0;
+    }
     if (sidecars_safe(path) != 0) return 1;
+    print_residency("before", path);
     double load[3] = { -1, -1, -1 };
     if (getloadavg(load, 3) != 3) load[0] = load[1] = load[2] = -1;
     printf("sqlite=%s mmap=%d reuse_stmt=%d loadavg=%.2f %.2f %.2f\n", sqlite3_libversion(), use_mmap, reuse,
            load[0], load[1], load[2]);
     for (int c = 1; c <= conns; c++) {
         sqlite3 *db = NULL;
+        if (sidecars_safe(path) != 0) return 1;
         if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) {
             fprintf(stderr, "open: %s\n", db ? sqlite3_errmsg(db) : "failed");
             sqlite3_close_v2(db);
