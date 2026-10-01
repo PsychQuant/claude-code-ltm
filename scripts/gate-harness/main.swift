@@ -6,8 +6,9 @@
 //   --old-sql       不呼叫 sourcesWithoutCursor()，改用 IndexDatabase.query 跑 #58 修正之前的兩條閘 SQL
 // 印出的 rows：閘模式是 sourcesWithoutCursor() 回的項數；--old-sql 是兩條 SQL 回的列數加總
 // （Q1 的 COUNT 永遠一列，所以 no-op 時是 1）。
-// 主檔不存在或不是一般檔就拒絕（exit 66）。存在的話以讀寫開檔（ltm 的查詢也是）：`init` 會把它設成 WAL 模式，
-// 關閉時可能 checkpoint——所以只對 ltm 的索引用，不要指向別的 SQLite 檔。
+// 主檔不存在或不是一般檔就拒絕（exit 66；每條連線開檔前都查）。存在的話以讀寫開檔（ltm 的查詢也是）：
+// `init` 會把它設成 WAL 模式，關閉時可能 checkpoint——所以只對 ltm 的索引用，不要指向別的 SQLite 檔。
+// stdout 逐行輸出，崩潰時已印的行不會遺失。
 // 量測紀錄：docs/measurements/2026-09-07-gate-first-touch.md（表 9–11；表 6、7 用的是較早的版本）。
 import Darwin
 import Foundation
@@ -44,13 +45,17 @@ while !args.isEmpty {
 }
 guard rest.count == 3, let conns = Int(rest[1]), let reps = Int(rest[2]),
       (1...20).contains(conns), (1...20).contains(reps) else { fail(usageLine, 64) }
-var st = stat()
-guard lstat(rest[0], &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { fail("不跑：\(rest[0]) 不存在或不是一般檔", 66) }
+func requireRegularFile(_ path: String) {
+    var st = stat()
+    guard lstat(path, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { fail("不跑：\(path) 不存在或不是一般檔", 66) }
+}
+setvbuf(stdout, nil, _IOLBF, 0)
 var load = [Double](repeating: -1, count: 3)
 _ = getloadavg(&load, 3)
 print(String(format: "harness loadavg=%.2f %.2f %.2f cache_size=%@ mmap=%@ sql=%@", load[0], load[1], load[2],
              cacheSize.map(String.init) ?? "default", noMmap ? "off" : "on", oldSQL ? "old" : "gate"))
 for c in 1...conns {
+    requireRegularFile(rest[0])
     let t0 = nowMs()
     let database = try IndexDatabase(path: rest[0])
     if let cacheSize { try database.execute("PRAGMA cache_size=\(cacheSize)") }
