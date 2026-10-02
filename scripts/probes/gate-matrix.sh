@@ -18,7 +18,9 @@
 #   GATE_MATRIX_DB 可指向另一個 ltm 索引（測試用；log 會標記）。harness 以讀寫開檔、會把目標設成 WAL，
 #   所以指向的檔若不是 ltm 索引就拒跑（以 immutable 唯讀檢查，不寫主檔、-wal 或 -shm；immutable 不讀 WAL，
 #   schema 還沒 checkpoint 的索引會被誤拒——覆寫的索引要先 checkpoint、沒有並行寫入者）；預設是
-#   ~/.claude-ltm/derived/index.sqlite3。開跑時沒有 -wal 就拒跑（harness 以讀寫開檔會建出它）。
+#   ~/.claude-ltm/derived/index.sqlite3。開跑時沒有 -wal 就拒跑（前置檢查就擋；harness 以讀寫開檔會建出它）。
+#   mtime 的比對依賴 macOS 系統 SQLite 關檔後保留 0 B 的 -wal（persistent WAL）；改連別的 SQLite 時，關檔可能
+#   刪掉 -wal，腳本會停在讀不到 mtime。
 #   mtime 只到秒，字串沒變不完全保證沒有寫入。
 set -u
 setopt pipefail
@@ -47,6 +49,8 @@ OQ2="SELECT DISTINCT s.source_key FROM chunk_sources s LEFT JOIN scan_state c ON
 #    symlink）都要是 1 Regular File <uid>；工作樹乾淨 ──
 case "$DB" in *[#?%]*) fail "路徑含 #、? 或 %，CLI 的 file: URI 會開到別的檔：$DB" ;; esac
 [ -f "$DB" ] || fail "找不到 $DB"
+# 沒有 -wal 就拒跑：harness 以讀寫開檔會建出它，後面 mtime 的比對會因此誤停。
+[ -f "$DB-wal" ] || fail "沒有 $DB-wal（harness 以讀寫開檔會建出它，mtime 的比對會因此誤停）：先以讀寫開一次索引（預設路徑用 ltm；GATE_MATRIX_DB 用 sqlite3）"
 ME=$(id -u)
 for f in "$DB" "$DB-wal" "$DB-shm" "$DB-journal"; do
   [ -e "$f" ] || [ -L "$f" ] || continue
@@ -89,9 +93,7 @@ CLISET=$(sqlite3 -init /dev/null "$W/cli-defaults.sqlite3" 'PRAGMA mmap_size;' '
 [ "$CLISET" = '0 2000 ' ] || fail "CLI 的預設設定是「$CLISET」，不是 mmap_size=0、cache_size=2000"
 
 MTFMT='%Y-%m-%d %H:%M:%S'
-# 主檔或 -wal 讀不到就回非零（呼叫端 || fail）。開跑時沒有 -wal 就拒跑：harness 以讀寫開檔會建出它，
-# mtime 的比對會因此誤停。
-[ -f "$DB-wal" ] || fail "沒有 $DB-wal（harness 以讀寫開檔會建出它，mtime 的比對會因此誤停）：先用 ltm 開一次索引"
+# 主檔或 -wal 讀不到就回非零（呼叫端 || fail）；開跑時沒有 -wal 已在前置檢查擋掉。
 mtimes() { stat -f '%Sm' -t "$MTFMT" "$DB" "$DB-wal" | tr '\n' ' '; }
 MT0=$(mtimes) || fail '讀不到索引的 mtime'
 # 每一步記負載、常駐頁數、主檔與 -wal 的 mtime；常駐讀數格式不對、或 mtime 與開頭不同就停（harness 自己關檔時
