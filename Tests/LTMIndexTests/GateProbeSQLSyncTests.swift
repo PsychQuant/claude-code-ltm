@@ -189,12 +189,12 @@ private func strayGateMentions() throws -> (walked: Set<String>, stray: [String]
 
 /// `sourcesWithoutCursor()` 去掉註解、壓縮空白、SQL 換成 `<SQL>` 之後的樣子。
 private let expectedGateSkeleton =
-    #"var missing: [String] = [] var orphanChunks = 0 try query( <SQL> ) { statement in orphanChunks = Int(sqlite3_column_int64(statement, 0)) } if orphanChunks > 0 { missing.append("(\(orphanChunks) 個 chunk 沒有任何 source mapping)") } try query( <SQL> ) { statement in missing.append(columnText(statement, 0)) } return missing.sorted()"#
+    #"var missing: [String] = [] var orphanChunks = 0 try query( <SQL> ) { statement in orphanChunks = Int(sqlite3_column_int64(statement, 0)) } if orphanChunks > 0 { missing.append(Self.orphanFinding(orphanChunks)) } try query( <SQL> ) { statement in missing.append(columnText(statement, 0)) } return missing.sorted()"#
 
 /// 探針去掉註解、壓縮空白、三個字面換成佔位之後的 SHA-256。
 private let expectedProbeSkeletonSHA256 = "fa32cff5ae23b93e05832163bb79af1ae683ebc909d2540313c544f169c441da"
 
-private enum SwiftToken: Equatable {
+enum SwiftToken: Equatable {
     case code(String)
     case literal(String)
 }
@@ -254,17 +254,18 @@ private func functionBody(of declaration: String, in tokens: [SwiftToken]) throw
     throw LexError.unbalanced(declaration)
 }
 
-private enum LexError: Error {
+enum LexError: Error {
     case unterminated(String)
     case unbalanced(String)
     case unsupported(String)
 }
 
+/// （`DerivedCountTests` 也用它掃 `Sources/` 的 SQL 字面——同一個切詞器，不寫第二份。）
 /// 最小的 Swift 切詞：去掉 `//` 與（可巢狀的）`/* */` 註解，把 `"…"` 與 `"""…"""` 字面分出來（保留
 /// 內容原樣，含 `\(…)` 插值）。它只懂 Swift 的一個子集：認得出的不支援語法（raw string、`#/` regex
 /// literal）直接拋錯，切不動也拋錯——那是紅燈；認不出的（例如裸的 `/…/` regex literal 裡有引號）可能
 /// 切錯而不報錯。
-private func lexSwift(_ source: String) throws -> [SwiftToken] {
+func lexSwift(_ source: String) throws -> [SwiftToken] {
     var tokens: [SwiftToken] = []
     var code = ""
     let chars = Array(source)

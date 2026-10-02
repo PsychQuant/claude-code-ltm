@@ -8,10 +8,13 @@
 #   cache_size=2000；前置檢查不跳過 dangling symlink；下面列的路徑有未 commit 的改動就拒跑（建置前後各查一次）；
 #   harness 建好後複製到暫存目錄再跑，log 記它的 SHA-256；路徑含 URI 特殊字元就拒跑；mtime 連日期記；結束時撤銷
 #   sudo；GATE_MATRIX_DB（測試用）。
+# #61（gate-structural-counts）：Q1／Q2 與 A、B 段量的是結構計數版的閘（layout 6；在 layout 5 的索引上 harness、探針
+#   與 CLI 都會報 no such column 而停）。D 段在同一個檔、同一個窗口交錯量 #61 之前（--pre61-sql、P1／P2）與之後的閘，
+#   暖態三輪、冷態每臂一個樣本；那是 #61 量測紀錄的 A/B。
 # 用法：在自己的終端機執行  zsh scripts/probes/gate-matrix.sh
 #   不要用 sudo 跑整個腳本（ltm 開索引會檢查擁有者，root 會被拒）；開頭問一次 sudo 密碼，只給 purge 用，
 #   結束時 `sudo -k` 撤銷（這個終端機先前的 sudo 憑證也會一起失效，提早失敗時也是）。
-#   每個冷樣本前跑一次 purge（共 7 次）：整台機器的檔案快取都會被清掉，會干擾別的 session 的效能與量測——
+#   每個冷樣本前跑一次 purge（共 11 次）：整台機器的檔案快取都會被清掉，會干擾別的 session 的效能與量測——
 #   不要在別人也在量的時候跑。
 #   Sources/、Package.swift、harness、探針或這支腳本有未 commit 的改動就拒跑（log 只記 HEAD）。
 #   log 寫在 repo 外（mktemp），結束時（不論成敗，SIGKILL 除外）印出路徑。
@@ -42,8 +45,11 @@ trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 141' PIPE
 fail() { print -r -- "FAIL: $*" >&2; { print -r -- "FAIL: $*" >> "$OUT"; } 2>/dev/null; exit 1; }
 emit() { print -r -- "$1" | tee -a "$OUT" || { print -r -- "FAIL: log 寫不進 $OUT" >&2; exit 1; }; }
 log() { emit "$*"; }
-Q1="SELECT COUNT(*) FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_sources);"
-Q2="SELECT source_key FROM chunk_sources EXCEPT SELECT source_key FROM scan_state;"
+# 目前的閘（#61 的結構計數版）與 #61 之前的閘；兩組都要與 IndexDatabase／gate-harness 的 SQL 相同。
+Q1="SELECT COUNT(*) FROM chunks WHERE source_count = 0;"
+Q2="SELECT source_key FROM source_chunk_counts EXCEPT SELECT source_key FROM scan_state;"
+P1="SELECT COUNT(*) FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_sources);"
+P2="SELECT source_key FROM chunk_sources EXCEPT SELECT source_key FROM scan_state;"
 OQ2="SELECT DISTINCT s.source_key FROM chunk_sources s LEFT JOIN scan_state c ON c.source_key = s.source_key WHERE c.source_key IS NULL;"
 
 # ── 前置檢查：路徑不含 URI 特殊字元（CLI 以 file: URI 開檔）；主檔必須存在；每個存在的檔（含 dangling
@@ -110,12 +116,12 @@ state() {
 run_h() {
   log "-- harness $*"
   local o rc exp=' rows=0' r
-  [[ " $* " == *" --old-sql "* ]] && exp=' rows=1 q1=0'
+  [[ " $* " == *" --old-sql "* || " $* " == *" --pre61-sql "* ]] && exp=' rows=1 q1=0'
   o=$("$H" "$DB" 1 2 "$@" 2>&1); rc=$?
   emit "$o"
   [ $rc -eq 0 ] || fail "harness $* 回 $rc"
-  # 一條連線、兩次呼叫：恰好兩行讀數。no-op 狀態：閘模式 rows=0；--old-sql 是兩條 SQL 的列數加總（Q1 的 COUNT
-  # 一列、Q2 零列）＝1，且 Q1 的 COUNT 值 q1=0。
+  # 一條連線、兩次呼叫：恰好兩行讀數。no-op 狀態：閘模式 rows=0；--old-sql／--pre61-sql 是兩條 SQL 的列數加總
+  # （Q1 的 COUNT 一列、Q2 零列）＝1，且 Q1 的 COUNT 值 q1=0。
   local -a reads; reads=( ${(M)${(@f)o}:#conn=1 rep=<-> *} )
   (( ${#reads} == 2 )) || fail "harness $* 的讀數不是兩行（${#reads} 行）"
   for r in $reads; do
@@ -131,10 +137,11 @@ run_p() {
   (( ${#${(@M)${(@f)o}:#*rep=*}} > 0 )) || fail "probe $* 的輸出裡沒有讀數"
 }
 # CLI：-init /dev/null 不讀 ~/.sqliterc；stdout 丟掉（不印任何一列），只留 time -p 的 real 與錯誤行。
+# 用法：run_cli <標籤> <Q1> <Q2>。
 run_cli() {
   log "-- cli $1"
   local o rc
-  o=$( { /usr/bin/time -p sqlite3 -init /dev/null "file:$DB?mode=ro" "$Q1" "$2" > /dev/null; } 2>&1 ); rc=$?
+  o=$( { /usr/bin/time -p sqlite3 -init /dev/null "file:$DB?mode=ro" "$2" "$3" > /dev/null; } 2>&1 ); rc=$?
   emit "${(F)${(@M)${(@f)o}:#*(real|rror)*}}"
   [ $rc -eq 0 ] || fail "cli $1 回 $rc"
   (( ${#${(@M)${(@f)o}:#real *}} > 0 )) || fail "cli $1 的輸出裡沒有 real 那一行"
@@ -152,7 +159,7 @@ log "# 版本：$(git -C "$REPO" rev-parse --short HEAD)；DB $(stat -f '%z' "$D
 log "# harness sha256=$(shasum -a 256 "$H" | cut -d' ' -f1)；CLI 預設 mmap_size cache_size = $CLISET"
 
 # ── A. 暖態：目前的閘 SQL，三條路徑、三種設定，三輪交錯 ──
-state warmup; run_h > /dev/null; run_cli gate "$Q2" > /dev/null
+state warmup; run_h > /dev/null; run_cli gate "$Q1" "$Q2" > /dev/null
 for round in 1 2 3; do
   state "warm round=$round"
   run_h
@@ -161,7 +168,7 @@ for round in 1 2 3; do
   run_p --mmap
   run_p --mmap --cache-size -1000000
   run_p
-  run_cli gate "$Q2"
+  run_cli gate "$Q1" "$Q2"
 done
 state warm-end
 
@@ -170,16 +177,30 @@ cold h-default;  run_h;                        state after
 cold h-cache;    run_h --cache-size -1000000;  state after
 cold h-nommap;   run_h --no-mmap;              state after
 cold p-mmap;     run_p --mmap;                 state after
-cold cli-gate;   run_cli gate "$Q2";           state after
+cold cli-gate;   run_cli gate "$Q1" "$Q2";     state after
 
 # ── C. #58 條件重現：#58 修正之前的 SQL、不開 mmap；ltm 路徑對 CLI ──
-state warmup-old; run_h --old-sql --no-mmap > /dev/null; run_cli old "$OQ2" > /dev/null
+state warmup-old; run_h --old-sql --no-mmap > /dev/null; run_cli old "$P1" "$OQ2" > /dev/null
 for round in 1 2 3; do
   state "old warm round=$round"
   run_h --old-sql --no-mmap
-  run_cli old "$OQ2"
+  run_cli old "$P1" "$OQ2"
 done
 cold h-old;   run_h --old-sql --no-mmap; state after
-cold cli-old; run_cli old "$OQ2";        state after
+cold cli-old; run_cli old "$P1" "$OQ2";  state after
+
+# ── D. #61 的 A/B：同一個檔、同一個窗口，#61 之前的閘對結構計數版的閘（ltm 的設定）；暖態三輪交錯、冷態每臂一個樣本 ──
+state warmup-61; run_h --pre61-sql > /dev/null; run_cli pre61 "$P1" "$P2" > /dev/null
+for round in 1 2 3; do
+  state "61 warm round=$round"
+  run_h --pre61-sql
+  run_h
+  run_cli pre61 "$P1" "$P2"
+  run_cli gate "$Q1" "$Q2"
+done
+cold h-pre61;   run_h --pre61-sql;           state after
+cold h-gate61;  run_h;                       state after
+cold cli-pre61; run_cli pre61 "$P1" "$P2";   state after
+cold cli-gate61; run_cli gate "$Q1" "$Q2";   state after
 
 log "# 完成 $(date +%H:%M:%S)"

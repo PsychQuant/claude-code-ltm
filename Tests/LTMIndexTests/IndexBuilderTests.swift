@@ -1484,6 +1484,116 @@ func anIndexWithChunksButNoSourceMappingIsRefused() throws {
     }
 }
 
+/// 一則 chunk 失去最後一個 source mapping、其他都正常（#61）：閘改讀 `source_count = 0` 的 partial index
+/// 之後，直接刪掉那一列連結也要被看見——trigger 把它的計數減到 0。名字裡要說出是 1 個 chunk。
+@Test("一則 chunk 的最後一個 source mapping 被直接刪掉時，閘拒絕並指名 1 個 chunk")
+func aChunkThatLostItsLastSourceIsRefused() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner,
+                         embedder: StubEmbedder(revision: "rev-A")).build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("DELETE FROM chunk_sources WHERE chunk_id = (SELECT MIN(chunk_id) FROM chunk_sources)")
+        #expect(try database.sourcesWithoutCursor() == ["(1 個 chunk 沒有任何 source mapping)"])
+    }
+    let error = #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner,
+                             embedder: StubEmbedder(revision: "rev-A")).build()
+    }
+    guard case .stateUnreadable(let detail) = error else {
+        Issue.record("應該是 stateUnreadable，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(detail.contains("1 個 chunk 沒有任何 source mapping"))
+}
+
+// MARK: - 整份稽核（#61）
+
+@Test("audit: true 在一致的索引上通過並回報檢查數；從零重建一定跑稽核，一般的增量不跑")
+func auditRunsWhereItShould() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+
+    let first = try builder.build()
+    #expect(first.wasFullRebuild && first.audit != nil, "第一次是從零建，結尾要跑稽核")
+    #expect(try builder.build().audit == nil, "一般的增量 build 不跑稽核")
+    let audited = try builder.build(audit: true)
+    #expect(audited.audit?.chunksChecked == 2)
+    #expect(audited.audit?.sourcesChecked == 1)
+    let full = try builder.build(full: true)
+    #expect(full.wasFullRebuild && full.audit?.chunksChecked == 2, "--full 之後要跑稽核")
+}
+
+@Test("audit: true 發現手動改壞的 source_count：具名指出 1 個 chunk、0 個來源，且不併入任何內容")
+func auditRefusesDivergentCounts() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+    }
+    // 語料多了一則：稽核在掃描之前停下，所以它不得被併入。
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容", "第三段內容"])
+
+    let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
+    guard case .derivedCountsDiverged(let chunks, let sources) = error else {
+        Issue.record("應該是 derivedCountsDiverged，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(chunks == 1 && sources == 0)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.chunkCount() == 2, "稽核失敗時不得併入新內容")
+}
+
+@Test("audit: true 遇到被刪掉的游標：計數一致，照既有的 stateUnreadable 拒絕並指名來源")
+func auditRefusesAMissingCursorLikeTheGate() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("DELETE FROM scan_state")
+    }
+    let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
+    guard case .stateUnreadable(let detail) = error else {
+        Issue.record("應該是 stateUnreadable，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(detail.contains("proj-one/session.jsonl"))
+}
+
 /// `vectors.bin.tmp` 是連結時，**受害者一個 byte 都不得變**。
 ///
 /// **這條測試扛的是「discard 會清掉 `.tmp`」，不是「`.atomic` 比 `O_TRUNC` 安全」。

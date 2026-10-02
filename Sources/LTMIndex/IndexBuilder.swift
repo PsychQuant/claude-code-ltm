@@ -31,6 +31,9 @@ public struct BuildReport: Sendable, Equatable {
     /// 反過來預算剛好在最後一批之後用完時，此旗標為 true 而 `unmergedSources` 可能為 0。
     /// 消費端要判斷「索引是否落後」一律看 `unmergedSources > 0`，不要看這個旗標（`RecallBlock`／CLI 都如此）。
     public let budgetExhausted: Bool
+    /// 這次跑了整份稽核時的結果（`audit: true`，或從零重建之後，#61）；沒跑是 nil。
+    /// 走到這裡的稽核一定是通過的——不通過會拋錯，不會回報。
+    public let audit: IndexDatabase.DerivedCountAudit?
 }
 
 /// 把掃描、索引、向量三件事串起來的建置流程。
@@ -182,6 +185,12 @@ public struct IndexBuilder: Sendable {
         /// 需要整份重建，但呼叫端不允許（查詢路徑）。
         case fullRebuildRequired(detail: String)
         case stateUnreadable(detail: String)
+        /// 整份稽核發現 trigger 維護的計數與 `chunk_sources` 重算的結果不符（#61）：`chunks` 是
+        /// `source_count` 不符的 chunk 數，`sources` 是 `source_chunk_counts` 不符的來源數。
+        ///
+        /// 與 `stateUnreadable` 分開：那個說「索引的內容涵蓋不到」，這個說「閘每次讀的那兩份計數本身
+        /// 不可信」——在從零重建之後出現就是 trigger 的缺陷，不是使用者的索引壞了。補救都是 `--full`。
+        case derivedCountsDiverged(chunks: Int, sources: Int)
         /// 估算的向量累積超過使用者設定的預算。
         ///
         /// **只在使用者顯式設了預算時才可能發生**——沒有預設值，因為本 repo 沒有
@@ -215,8 +224,11 @@ public struct IndexBuilder: Sendable {
     ///   邊界**（含第一批之前）讀一次 `clock`，超過起點＋預算就停止：已提交的批次留著、
     ///   不提交任何半批、未跑到的來源不寫游標（否則就是「游標超前內容」）。停下來的狀態
     ///   與一次崩潰留下的完全相同，下一次 build 從那裡續完——不變式 2 因此不受影響。
+    /// - Parameter audit: 在掃描之前跑整份稽核（`IndexDatabase.auditDerivedCounts()`），取代每次
+    ///   build 的結構性閘；從零重建則不論這個參數，都在最後一批之後跑一次（#61）。查詢路徑不傳。
     public func build(
-        full: Bool = false, refusingFullRebuild: Bool = false, budget: TimeInterval? = nil
+        full: Bool = false, refusingFullRebuild: Bool = false, budget: TimeInterval? = nil,
+        audit: Bool = false
     ) throws -> BuildReport {
         // 預算從**這裡**起算——含取鎖、掃描、`sourcesWithoutCursor()` 閘，不只是批次迴圈。
         // verify R1 抓到第一版把起點放在批次組裝之後，掃描時間完全在預算外。
@@ -387,6 +399,7 @@ public struct IndexBuilder: Sendable {
         // 永久卡死、`try? removeItem` 銷毀事證，以及「`ltm query` 會替使用者執行
         // 一次不可逆的遷移」。**沒有那條路徑，就沒有那五個洞。**
         var previousState = ScanState()
+        var auditResult: IndexDatabase.DerivedCountAudit?
         if !rebuildFromScratch {
             previousState = try database.scanState()
             // **判準是「這份游標涵蓋得住索引嗎」，不是「表是不是空的」。**
@@ -397,7 +410,21 @@ public struct IndexBuilder: Sendable {
             // 已從語料刪除的來源永不作廢（違反不變式 2，#44 R4 verify）。
             //
             // 現在直接問資料庫：有 chunk 卻沒有游標的來源。空集合才放行。
-            let orphaned = try database.sourcesWithoutCursor()
+            //
+            // 平常讀 trigger 維護的計數（#61）；`audit: true` 時改跑不假設任何計數的整份稽核，計數本身
+            // 不可信就先停在那裡，不拿它的閘結果做決定。
+            let orphaned: [String]
+            if audit {
+                let result = try database.auditDerivedCounts()
+                guard result.countsAgree else {
+                    throw BuildError.derivedCountsDiverged(
+                        chunks: result.divergentChunks, sources: result.divergentSources)
+                }
+                auditResult = result
+                orphaned = result.coverageFindings
+            } else {
+                orphaned = try database.sourcesWithoutCursor()
+            }
             if !orphaned.isEmpty {
                 // **不可**當成空 state 繼續：那會在既有索引上重掃全語料 upsert，
                 // 而使用者不會知道發生過什麼。
@@ -816,6 +843,22 @@ public struct IndexBuilder: Sendable {
         // 第三份真相來源——見本函式上方遷移分支的註解與那次實測。診斷改讀
         // `scan_state` 表。
 
+        // 從零重建之後跑一次整份稽核（#61）：兩份計數是這次重建中由 trigger 長出來的，在真實資料上
+        // 對一次重算。不符代表 trigger 有缺陷——資料已提交，所以拋錯讓 build 以非零結束並說出來。
+        if rebuildFromScratch {
+            let result = try database.auditDerivedCounts()
+            guard result.countsAgree else {
+                throw BuildError.derivedCountsDiverged(
+                    chunks: result.divergentChunks, sources: result.divergentSources)
+            }
+            guard result.coverageFindings.isEmpty else {
+                throw BuildError.stateUnreadable(
+                    detail: "從零重建之後仍有 \(result.coverageFindings.count) 個來源沒有續讀游標"
+                        + "——例如 \(result.coverageFindings.prefix(3).joined(separator: "、"))")
+            }
+            auditResult = result
+        }
+
         return BuildReport(
             chunksIndexed: indexed,
             sourcesRefreshed: refreshedSourceKeys.subtracting(unmergedSourceKeys).count,
@@ -826,7 +869,8 @@ public struct IndexBuilder: Sendable {
             embeddingRevision: embedder.revision,
             totalChunks: try database.chunkCount(),
             unmergedSources: unmergedSourceKeys.count,
-            budgetExhausted: budgetExhausted)
+            budgetExhausted: budgetExhausted,
+            audit: auditResult)
     }
 
     // MARK: - 衍生產物

@@ -36,7 +36,10 @@ public final class IndexDatabase {
     /// 導航資訊改由 `chunk_sources` 回傳全部來源。留著這個欄位會違反不變式 2：
     /// 停止維護後它的值變成 insertion-order 相依，增量與全量重建不再等價
     /// （由 `IncrementalEquivalenceTests` 的性質測試抓到）。
-    public static let layoutVersion = 5
+    ///
+    /// 5 → 6（#61）：`chunks.source_count`、`source_chunk_counts` 與維護它們的三個 trigger，
+    /// 以及閘用的 partial index。舊索引沒有這些結構，只能從零重建。
+    public static let layoutVersion = 6
 
     public enum DatabaseError: Error, Sendable, Equatable {
         case openFailed(path: String, message: String)
@@ -246,7 +249,8 @@ public final class IndexDatabase {
                 anchor_hash TEXT NOT NULL,
                 anchor_span_lower INTEGER NOT NULL,
                 anchor_span_upper INTEGER NOT NULL,
-                vector_row INTEGER
+                vector_row INTEGER,
+                source_count INTEGER NOT NULL DEFAULT 0
             )
             """)
         // 掃描續讀游標。**放在 DB 裡而不是 state.json，是為了讓它與內容同進同出。**
@@ -323,7 +327,66 @@ public final class IndexDatabase {
             """)
         try execute(
             "CREATE INDEX IF NOT EXISTS chunk_sources_by_source ON chunk_sources(source_key)")
+        // #61：#44 閘的兩個全稱命題（每個 chunk 至少一個來源、每個持有 chunk 的來源都有游標）改讀
+        // **引擎維護的計數**，不再每次 build 走完 `chunk_sources`。
+        //
+        // 兩份計數都是 `chunk_sources` 的函數（純衍生物，`--full` 重建時由同一組 trigger 重新長出來），
+        // 而且**只有下面三個 trigger 寫它們**：它們與寫 `chunk_sources` 的那個敘述在同一個交易裡執行，
+        // 任何 SQL 寫入路徑都逃不掉，app 這邊沒有第二份實作可以漂移。這正是 #58 棄用 count-diff 的
+        // 那條理由的反面：count-diff 是 app 算出來的推論，這裡是引擎維護的事實。
+        //
+        // **兩條使用規則，由 `DerivedCountTests` 的掃描守**：
+        // - 不得用 REPLACE 衝突處理寫 `chunk_sources`（`INSERT OR REPLACE`、`REPLACE INTO`、表定義的
+        //   `ON CONFLICT REPLACE`）。REPLACE 刪掉的那一列在預設 `recursive_triggers = OFF` 下**不觸發**
+        //   DELETE trigger——`/usr/bin/sqlite3` 3.54 實測：計數 2、實際 1，而且沒有任何錯誤。
+        // - app 的 SQL 不得直接寫 `source_count` 或 `source_chunk_counts`。
+        //
+        // 那兩條掃描比對文字：擋得住一般的編輯，擋不住刻意繞過。真正量到計數正確的是等價測試——
+        // 每一條寫入路徑之後計數等於從 `chunk_sources` 重算的結果，拿掉任一個 trigger 會紅。
+        try execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_chunk_counts (
+                source_key TEXT PRIMARY KEY NOT NULL,
+                n INTEGER NOT NULL CHECK (n > 0)
+            )
+            """)
+        // 同一則 turn 被同一個來源再看一次時，upsert 走 DO UPDATE，**不觸發** AFTER INSERT——計數不變。
+        try execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS chunk_sources_count_insert
+            AFTER INSERT ON chunk_sources
+            BEGIN
+                UPDATE chunks SET source_count = source_count + 1 WHERE id = NEW.chunk_id;
+                INSERT INTO source_chunk_counts(source_key, n) VALUES (NEW.source_key, 1)
+                    ON CONFLICT(source_key) DO UPDATE SET n = n + 1;
+            END
+            """)
+        // 先刪「只剩這一列」的來源，再對其餘的減一：順序反過來會先把 n 減到 0，撞上 `CHECK (n > 0)`。
+        // 被刪的 chunk 已經不在 `chunks` 裡時（`deleteChunks` 先刪 chunk 再刪連結），第一句是 no-op。
+        try execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS chunk_sources_count_delete
+            AFTER DELETE ON chunk_sources
+            BEGIN
+                UPDATE chunks SET source_count = source_count - 1 WHERE id = OLD.chunk_id;
+                DELETE FROM source_chunk_counts WHERE source_key = OLD.source_key AND n = 1;
+                UPDATE source_chunk_counts SET n = n - 1 WHERE source_key = OLD.source_key;
+            END
+            """)
+        // 連結的鍵不可改：沒有任何路徑改它們，而改了兩份計數都會錯。由引擎拒絕，不靠記得。
+        try execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS chunk_sources_keys_immutable
+            BEFORE UPDATE OF chunk_id, source_key ON chunk_sources
+            BEGIN
+                SELECT RAISE(ABORT, 'chunk_sources keys are immutable');
+            END
+            """)
         try execute("CREATE INDEX IF NOT EXISTS chunks_by_project ON chunks(project)")
+        // 閘的 Q1 只讀這個 partial index（#61）：正常情況下它是空的，所以「有沒有孤兒 chunk」的成本
+        // 跟著孤兒數走，不跟著 chunk 總數走。`DerivedCountTests` 釘住查詢計畫真的走它。
+        try execute(
+            "CREATE INDEX IF NOT EXISTS chunks_unsourced ON chunks(id) WHERE source_count = 0")
         // 兩條 lexical 通道。`content=''` 表示外部內容表——FTS5 不自己存一份原文，
         // 由 `chunks.text` 當唯一來源，避免同一段文字在檔案裡出現兩次。
         try execute(
@@ -444,33 +507,106 @@ public final class IndexDatabase {
         var missing: [String] = []
         // 第一種：有 chunk，卻沒有任何 source mapping。那些 chunk 屬於哪個來源
         // 無從得知，所以任何游標都涵蓋不住它們。
+        //
+        // 兩條查詢都讀 trigger 維護的計數（#61），不再走 `chunk_sources`：每次 build 做 sound 的稽核
+        // 必然要讀它所量化的全部東西，所以這裡改成讀引擎在同一交易裡維護的事實，而 O(N) 的稽核搬到
+        // `auditDerivedCounts()`（按需、與每次從零重建之後）。計數與 `chunk_sources` 一致時，兩條查詢
+        // 回的集合與舊寫法相同——`IndexBuilderTests` 的缺游標、零 mapping、刪掉最後一個連結三條測試守這件事。
         var orphanChunks = 0
         try query(
-            "SELECT COUNT(*) FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_sources)"
+            "SELECT COUNT(*) FROM chunks WHERE source_count = 0"
         ) { statement in
             orphanChunks = Int(sqlite3_column_int64(statement, 0))
         }
         if orphanChunks > 0 {
-            missing.append("(\(orphanChunks) 個 chunk 沒有任何 source mapping)")
+            missing.append(Self.orphanFinding(orphanChunks))
         }
-        // `EXCEPT` 而非 DISTINCT＋LEFT JOIN（#58）：**在出貨 schema 下**回同一
-        // 集合——兩欄都是 `TEXT NOT NULL`、無顯式 collation（BINARY），查法
-        // `sqlite3 <db> '.schema chunk_sources' '.schema scan_state'`。這句刻意
-        // 不寫「對任何資料庫狀態」（第一版如此，#58 verify 抓到）：NULL（EXCEPT
-        // 視兩 NULL 相等、`=` 不）、collation 不一致、混合 storage class 的
-        // affinity 三類反例在 schema 之外存在，codex 各給了構造。EXCEPT 走排序
-        // 合併、不做逐列 NULL 探查——對生產規模（643,895 列）CLI 實測
-        // 0.20s → 0.073s（≈2.7×）。語意守衛是 `IndexBuilderTests` 的缺游標測試
-        // （其 fixture 讓一個來源帶多列，所以去重那一半也被釘住），不是這句話。
+        // 第二種：持有 chunk 卻沒有游標的來源。`source_chunk_counts` 每個持有列的來源恰好一列（trigger
+        // 在計數歸零時刪掉那一列），所以它的 `source_key` 集合等於 `chunk_sources` 的。
+        //
+        // `EXCEPT` 的語意（#58 起）：**在出貨 schema 下**與 DISTINCT＋LEFT JOIN 回同一集合——兩邊的
+        // `source_key` 都是 `TEXT NOT NULL`、無顯式 collation（BINARY），查法
+        // `sqlite3 <db> '.schema source_chunk_counts' '.schema scan_state'`。這句刻意不寫「對任何資料庫
+        // 狀態」：NULL、collation 不一致、混合 storage class 的 affinity 三類反例在 schema 之外存在（#58
+        // verify，codex 各給了構造）。語意守衛是 `IndexBuilderTests` 的缺游標測試，不是這句話。
         try query(
             """
-            SELECT source_key FROM chunk_sources
+            SELECT source_key FROM source_chunk_counts
             EXCEPT SELECT source_key FROM scan_state
             """
         ) { statement in
             missing.append(columnText(statement, 0))
         }
         return missing.sorted()
+    }
+
+    /// 閘拒絕訊息裡「沒有 mapping 的 chunk」那一項的寫法。閘與稽核共用這一個寫者。
+    static func orphanFinding(_ count: Int) -> String {
+        "(\(count) 個 chunk 沒有任何 source mapping)"
+    }
+
+    /// 整份稽核的結果（#61）。
+    public struct DerivedCountAudit: Sendable, Equatable {
+        /// 檢查了幾個 chunk、幾個來源（`chunk_sources` 裡出現過的 `source_key`）。
+        public let chunksChecked: Int
+        public let sourcesChecked: Int
+        /// `source_count` 與重算不符的 chunk 數。
+        public let divergentChunks: Int
+        /// `source_chunk_counts` 與重算不符的來源數：計數不同、該有列卻沒有、不該有列卻有，都算。
+        public let divergentSources: Int
+        /// 用舊寫法（直接走 `chunk_sources`）算出的閘結果，格式與 `sourcesWithoutCursor()` 相同。
+        public let coverageFindings: [String]
+
+        public var countsAgree: Bool { divergentChunks == 0 && divergentSources == 0 }
+    }
+
+    /// 不假設任何計數的整份稽核：閘的兩個全稱命題用直接走 `chunk_sources` 的舊寫法重算，兩份衍生計數
+    /// 逐列與重算比對（#61）。成本與索引總量成正比，所以只在 `ltm build --audit` 與每次從零重建之後跑，
+    /// 查詢路徑不跑。
+    ///
+    /// 「稽核者不得假設待稽核物」（#58 棄 count-diff 的理由）在這一層成立：這裡的每一個數字都是從
+    /// `chunk_sources` 本身算出來的，沒有讀任何由 trigger 維護的值來當答案——那些值只是被比對的對象。
+    public func auditDerivedCounts() throws -> DerivedCountAudit {
+        func count(_ sql: String) throws -> Int {
+            var value = 0
+            try query(sql) { statement in value = Int(sqlite3_column_int64(statement, 0)) }
+            return value
+        }
+        let chunksChecked = try count("SELECT COUNT(*) FROM chunks")
+        let sourcesChecked = try count("SELECT COUNT(DISTINCT source_key) FROM chunk_sources")
+        let divergentChunks = try count(
+            """
+            SELECT COUNT(*) FROM chunks c
+            WHERE c.source_count != (SELECT COUNT(*) FROM chunk_sources s WHERE s.chunk_id = c.id)
+            """)
+        let divergentSources = try count(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT a.source_key FROM
+                    (SELECT source_key, COUNT(*) AS n FROM chunk_sources GROUP BY source_key) a
+                    LEFT JOIN source_chunk_counts c ON c.source_key = a.source_key
+                WHERE c.n IS NULL OR c.n != a.n
+                UNION ALL
+                SELECT c.source_key FROM source_chunk_counts c
+                WHERE NOT EXISTS (SELECT 1 FROM chunk_sources s WHERE s.source_key = c.source_key)
+            )
+            """)
+        var findings: [String] = []
+        let orphanChunks = try count(
+            "SELECT COUNT(*) FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_sources)")
+        if orphanChunks > 0 { findings.append(Self.orphanFinding(orphanChunks)) }
+        try query(
+            """
+            SELECT source_key FROM chunk_sources
+            EXCEPT SELECT source_key FROM scan_state
+            """
+        ) { statement in
+            findings.append(columnText(statement, 0))
+        }
+        return DerivedCountAudit(
+            chunksChecked: chunksChecked, sourcesChecked: sourcesChecked,
+            divergentChunks: divergentChunks, divergentSources: divergentSources,
+            coverageFindings: findings.sorted())
     }
 
     public func meta(_ key: String) throws -> String? {

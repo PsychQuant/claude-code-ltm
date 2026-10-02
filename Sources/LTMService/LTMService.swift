@@ -512,15 +512,18 @@ public struct LTMService {
     ///   為粒度、來源可跨批切開）。（這一行曾是「下限→上界」更正漏掉的第八份
     ///   副本、還引 #47 當權威——同步 grep 用 `largestSource|batchChunkUpperBound`
     ///   列舉站點，而這行兩個 token 都不含。列舉會漏，#47 verify 四個視角各自命中。）
+    /// - Parameter audit: 掃描前跑整份稽核取代結構性閘（`ltm build --audit`，#61）。查詢路徑
+    ///   （`refreshIncrementally`）不經過這裡、也不跑稽核。
     public func build(
-        full: Bool = false, batchChunkTarget: Int = 2_000, memoryBudgetBytes: Int? = nil,
+        full: Bool = false, audit: Bool = false, batchChunkTarget: Int = 2_000,
+        memoryBudgetBytes: Int? = nil,
         progress: (@Sendable (BuildProgress) -> Void)? = nil
     ) throws -> BuildReport {
         try IndexBuilder(
             location: location, scanner: CorpusScanner(corpusRoot: corpusRoot, anchorKey: anchorKey),
             embedder: embedder, progress: progress, batchChunkTarget: batchChunkTarget,
             memoryBudgetBytes: memoryBudgetBytes
-        ).build(full: full)
+        ).build(full: full, audit: audit)
     }
 
     // MARK: - 查詢

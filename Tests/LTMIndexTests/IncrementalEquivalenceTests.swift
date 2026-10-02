@@ -203,6 +203,8 @@ private struct ChunkRow: Equatable, Comparable {
     let spanUpper: Int
     /// **解參考之後**的向量，不是 `vector_row`。
     let vector: [Float]?
+    /// 由 trigger 維護的衍生計數（#61）。增量路徑有刪除、全量沒有，所以 DELETE trigger 少減一次會在這裡分岔。
+    let sourceCount: Int64
 
     static func < (a: ChunkRow, b: ChunkRow) -> Bool {
         (a.fingerprint, a.uuid) < (b.fingerprint, b.uuid)
@@ -222,6 +224,8 @@ private struct Snapshot {
     /// 錯誤看起來會像是語料自己變了。把它納入比對，讓那個錯誤在發生的那一輪就
     /// 被看見，而不是在下一輪被誤診。
     var scanState: [String]
+    /// `source_chunk_counts` 的全部列（#61），`source_key|n`。
+    var sourceCounts: [String]
 }
 
 private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> Snapshot {
@@ -235,7 +239,7 @@ private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> S
     try database.query(
         """
         SELECT project_fingerprint, uuid, project, role, text, timestamp,
-               anchor_hash, anchor_span_lower, anchor_span_upper, vector_row
+               anchor_hash, anchor_span_lower, anchor_span_upper, vector_row, source_count
         FROM chunks
         """
     ) { statement in
@@ -253,7 +257,8 @@ private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> S
                 anchorHash: str(6),
                 spanLower: Int(sqlite3_column_int64(statement, 7)),
                 spanUpper: Int(sqlite3_column_int64(statement, 8)),
-                vector: row.flatMap { sidecar?.vector(at: $0) }))
+                vector: row.flatMap { sidecar?.vector(at: $0) },
+                sourceCount: sqlite3_column_int64(statement, 10)))
     }
 
     var links: [String] = []
@@ -284,6 +289,13 @@ private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> S
         let identity = Int64(parts[0]).flatMap { identityByRowID[$0] } ?? "(orphan-link)"
         return "\(identity)|\(parts[1])"
     }.sorted()
+
+    var sourceCounts: [String] = []
+    try database.query("SELECT source_key, n FROM source_chunk_counts") { statement in
+        sourceCounts.append(
+            "\(String(cString: sqlite3_column_text(statement, 0)))|\(sqlite3_column_int64(statement, 1))")
+    }
+    sourceCounts.sort()
 
     var averages: [String] = []
     for table in ["chunks_trigram", "chunks_segment"] {
@@ -348,7 +360,7 @@ private func snapshot(_ location: DerivedLocation, probes: [String]) throws -> S
 
     return Snapshot(
         chunks: chunks.sorted(), links: links, ftsAverages: averages, lexicalRanks: ranks,
-        scanState: scanState)
+        scanState: scanState, sourceCounts: sourceCounts)
 }
 
 /// 兩份快照的差異，逐面向命名——「不相等」對這個測試沒有用，要說出哪一面不相等。
@@ -369,12 +381,16 @@ private func divergences(incremental a: Snapshot, fullRebuild b: Snapshot) -> [S
             if x.project != y.project { fields.append("project") }
             if x.spanLower != y.spanLower || x.spanUpper != y.spanUpper { fields.append("span") }
             if x.vector != y.vector { fields.append("vector(解參考後)") }
+            if x.sourceCount != y.sourceCount { fields.append("source_count") }
             out.append("chunk \(x.uuid.prefix(8)) 欄位不同：\(fields.joined(separator: ", "))")
         }
     }
 
     if a.links != b.links {
         out.append("chunk_sources 不同：增量 \(a.links) vs 全量 \(b.links)")
+    }
+    if a.sourceCounts != b.sourceCounts {
+        out.append("source_chunk_counts 不同：增量 \(a.sourceCounts) vs 全量 \(b.sourceCounts)")
     }
     if a.ftsAverages != b.ftsAverages {
         out.append("FTS 全域統計不同：增量 \(a.ftsAverages) vs 全量 \(b.ftsAverages)")

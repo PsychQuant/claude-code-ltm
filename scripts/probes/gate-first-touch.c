@@ -68,9 +68,11 @@
 #include <sys/stat.h>
 #include <sys/resource.h>
 
-/* 與 IndexDatabase.sourcesWithoutCursor() 的 SQL 相等；GateProbeSQLSyncTests 比對兩者。 */
-static const char *Q1 = "SELECT COUNT(*) FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_sources)";
-static const char *Q2 = "SELECT source_key FROM chunk_sources EXCEPT SELECT source_key FROM scan_state";
+/* 與 IndexDatabase.sourcesWithoutCursor() 的 SQL 相等；GateProbeSQLSyncTests 比對兩者。
+ * #61 起兩條都讀 trigger 維護的計數（layout 6）：在 layout 5 的索引上會報 no such column。
+ * #61 之前的兩條（直接走 chunk_sources）由 gate-harness 的 --pre61-sql 跑。 */
+static const char *Q1 = "SELECT COUNT(*) FROM chunks WHERE source_count = 0";
+static const char *Q2 = "SELECT source_key FROM source_chunk_counts EXCEPT SELECT source_key FROM scan_state";
 /* --mmap 用；IndexDatabase 連線讀回的有效值與它相同，由同一個測試檔比對。 */
 static const char *MMAP_PRAGMA = "PRAGMA mmap_size=4294967296";
 

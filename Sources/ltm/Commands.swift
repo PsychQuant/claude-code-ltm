@@ -272,10 +272,13 @@ enum BuildCommand {
     }
 
     static let usage = """
-        用法：ltm build [--full] [--quiet] [--batch-chunks N] [--memory-budget-mb N]
+        用法：ltm build [--full] [--audit] [--quiet] [--batch-chunks N] [--memory-budget-mb N]
 
         選項：
-          --full                捨棄既有索引，從零重建
+          --full                捨棄既有索引，從零重建（重建完會跑一次整份稽核）
+          --audit               掃描之前先跑整份稽核：不讀任何維護中的計數，直接從
+                                chunk_sources 重算閘的兩個判斷與兩份計數，逐一比對。
+                                成本與索引大小成正比，所以平常的 build 與查詢不跑。
           --quiet               不印進度（進度預設寫 stderr；CI／腳本可關掉）
           --batch-chunks N      一批 chunk 數的上界（預設 2000）。批次以 chunk 為
                                 粒度組裝、來源可在 chunk 邊界切開（#47），最大
@@ -295,7 +298,7 @@ enum BuildCommand {
             return LTMCommandLine.ExitCode.success.rawValue
         }
         let unknown = arguments.unknown(
-            known: ["full", "quiet", "help", "h", "memory-budget-mb", "batch-chunks"])
+            known: ["full", "audit", "quiet", "help", "h", "memory-budget-mb", "batch-chunks"])
         guard unknown.isEmpty else {
             Output.error("未知選項：\(unknown.joined(separator: ", "))\n\n\(usage)")
             return LTMCommandLine.ExitCode.usageError.rawValue
@@ -351,8 +354,8 @@ enum BuildCommand {
             }
 
             let report = try service.build(
-                full: arguments.has("full"), batchChunkTarget: batchChunkTarget,
-                memoryBudgetBytes: memoryBudgetBytes
+                full: arguments.has("full"), audit: arguments.has("audit"),
+                batchChunkTarget: batchChunkTarget, memoryBudgetBytes: memoryBudgetBytes
             ) { progress in
                 guard !quiet else { return }
                 BuildCommand.writeProgress(progress)
@@ -363,6 +366,9 @@ enum BuildCommand {
                   新增 chunk：\(report.chunksIndexed)　索引總計：\(report.totalChunks)
                   作廢來源：\(report.sourcesInvalidated)　embedding revision：\(report.embeddingRevision)
                 """)
+            if let audit = report.audit {
+                print("  稽核：檢查 \(audit.chunksChecked) 個 chunk、\(audit.sourcesChecked) 個來源，計數與 chunk_sources 一致")
+            }
             if !report.sourcesUnreadable.isEmpty {
                 // 讀不到的來源**沒有**被作廢（那會刪掉還存在的內容），所以它們的
                 // 內容仍在索引裡、只是不會更新。沉默地繼續會讓這次建置看起來完整。
@@ -450,6 +456,15 @@ enum BuildCommand {
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .stateUnreadable(let detail):
                 Output.error("✗ 續讀狀態無法讀取：\(detail)。用 `ltm build --full` 從零重建。")
+                return LTMCommandLine.ExitCode.indexStateError.rawValue
+            case .derivedCountsDiverged(let chunks, let sources):
+                Output.error(
+                    """
+                    ✗ 稽核發現衍生計數與 chunk_sources 不符：\(chunks) 個 chunk 的 source_count、\
+                    \(sources) 個來源的 source_chunk_counts。
+                    每次 build 的閘讀的就是這兩份計數，所以它的判斷不能再信任；這次沒有併入任何內容。
+                    請跑 `ltm build --full` 從零重建。
+                    """)
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .sidecarShorterThanDeclared(let declared, let found):
                 Output.error(
@@ -715,6 +730,10 @@ enum QueryCommand {
                     """)
             case .lockHeld(let path):
                 Output.error("✗ 意外的鎖錯誤（\(path)）——查詢路徑本應吞掉它。這是 bug。")
+            case .derivedCountsDiverged(let chunks, let sources):
+                // 查詢路徑不跑稽核、也不從零重建，所以照理到不了；到了就是 bug，照實說。
+                Output.error(
+                    "✗ 意外的稽核錯誤（\(chunks) 個 chunk、\(sources) 個來源的計數不符）——查詢路徑不跑稽核。這是 bug。")
             case .memoryBudgetExceeded(let estimated, let budget, _):
                 // **這條分支到得了，而且是設計如此。** 上一版的註解寫「查詢路徑不設
                 // 預算，所以這裡到不了」——那句話被同一次改動變成假的（#46 的 F 列

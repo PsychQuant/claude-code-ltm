@@ -328,6 +328,32 @@ func badNumericFlagsGiveUsageErrorsNotCrashes() throws {
     }
 }
 
+@Test("ltm build --audit：一致的索引印出稽核那一行；改壞一個 source_count 之後非零結束並指名補救")
+func auditFromTheCLI() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    let plain = try runCLI(["build"], environment: workspace.environment)
+    #expect(plain.code == 0)
+    #expect(!plain.out.contains("稽核："), "一般的增量 build 不跑稽核")
+
+    let audited = try runCLI(["build", "--audit"], environment: workspace.environment)
+    #expect(audited.code == 0)
+    if audited.code != 0 { Issue.record("build --audit stderr: \(audited.err)") }
+    #expect(audited.out.contains("稽核：檢查 2 個 chunk、1 個來源"))
+
+    do {
+        let database = try IndexDatabase(
+            path: workspace.derived.appendingPathComponent("index.sqlite3").path)
+        defer { database.close() }
+        try database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+    }
+    let corrupted = try runCLI(["build", "--audit"], environment: workspace.environment)
+    #expect(corrupted.code != 0)
+    #expect(corrupted.err.contains("1 個 chunk 的 source_count、0 個來源的 source_chunk_counts"))
+    #expect(corrupted.err.contains("ltm build --full"))
+}
+
 @Test("預算被超過時 CLI 具名拒絕，並列出補救")
 func exceedingTheBudgetFromTheCLINamesRemedies() throws {
     let workspace = try CLIWorkspace.make(
