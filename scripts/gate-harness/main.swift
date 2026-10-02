@@ -5,7 +5,7 @@
 //   --no-mmap       開好之後在同一條連線上下 PRAGMA mmap_size=0
 //   --old-sql       不呼叫 sourcesWithoutCursor()，改用 IndexDatabase.query 跑 #58 修正之前的兩條閘 SQL
 // 印出的 rows：閘模式是 sourcesWithoutCursor() 回的項數；--old-sql 是兩條 SQL 回的列數加總
-// （Q1 的 COUNT 永遠一列，所以 no-op 時是 1）。
+// （Q1 的 COUNT 永遠一列，所以 no-op 時是 1），另外印 q1=<Q1 的 COUNT 值>（no-op 時是 0）。
 // 主檔不存在或不是一般檔就拒絕（exit 66；每條連線開檔前都查）。存在的話以讀寫開檔（ltm 的查詢也是）：
 // `init` 會把它設成 WAL 模式，關閉時可能 checkpoint——所以只對 ltm 的索引用，不要指向別的 SQLite 檔。
 // stdout 逐行輸出，崩潰時已印的行不會遺失。
@@ -67,15 +67,17 @@ for c in 1...conns {
     for r in 1...reps {
         let a = usage(); let s = nowMs()
         var rows = 0
+        var q1: Int64 = -1
         if oldSQL {
-            try database.query(oldQ1) { _ in rows += 1 }
+            try database.query(oldQ1) { q1 = sqlite3_column_int64($0, 0); rows += 1 }
             try database.query(oldQ2) { _ in rows += 1 }
         } else {
             rows = try database.sourcesWithoutCursor().count
         }
         let ms = nowMs() - s; let b = usage()
         print(String(format: "conn=%d rep=%d ms=%.1f majflt=%ld minflt=%ld rows=%d",
-                     c, r, ms, b.ru_majflt - a.ru_majflt, b.ru_minflt - a.ru_minflt, rows))
+                     c, r, ms, b.ru_majflt - a.ru_majflt, b.ru_minflt - a.ru_minflt, rows)
+              + (oldSQL ? " q1=\(q1)" : ""))
     }
     database.close()
 }

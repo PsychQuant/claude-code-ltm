@@ -1,11 +1,13 @@
 #!/bin/zsh
 # #60 Expected 1 補量（量測紀錄 docs/measurements/2026-09-07-gate-first-touch.md 的表 9–11）：
 # ltm 路徑上的 cache_size／mmap、CLI 冷態、#58 條件重現。只印計數與時間，不印任何一列。
-# 表 9–11 是它的前身跑的（量測的順序、命令與參數相同；差別見紀錄的方法段），之後為 #60 verify R8、R9 加了：
-#   任何一次量測或 log 寫入失敗就停；冷樣本開跑前要讀到 0 頁常駐；常駐讀數格式不對就停；索引的 mtime 在途中
-#   變了、或 harness 回的 rows 不是 no-op 的值就停；CLI 加 -init /dev/null，開跑前在暫存檔上確認它的預設是
-#   mmap_size=0、cache_size=2000；工作樹（含這支腳本）要乾淨；harness 建好後複製到暫存目錄再跑，log 記它的
-#   SHA-256；路徑含 URI 特殊字元就拒跑；mtime 連日期記；結束時撤銷 sudo；GATE_MATRIX_DB（測試用）。
+# 表 9–11 是它的前身跑的（量測的順序、命令與參數與 1104d49 的這支腳本相同；差別見紀錄的方法段）。之後為 #60
+# verify R8–R10 加的：setopt pipefail；任何一次量測或 log 寫入失敗就停；探針與 CLI 的輸出裡沒有讀數就停；冷樣本
+#   開跑前要讀到 0 頁常駐；常駐讀數格式不對就停；讀不到 mtime、或 mtime 在途中變了就停；harness 回的 rows（與
+#   --old-sql 的 q1）不是 no-op 的值就停；CLI 加 -init /dev/null，開跑前在暫存檔上確認它的預設是 mmap_size=0、
+#   cache_size=2000；前置檢查不跳過 dangling symlink；下面列的路徑有未 commit 的改動就拒跑（建置前後各查一次）；
+#   harness 建好後複製到暫存目錄再跑，log 記它的 SHA-256；路徑含 URI 特殊字元就拒跑；mtime 連日期記；結束時撤銷
+#   sudo；GATE_MATRIX_DB（測試用）。
 # 用法：在自己的終端機執行  zsh scripts/probes/gate-matrix.sh
 #   不要用 sudo 跑整個腳本（ltm 開索引會檢查擁有者，root 會被拒）；開頭問一次 sudo 密碼，只給 purge 用，
 #   結束時 `sudo -k` 撤銷（這個終端機先前的 sudo 憑證也會一起失效，提早失敗時也是）。
@@ -14,7 +16,8 @@
 #   Sources/、Package.swift、harness、探針或這支腳本有未 commit 的改動就拒跑（log 只記 HEAD）。
 #   log 寫在 repo 外（mktemp），結束時（不論成敗，SIGKILL 除外）印出路徑。
 #   GATE_MATRIX_DB 可指向另一個 ltm 索引（測試用；log 會標記）。harness 以讀寫開檔、會把目標設成 WAL，
-#   所以指向的檔若不是 ltm 索引就拒跑；預設是 ~/.claude-ltm/derived/index.sqlite3。
+#   所以指向的檔若不是 ltm 索引就拒跑（以 immutable 唯讀檢查，不寫主檔、-wal 或 -shm）；預設是
+#   ~/.claude-ltm/derived/index.sqlite3。mtime 只到秒，字串沒變不完全保證沒有寫入。
 set -u
 setopt pipefail
 if [ "$(id -u)" = 0 ]; then echo '不要用 sudo 跑整個腳本：ltm 開索引會檢查擁有者，root 會被拒。' >&2; exit 1; fi
@@ -31,7 +34,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 141' PIPE
 # fail 不經過 emit（log 寫不進去時不能再靠它）。
-fail() { print -r -- "FAIL: $*" >&2; print -r -- "FAIL: $*" >> "$OUT" 2>/dev/null; exit 1; }
+fail() { print -r -- "FAIL: $*" >&2; { print -r -- "FAIL: $*" >> "$OUT"; } 2>/dev/null; exit 1; }
 emit() { print -r -- "$1" | tee -a "$OUT" || { print -r -- "FAIL: log 寫不進 $OUT" >&2; exit 1; }; }
 log() { emit "$*"; }
 Q1="SELECT COUNT(*) FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_sources);"
@@ -48,13 +51,17 @@ for f in "$DB" "$DB-wal" "$DB-shm" "$DB-journal"; do
   s=$(stat -f '%l %HT %u' "$f")
   [ "$s" = "1 Regular File $ME" ] || fail "不跑：$f 是「$s」"
 done
-DIRTY=$(git -C "$REPO" status --porcelain -- Sources Package.swift Package.resolved scripts/gate-harness \
-          scripts/probes/gate-first-touch.c scripts/probes/gate-matrix.sh) || fail 'git status 失敗'
-[ -z "$DIRTY" ] || fail '工作樹有未 commit 的改動（Sources/、Package.swift、harness、探針或這支腳本）：先 commit 或 stash'
+require_clean() {
+  local dirty
+  dirty=$(git -C "$REPO" status --porcelain -- Sources Package.swift Package.resolved scripts/gate-harness \
+            scripts/probes/gate-first-touch.c scripts/probes/gate-matrix.sh) || fail 'git status 失敗'
+  [ -z "$dirty" ] || fail '有未 commit 的改動（Sources/、Package.swift、harness、探針或這支腳本）：先 commit 或 stash'
+}
+require_clean
 # 預設路徑就是 ltm 的索引；覆寫時先以唯讀確認它是（不然 harness 會把它改成 WAL 才失敗）。
 # 預設路徑不做這一步：它會讀索引的第 1 頁，warmup 就不再是自然冷。
 if [ -n "${GATE_MATRIX_DB:-}" ]; then
-  n=$(sqlite3 -init /dev/null "file:$DB?mode=ro" \
+  n=$(sqlite3 -init /dev/null "file:$DB?mode=ro&immutable=1" \
         "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('chunks','chunk_sources','scan_state');" 2>&1) \
     || fail "讀不到 $DB 的 schema"
   [ "$n" = 3 ] || fail "$DB 不是 ltm 的索引（缺 chunks／chunk_sources／scan_state）"
@@ -72,50 +79,59 @@ cc -O2 -o "$W/gtf" "$REPO/scripts/probes/gate-first-touch.c" -lsqlite3 || fail '
 (cd "$REPO" && swift build -c release --product gate-harness > "$W/build.log" 2>&1) || { tail -20 "$W/build.log"; fail 'harness 建置失敗'; }
 cp "$REPO/.build/release/gate-harness" "$W/gate-harness" || fail 'harness 複製失敗'
 H="$W/gate-harness"; P="$W/gtf"
+require_clean
 # CLI 的預設設定：在暫存目錄的空檔上讀（不碰索引），不是 mmap_size=0、cache_size=2000 就停。
 CLISET=$(sqlite3 -init /dev/null "$W/cli-defaults.sqlite3" 'PRAGMA mmap_size;' 'PRAGMA cache_size;' 2>&1 | tr '\n' ' ') \
   || fail 'CLI 讀回預設設定失敗'
 [ "$CLISET" = '0 2000 ' ] || fail "CLI 的預設設定是「$CLISET」，不是 mmap_size=0、cache_size=2000"
 
 MTFMT='%Y-%m-%d %H:%M:%S'
-mtimes() { stat -f '%Sm' -t "$MTFMT" "$DB" "$DB-wal" 2>/dev/null | tr '\n' ' '; }
-MT0=$(mtimes)
+# 主檔讀不到就回非零；-wal 不存在時寫明，存在卻讀不到也回非零（呼叫端 || fail）。
+mtimes() {
+  local m w
+  m=$(stat -f '%Sm' -t "$MTFMT" "$DB") || return 1
+  if [ -e "$DB-wal" ] || [ -L "$DB-wal" ]; then w=$(stat -f '%Sm' -t "$MTFMT" "$DB-wal") || return 1; else w='(no-wal)'; fi
+  print -r -- "$m $w"
+}
+MT0=$(mtimes) || fail '讀不到索引的 mtime'
 # 每一步記負載、常駐頁數、主檔與 -wal 的 mtime；常駐讀數格式不對、或 mtime 與開頭不同就停（harness 自己關檔時
 # 若做了 checkpoint 也會讓它停）。常駐讀數留在 LAST_RES 給 cold() 檢查。
 state() {
   LAST_RES=$("$P" "$DB" --residency) || fail '讀常駐頁數失敗'
   [[ "$LAST_RES" == "residency before resident="<->" of="<->" page="<-> ]] || fail "常駐讀數不對：$LAST_RES"
-  local mt; mt=$(mtimes)
+  local mt; mt=$(mtimes) || fail '讀不到索引的 mtime'
   log "## $1 $(date +%H:%M:%S) load=$(sysctl -n vm.loadavg) $LAST_RES mtime=$mt"
   [ "$mt" = "$MT0" ] || fail "索引在量測途中被寫入（mtime 從 $MT0 變成 $mt）"
 }
 # 三個 run_*：先收下輸出與退出碼再寫 log，任何一次失敗就停。
 run_h() {
   log "-- harness $*"
-  local o rc exp=0 r
-  [[ " $* " == *" --old-sql "* ]] && exp=1
+  local o rc exp=' rows=0' r
+  [[ " $* " == *" --old-sql "* ]] && exp=' rows=1 q1=0'
   o=$("$H" "$DB" 1 2 "$@" 2>&1); rc=$?
   emit "$o"
   [ $rc -eq 0 ] || fail "harness $* 回 $rc"
-  # no-op 狀態：閘模式 rows=0；--old-sql 是兩條 SQL 的列數加總，Q1 的 COUNT 一列、Q2 零列，所以是 1。
+  # no-op 狀態：閘模式 rows=0；--old-sql 是兩條 SQL 的列數加總（Q1 的 COUNT 一列、Q2 零列）＝1，且 Q1 的 COUNT 值 q1=0。
   for r in ${(M)${(@f)o}:#*rows=*}; do
-    [[ "$r" == *" rows=$exp" ]] || fail "harness $* 回的 rows 不是 $exp（不是 no-op 狀態）"
+    [[ "$r" == *"$exp" ]] || fail "harness $* 回的不是 no-op 的值（要${exp}）"
   done
 }
 run_p() {
   log "-- probe $*"
   local o rc
   o=$("$P" "$DB" --conns 1 --reps 2 "$@" 2>&1); rc=$?
-  emit "${(F)${(@f)o}:#residency*}"
+  emit "${(F)${(@)${(@f)o}:#residency*}}"
   [ $rc -eq 0 ] || fail "probe $* 回 $rc"
+  (( ${#${(@M)${(@f)o}:#*rep=*}} > 0 )) || fail "probe $* 的輸出裡沒有讀數"
 }
 # CLI：-init /dev/null 不讀 ~/.sqliterc；stdout 丟掉（不印任何一列），只留 time -p 的 real 與錯誤行。
 run_cli() {
   log "-- cli $1"
   local o rc
   o=$( { /usr/bin/time -p sqlite3 -init /dev/null "file:$DB?mode=ro" "$Q1" "$2" > /dev/null; } 2>&1 ); rc=$?
-  emit "${(F)${(M)${(@f)o}:#*(real|rror)*}}"
+  emit "${(F)${(@M)${(@f)o}:#*(real|rror)*}}"
   [ $rc -eq 0 ] || fail "cli $1 回 $rc"
+  (( ${#${(@M)${(@f)o}:#real *}} > 0 )) || fail "cli $1 的輸出裡沒有 real 那一行"
 }
 # 冷樣本：purge 之後讀到 0 頁常駐才開跑，否則停（不輪詢；讀完到開跑之間仍可能被別的行程讀暖）。
 cold() {

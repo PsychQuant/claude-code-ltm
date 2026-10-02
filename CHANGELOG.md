@@ -15,7 +15,8 @@
   當時的狀態沒有紀錄，負載、建置情境與 `sample` 的量法也沒有排除，無法證實。閘的 harness 是 executable target
   `gate-harness`；表 9–11 由 `scripts/probes/gate-matrix.sh` 的前身跑（每個冷樣本前 `sudo purge`，只問一次密碼），
   之後腳本改成量測或寫 log 失敗就停、冷樣本要讀到 0 頁才開跑、CLI 不讀 `~/.sqliterc`、結束時撤銷 sudo（連同
-  這個終端機先前的憑證）。同一常駐狀態下新連線不會重付那個數量級，開 mmap 時每條新連線
+  這個終端機先前的憑證）。Expected 1 的殘差（只能說相符、不能說是主因）在 close 時記為 Residue，建置情境那一臂
+  交給 #61。同一常駐狀態下新連線不會重付那個數量級，開 mmap 時每條新連線
   多約 1.2 萬次 minor fault；要保留 mmap，只有重用同一條連線才省得掉。整檔會不會變冷，強候選是 vnode 回收——有沒有
   行程持有它（表 5）；持有不保證沒被引用的預讀頁留著（表 8，一次觀測）。唯讀探針 `scripts/probes/gate-first-touch.c`
   （每條連線開檔前做與 `IndexDatabase.init` 相同的 `lstat` 檢查）；`GateProbeSQLSyncTests` 比對閘的本體、
