@@ -9,8 +9,8 @@
 - **量測紀錄：no-op build 閘的第一次觸碰（#60）**：`docs/measurements/2026-09-07-gate-first-touch.md`
   ——一次閘的成本，數量級由索引頁在不在 OS 頁快取決定（該紀錄表 1、1b：冷約 3 s、11,338 次 major fault；
   暖約 0.22–0.26 s）；ltm 自己的 `IndexDatabase` 路徑也一樣：暖態與 C 探針、CLI 同級，冷態也沒有看到 2×（表 6、7、10；
-  冷態每種一到兩個樣本）。SQLite 私有快取在預設大小下不保留工作集；暖態下 `cache_size` 調大不會讓第一次變快，關掉 mmap
-  的第 1 次也沒有變快——C 探針與 ltm 路徑都量過（表 2、9）。照 #58 當時的條件重現（修正之前的 SQL、不開 mmap），
+  冷態每種一到兩個樣本）。SQLite 私有快取在預設大小下不保留工作集；暖態下 `cache_size` 調大，本紀錄的樣本裡沒有觀察到第一次
+  變快，關掉 mmap 的第 1 次也沒有——C 探針與 ltm 路徑都量過（表 2、9）。照 #58 當時的條件重現（修正之前的 SQL、不開 mmap），
   同一常駐狀態下 ltm 路徑與 CLI 同級、冷暖相差約八到九倍（表 11）：#58 那個約 2× 差距與常駐狀態不同相符，但 #58
   當時的狀態沒有紀錄，負載、建置情境與 `sample` 的量法也沒有排除，無法證實。閘的 harness 是 executable target
   `gate-harness`；表 9–11 由 `scripts/probes/gate-matrix.sh` 的前身跑（每個冷樣本前 `sudo purge`，只問一次密碼），

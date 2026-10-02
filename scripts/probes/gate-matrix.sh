@@ -73,7 +73,7 @@ if [ -n "${GATE_MATRIX_DB:-}" ]; then
   [ "$n" = 3 ] || fail "$DB 不是 ltm 的索引（缺 chunks／chunk_sources／scan_state）"
 fi
 # 沒有 -wal 就拒跑：harness 以讀寫開檔會建出它，後面 mtime 的比對會因此誤停。
-[ -f "$DB-wal" ] || fail "沒有 $DB-wal（harness 以讀寫開檔會建出它，mtime 的比對會因此誤停）：先以讀寫開一次索引（預設路徑用 ltm；GATE_MATRIX_DB 用 sqlite3）"
+[ -f "$DB-wal" ] || fail "沒有 $DB-wal（harness 以讀寫開檔會建出它，mtime 的比對會因此誤停）：先建出它——預設路徑跑一次 ltm query；GATE_MATRIX_DB 跑 /usr/bin/sqlite3 -init /dev/null <檔> 'PRAGMA journal_mode;'（要印出 wal；只開檔、不跑語句不會建出 -wal）"
 
 # ── sudo：只問一次，背景保持有效到腳本結束，結束時撤銷 ──
 echo '輸入一次 sudo 密碼（只用來執行 purge；結束時撤銷）：'
