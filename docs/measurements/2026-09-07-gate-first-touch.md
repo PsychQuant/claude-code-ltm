@@ -3,7 +3,7 @@
 **日期**：2026-09-29 改寫、2026-09-30 與 10-01 補量（第一版 2026-09-07 的機理被 #60 verify R1 推翻；之後幾輪 verify 又各抓到
 一批說過頭的地方，見「第一版錯在哪」與誠實邊界）。**機器**：Apple M5 Max、128 GB、macOS 27。
 
-**DB**：`~/.claude-ltm/derived/index.sqlite3`，有兩個量測窗口，數字不互比。
+**DB**：`~/.claude-ltm/derived/index.sqlite3`，有三個量測窗口，數字不互比。
 - **表 1–5**（2026-09-29 14:09 到 2026-09-30 15:38）：2,755,592,192 B（168,188 個 16 KiB 的 OS 頁；SQLite
   `page_size` 4096、共 672,752 頁）、785,879 chunk。主檔 mtime 那段時間一直是 2026-09-29 14:09；`-wal`
   沒有記錄，所以只寫進 `-wal`、還沒 checkpoint 的交易排除不了。
@@ -111,7 +111,7 @@ prepare＋finalize，要重用就得改 `Sources/`，所以這個旋鈕只在 C 
 表 9–11 是 `scripts/probes/gate-matrix.sh` 的前身一次跑完的（使用者在自己的終端機執行；前身不在 repo 裡）。量測本體
 ——順序、每一條命令與參數——與 `1104d49` 的 `gate-matrix.sh` 相同；差別是 log 的標題與位置，以及 harness 在
 `022dae2` 的 `git archive` 副本裡建置（兩個受限查詢檔都排除、以檔名確認沒落地，副本由 trap 刪除），原始碼與
-`1104d49` 的 `scripts/gate-harness/main.swift` 只差註解。之後為 #60 verify R8–R11 改過兩者，清單在各自的檔頭，主要的是：
+`1104d49` 的 `scripts/gate-harness/main.swift` 只差註解。之後為 #60 verify 改過兩者，清單在各自的檔頭，主要的是：
 harness 每條連線開檔前拒絕不存在的主檔、stdout 逐行輸出、`--old-sql` 另印 Q1 的 COUNT；腳本在量測或寫 log 失敗、
 探針與 CLI 的輸出裡沒有讀數、常駐讀數格式不對、讀不到 mtime 或 mtime 在途中變了、harness 回的不是 no-op 的值時就停，冷樣本要讀到 0 頁常駐才開跑，CLI 加 `-init /dev/null` 並在開跑前
 （暫存檔上，不碰索引）確認預設是 `mmap_size=0`、`cache_size=2000`，Sources/、Package.swift、harness、探針與這支
@@ -613,6 +613,8 @@ CLI 只跑過 Q1——但那個順序本紀錄沒有重跑。它的誠實邊界�
   沒有證據支撐的「都在階躍之後」配對；刪負載歸因時漏了幾處拿 1 分鐘平均比較樣本的說法；`run_h` 沒有讀數也會通過。
 - `b3f4f12`（R12 抓到，`issuecomment-5946063684`）：在判讀 7 加了一句拿判讀 5 的比較來排除順序影響的依據——那組比較
   同時換了路徑與位置，方向也寫反了。
+- `5ee7b3b`（R13，只有 LOW，`issuecomment-5948481369`）：把沒有 `-wal` 的檢查移到型別與 schema 檢查之前，蓋掉了它們
+  比較準的訊息；方法段的輪次範圍又過時；DB 段寫兩個量測窗口、實際列了三個。
 
 #60 各個 commit 的 message（從第一版 `e9f5dec` 起）都不改寫：其中有些句子後來被推翻，有些寫下當時就不準。與本紀錄
 衝突時，以本紀錄為準。
