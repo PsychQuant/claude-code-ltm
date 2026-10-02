@@ -2,8 +2,8 @@
 # #60 Expected 1 補量（量測紀錄 docs/measurements/2026-09-07-gate-first-touch.md 的表 9–11）：
 # ltm 路徑上的 cache_size／mmap、CLI 冷態、#58 條件重現。只印計數與時間，不印任何一列。
 # 表 9–11 是它的前身跑的（量測的順序、命令與參數與 1104d49 的這支腳本相同；差別見紀錄的方法段）。之後為 #60
-# verify R8–R10 加的：setopt pipefail；任何一次量測或 log 寫入失敗就停；探針與 CLI 的輸出裡沒有讀數就停；冷樣本
-#   開跑前要讀到 0 頁常駐；常駐讀數格式不對就停；讀不到 mtime、或 mtime 在途中變了就停；harness 回的 rows（與
+# verify R8–R11 加的：setopt pipefail；任何一次量測或 log 寫入失敗就停；探針與 CLI 的輸出裡沒有讀數、harness 的讀數
+#   不是兩行就停；開跑時沒有 -wal 就拒跑；冷樣本開跑前要讀到 0 頁常駐；常駐讀數格式不對就停；讀不到 mtime、或 mtime 在途中變了就停；harness 回的 rows（與
 #   --old-sql 的 q1）不是 no-op 的值就停；CLI 加 -init /dev/null，開跑前在暫存檔上確認它的預設是 mmap_size=0、
 #   cache_size=2000；前置檢查不跳過 dangling symlink；下面列的路徑有未 commit 的改動就拒跑（建置前後各查一次）；
 #   harness 建好後複製到暫存目錄再跑，log 記它的 SHA-256；路徑含 URI 特殊字元就拒跑；mtime 連日期記；結束時撤銷
@@ -16,8 +16,10 @@
 #   Sources/、Package.swift、harness、探針或這支腳本有未 commit 的改動就拒跑（log 只記 HEAD）。
 #   log 寫在 repo 外（mktemp），結束時（不論成敗，SIGKILL 除外）印出路徑。
 #   GATE_MATRIX_DB 可指向另一個 ltm 索引（測試用；log 會標記）。harness 以讀寫開檔、會把目標設成 WAL，
-#   所以指向的檔若不是 ltm 索引就拒跑（以 immutable 唯讀檢查，不寫主檔、-wal 或 -shm）；預設是
-#   ~/.claude-ltm/derived/index.sqlite3。mtime 只到秒，字串沒變不完全保證沒有寫入。
+#   所以指向的檔若不是 ltm 索引就拒跑（以 immutable 唯讀檢查，不寫主檔、-wal 或 -shm；immutable 不讀 WAL，
+#   schema 還沒 checkpoint 的索引會被誤拒——覆寫的索引要先 checkpoint、沒有並行寫入者）；預設是
+#   ~/.claude-ltm/derived/index.sqlite3。開跑時沒有 -wal 就拒跑（harness 以讀寫開檔會建出它）。
+#   mtime 只到秒，字串沒變不完全保證沒有寫入。
 set -u
 setopt pipefail
 if [ "$(id -u)" = 0 ]; then echo '不要用 sudo 跑整個腳本：ltm 開索引會檢查擁有者，root 會被拒。' >&2; exit 1; fi
@@ -58,7 +60,8 @@ require_clean() {
   [ -z "$dirty" ] || fail '有未 commit 的改動（Sources/、Package.swift、harness、探針或這支腳本）：先 commit 或 stash'
 }
 require_clean
-# 預設路徑就是 ltm 的索引；覆寫時先以唯讀確認它是（不然 harness 會把它改成 WAL 才失敗）。
+# 預設路徑就是 ltm 的索引；覆寫時先以唯讀確認它是（不然 harness 會把它改成 WAL 才失敗）。immutable 只看主檔，
+# schema 還在 WAL 裡時會誤拒（安全的方向）。
 # 預設路徑不做這一步：它會讀索引的第 1 頁，warmup 就不再是自然冷。
 if [ -n "${GATE_MATRIX_DB:-}" ]; then
   n=$(sqlite3 -init /dev/null "file:$DB?mode=ro&immutable=1" \
@@ -86,13 +89,10 @@ CLISET=$(sqlite3 -init /dev/null "$W/cli-defaults.sqlite3" 'PRAGMA mmap_size;' '
 [ "$CLISET" = '0 2000 ' ] || fail "CLI 的預設設定是「$CLISET」，不是 mmap_size=0、cache_size=2000"
 
 MTFMT='%Y-%m-%d %H:%M:%S'
-# 主檔讀不到就回非零；-wal 不存在時寫明，存在卻讀不到也回非零（呼叫端 || fail）。
-mtimes() {
-  local m w
-  m=$(stat -f '%Sm' -t "$MTFMT" "$DB") || return 1
-  if [ -e "$DB-wal" ] || [ -L "$DB-wal" ]; then w=$(stat -f '%Sm' -t "$MTFMT" "$DB-wal") || return 1; else w='(no-wal)'; fi
-  print -r -- "$m $w"
-}
+# 主檔或 -wal 讀不到就回非零（呼叫端 || fail）。開跑時沒有 -wal 就拒跑：harness 以讀寫開檔會建出它，
+# mtime 的比對會因此誤停。
+[ -f "$DB-wal" ] || fail "沒有 $DB-wal（harness 以讀寫開檔會建出它，mtime 的比對會因此誤停）：先用 ltm 開一次索引"
+mtimes() { stat -f '%Sm' -t "$MTFMT" "$DB" "$DB-wal" | tr '\n' ' '; }
 MT0=$(mtimes) || fail '讀不到索引的 mtime'
 # 每一步記負載、常駐頁數、主檔與 -wal 的 mtime；常駐讀數格式不對、或 mtime 與開頭不同就停（harness 自己關檔時
 # 若做了 checkpoint 也會讓它停）。常駐讀數留在 LAST_RES 給 cold() 檢查。
@@ -111,8 +111,11 @@ run_h() {
   o=$("$H" "$DB" 1 2 "$@" 2>&1); rc=$?
   emit "$o"
   [ $rc -eq 0 ] || fail "harness $* 回 $rc"
-  # no-op 狀態：閘模式 rows=0；--old-sql 是兩條 SQL 的列數加總（Q1 的 COUNT 一列、Q2 零列）＝1，且 Q1 的 COUNT 值 q1=0。
-  for r in ${(M)${(@f)o}:#*rows=*}; do
+  # 一條連線、兩次呼叫：恰好兩行讀數。no-op 狀態：閘模式 rows=0；--old-sql 是兩條 SQL 的列數加總（Q1 的 COUNT
+  # 一列、Q2 零列）＝1，且 Q1 的 COUNT 值 q1=0。
+  local -a reads; reads=( ${(M)${(@f)o}:#conn=1 rep=<-> *} )
+  (( ${#reads} == 2 )) || fail "harness $* 的讀數不是兩行（${#reads} 行）"
+  for r in $reads; do
     [[ "$r" == *"$exp" ]] || fail "harness $* 回的不是 no-op 的值（要${exp}）"
   done
 }
