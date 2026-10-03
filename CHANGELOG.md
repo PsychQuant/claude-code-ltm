@@ -50,6 +50,18 @@
   `.claude/settings.json` 關掉 security-guidance 外掛的 commit／push 審查（`ENABLE_COMMIT_REVIEW=0`）：它的 reviewer 會讀查詢檔、逐字稿進本 project
   的語料；代價是本 repo 的 commit 與 push 不再有那個 LLM 審查（R41、R42；擋不住的範圍見 README「它擋不住什麼」）。
 
+### Changed
+
+- **閘改讀結構計數；索引 layout 5 → 6，升版後要從零重建一次（#61）**：每次 build（因此每次 `ltm query` 的
+  併入）都跑的 #44 閘，兩個全稱命題——每個 chunk 至少一個來源、每個持有 chunk 的來源都有游標——先前每次都走完
+  `chunk_sources`。現在改讀由 SQLite trigger 在同一交易裡維護的兩份衍生計數：`chunks.source_count`（加上
+  `WHERE source_count = 0` 的 partial index）與 `source_chunk_counts`。閘的判斷與拒絕訊息不變。
+  不假設任何計數的整份稽核改為 `ltm build --audit`（掃描之前跑，取代結構性閘），以及每次從零重建之後跑一次；
+  計數與重算不符時以非零結束、指名不符的 chunk 數與來源數，要求 `ltm build --full`。查詢路徑不跑稽核。
+  **升版成本**：layout 6 的索引結構不同，舊索引在第一次 `ltm build` 時整份重建；查詢路徑在那之前照舊拒絕並指名
+  `ltm build --full`。效果的量測在發版、線上索引重建之後做，結果只會引用那份紀錄（`docs/measurements/`，
+  change `gate-structural-counts` 的 task 6.1）；這裡不寫任何數字。
+
 ## [0.5.0] - 2026-09-05
 
 ### Added
