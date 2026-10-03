@@ -30,4 +30,4 @@
 ## 7. Release notes and tracking
 
 - [x] 7.1 Add the CHANGELOG entry: layout 6 requires one from-scratch rebuild on upgrade, `ltm build --audit` exists, from-scratch builds end with the audit, and the measured effect is quoted only from the 6.1 record. Verify: `swift test --filter ReleaseVersionSyncTests` green; content review against the record.
-- [ ] 7.2 Post `## Implementation Complete` on #61 with the commit list and the 2.2 mutation outcomes, then sync the issue's task list from this file with `/idd-update #61 --tasks-file openspec/changes/gate-structural-counts/tasks.md`. Verify: the #61 body's Current Status lists these tasks with their states.
+- [x] 7.2 Post `## Implementation Complete` on #61 with the commit list and the 2.2 mutation outcomes, then sync the issue's task list from this file with `/idd-update #61 --tasks-file openspec/changes/gate-structural-counts/tasks.md`. Verify: the #61 body's Current Status lists these tasks with their states.
