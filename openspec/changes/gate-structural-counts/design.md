@@ -31,7 +31,7 @@ A from-scratch build discards the database file and recreates the schema.
 **Non-Goals:**
 
 - **Holding the index open, and reusing one connection across queries.** These are the two levers from #60. They change process lifetime (`ltm mcp`, overlapping #65), not the gate's SQL.
-- **`chunkCount()`.** This change targets the two gate queries only. Whether `chunkCount()` is a per-build cost worth changing is not decided here: the only timing for it is an estimate in the #61 diagnosis, not a `docs/measurements/` record, and `docs/measurements/2026-09-01-noop-build-attribution.md` lists it among the per-build costs. (R1-8: the first version quoted that estimate as the reason.)
+- **`chunkCount()`.** This change targets the two gate queries only. Whether `chunkCount()` is a per-build cost worth changing is not decided here: the only timing for it is an estimate in the #61 diagnosis, not a `docs/measurements/` record, and `docs/measurements/2026-09-01-noop-build-attribution.md` lists it among the per-build costs. It is tracked in #73: measure first, then decide. (R1-8: the first version quoted that estimate as the reason; R2-6: the item had no landing point.)
 - **Using `source_count` inside `deleteChunks`.** Its `COUNT(*)` subqueries stay as they are; behaviour is unchanged.
 - **A latency target.** "Under one second" (#56) is not claimed; the record reports what is measured.
 - **#67's possible schema change.** Merging layout bumps is a release-time decision.
