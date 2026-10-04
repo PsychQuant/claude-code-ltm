@@ -182,12 +182,17 @@ public struct RefreshReport: Sendable {
     public let unmergedSources: Int
     /// 查詢前的併入是否因預算用完而在批次邊界提前停止。
     public let budgetExhausted: Bool
+    /// 索引欠一次整份稽核（見 `IndexBuilder.BuildReport.auditOwed`）。查詢路徑不補跑它，所以同一條原則：
+    /// 欠著就要說出來（#61 R2-4）——只用 hook／MCP 的使用者沒有別的管道知道要跑 `ltm build`。
+    public let auditOwed: Bool
 
     public init(
         sourcesRefreshed: Int, sourcesUnreadable: [String], sourcesInvalidated: Int,
         skipped: SkipTally, mergeDeferredForConcurrentBuild: Bool = false,
-        tuningRejections: [String] = [], unmergedSources: Int = 0, budgetExhausted: Bool = false
+        tuningRejections: [String] = [], unmergedSources: Int = 0, budgetExhausted: Bool = false,
+        auditOwed: Bool = false
     ) {
+        self.auditOwed = auditOwed
         self.unmergedSources = unmergedSources
         self.budgetExhausted = budgetExhausted
         self.tuningRejections = tuningRejections
@@ -982,7 +987,8 @@ public struct LTMService {
                 skipped: report.skipped,
                 tuningRejections: tuningRejections,
                 unmergedSources: report.unmergedSources,
-                budgetExhausted: report.budgetExhausted)
+                budgetExhausted: report.budgetExhausted,
+                auditOwed: report.auditOwed)
         } catch IndexBuilder.BuildError.lockHeld {
             // 不拒答：既有索引仍然有效，為了「有人在建置」而讓查詢失敗是過度反應。
             // 但也不靜默：把它記進 report，由呈現層說出來。

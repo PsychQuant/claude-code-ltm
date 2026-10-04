@@ -33,13 +33,17 @@ public struct BuildReport: Sendable, Equatable {
     public let budgetExhausted: Bool
     /// 這次跑過、而且通過的整份稽核（#61），按發生順序。沒跑是空陣列；不通過會拋錯，不會出現在這裡。
     public let audits: [BuildAudit]
+    /// 這次 build 結束時，索引是否仍欠一次整份稽核（`audit_pending` 還在）。查詢路徑不補跑稽核，
+    /// 所以由它續完一次中斷的從零重建之後，這個旗標會一直是 true，直到下一次 `ltm build`——呈現層
+    /// 必須把它說出來（#61 R2-4），否則只用 hook／MCP 的使用者永遠不知道要跑。
+    public let auditOwed: Bool
 }
 
 /// 一次通過的整份稽核，與它發生在建置的哪個時點（#61 R1-17：`--audit` 的數字是掃描前的，從零重建的
 /// 是建置完成後的，兩者印在同一份報告裡時要分得出來）。
 public struct BuildAudit: Sendable, Equatable {
     public enum Moment: Sendable, Equatable {
-        /// `audit: true`：掃描之前，取代結構性閘。
+        /// 掃描之前，取代結構性閘：`audit: true`，或索引欠著一次稽核（#61 R2-2）。這時這次 build 還沒併入任何內容。
         case beforeScan
         /// 從零重建的結尾，或續完一次中斷的從零重建的那一次 build 的結尾。
         case afterBuild
@@ -47,6 +51,38 @@ public struct BuildAudit: Sendable, Equatable {
 
     public let moment: Moment
     public let result: IndexDatabase.DerivedCountAudit
+}
+
+/// 一次不通過的整份稽核：發生在欠著稽核的索引上（掃描前或結尾），或從零重建的結尾（#61 R1-4、R2-2／3）。
+public struct AuditFailure: Sendable, Equatable {
+    /// 不符要歸給誰。**只有兩種，不得依性質類推第三種**——判準是「計數是不是在同一次不中斷的 build 裡從頭
+    /// 長出來的」，因為只有那樣，ltm 以外的寫入者才沒有窗口。
+    public enum Attribution: Sendable, Equatable {
+        /// 計數在一次不中斷的從零重建裡從頭長出來：這一次 build 本身，或旗標記著「上一次這樣的重建結尾稽核
+        /// 已經失敗」（`IndexBuilder.rebuildFailedMarker`）。除非建置期間有 ltm 以外的程式寫這個檔，否則是
+        /// ltm 的缺陷；同一個 binary 再跑 `--full` 會重演。
+        case defect
+        /// 計數長在一次被中斷、之後由別的 build 續完的從零重建裡。兩次 build 之間 ltm 以外的程式可以改這個檔
+        /// （讀者不取鎖，外部 sqlite3 也不取），所以分不出是缺陷還是外部修改。跑一次 `--full`：它結尾的稽核
+        /// 若又不通過，那一次的歸因就是 `defect`。
+        case defectOrOutsideChange
+    }
+
+    public let divergentChunks: Int
+    public let divergentSources: Int
+    /// 不假設計數的舊寫法找到的覆蓋缺口，格式與 `sourcesWithoutCursor()` 相同（來源鍵是本機路徑）。
+    public let coverageFindings: [String]
+    /// `.beforeScan`：這次什麼都沒併入；`.afterBuild`：這次的併入已經提交。
+    public let moment: BuildAudit.Moment
+    public let attribution: Attribution
+
+    public init(_ result: IndexDatabase.DerivedCountAudit, moment: BuildAudit.Moment, attribution: Attribution) {
+        divergentChunks = result.divergentChunks
+        divergentSources = result.divergentSources
+        coverageFindings = result.coverageFindings
+        self.moment = moment
+        self.attribution = attribution
+    }
 }
 
 /// 把掃描、索引、向量三件事串起來的建置流程。
@@ -198,18 +234,22 @@ public struct IndexBuilder: Sendable {
         /// 需要整份重建，但呼叫端不允許（查詢路徑）。
         case fullRebuildRequired(detail: String)
         case stateUnreadable(detail: String)
+        /// 結構性閘拒絕，而索引欠著一次整份稽核（#61 R2-2）。只有不補跑稽核的路徑（查詢）會拋它：
+        /// `ltm build` 遇到欠著的稽核會在掃描前改跑稽核、不跑這道閘。與 `stateUnreadable` 分開，因為補救不同——
+        /// 那個是 `--full`，這個是先跑 `ltm build`，讓稽核說出是哪裡不符；欠著的狀態可能正是一次失敗的稽核，
+        /// 那時 `--full` 會重演。
+        case stateUnreadableWhileAuditOwed(detail: String)
         /// 整份稽核發現 trigger 維護的計數與 `chunk_sources` 重算的結果不符（#61）：`chunks` 是
         /// `source_count` 不符的 chunk 數，`sources` 是 `source_chunk_counts` 不符的來源數。
         ///
-        /// 只在**掃描之前**的稽核（`audit: true`）拋出；那時什麼都還沒併入。與 `stateUnreadable` 分開：
-        /// 那個說「索引的內容涵蓋不到」，這個說「閘每次讀的那兩份計數本身不可信」。補救是 `--full`——
-        /// 計數若是被外部寫壞的，重建會讓 trigger 從頭長出正確的值。
+        /// 只在**沒有欠著稽核**的索引上、掃描之前的稽核（`audit: true`）拋出；那時什麼都還沒併入。與
+        /// `stateUnreadable` 分開：那個說「索引的內容涵蓋不到」，這個說「閘每次讀的那兩份計數本身不可信」。
+        /// 補救是 `--full`——計數若是被外部寫壞的，重建會讓 trigger 從頭長出正確的值。欠著稽核時改拋
+        /// `auditFailed`：那時計數長在一次從零重建裡，`--full` 不一定是補救（#61 R2-2）。
         case derivedCountsDiverged(chunks: Int, sources: Int)
-        /// 建置**結尾**的稽核不通過（#61 R1-4）：從零重建、或續完一次中斷的從零重建之後。這時資料已經提交，
-        /// 兩份計數全是這一次（或被中斷的那一次）由 trigger 長出來的，所以不符就是 ltm 自己的缺陷——再跑
-        /// `--full` 會原樣重演，不能拿它當補救。`coverageFindings` 是不假設計數的舊寫法找到的覆蓋缺口，
-        /// 格式與 `sourcesWithoutCursor()` 相同。欠著的稽核不清掉，下一次 `ltm build` 會再跑。
-        case postRebuildAuditFailed(divergentChunks: Int, divergentSources: Int, coverageFindings: [String])
+        /// 欠著稽核的索引（掃描前或結尾）、或從零重建的結尾，整份稽核不通過（#61 R1-4、R2-2／3）。歸因與
+        /// 補救見 `AuditFailure.Attribution`。旗標不清掉：下一次 `ltm build` 在掃描前再稽核一次。
+        case auditFailed(AuditFailure)
         /// 估算的向量累積超過使用者設定的預算。
         ///
         /// **只在使用者顯式設了預算時才可能發生**——沒有預設值，因為本 repo 沒有
@@ -243,11 +283,12 @@ public struct IndexBuilder: Sendable {
     ///   邊界**（含第一批之前）讀一次 `clock`，超過起點＋預算就停止：已提交的批次留著、
     ///   不提交任何半批、未跑到的來源不寫游標（否則就是「游標超前內容」）。停下來的狀態
     ///   與一次崩潰留下的完全相同，下一次 build 從那裡續完——不變式 2 因此不受影響。
-    /// - Parameter audit: 在掃描之前跑整份稽核（`IndexDatabase.auditDerivedCounts()`），取代每次
-    ///   build 的結構性閘；從零重建則不論這個參數，都在最後一批之後跑一次（#61）。查詢路徑不傳。
+    /// - Parameter audit: 增量 build 時，在掃描之前跑整份稽核（`IndexDatabase.auditDerivedCounts()`），
+    ///   取代結構性閘。從零重建時索引已經丟掉，掃描前沒有東西可稽核，只跑結尾那一次（#61）。查詢路徑不傳。
     /// - Parameter honorPendingAudit: 從零重建開始時會在 meta 記下「欠一次稽核」（`audit_pending`），
-    ///   通過才清掉——所以被中斷、之後以增量續完的從零重建，由續完它的那一次 build 在結尾補跑
-    ///   （#61 R1-3）。查詢路徑傳 `false`：spec 規定查詢的併入不跑稽核，旗標留給下一次 `ltm build`。
+    ///   完成從零重建的那一次 build 在結尾稽核、通過才清掉（沒併完的有界 build 不算完成）。欠著稽核的
+    ///   增量 build 在掃描前也改跑整份稽核、不跑結構性閘（#61 R2-2）。查詢路徑傳 `false`：spec 規定查詢的
+    ///   併入不跑稽核，旗標留給下一次 `ltm build`，而 `BuildReport.auditOwed` 讓呈現層說出來。
     public func build(
         full: Bool = false, refusingFullRebuild: Bool = false, budget: TimeInterval? = nil,
         audit: Bool = false, honorPendingAudit: Bool = true
@@ -422,9 +463,12 @@ public struct IndexBuilder: Sendable {
         // 一次不可逆的遷移」。**沒有那條路徑，就沒有那五個洞。**
         var previousState = ScanState()
         var audits: [BuildAudit] = []
-        // 從零重建在下面的 stamps 交易裡記下欠著的稽核；這裡讀的是**先前**欠下、還沒補的那一次。
-        let pendingMarker = honorPendingAudit && !rebuildFromScratch ? try database.meta(Self.auditPendingKey) : nil
-        let owesAudit = pendingMarker != nil
+        // 從零重建在下面的 stamps 交易裡記下欠著的稽核；這裡讀的是**先前**欠下、還沒補的那一次。不補跑
+        // 稽核的路徑（查詢）也讀：閘拒絕時要說「先跑 ltm build」而不是 `--full`（#61 R2-2）。
+        let pendingMarker = rebuildFromScratch ? nil : try database.meta(Self.auditPendingKey)
+        let owesAudit = honorPendingAudit && pendingMarker != nil
+        let owedAttribution: AuditFailure.Attribution =
+            pendingMarker == Self.rebuildFailedMarker ? .defect : .defectOrOutsideChange
         if !rebuildFromScratch {
             previousState = try database.scanState()
             // **判準是「這份游標涵蓋得住索引嗎」，不是「表是不是空的」。**
@@ -438,12 +482,22 @@ public struct IndexBuilder: Sendable {
             //
             // 平常讀 trigger 維護的計數（#61）；`audit: true` 時改跑不假設任何計數的整份稽核，計數本身
             // 不可信就先停在那裡，不拿它的閘結果做決定。
+            //
+            // 欠著稽核時也一樣（#61 R2-2）：結構性閘讀的正是還沒被稽核過的那兩份計數，拿它擋路，一次失敗的
+            // 稽核留下的狀態就會被閘以「請跑 --full」攔下，而 --full 可能正是會重演的那條路。
             let orphaned: [String]
-            if audit {
+            if audit || owesAudit {
                 let result = try database.auditDerivedCounts()
-                guard result.countsAgree else {
-                    throw BuildError.derivedCountsDiverged(
-                        chunks: result.divergentChunks, sources: result.divergentSources)
+                if owesAudit {
+                    guard result.countsAgree, result.coverageFindings.isEmpty else {
+                        throw BuildError.auditFailed(
+                            AuditFailure(result, moment: .beforeScan, attribution: owedAttribution))
+                    }
+                } else {
+                    guard result.countsAgree else {
+                        throw BuildError.derivedCountsDiverged(
+                            chunks: result.divergentChunks, sources: result.divergentSources)
+                    }
                 }
                 audits.append(BuildAudit(moment: .beforeScan, result: result))
                 orphaned = result.coverageFindings
@@ -453,12 +507,12 @@ public struct IndexBuilder: Sendable {
             if !orphaned.isEmpty {
                 // **不可**當成空 state 繼續：那會在既有索引上重掃全語料 upsert，
                 // 而使用者不會知道發生過什麼。
-                throw BuildError.stateUnreadable(
-                    detail: "索引裡有 \(orphaned.count) 個來源沒有續讀游標"
-                        + "（舊版本建立的索引、或一次回滾之後）"
-                        + "——例如 \(orphaned.prefix(3).joined(separator: "、"))。"
-                        + "續讀點與索引內容是否一致無法從磁碟上驗證，所以這裡不猜："
-                        + "請跑 `ltm build --full` 從零重建")
+                let detail = "索引裡有 \(orphaned.count) 個來源沒有續讀游標"
+                    + "（舊版本建立的索引、或一次回滾之後）"
+                    + "——例如 \(orphaned.prefix(3).joined(separator: "、"))。"
+                    + "續讀點與索引內容是否一致無法從磁碟上驗證，所以這裡不猜"
+                if pendingMarker != nil { throw BuildError.stateUnreadableWhileAuditOwed(detail: detail) }
+                throw BuildError.stateUnreadable(detail: detail + "：請跑 `ltm build --full` 從零重建")
             }
         }
         let scanStarted = Date()
@@ -882,13 +936,17 @@ public struct IndexBuilder: Sendable {
         if (rebuildFromScratch || owesAudit) && unmergedSourceKeys.isEmpty {
             let result = try database.auditDerivedCounts()
             guard result.countsAgree, result.coverageFindings.isEmpty else {
-                throw BuildError.postRebuildAuditFailed(
-                    divergentChunks: result.divergentChunks, divergentSources: result.divergentSources,
-                    coverageFindings: result.coverageFindings)
+                // 這一次 build 從丟掉索引一路做到這裡、沒有中斷：計數全是它自己長出來的，記下來，讓之後的
+                // build 不必再要使用者跑一次會重演的 --full 才得出同一個結論（#61 R2-3）。
+                if rebuildFromScratch { try database.setMeta(Self.auditPendingKey, Self.rebuildFailedMarker) }
+                throw BuildError.auditFailed(
+                    AuditFailure(result, moment: .afterBuild,
+                                 attribution: rebuildFromScratch ? .defect : owedAttribution))
             }
             try database.removeMeta(Self.auditPendingKey)
             audits.append(BuildAudit(moment: .afterBuild, result: result))
         }
+        let auditOwed = try database.meta(Self.auditPendingKey) != nil
 
         return BuildReport(
             chunksIndexed: indexed,
@@ -901,7 +959,8 @@ public struct IndexBuilder: Sendable {
             totalChunks: try database.chunkCount(),
             unmergedSources: unmergedSourceKeys.count,
             budgetExhausted: budgetExhausted,
-            audits: audits)
+            audits: audits,
+            auditOwed: auditOwed)
     }
 
     // MARK: - 衍生產物
@@ -917,6 +976,8 @@ public struct IndexBuilder: Sendable {
 
     /// 從零重建欠著、還沒通過的整份稽核（#61 R1-3）。值無意義，有這個鍵就是欠著。
     static let auditPendingKey = "audit_pending"
+    /// `audit_pending` 的值：一次不中斷的從零重建，結尾的稽核失敗了（#61 R2-3）。其他值（"1"）是「欠著」。
+    static let rebuildFailedMarker = "rebuild-failed"
 
     private func discardDerivedArtifacts() throws {
         let fm = FileManager.default

@@ -335,14 +335,15 @@ public final class IndexDatabase {
         // app 這邊沒有第二份實作可以漂移。
         //
         // 引擎保證的只有「trigger 會跑、與寫入同一個交易」，**不保證 trigger 本體寫對**（那是 app 寫的
-        // SQL），而且下面這幾條寫入會繞過它們——這是封閉列舉，不得依性質類推第五條：
-        // 1. REPLACE 衝突處理刪掉的列（預設 `recursive_triggers = OFF`，見下）；
-        // 2. 關掉 trigger 的連線（`sqlite3_db_config(SQLITE_DBCONFIG_ENABLE_TRIGGER, 0)`）；
-        // 3. `DROP TRIGGER` 之後的寫入；
-        // 4. `PRAGMA writable_schema` 下直接改 schema。
+        // SQL）。計數會漂移的條件是一個性質：**`chunk_sources` 或兩份計數被 trigger 以外的方式改動**。判準是
+        // 這個性質，不是例子清單——例子：REPLACE 衝突處理刪掉的列（預設 `recursive_triggers = OFF`，見下）、
+        // 關掉 trigger 的連線、`DROP TRIGGER` 之後的寫入、`DROP TABLE chunk_sources` 再建（隱式刪除不觸發
+        // trigger）、直接寫計數、`INSERT OR REPLACE INTO chunks`（`source_count` 重設成預設值）、在 chunk 列存在
+        // 之前先插連結（trigger 的 UPDATE 打不到列）。
         // 所以每次 build 的閘是**信任**這份簿記，不是稽核它——這正是 #58 對 count-diff 的異議；差別是這裡
-        // 有稽核那一層（`auditDerivedCounts()`）。R1-5（#61 verify）：上一版寫「任何 SQL 寫入路徑都逃不掉」，
-        // 五行後就列出第 1 條；也寫「引擎維護的事實」，高估了引擎保證的範圍。
+        // 有稽核那一層（`auditDerivedCounts()`）。R1-5（#61 verify）：最早寫「任何 SQL 寫入路徑都逃不掉」、
+        // 「引擎維護的事實」；R1 修正改成四類的「封閉列舉」，R2-9 又找到三類漏掉的——包括本 change 每一條稽核
+        // 測試自己用來造漂移的「直接寫計數」。列舉在這裡會漏，所以改寫成性質。
         //
         // **兩條使用規則，由 `DerivedCountTests` 的掃描守**：
         // - 不得用 REPLACE 衝突處理寫 `chunk_sources`（`INSERT OR REPLACE`、`REPLACE INTO`、表定義的
@@ -350,9 +351,10 @@ public final class IndexDatabase {
         //   DELETE trigger——`/usr/bin/sqlite3` 3.54 實測：計數 2、實際 1，而且沒有任何錯誤。
         // - app 的 SQL 不得直接寫 `source_count` 或 `source_chunk_counts`。
         //
-        // 那兩條掃描比對文字，只認得 `derivedCountGuardsRecogniseTheirShapes` 列出的形狀；拆成多段字串
-        // 拼接或插值的 SQL 認不得。真正量到計數正確的是等價測試——每一條寫入路徑之後計數等於從
-        // `chunk_sources` 重算的結果，拿掉任一個 trigger 會紅。
+        // 那兩條掃描比對文字，**保證認得的**只有 `derivedCountGuardsRecogniseTheirShapes` 列出的形狀，其餘
+        // 未必（已知認不得的單一字面與已知誤報列在 `DerivedCountTests` 檔頭）；拆成多段字串拼接或插值的 SQL
+        // 認不得。真正量到計數正確的是等價測試——每一條寫入路徑之後計數等於從 `chunk_sources` 重算的結果，
+        // 拿掉任一個 trigger 會紅。
         try execute(
             """
             CREATE TABLE IF NOT EXISTS source_chunk_counts (
@@ -566,7 +568,8 @@ public final class IndexDatabase {
 
     /// 整份稽核的結果（#61）。
     public struct DerivedCountAudit: Sendable, Equatable {
-        /// 檢查了幾個 chunk、幾個來源（`chunk_sources` 裡出現過的 `source_key`）。
+        /// 檢查了幾個 chunk、幾個來源（`chunk_sources` 與 `source_chunk_counts` 兩邊出現過的 `source_key`
+        /// 的聯集——`source_chunk_counts` 多出來的列也算被檢查過，所以 `divergentSources` 不會比它大）。
         public let chunksChecked: Int
         public let sourcesChecked: Int
         /// `source_count` 與重算不符的 chunk 數。
@@ -580,11 +583,13 @@ public final class IndexDatabase {
     }
 
     /// 不假設任何計數的整份稽核：閘的兩個全稱命題用直接走 `chunk_sources` 的舊寫法重算，兩份衍生計數
-    /// 逐列與重算比對（#61）。它要讀完整份 `chunks` 與 `chunk_sources`，所以只在 `ltm build --audit` 與
-    /// 完成從零重建的那一次 build 的結尾跑，查詢路徑不跑。
+    /// 逐列與重算比對（#61）。它要讀完整份 `chunks` 與 `chunk_sources`，所以只在 `ltm build --audit`、
+    /// 完成從零重建的那一次 build 的結尾、與欠著稽核時的 `ltm build` 跑，查詢路徑不跑。
     ///
-    /// 「稽核者不得假設待稽核物」（#58 棄 count-diff 的理由）在這一層成立：這裡的每一個數字都是從
-    /// `chunk_sources` 本身算出來的，沒有讀任何由 trigger 維護的值來當答案——那些值只是被比對的對象。
+    /// 「稽核者不得假設待稽核物」（#58 棄 count-diff 的理由）在這一層成立：判斷用的數字——孤兒 chunk、
+    /// 缺游標的來源、兩份計數各自與重算的差——都從 `chunks` 與 `chunk_sources` 本身算出來，trigger 維護的值
+    /// 只是被比對的對象。例外是報告用的 `sourcesChecked`：它把 `source_chunk_counts` 的鍵也算進分母，因為多出
+    /// 來的列同樣被檢查過（R1-17）；它不參與任何判斷。
     public func auditDerivedCounts() throws -> DerivedCountAudit {
         func count(_ sql: String) throws -> Int {
             var value = 0

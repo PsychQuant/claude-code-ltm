@@ -101,6 +101,10 @@ public enum RetrievalTool {
         for rejection in outcome.refresh.tuningRejections {
             warnings.append("⚠ \(rejection)")
         }
+        // #61 R2-4：查詢路徑不補跑欠著的稽核；模型讀者是使用者唯一可能聽到這件事的管道。
+        if outcome.refresh.auditOwed {
+            warnings.append("⚠ \(RecallBlock.auditOwedLine)")
+        }
         guard !outcome.hits.isEmpty else {
             return (warnings + ["（沒有命中）"]).joined(separator: "\n")
         }

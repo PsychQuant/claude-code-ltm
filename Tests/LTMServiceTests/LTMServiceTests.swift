@@ -1088,6 +1088,18 @@ func recallBlockNeverExceedsFourThousandCharacters() throws {
     #expect(withShortfall.range(of: "索引落後")!.lowerBound > withShortfall.range(of: "1. [proj]")!.lowerBound)
 }
 
+@Test("欠著稽核時 recall 區塊在結尾標記之前附一行提示（#61 R2-4）")
+func recallBlockSurfacesAnOwedAudit() {
+    let entry = RecallBlock.Entry(
+        project: "proj", timestamp: Date(timeIntervalSince1970: 0), snippet: "片段",
+        sessions: ["s-1"], uuid: "00000001-aaaa-bbbb-cccc-dddddddddddd")
+    let owed = RecallBlock.render(entries: [entry], shortfall: nil, auditOwed: true)
+    let lines = owed.split(separator: "\n").map(String.init)
+    #expect(lines.dropLast().last == RecallBlock.auditOwedLine)
+    #expect(lines.last == RecallMarker.close)
+    #expect(!RecallBlock.render(entries: [entry], shortfall: nil).contains(RecallBlock.auditOwedLine))
+}
+
 // MARK: - verify R1 finding 3：k 在排除後**真正**補滿，不是 4·k 啟發式
 
 @Test("前 4·k 名全被排除時仍回傳 k 筆（撈到 1,000 上限為止）")

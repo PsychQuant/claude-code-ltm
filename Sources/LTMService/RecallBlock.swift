@@ -54,31 +54,35 @@ public enum RecallBlock {
         let shortfall: (sources: Int, budgetSeconds: Int)? =
             (outcome.refresh.unmergedSources > 0 && budgetSeconds != nil)
             ? (outcome.refresh.unmergedSources, budgetSeconds!) : nil
-        return render(entries: entries, shortfall: shortfall, characterLimit: characterLimit)
+        return render(entries: entries, shortfall: shortfall, auditOwed: outcome.refresh.auditOwed,
+                      characterLimit: characterLimit)
     }
 
     public static func render(
-        entries: [Entry], shortfall: (sources: Int, budgetSeconds: Int)?,
+        entries: [Entry], shortfall: (sources: Int, budgetSeconds: Int)?, auditOwed: Bool = false,
         characterLimit: Int = defaultCharacterLimit
     ) -> String {
         var kept = entries
         var snippetLimit = defaultSnippetLimit
-        var block = compose(kept, shortfall: shortfall, snippetLimit: snippetLimit)
+        var block = compose(kept, shortfall: shortfall, auditOwed: auditOwed, snippetLimit: snippetLimit)
         // 1) 縮 snippet：200 → 100 → 50 → 20。
         while block.count > characterLimit, snippetLimit > minimumSnippetLimit {
             snippetLimit = max(minimumSnippetLimit, snippetLimit / 2)
-            block = compose(kept, shortfall: shortfall, snippetLimit: snippetLimit)
+            block = compose(kept, shortfall: shortfall, auditOwed: auditOwed, snippetLimit: snippetLimit)
         }
         // 2) 從尾端丟命中。
         while block.count > characterLimit, !kept.isEmpty {
             kept.removeLast()
-            block = compose(kept, shortfall: shortfall, snippetLimit: snippetLimit)
+            block = compose(kept, shortfall: shortfall, auditOwed: auditOwed, snippetLimit: snippetLimit)
         }
         return block
     }
 
+    /// 欠著稽核時附在區塊尾端的那一行（#61 R2-4）。CLI 的 stderr 與 MCP 用同一句的變體。
+    public static let auditOwedLine = "索引欠一次整份稽核（從零重建被中斷後由查詢續完，或稽核沒通過）：跑一次 ltm build"
+
     private static func compose(
-        _ entries: [Entry], shortfall: (sources: Int, budgetSeconds: Int)?, snippetLimit: Int
+        _ entries: [Entry], shortfall: (sources: Int, budgetSeconds: Int)?, auditOwed: Bool, snippetLimit: Int
     ) -> String {
         let formatter = ISO8601DateFormatter()
         var lines = [RecallMarker.open, RetrievalBanner.untrusted, RetrievalBanner.authorityRule]
@@ -101,6 +105,7 @@ public enum RecallBlock {
         if let shortfall {
             lines.append("索引落後 \(shortfall.sources) 個來源（有界併入未涵蓋，跑一次 ltm build 補齊）")
         }
+        if auditOwed { lines.append(auditOwedLine) }
         lines.append(RecallMarker.close)
         return lines.joined(separator: "\n")
     }

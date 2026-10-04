@@ -259,6 +259,59 @@ enum BuildCommand {
         try? FileHandle.standardError.write(contentsOf: Data((line + "\n").utf8))
     }
 
+    /// 整份稽核不通過的訊息（#61 R1-4、R2-2／3）。歸因只有 `AuditFailure.Attribution` 的兩種，措辭跟著它走；
+    /// 只有覆蓋缺口時不提計數，不然會出現「0 個不符，所以是計數的缺陷」這種自相矛盾的句子（R2-11）。
+    /// 來源鍵是本機路徑（含使用者名稱與 project 目錄名），單獨一行並註明回報前遮掉——tracker 是公開的（R2-12）。
+    static func auditFailureMessage(_ failure: AuditFailure) -> String {
+        var lines: [String] = []
+        switch failure.moment {
+        case .beforeScan:
+            lines.append("✗ 這份索引欠一次整份稽核；掃描前補跑，不通過——這次沒有併入任何內容。")
+        case .afterBuild:
+            lines.append("✗ 建置結尾的整份稽核不通過；這次的併入已經提交。")
+        }
+        if failure.divergentChunks > 0 || failure.divergentSources > 0 {
+            lines.append(
+                "  計數不符：\(failure.divergentChunks) 個 chunk 的 source_count、\(failure.divergentSources) 個來源的"
+                    + " source_chunk_counts 與 chunk_sources 重算的結果不同。")
+        }
+        if !failure.coverageFindings.isEmpty {
+            lines.append(
+                "  覆蓋缺口：\(failure.coverageFindings.count) 個（有 chunk 卻沒有續讀游標的來源，或沒有任何 source mapping 的 chunk）。")
+        }
+        switch failure.attribution {
+        case .defect:
+            lines.append(
+                """
+                  這份索引是同一次不中斷的從零重建從頭建出來的（這一次，或結尾稽核已經失敗過的上一次）：除非建置期間有 ltm \
+                以外的程式寫這個檔，否則是 ltm 自己的缺陷。同一個版本再跑 `ltm build --full` 會重演，不要拿它當補救；請回報這個問題\
+                （附上面的數字）。升級到修正版之後，若新版改了索引結構，第一次 `ltm build` 會自動從零重建，否則跑一次 `ltm build --full`。
+                """)
+        case .defectOrOutsideChange:
+            lines.append(
+                """
+                  這份索引長在一次被中斷、之後由別的 build 續完的從零重建裡；兩次 build 之間 ltm 以外的程式可以改這個檔，所以分不出\
+                是 ltm 的缺陷還是外部修改。跑一次 `ltm build --full`：若它結尾的稽核又不通過，那就是 ltm 的缺陷，請回報。
+                """)
+        }
+        lines.append(
+            "  在那之前：每次 `ltm build` 會在掃描前先補跑這次稽核，不通過就什麼都不併入；查詢不跑稽核，閘放行時照常回答並提示欠著稽核。")
+        if !failure.coverageFindings.isEmpty {
+            lines.append(
+                "  本機路徑（貼到公開的 issue 之前請先遮掉）：\(failure.coverageFindings.prefix(3).joined(separator: "、"))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// 結構性閘拒絕、而索引欠著一次稽核時的訊息（#61 R2-2）：補救是先跑 `ltm build`，不是 `--full`。
+    static func owedGateRefusalMessage(_ detail: String) -> String {
+        """
+        ✗ 續讀狀態無法讀取：\(detail)。
+        這份索引還欠一次整份稽核（從零重建被中斷，或它結尾的稽核沒通過），而這道閘讀的正是還沒稽核過的計數。
+        先跑 `ltm build`：它會在併入之前補跑稽核，說明是哪裡不符、該不該跑 `--full`。
+        """
+    }
+
     static func megabytes(_ bytes: Int) -> String {
         String(format: "%.1f MB", Double(bytes) / 1_048_576)
     }
@@ -470,18 +523,11 @@ enum BuildCommand {
                     請跑 `ltm build --full` 從零重建：兩份計數會由 trigger 從頭長出來，重建的結尾也會再稽核一次。
                     """)
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
-            case .postRebuildAuditFailed(let chunks, let sources, let coverage):
-                let coverageLine = coverage.isEmpty
-                    ? ""
-                    : "\n另有 \(coverage.count) 個覆蓋缺口——例如 \(coverage.prefix(3).joined(separator: "、"))。"
-                Output.error(
-                    """
-                    ✗ 從零重建已經完成並提交，但結尾的稽核不通過：\(chunks) 個 chunk 的 source_count、\
-                    \(sources) 個來源的 source_chunk_counts 與 chunk_sources 不符。\(coverageLine)
-                    這兩份計數是這次重建中由 ltm 的 trigger 長出來的，所以這是 ltm 自己的缺陷，不是索引被弄壞了——
-                    再跑 `ltm build --full` 會重演同一個結果。請回報這個問題（附上這段訊息）。
-                    在修好之前索引仍可查詢，但每次 build 的閘讀的是這兩份計數；下一次 `ltm build` 會再稽核一次。
-                    """)
+            case .auditFailed(let failure):
+                Output.error(Self.auditFailureMessage(failure))
+                return LTMCommandLine.ExitCode.indexStateError.rawValue
+            case .stateUnreadableWhileAuditOwed(let detail):
+                Output.error(Self.owedGateRefusalMessage(detail))
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .sidecarShorterThanDeclared(let declared, let found):
                 Output.error(
@@ -751,9 +797,11 @@ enum QueryCommand {
                 // 查詢路徑不跑稽核、也不從零重建，所以照理到不了；到了就是 bug，照實說。
                 Output.error(
                     "✗ 意外的稽核錯誤（\(chunks) 個 chunk、\(sources) 個來源的計數不符）——查詢路徑不跑稽核。這是 bug。")
-            case .postRebuildAuditFailed(let chunks, let sources, _):
+            case .auditFailed(let failure):
                 Output.error(
-                    "✗ 意外的稽核錯誤（建置結尾：\(chunks) 個 chunk、\(sources) 個來源的計數不符）——查詢路徑不跑稽核。這是 bug。")
+                    "✗ 意外的稽核錯誤（\(failure.divergentChunks) 個 chunk、\(failure.divergentSources) 個來源的計數不符）——查詢路徑不跑稽核。這是 bug。")
+            case .stateUnreadableWhileAuditOwed(let detail):
+                Output.error(BuildCommand.owedGateRefusalMessage(detail))
             case .memoryBudgetExceeded(let estimated, let budget, _):
                 // **這條分支到得了，而且是設計如此。** 上一版的註解寫「查詢路徑不設
                 // 預算，所以這裡到不了」——那句話被同一次改動變成假的（#46 的 F 列
@@ -1021,6 +1069,10 @@ enum QueryCommand {
         // 打錯的環境變數，等於讓他以為記憶體預算還在守著（#46 R3 verify）。
         for rejection in refresh.tuningRejections {
             Output.error("  ⚠ \(rejection)")
+        }
+        // #61 R2-4：查詢不補跑欠著的稽核，所以要說出來，否則只靠查詢續完重建的人永遠不會跑 `ltm build`。
+        if refresh.auditOwed {
+            Output.error("  ⚠ \(RecallBlock.auditOwedLine)")
         }
     }
 

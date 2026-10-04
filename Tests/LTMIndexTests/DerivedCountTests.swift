@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SQLite3
 import Testing
@@ -11,13 +12,16 @@ import Testing
 // 1. 每一條出貨的寫入路徑之後，兩份計數都等於從 `chunk_sources` 重算的結果（不變式 2 的衍生資料版）；
 // 2. 只有 trigger 寫它們、沒有 SQL 用 REPLACE 寫 `chunk_sources`——REPLACE 刪掉的列在預設
 //    `recursive_triggers = OFF` 下不觸發 DELETE trigger（`/usr/bin/sqlite3` 3.54 實測：計數 2、實際 1）；
-// 3. 閘的 Q1 走 partial index，不掃 `chunks`。
+// 3. 閘的 Q1 只透過 partial index 讀 `chunks`。
 //
-// 第 2 件是比對文字的檢查，**只認得 `derivedCountGuardsRecogniseTheirShapes` 列出的那些形狀**（含 schema
-// 限定、加引號、別名、upsert 的 `DO UPDATE SET`、對 `chunks` 的 REPLACE）。認不得的：把 SQL 拆成多段字串
-// 拼接或插值。raw string 不是漏洞——切詞器遇到它就拋錯，掃描變紅。真正界定計數正確的是第 1 件的等價測試；
-// 這兩個掃描只是讓最常見的寫錯在掃描這一層就被指名（R1-7，#61 verify：上一版寫「擋得住一般的編輯」，
-// 而最自然的一種——在 chunks 的 upsert 裡加 `source_count`——它認不得）。
+// 第 2 件是比對文字的檢查。**保證認得的**只有 `derivedCountGuardsRecogniseTheirShapes` 列出的那些形狀（含
+// schema 限定、加引號、別名、upsert 的 `DO UPDATE SET`、`INSERT OR REPLACE INTO chunks`）；其餘未必。已知
+// 認不得的單一字面（R2-8 實測，**不是完整清單**）：不帶欄位清單的 `INSERT INTO chunks VALUES(…)`（會按位置
+// 寫進 `source_count`）、`INSERT INTO chunks SELECT …`、`UPDATE OR REPLACE chunks`、表層的
+// `ON CONFLICT REPLACE`、列值寫法 `SET (source_count, …) =`、加引號的別名；拆段拼接或插值的 SQL 也認不得。
+// 已知誤報：`WHERE source_count = …` 這種只讀不寫的子句。raw string 不是漏洞——切詞器遇到它就拋錯，掃描變紅。
+// 真正界定計數正確的是第 1 件的等價測試；這兩個掃描只是讓最常見的寫錯在掃描這一層就被指名（R1-7 的上一版
+// 寫「擋得住一般的編輯」，R1 修正寫「只認得列出的形狀」——兩次都寫寬了，方向相反）。
 
 // MARK: - 共用
 
@@ -361,7 +365,7 @@ private func gateOrphanCountSQL() throws -> String {
     throw LexError.unbalanced("sourcesWithoutCursor() 裡找不到 query( 之後的 SQL 字面")
 }
 
-@Test("閘的孤兒計數查詢（從原始碼抽出）走 chunks_unsourced，不掃 chunks")
+@Test("閘的孤兒計數查詢（從原始碼抽出）只透過 chunks_unsourced 讀 chunks")
 func orphanCountUsesThePartialIndex() throws {
     let (db, cleanup) = try makeTempDatabase()
     defer { cleanup() }
@@ -376,3 +380,44 @@ func orphanCountUsesThePartialIndex() throws {
     #expect(touchingChunks.allSatisfy { $0.contains("chunks_unsourced") },
             "讀 chunks 的每一步都要走 chunks_unsourced：\(plan)")
 }
+
+// MARK: - trigger 本體與 layout 版本綁在一起（#61 R2-2）
+
+/// trigger 與 partial index 用 `CREATE … IF NOT EXISTS` 建立，所以**只改本體、不升 `layoutVersion` 的修正，
+/// 永遠到不了既有索引**：舊的（可能有缺陷的）trigger 留在使用者的檔案裡，而稽核失敗之後的出口正是「升級後
+/// 新版自動從零重建」。這裡把每個 layout 版本的 trigger 與 partial index 定義釘成一個雜湊：本體一改，現行版本
+/// 的釘值就對不上。**補救是升 `layoutVersion` 並新增一列，不是改舊的那一列**——舊列是已出貨索引的事實。
+private let pinnedCountSchemaSHA256: [Int: String] = [
+    6: "8dca07c0ed8e7c8c5a6d0e3d44c42d31f1e5ee6bb89da126a229b53fe59b3f70",
+]
+
+@Test("trigger 與 partial index 的定義一改就要升 layoutVersion（每個版本一個釘值）")
+func countSchemaIsPinnedToTheLayoutVersion() throws {
+    let (db, cleanup) = try makeTempDatabase()
+    defer { cleanup() }
+    var definitions: [String] = []
+    try db.query(
+        "SELECT type, name, sql FROM sqlite_schema WHERE type = 'trigger' OR name = 'chunks_unsourced' ORDER BY type, name"
+    ) { statement in
+        definitions.append([text(statement, 0), text(statement, 1), text(statement, 2)].joined(separator: "\u{1F}"))
+    }
+    #expect(definitions.count == 4, "前提：三個 trigger 加一個 partial index：\(definitions.count)")
+    let digest = SHA256.hash(data: Data(definitions.joined(separator: "\u{1E}").utf8))
+        .map { String(format: "%02x", $0) }.joined()
+    let layout = IndexDatabase.layoutVersion
+    #expect(pinnedCountSchemaSHA256[layout] == digest,
+            "layout \(layout) 的 trigger／partial index 定義變了：升 IndexDatabase.layoutVersion，再在 pinnedCountSchemaSHA256 新增 \(layout + 1): \"\(digest)\"（不要改舊的那一列）")
+}
+
+/// R1-17 → R2-10：`sourcesChecked` 數兩邊來源鍵的聯集。只有 `source_chunk_counts` 多出一個鍵時，兩種寫法才分得出來。
+@Test("sourcesChecked 數 chunk_sources 與 source_chunk_counts 兩邊來源鍵的聯集")
+func sourcesCheckedCountsTheUnionOfKeys() throws {
+    let (db, cleanup) = try makeTempDatabase()
+    defer { cleanup() }
+    _ = try db.insert(chunks: [turn("U", in: "proj-one/s1.jsonl")], sourceKey: "proj-one/s1.jsonl")
+    try db.execute("INSERT INTO source_chunk_counts(source_key, n) VALUES ('proj-one/ghost.jsonl', 1)")
+    let audit = try db.auditDerivedCounts()
+    #expect(audit.sourcesChecked == 2)
+    #expect(audit.divergentSources == 1)
+}
+

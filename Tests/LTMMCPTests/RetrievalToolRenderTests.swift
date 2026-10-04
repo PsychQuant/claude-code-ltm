@@ -135,3 +135,16 @@ func skippedTallyDoesNotAffectTheResponse() {
         RetrievalTool.render(with) == RetrievalTool.render(outcome(deferred: false)),
         "兩個只差 skipped 的 outcome 必須 render 出相同回應")
 }
+
+@Test("欠著稽核時 MCP 回應帶一行提示（#61 R2-4）")
+func owedAuditSurfacesInResponse() {
+    let owed = QueryOutcome(
+        hits: [], strategyID: "archival",
+        refresh: RefreshReport(
+            sourcesRefreshed: 0, sourcesUnreadable: [], sourcesInvalidated: 0,
+            skipped: SkipTally(), auditOwed: true),
+        eventsRecorded: 0, unattributableResults: 0)
+    let text = RetrievalTool.render(owed)
+    #expect(text.contains(RecallBlock.auditOwedLine), "實得：\(text)")
+    #expect(!RetrievalTool.render(outcome(deferred: false)).contains(RecallBlock.auditOwedLine))
+}

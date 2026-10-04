@@ -98,6 +98,10 @@ func gateProbeMatchesSourcesWithoutCursor() throws {
 /// #61 R1-13：6.1 的 A/B 兩臂各有幾份 SQL 複本，先前沒有任何測試比對（#60 加這個檔，正是因為兩份沒比對的
 /// 閘 SQL 讓探針「安靜地量另一件事」）。這裡比三組：`gate-matrix.sh` 的 Q1／Q2 對閘本身；`gate-matrix.sh`
 /// 的 P1／P2、`gate-harness` 的 `--pre61-sql` 對 `auditDerivedCounts()` 裡的舊寫法。比對壓縮空白、去掉結尾分號。
+///
+/// R2-19：只錨在稽核上，日後改寫稽核的 SQL 會讓 A/B 的 pre61 臂安靜地跟著變。所以舊寫法另外對一份凍結的原文
+/// 比——`1f4123b`（#61 之前最後一個 commit）的 `sourcesWithoutCursor()`。稽核要改寫時，這條會紅，提醒 pre61 臂
+/// 不能跟著改。
 @Test("gate-matrix.sh 與 gate-harness 的閘 SQL 複本，與閘本身、稽核的舊寫法逐項相等")
 func gateSQLCopiesMatch() throws {
     func shellConstant(_ name: String, in script: String) throws -> String {
@@ -139,6 +143,8 @@ func gateSQLCopiesMatch() throws {
     try #require(gate.count == 2, "閘要恰好兩條查詢：\(gate)")
     let oldQ1 = try #require(audit.first { $0.contains("NOT IN") }, "稽核裡找不到舊的 Q1：\(audit)")
     let oldQ2 = try #require(audit.first { $0.contains("FROM chunk_sources EXCEPT") }, "稽核裡找不到舊的 Q2：\(audit)")
+    #expect(oldQ1 == pre61GateQ1 && oldQ2 == pre61GateQ2,
+            "稽核的舊寫法與 #61 之前的閘原文不同——pre61 臂量的就不再是 #61 之前的閘")
 
     let script = try readRepoFile("scripts/probes/gate-matrix.sh")
     #expect(normalized(try shellConstant("Q1", in: script)) == gate[0])
@@ -488,3 +494,8 @@ private func probeConstant(_ name: String, in tokens: CTokens) throws -> String 
     }
     return try #require(hits.count == 1 ? hits.first : nil, "探針裡的 \(name) 要恰好宣告一次，實際 \(hits.count) 次")
 }
+
+/// `1f4123b:Sources/LTMIndex/IndexDatabase.swift` 的 `sourcesWithoutCursor()` 兩條查詢（壓縮空白後）。凍結的原文，不要改。
+private let pre61GateQ1 = "SELECT COUNT(*) FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_sources)"
+private let pre61GateQ2 = "SELECT source_key FROM chunk_sources EXCEPT SELECT source_key FROM scan_state"
+

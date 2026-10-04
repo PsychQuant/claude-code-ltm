@@ -666,11 +666,15 @@ CLI 只跑過 Q1——但那個順序本紀錄沒有重跑。它的誠實邊界�
   - 表 1–10 量的是 #61 之前的閘 SQL（表 11 是 #58 之前的）。重跑時探針與 harness 會量到新的閘；表 3、表 4、表 7 的
     CLI 命令與 `scripts/probes/gate-matrix.sh` 的 CLI 那一臂寫死了舊的 SQL（前者還有樹名），沒有測試守，要自己換——
     不換的話 CLI 量的是舊 SQL，log 裡沒有任何訊號。
-- **#61 之後（change `gate-structural-counts`）要重跑本紀錄的表，先 checkout `1f4123b`**（#60 的最後一個 commit）：
-  #61 把探針 `scripts/probes/gate-first-touch.c` 改成跑結構計數版的 SQL（layout 6；在 layout 5 的索引上會報
-  no such column），`scripts/probes/gate-matrix.sh` 的 A、B 段也跟著量新的閘，CLI 那一臂改成帶兩條 SQL——上一點說
-  「寫死了舊的 SQL」的那一臂已經換掉了。#61 之前的閘 SQL 在 #61 之後由 `gate-harness --pre61-sql` 與
-  `gate-matrix.sh` 的 P1／P2 跑（兩者由 `GateProbeSQLSyncTests` 釘住），只用在 #61 的 A/B，不用來重現本紀錄的表。
+- **#61 之後（change `gate-structural-counts`）**：#61 把探針 `scripts/probes/gate-first-touch.c` 改成跑結構計數版的
+  SQL（layout 6；在 layout 5 的索引上會報 no such column），`scripts/probes/gate-matrix.sh` 的 A、B 段也跟著量新的閘，
+  CLI 那一臂改成帶兩條 SQL——上一點說「寫死了舊的 SQL」「沒有測試守」的那一臂已經換掉，它的 Q1／Q2 與 P1／P2 現在都由
+  `GateProbeSQLSyncTests.gateSQLCopiesMatch` 釘住。#61 之前的閘 SQL 在 #61 之後由 `gate-harness --pre61-sql` 與 P1／P2 跑，
+  只用在 #61 的 A/B。
+  要在**本紀錄的條件**下重跑表 1–10，光 checkout `1f4123b`（#60 的最後一個 commit）不夠：發版後線上索引是 layout 6，
+  在它上面跑 `1f4123b` 的工具量到的是舊 SQL 跑在另一種頁面配置上，不是原條件（#61 R2-15）。還要一份由 `1f4123b` 的
+  binary 建出的 layout 5 索引——在線上索引上建它，會讓發版的 binary 拒答到下一次重建為止，所以要建在旁路
+  （`LTM_DERIVED_ROOT`）。
 
 ## 誠實邊界
 

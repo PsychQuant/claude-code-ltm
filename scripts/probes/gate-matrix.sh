@@ -10,8 +10,9 @@
 #   sudo；GATE_MATRIX_DB（測試用）。
 # #61（gate-structural-counts）：Q1／Q2 與 A、B 段量的是結構計數版的閘（layout 6；在 layout 5 的索引上 harness、探針
 #   與 CLI 都會報 no such column 而停）。D 段在同一個檔、同一個窗口交錯量 #61 之前（--pre61-sql、P1／P2）與之後的閘，
-#   暖態三輪（兩臂都先暖過；每輪輪換兩臂的先後）、冷態每臂一個樣本；那是 #61 量測紀錄的 A/B。
-#   GATE_MATRIX_SECTIONS 選要跑的段（預設 ABCD；#61 的 6.1 只要 D：GATE_MATRIX_SECTIONS=D）。
+#   暖態四輪（兩臂都先暖過；每輪輪換兩臂的先後，各先兩次——三輪平衡不了，R2-19）、冷態每臂一個樣本；那是 #61 量測紀錄的 A/B。
+#   GATE_MATRIX_SECTIONS 選要跑的段（沒設是 ABCD；#61 的 6.1 只要 D：GATE_MATRIX_SECTIONS=D）。設成空字串會拒跑——
+#   先前空字串會被當成沒設、跑完全部 11 次 purge（R2-19）。
 #   layout 6 的檢查（四張表都在）在 sudo 之前做——GATE_MATRIX_DB，或不跑 A 段時；預設路徑又要跑 A 段時不做，
 #   因為它會讀索引的第 1 頁，A 段第一個樣本就不再是自然冷；那時 layout 5 的索引要到 sudo 之後的第一次 warmup 才停。
 # 用法：在自己的終端機執行  zsh scripts/probes/gate-matrix.sh
@@ -72,7 +73,7 @@ require_clean() {
   [ -z "$dirty" ] || fail '有未 commit 的改動（Sources/、Package.swift、harness、探針或這支腳本）：先 commit 或 stash'
 }
 require_clean
-SECTIONS="${GATE_MATRIX_SECTIONS:-ABCD}"
+SECTIONS="${GATE_MATRIX_SECTIONS-ABCD}"
 [[ "$SECTIONS" =~ '^[ABCD]+$' ]] || fail "GATE_MATRIX_SECTIONS 只能由 A、B、C、D 組成：$SECTIONS"
 has() { [[ "$SECTIONS" == *$1* ]]; }
 # 覆寫時先以唯讀確認它是 layout 6 的 ltm 索引（不然 harness 會把它改成 WAL 才失敗，或要到 sudo 之後才因
@@ -80,9 +81,9 @@ has() { [[ "$SECTIONS" == *$1* ]]; }
 # 預設路徑又要跑 A 段時不做這一步：它會讀索引的第 1 頁，A 段的 warmup 就不再是自然冷。
 if [ -n "${GATE_MATRIX_DB:-}" ] || ! has A; then
   n=$(sqlite3 -init /dev/null "file:$DB?mode=ro&immutable=1" \
-        "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('chunks','chunk_sources','scan_state','source_chunk_counts');" 2>&1) \
+        "SELECT (SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('chunks','chunk_sources','scan_state','source_chunk_counts')) || ':' || coalesce((SELECT value FROM meta WHERE key='layout_version'), '');" 2>&1) \
     || fail "讀不到 $DB 的 schema"
-  [ "$n" = 4 ] || fail "$DB 不是 layout 6 的 ltm 索引（缺 chunks／chunk_sources／scan_state／source_chunk_counts 其中之一）"
+  [ "$n" = 4:6 ] || fail "$DB 不是 layout 6 的 ltm 索引（要四張表 chunks／chunk_sources／scan_state／source_chunk_counts、meta 的 layout_version 是 6；讀到 $n）"
 fi
 # 沒有 -wal 就拒跑：harness 以讀寫開檔會建出它，後面 mtime 的比對會因此誤停。
 [ -f "$DB-wal" ] || fail "沒有 $DB-wal（harness 以讀寫開檔會建出它，mtime 的比對會因此誤停）：先建出它——預設路徑跑一次 ltm query；GATE_MATRIX_DB 跑 /usr/bin/sqlite3 -init /dev/null <檔> 'PRAGMA journal_mode;'（要印出 wal；只開檔、不跑語句不會建出 -wal）"
@@ -201,7 +202,7 @@ cold h-old;   run_h --old-sql --no-mmap; state after
 cold cli-old; run_cli old "$P1" "$OQ2";  state after
 fi
 
-# ── D. #61 的 A/B：同一個檔、同一個窗口，#61 之前的閘對結構計數版的閘（ltm 的設定）；暖態三輪交錯、冷態每臂一個樣本 ──
+# ── D. #61 的 A/B：同一個檔、同一個窗口，#61 之前的閘對結構計數版的閘（ltm 的設定）；暖態四輪交錯、冷態每臂一個樣本 ──
 # 兩臂都先暖過（只暖一臂的話，另一臂第一輪的第一次呼叫會付首次觸碰）；每輪輪換先後，順序不固定在同一邊（R1-13）。
 if has D; then
 d_pre61() { run_h --pre61-sql; run_cli pre61 "$P1" "$P2"; }
@@ -209,7 +210,7 @@ d_gate()  { run_h;             run_cli gate "$Q1" "$Q2"; }
 state warmup-61
 run_h --pre61-sql > /dev/null; run_cli pre61 "$P1" "$P2" > /dev/null
 run_h > /dev/null;             run_cli gate "$Q1" "$Q2" > /dev/null
-for round in 1 2 3; do
+for round in 1 2 3 4; do
   if (( round % 2 )); then
     state "61 warm round=$round order=pre61,gate"; d_pre61; d_gate
   else

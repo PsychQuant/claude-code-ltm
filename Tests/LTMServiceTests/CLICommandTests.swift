@@ -356,6 +356,7 @@ func auditFromTheCLI() throws {
     let corrupted = try runCLI(["build", "--audit"], environment: workspace.environment)
     #expect(corrupted.code != 0)
     #expect(corrupted.err.contains("1 個 chunk 的 source_count、0 個來源的 source_chunk_counts"))
+    #expect(corrupted.err.contains("沒有併入任何內容"))
     #expect(corrupted.err.contains("ltm build --full"))
 }
 
@@ -1373,4 +1374,89 @@ func compareRefusesBudgetAndDoubleDashTerminatesOptions() throws {
     #expect(dashed.code == 0, Comment(rawValue: dashed.err))
     #expect(dashed.out.hasPrefix("<!-- ltm:recall v1 -->"))
     #expect(dashed.out.contains("上次 flock"))
+}
+
+// MARK: - 欠著稽核（#61 R2）
+
+/// 在一份建好的索引上造出「欠著稽核」的狀態，再用 `corruption` 改壞它。
+private func owedIndex(_ workspace: CLIWorkspace, marker: String = "1", corruption: String) throws {
+    let database = try IndexDatabase(path: workspace.derived.appendingPathComponent("index.sqlite3").path)
+    defer { database.close() }
+    try database.setMeta("audit_pending", marker)
+    try database.execute(corruption)
+}
+
+private func pendingMarker(_ workspace: CLIWorkspace) throws -> String? {
+    let database = try IndexDatabase(path: workspace.derived.appendingPathComponent("index.sqlite3").path)
+    defer { database.close() }
+    return try database.meta("audit_pending")
+}
+
+/// R2-1／R2-4：生產路徑那一行（`refreshIncrementally` 傳 `honorPendingAudit: false`）由這條守——先前的兩條
+/// 一條跑在沒有欠著稽核的索引上，一條自己把 `false` 傳給 `IndexBuilder`，那一行整行刪掉都照綠。
+@Test("欠著稽核、計數被改壞：ltm query 照常回答、提示欠一次稽核，旗標留著")
+func theQueryPathAnswersAndSurfacesAnOwedAudit() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    try owedIndex(workspace, corruption: "UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+    let result = try runCLI(["query", "內容", "--all-projects"], environment: workspace.environment)
+    #expect(result.code == 0, "查詢路徑若補跑了欠著的稽核，這裡會被拒：\(result.err)")
+    #expect(result.err.contains("索引欠一次整份稽核"), "欠著就要說出來：\(result.err)")
+    #expect(try pendingMarker(workspace) == "1")
+}
+
+@Test("欠著稽核、閘看得到的漂移：ltm query 叫你先跑 ltm build，不是 --full")
+func theQueryPathRefusalNamesBuildWhenAnAuditIsOwed() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    try owedIndex(workspace, corruption: "UPDATE chunks SET source_count = 0 WHERE id = (SELECT MIN(id) FROM chunks)")
+    let result = try runCLI(["query", "內容", "--all-projects"], environment: workspace.environment)
+    #expect(result.code != 0)
+    #expect(result.err.contains("先跑 `ltm build`"), "實得：\(result.err)")
+    #expect(!result.err.contains("請跑 `ltm build --full` 從零重建"))
+}
+
+@Test("欠著稽核（重建被中斷）的 ltm build：掃描前補跑、不併入，歸因是缺陷或外部修改，建議跑一次 --full")
+func anOwedAuditFromAnInterruptedRebuildSuggestsOneFullRebuild() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    try owedIndex(workspace, corruption: "UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+    let result = try runCLI(["build"], environment: workspace.environment)
+    #expect(result.code != 0)
+    #expect(result.err.contains("掃描前補跑"))
+    #expect(result.err.contains("沒有併入任何內容"))
+    #expect(result.err.contains("計數不符：1 個 chunk"))
+    #expect(result.err.contains("分不出是 ltm 的缺陷還是外部修改"))
+    #expect(result.err.contains("跑一次 `ltm build --full`"))
+    #expect(try pendingMarker(workspace) == "1")
+}
+
+@Test("上一次不中斷的重建結尾稽核已失敗：ltm build 歸為缺陷，說明再跑 --full 會重演")
+func aFailedRebuildAuditIsReportedAsADefect() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    try owedIndex(workspace, marker: "rebuild-failed",
+                  corruption: "UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+    let result = try runCLI(["build"], environment: workspace.environment)
+    #expect(result.code != 0)
+    #expect(result.err.contains("是 ltm 自己的缺陷"))
+    #expect(result.err.contains("同一個版本再跑 `ltm build --full` 會重演"))
+}
+
+/// R2-11／R2-12：只有覆蓋缺口時不提計數；來源鍵是本機路徑，單獨一行並註明回報前遮掉。
+@Test("欠著稽核、只有覆蓋缺口：訊息不提計數不符，路徑單獨一行並註明遮掉")
+func anOwedAuditWithOnlyCoverageGapsReadsConsistently() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    try owedIndex(workspace, corruption: "DELETE FROM scan_state")
+    let result = try runCLI(["build"], environment: workspace.environment)
+    #expect(result.code != 0)
+    #expect(result.err.contains("覆蓋缺口：1 個"))
+    #expect(!result.err.contains("計數不符"), "只有覆蓋缺口時不該提計數：\(result.err)")
+    #expect(result.err.contains("本機路徑（貼到公開的 issue 之前請先遮掉）"))
 }
