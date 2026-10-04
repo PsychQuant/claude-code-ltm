@@ -874,7 +874,12 @@ public struct IndexBuilder: Sendable {
         // 從零重建（或續完一次中斷的從零重建）的結尾跑一次整份稽核（#61）：兩份計數是重建中由 trigger
         // 長出來的，在真實資料上對一次重算。不通過代表 trigger 有缺陷——資料已提交，所以拋一個與掃描前
         // 不同的錯，讓 CLI 說得出「再跑 --full 會重演」；欠著的稽核不清，下一次 `ltm build` 再跑。
-        if rebuildFromScratch || owesAudit {
+        //
+        // 有界併入留下未併入的來源時，這一次沒有完成從零重建的工作：不稽核、旗標留著，由真正完成它的
+        // 那一次 build 跑。今天出貨的呼叫端不會走到這裡（查詢路徑拒絕從零重建、也不讀旗標），但
+        // `build(full:budget:)` 是公開的組合，而先前它會在半份索引上稽核、清掉旗標，之後續完的部分
+        // 就永遠不再被稽核——R1-3 那個洞換一條路回來（#61 verify-fix R1 自查）。
+        if (rebuildFromScratch || owesAudit) && unmergedSourceKeys.isEmpty {
             let result = try database.auditDerivedCounts()
             guard result.countsAgree, result.coverageFindings.isEmpty else {
                 throw BuildError.postRebuildAuditFailed(

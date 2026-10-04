@@ -1574,6 +1574,37 @@ func anInterruptedRebuildIsAuditedByTheBuildThatFinishesIt() throws {
     #expect(try database.meta("audit_pending") == nil, "稽核通過之後不再欠")
 }
 
+/// R1-3 的同一個洞換一條路：有界的從零重建沒併完時，它沒有完成從零重建的工作，不得在半份索引上
+/// 稽核、清掉旗標——否則續完的部分永遠不被稽核。
+@Test("有界的從零重建沒併完：不稽核、旗標留著；續完它的 build 在結尾稽核整份")
+func aBoundedRebuildThatStopsShortLeavesTheAuditOwed() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeSixSources(in: corpus)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    let clock = SteppingClock()
+    let partial = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A"),
+                                   batchChunkTarget: 2, clock: clock.now).build(budget: 1.5)
+    #expect(partial.wasFullRebuild, "前提：空的 derived 走從零重建")
+    #expect(partial.unmergedSources > 0, "前提：預算在併完之前用完")
+    #expect(partial.audits.isEmpty)
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        #expect(try database.meta("audit_pending") != nil)
+    }
+    let finished = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")).build()
+    #expect(!finished.wasFullRebuild)
+    #expect(finished.audits.map(\.moment) == [.afterBuild])
+    #expect(finished.audits.first?.result.chunksChecked == 12)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.meta("audit_pending") == nil)
+}
+
 @Test("查詢路徑（honorPendingAudit: false）不補跑欠著的稽核，旗標留給下一次 ltm build")
 func theQueryPathLeavesAPendingAuditToAnExplicitBuild() throws {
     let (corpus, derived) = try makeWorkspace()
