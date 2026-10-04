@@ -332,15 +332,20 @@ func badNumericFlagsGiveUsageErrorsNotCrashes() throws {
 func auditFromTheCLI() throws {
     let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
     defer { workspace.cleanup() }
-    _ = try runCLI(["build"], environment: workspace.environment)
+    let first = try runCLI(["build"], environment: workspace.environment)
+    #expect(first.out.contains("稽核（建置完成後）：檢查 2 個 chunk、1 個來源"), "從零建的結尾要報稽核")
     let plain = try runCLI(["build"], environment: workspace.environment)
     #expect(plain.code == 0)
-    #expect(!plain.out.contains("稽核："), "一般的增量 build 不跑稽核")
+    #expect(!plain.out.contains("稽核"), "一般的增量 build 不跑稽核")
 
     let audited = try runCLI(["build", "--audit"], environment: workspace.environment)
     #expect(audited.code == 0)
     if audited.code != 0 { Issue.record("build --audit stderr: \(audited.err)") }
-    #expect(audited.out.contains("稽核：檢查 2 個 chunk、1 個來源"))
+    #expect(audited.out.contains("稽核（掃描前）：檢查 2 個 chunk、1 個來源"))
+
+    let full = try runCLI(["build", "--full"], environment: workspace.environment)
+    #expect(full.code == 0)
+    #expect(full.out.contains("稽核（建置完成後）：檢查 2 個 chunk、1 個來源"), "--full 的結尾要報稽核")
 
     do {
         let database = try IndexDatabase(
@@ -352,6 +357,39 @@ func auditFromTheCLI() throws {
     #expect(corrupted.code != 0)
     #expect(corrupted.err.contains("1 個 chunk 的 source_count、0 個來源的 source_chunk_counts"))
     #expect(corrupted.err.contains("ltm build --full"))
+}
+
+@Test("ltm build --audit 遇到被刪掉的游標：非零結束，用閘的那一套訊息")
+func auditRefusesAMissingCursorFromTheCLI() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    do {
+        let database = try IndexDatabase(
+            path: workspace.derived.appendingPathComponent("index.sqlite3").path)
+        defer { database.close() }
+        try database.execute("DELETE FROM scan_state")
+    }
+    let result = try runCLI(["build", "--audit"], environment: workspace.environment)
+    #expect(result.code != 0)
+    #expect(result.err.contains("續讀狀態無法讀取"))
+}
+
+/// spec：`ltm query` 的併入不跑稽核。把一個 chunk 的計數改成錯的非零值——結構性閘不會因此拒絕，
+/// 稽核會。所以查詢照常回答，就代表這條路徑沒有跑稽核（R1-10）。
+@Test("ltm query 的併入不跑稽核：計數被改壞（非零），查詢照常回答")
+func theQueryPathDoesNotAudit() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    do {
+        let database = try IndexDatabase(
+            path: workspace.derived.appendingPathComponent("index.sqlite3").path)
+        defer { database.close() }
+        try database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+    }
+    let result = try runCLI(["query", "內容", "--all-projects"], environment: workspace.environment)
+    #expect(result.code == 0, "查詢路徑若跑了稽核，這裡會被拒：\(result.err)")
 }
 
 @Test("預算被超過時 CLI 具名拒絕，並列出補救")

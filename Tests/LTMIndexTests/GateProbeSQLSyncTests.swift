@@ -95,6 +95,63 @@ func gateProbeMatchesSourcesWithoutCursor() throws {
             "探針的程式碼變了——確認它仍量 sourcesWithoutCursor() 的兩條查詢、--mmap 仍下 MMAP_PRAGMA，再把 expectedProbeSkeletonSHA256 更新成 \(digest)")
 }
 
+/// #61 R1-13：6.1 的 A/B 兩臂各有幾份 SQL 複本，先前沒有任何測試比對（#60 加這個檔，正是因為兩份沒比對的
+/// 閘 SQL 讓探針「安靜地量另一件事」）。這裡比三組：`gate-matrix.sh` 的 Q1／Q2 對閘本身；`gate-matrix.sh`
+/// 的 P1／P2、`gate-harness` 的 `--pre61-sql` 對 `auditDerivedCounts()` 裡的舊寫法。比對壓縮空白、去掉結尾分號。
+@Test("gate-matrix.sh 與 gate-harness 的閘 SQL 複本，與閘本身、稽核的舊寫法逐項相等")
+func gateSQLCopiesMatch() throws {
+    func shellConstant(_ name: String, in script: String) throws -> String {
+        let regex = try NSRegularExpression(pattern: "^" + name + #"="(.*)"$"#, options: [.anchorsMatchLines])
+        let range = NSRange(script.startIndex..., in: script)
+        let matches = regex.matches(in: script, range: range)
+        try #require(matches.count == 1, "gate-matrix.sh 裡 \(name)= 要恰好一行：\(matches.count)")
+        return String(script[Range(matches[0].range(at: 1), in: script)!])
+    }
+    func swiftConstant(_ name: String, in source: String) throws -> String {
+        let regex = try NSRegularExpression(pattern: "^let " + name + #" = "(.*)"$"#, options: [.anchorsMatchLines])
+        let range = NSRange(source.startIndex..., in: source)
+        let matches = regex.matches(in: source, range: range)
+        try #require(matches.count == 1, "gate-harness 裡 let \(name) = \"…\" 要恰好一行：\(matches.count)")
+        return String(source[Range(matches[0].range(at: 1), in: source)!])
+    }
+    func normalized(_ sql: String) -> String {
+        var s = squash(sql)
+        while s.hasSuffix(";") { s.removeLast() }
+        return s
+    }
+    func queryLiterals(in body: [SwiftToken]) -> [String] {
+        var skeleton = ""
+        var found: [String] = []
+        for token in body {
+            switch token {
+            case .code(let text): skeleton += text
+            case .literal(let text):
+                let tail = squash(skeleton)
+                if tail.hasSuffix("query(") || tail.hasSuffix("count(") { found.append(normalized(text)) }
+                skeleton += "\"" + text + "\""
+            }
+        }
+        return found
+    }
+    let database = try lexSwift(readRepoFile("Sources/LTMIndex/IndexDatabase.swift"))
+    let gate = queryLiterals(in: try functionBody(of: "public func sourcesWithoutCursor()", in: database))
+    let audit = queryLiterals(in: try functionBody(of: "public func auditDerivedCounts()", in: database))
+    try #require(gate.count == 2, "閘要恰好兩條查詢：\(gate)")
+    let oldQ1 = try #require(audit.first { $0.contains("NOT IN") }, "稽核裡找不到舊的 Q1：\(audit)")
+    let oldQ2 = try #require(audit.first { $0.contains("FROM chunk_sources EXCEPT") }, "稽核裡找不到舊的 Q2：\(audit)")
+
+    let script = try readRepoFile("scripts/probes/gate-matrix.sh")
+    #expect(normalized(try shellConstant("Q1", in: script)) == gate[0])
+    #expect(normalized(try shellConstant("Q2", in: script)) == gate[1])
+    #expect(normalized(try shellConstant("P1", in: script)) == oldQ1)
+    #expect(normalized(try shellConstant("P2", in: script)) == oldQ2)
+
+    let harness = try readRepoFile("scripts/gate-harness/main.swift")
+    #expect(normalized(try swiftConstant("oldQ1", in: harness)) == oldQ1, "pre61Q1 沿用 oldQ1")
+    #expect(harness.contains("let pre61Q1 = oldQ1"), "pre61Q1 要沿用 oldQ1，不是另一份字面")
+    #expect(normalized(try swiftConstant("pre61Q2", in: harness)) == oldQ2)
+}
+
 /// #60：探針的 `--mmap` 與預設 `cache_size` 被紀錄當成「ltm 的設定」。這裡不比對字面，而是讀回有效值：
 /// 用 `IndexDatabase(path:)` 開一條連線，和一條照探針 `--mmap` 的方式設定的連線（`MMAP_PRAGMA` 必須是單一條
 /// `PRAGMA mmap_size=<整數>`），兩者讀回的 `mmap_size`、`cache_size` 要相同，且 mmap 真的開著。它只比這兩個值：
@@ -137,7 +194,7 @@ func indexDatabaseSettingsMatchProbe() throws {
     #expect((ltm["mmap_size"] ?? 0) > 0, "IndexDatabase 的連線沒有開 mmap：\(ltm)")
 }
 
-private func readRepoFile(_ path: String) throws -> String {
+func readRepoFile(_ path: String) throws -> String {
     var root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     while !FileManager.default.fileExists(atPath: root.appendingPathComponent("Package.swift").path) {
         root = root.deletingLastPathComponent()
@@ -199,7 +256,7 @@ enum SwiftToken: Equatable {
     case literal(String)
 }
 
-private func squash(_ text: String) -> String {
+func squash(_ text: String) -> String {
     text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).joined(separator: " ")
 }
 
@@ -215,7 +272,7 @@ private func codeMatches(of pattern: String, in tokens: [SwiftToken]) -> [String
 
 /// 在去掉註解的 token 裡找宣告（全檔只能出現一次），取到與它後面第一個 `{` 配對的 `}` 為止，
 /// 回傳本體的 token（不含外層大括號）。宣告若只出現在註解裡，這裡找不到——那是對的。
-private func functionBody(of declaration: String, in tokens: [SwiftToken]) throws -> [SwiftToken] {
+func functionBody(of declaration: String, in tokens: [SwiftToken]) throws -> [SwiftToken] {
     var hits: [(Int, String.Index)] = []
     for (index, token) in tokens.enumerated() {
         guard case .code(let text) = token else { continue }

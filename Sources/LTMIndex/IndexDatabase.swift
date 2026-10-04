@@ -332,8 +332,17 @@ public final class IndexDatabase {
         //
         // 兩份計數都是 `chunk_sources` 的函數（純衍生物，`--full` 重建時由同一組 trigger 重新長出來），
         // 而且**只有下面三個 trigger 寫它們**：它們與寫 `chunk_sources` 的那個敘述在同一個交易裡執行，
-        // 任何 SQL 寫入路徑都逃不掉，app 這邊沒有第二份實作可以漂移。這正是 #58 棄用 count-diff 的
-        // 那條理由的反面：count-diff 是 app 算出來的推論，這裡是引擎維護的事實。
+        // app 這邊沒有第二份實作可以漂移。
+        //
+        // 引擎保證的只有「trigger 會跑、與寫入同一個交易」，**不保證 trigger 本體寫對**（那是 app 寫的
+        // SQL），而且下面這幾條寫入會繞過它們——這是封閉列舉，不得依性質類推第五條：
+        // 1. REPLACE 衝突處理刪掉的列（預設 `recursive_triggers = OFF`，見下）；
+        // 2. 關掉 trigger 的連線（`sqlite3_db_config(SQLITE_DBCONFIG_ENABLE_TRIGGER, 0)`）；
+        // 3. `DROP TRIGGER` 之後的寫入；
+        // 4. `PRAGMA writable_schema` 下直接改 schema。
+        // 所以每次 build 的閘是**信任**這份簿記，不是稽核它——這正是 #58 對 count-diff 的異議；差別是這裡
+        // 有稽核那一層（`auditDerivedCounts()`）。R1-5（#61 verify）：上一版寫「任何 SQL 寫入路徑都逃不掉」，
+        // 五行後就列出第 1 條；也寫「引擎維護的事實」，高估了引擎保證的範圍。
         //
         // **兩條使用規則，由 `DerivedCountTests` 的掃描守**：
         // - 不得用 REPLACE 衝突處理寫 `chunk_sources`（`INSERT OR REPLACE`、`REPLACE INTO`、表定義的
@@ -341,8 +350,9 @@ public final class IndexDatabase {
         //   DELETE trigger——`/usr/bin/sqlite3` 3.54 實測：計數 2、實際 1，而且沒有任何錯誤。
         // - app 的 SQL 不得直接寫 `source_count` 或 `source_chunk_counts`。
         //
-        // 那兩條掃描比對文字：擋得住一般的編輯，擋不住刻意繞過。真正量到計數正確的是等價測試——
-        // 每一條寫入路徑之後計數等於從 `chunk_sources` 重算的結果，拿掉任一個 trigger 會紅。
+        // 那兩條掃描比對文字，只認得 `derivedCountGuardsRecogniseTheirShapes` 列出的形狀；拆成多段字串
+        // 拼接或插值的 SQL 認不得。真正量到計數正確的是等價測試——每一條寫入路徑之後計數等於從
+        // `chunk_sources` 重算的結果，拿掉任一個 trigger 會紅。
         try execute(
             """
             CREATE TABLE IF NOT EXISTS source_chunk_counts (
@@ -383,8 +393,9 @@ public final class IndexDatabase {
             END
             """)
         try execute("CREATE INDEX IF NOT EXISTS chunks_by_project ON chunks(project)")
-        // 閘的 Q1 只讀這個 partial index（#61）：正常情況下它是空的，所以「有沒有孤兒 chunk」的成本
-        // 跟著孤兒數走，不跟著 chunk 總數走。`DerivedCountTests` 釘住查詢計畫真的走它。
+        // 閘的 Q1 只讀這個 partial index（#61）：它只收 `source_count = 0` 的 chunk，正常情況下是空的。
+        // `DerivedCountTests` 釘住閘的那條查詢的計畫真的走它。耗時的量測在 change gate-structural-counts
+        // 的 task 6.1，還沒做——這裡只講讀什麼結構，不講多快。
         try execute(
             "CREATE INDEX IF NOT EXISTS chunks_unsourced ON chunks(id) WHERE source_count = 0")
         // 兩條 lexical 通道。`content=''` 表示外部內容表——FTS5 不自己存一份原文，
@@ -402,6 +413,10 @@ public final class IndexDatabase {
     }
 
     // MARK: - meta
+
+    public func removeMeta(_ key: String) throws {
+        try execute("DELETE FROM meta WHERE key = ?", bind: [.text(key)])
+    }
 
     public func setMeta(_ key: String, _ value: String) throws {
         try execute(
@@ -484,6 +499,10 @@ public final class IndexDatabase {
 
     /// 索引裡有 chunk、但 `scan_state` 沒有游標的那些來源鍵。
     ///
+    /// **#61 起它讀的是 trigger 維護的計數，所以它只在計數與 `chunk_sources` 一致時等於下面說的那個
+    /// 直接答案**；計數漂移（一次繞過 trigger 的寫入）時兩者可以往兩個方向分岔，只有
+    /// `auditDerivedCounts()` 看得出來。下面幾段是 #44 時寫的，描述的是它要回答的問題。
+    ///
     /// **這是「這份游標涵蓋得住索引嗎」的直接答案，不是代理。**
     ///
     /// 上一版用 `previousState.files.isEmpty` 當那個問題的代理，而代理在本輪自己
@@ -509,8 +528,8 @@ public final class IndexDatabase {
         // 無從得知，所以任何游標都涵蓋不住它們。
         //
         // 兩條查詢都讀 trigger 維護的計數（#61），不再走 `chunk_sources`：每次 build 做 sound 的稽核
-        // 必然要讀它所量化的全部東西，所以這裡改成讀引擎在同一交易裡維護的事實，而 O(N) 的稽核搬到
-        // `auditDerivedCounts()`（按需、與每次從零重建之後）。計數與 `chunk_sources` 一致時，兩條查詢
+        // 必然要讀它所量化的全部東西，所以這裡改成信任 trigger 在同一交易裡維護的簿記，而讀完整份資料的
+        // 稽核搬到 `auditDerivedCounts()`（按需、與完成從零重建的那一次 build 的結尾）。計數與 `chunk_sources` 一致時，兩條查詢
         // 回的集合與舊寫法相同——`IndexBuilderTests` 的缺游標、零 mapping、刪掉最後一個連結三條測試守這件事。
         var orphanChunks = 0
         try query(
@@ -561,8 +580,8 @@ public final class IndexDatabase {
     }
 
     /// 不假設任何計數的整份稽核：閘的兩個全稱命題用直接走 `chunk_sources` 的舊寫法重算，兩份衍生計數
-    /// 逐列與重算比對（#61）。成本與索引總量成正比，所以只在 `ltm build --audit` 與每次從零重建之後跑，
-    /// 查詢路徑不跑。
+    /// 逐列與重算比對（#61）。它要讀完整份 `chunks` 與 `chunk_sources`，所以只在 `ltm build --audit` 與
+    /// 完成從零重建的那一次 build 的結尾跑，查詢路徑不跑。
     ///
     /// 「稽核者不得假設待稽核物」（#58 棄 count-diff 的理由）在這一層成立：這裡的每一個數字都是從
     /// `chunk_sources` 本身算出來的，沒有讀任何由 trigger 維護的值來當答案——那些值只是被比對的對象。
@@ -573,7 +592,9 @@ public final class IndexDatabase {
             return value
         }
         let chunksChecked = try count("SELECT COUNT(*) FROM chunks")
-        let sourcesChecked = try count("SELECT COUNT(DISTINCT source_key) FROM chunk_sources")
+        // 兩邊出現過的來源都算：`source_chunk_counts` 裡多出來的列也被檢查（R1-17）。
+        let sourcesChecked = try count(
+            "SELECT COUNT(*) FROM (SELECT source_key FROM chunk_sources UNION SELECT source_key FROM source_chunk_counts)")
         let divergentChunks = try count(
             """
             SELECT COUNT(*) FROM chunks c

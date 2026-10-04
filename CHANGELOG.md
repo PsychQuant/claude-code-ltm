@@ -55,12 +55,16 @@
 - **閘改讀結構計數；索引 layout 5 → 6，升版後要從零重建一次（#61）**：每次 build（因此每次 `ltm query` 的
   併入）都跑的 #44 閘，兩個全稱命題——每個 chunk 至少一個來源、每個持有 chunk 的來源都有游標——先前每次都走完
   `chunk_sources`。現在改讀由 SQLite trigger 在同一交易裡維護的兩份衍生計數：`chunks.source_count`（加上
-  `WHERE source_count = 0` 的 partial index）與 `source_chunk_counts`。閘的判斷與拒絕訊息不變。
-  不假設任何計數的整份稽核改為 `ltm build --audit`（掃描之前跑，取代結構性閘），以及每次從零重建之後跑一次；
-  計數與重算不符時以非零結束、指名不符的 chunk 數與來源數，要求 `ltm build --full`。查詢路徑不跑稽核。
+  `WHERE source_count = 0` 的 partial index）與 `source_chunk_counts`。**在兩份計數與 `chunk_sources` 一致時**，
+  閘的判斷與拒絕訊息不變；計數若被一次繞過 trigger 的寫入弄歪，結構性閘與舊寫法可以往兩個方向分岔。
+  **這是取捨**：#44 那兩個命題的 sound 檢查不再每次 build 都做，搬到了整份稽核——`ltm build --audit`（掃描之前跑，
+  取代結構性閘），以及完成從零重建的那一次 build 的結尾（從零重建被中斷、之後由下一次 `ltm build` 續完時，由續完的
+  那一次補跑；查詢路徑不跑）。掃描前的稽核不通過時以非零結束、指名不符的 chunk 數與來源數，什麼都沒併入，要求
+  `ltm build --full`；建置結尾的稽核不通過時，訊息說明重建已提交、這是 ltm 的缺陷，不把 `--full` 當補救。
   **升版成本**：layout 6 的索引結構不同，舊索引在第一次 `ltm build` 時整份重建；查詢路徑在那之前照舊拒絕並指名
-  `ltm build --full`。效果的量測在發版、線上索引重建之後做，結果只會引用那份紀錄（`docs/measurements/`，
-  change `gate-structural-counts` 的 task 6.1）；這裡不寫任何數字。
+  `ltm build --full`。**這次升版在 #61 要求的前後量測完成之前出貨**（使用者的決定）：量測在發版、線上索引重建之後
+  做，結果只會引用那份紀錄（`docs/measurements/`，change `gate-structural-counts` 的 task 6.1），屆時再補進這一條；
+  這裡不寫任何數字。#67 若也要改索引結構，應與這次併在同一次升版（release 時協調）。
 
 ## [0.5.0] - 2026-09-05
 

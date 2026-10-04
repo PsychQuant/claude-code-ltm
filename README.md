@@ -219,8 +219,9 @@ repo 能保證的事。
 
 ```bash
 swift build                      # 產出 .build/debug/ltm
-ltm build                        # 掃語料、建索引（預設增量，--full 從零重建）
+ltm build                        # 掃語料、建索引（預設增量，--full 從零重建；從零重建的結尾會跑一次整份稽核）
                                  #   進度寫 stderr（--quiet 關掉），stdout 只有最終報告
+                                 #   --audit：掃描之前先對 chunk_sources 整份稽核閘讀的那兩份計數（#61）
                                  #   --batch-chunks N / --memory-budget-mb N 見 `ltm build --help`
 ltm query "要找的內容" --json     # 查詢；預設只搜當前 project
 ltm memory                       # 檢查記憶層，列出讀不回來的紀錄（唯讀）

@@ -973,7 +973,8 @@ public struct LTMService {
         do {
             // `refusingFullRebuild`：這條路徑上「整份重建」永遠是錯的答案——它會
             // 在查詢持有連線時刪掉 DB 與側車。先前這是註解裡的推理，現在是前置條件。
-            let report = try builder.build(refusingFullRebuild: true, budget: budget)
+            // `honorPendingAudit: false`：spec 規定查詢的併入不跑整份稽核（#61），欠著的留給 `ltm build`。
+            let report = try builder.build(refusingFullRebuild: true, budget: budget, honorPendingAudit: false)
             return RefreshReport(
                 sourcesRefreshed: report.sourcesRefreshed,
                 sourcesUnreadable: report.sourcesUnreadable,

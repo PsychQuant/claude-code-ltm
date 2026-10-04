@@ -13,8 +13,11 @@ import Testing
 //    `recursive_triggers = OFF` 下不觸發 DELETE trigger（`/usr/bin/sqlite3` 3.54 實測：計數 2、實際 1）；
 // 3. 閘的 Q1 走 partial index，不掃 `chunks`。
 //
-// 第 2 件是比對文字的檢查：擋得住一般的編輯，擋不住刻意繞過（字串拼接、插值、raw string）——與
-// `GateProbeSQLSyncTests` 同一條誠實邊界。
+// 第 2 件是比對文字的檢查，**只認得 `derivedCountGuardsRecogniseTheirShapes` 列出的那些形狀**（含 schema
+// 限定、加引號、別名、upsert 的 `DO UPDATE SET`、對 `chunks` 的 REPLACE）。認不得的：把 SQL 拆成多段字串
+// 拼接或插值。raw string 不是漏洞——切詞器遇到它就拋錯，掃描變紅。真正界定計數正確的是第 1 件的等價測試；
+// 這兩個掃描只是讓最常見的寫錯在掃描這一層就被指名（R1-7，#61 verify：上一版寫「擋得住一般的編輯」，
+// 而最自然的一種——在 chunks 的 upsert 裡加 `source_count`——它認不得）。
 
 // MARK: - 共用
 
@@ -216,6 +219,28 @@ func changingALinkKeyAborts() throws {
     }
     #expect(try sourceTable(db) == [s1: 2])
     #expect(try divergences(in: db).isEmpty)
+    // 中止訊息是 trigger 自己的，不是任何錯誤都算（R1-10）。
+    let error = #expect(throws: IndexDatabase.DatabaseError.self) {
+        try db.execute("UPDATE chunk_sources SET source_key = 'proj-one/again.jsonl'")
+    }
+    guard case .statementFailed(_, let message) = error else {
+        Issue.record("應該是 statementFailed，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(message.contains("chunk_sources keys are immutable"))
+}
+
+/// R1-6：DELETE trigger 的遞減分支。出貨路徑一次刪掉一個來源的全部連結，最後總是「那一列消失」，
+/// 看不出 `AND n = 1` 與遞減；直接刪掉其中一列連結才看得到。
+@Test("來源持有三列、刪掉其中一列：那個來源的計數變成 2，兩份計數仍等於重算")
+func deletingOneOfSeveralLinksDecrements() throws {
+    let (db, cleanup) = try makeTempDatabase()
+    defer { cleanup() }
+    let s1 = "proj-one/s1.jsonl"
+    _ = try db.insert(chunks: [turn("A", in: s1), turn("B", in: s1), turn("C", in: s1)], sourceKey: s1)
+    try db.execute("DELETE FROM chunk_sources WHERE chunk_id = (SELECT MIN(chunk_id) FROM chunk_sources)")
+    #expect(try sourceTable(db) == [s1: 2])
+    #expect(try divergences(in: db).isEmpty)
 }
 
 /// 一個 SQL 字面裡，用 REPLACE 衝突處理寫 `chunk_sources` 的形狀。
@@ -229,13 +254,21 @@ private func replacesChunkSources(_ literal: String) -> Bool {
 
 /// 一個 SQL 字面（trigger 的 DDL 以外）直接寫兩份衍生計數的形狀。
 private func writesDerivedCounts(_ literal: String) -> Bool {
-    if literal.range(of: #"\bCREATE\s+TRIGGER\b"#, options: [.regularExpression, .caseInsensitive]) != nil {
-        return false
-    }
+    // 只豁免那三個出貨的 trigger（名字＋掛在 chunk_sources 上）。先前是「含 CREATE TRIGGER 就豁免」，
+    // 於是一個掛在 chunks 上、寫 source_count 的新 trigger 也被放過（R1-7）。
+    let shipped = #"\bCREATE\s+TRIGGER\s+(IF\s+NOT\s+EXISTS\s+)?(chunk_sources_count_insert|chunk_sources_count_delete|chunk_sources_keys_immutable)\b[\s\S]*?\bON\s+chunk_sources\b"#
+    if literal.range(of: shipped, options: [.regularExpression, .caseInsensitive]) != nil { return false }
+    // 表名前可帶 schema 限定（`main.`）與引號（`"`、`` ` ``、`[`）。
+    let table = #"(\w+\.)?["`\[]?"#
     let patterns = [
-        #"\b(INSERT(\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(\s+OR\s+\w+)?|DELETE\s+FROM)\s+source_chunk_counts\b"#,
-        #"\bUPDATE(\s+OR\s+\w+)?\s+chunks\s+SET\b[\s\S]*\bsource_count\s*="#,
-        #"\bINSERT(\s+OR\s+\w+)?\s+INTO\s+chunks\s*\([^)]*\bsource_count\b"#,
+        #"\b(INSERT(\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(\s+OR\s+\w+)?|DELETE\s+FROM)\s+"# + table + #"source_chunk_counts\b"#,
+        #"\bUPDATE(\s+OR\s+\w+)?\s+"# + table + #"chunks["`\]]?(\s+(AS\s+)?\w+)?\s+SET\b[\s\S]*\bsource_count\s*="#,
+        #"\bINSERT(\s+OR\s+\w+)?\s+INTO\s+"# + table + #"chunks["`\]]?\s*\([^)]*\bsource_count\b"#,
+        // chunks 的 upsert 是最自然會碰到這一欄的地方。
+        #"\bDO\s+UPDATE\s+SET\b[\s\S]*\bsource_count\s*="#,
+        // 對 chunks 的 REPLACE 會把 source_count 重設成預設的 0，還會換 rowid。
+        #"\b(OR\s+REPLACE\s+INTO|REPLACE\s+INTO)\s+"# + table + #"chunks\b"#,
+        #"\bCREATE\s+TRIGGER\b[\s\S]*\b(source_count|source_chunk_counts)\b"#,
     ]
     return patterns.contains {
         literal.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil
@@ -256,8 +289,21 @@ func derivedCountGuardsRecogniseTheirShapes() {
     #expect(writesDerivedCounts("DELETE FROM source_chunk_counts WHERE source_key = ?"))
     #expect(writesDerivedCounts("INSERT INTO source_chunk_counts(source_key, n) VALUES(?, 1)"))
     #expect(!writesDerivedCounts("SELECT COUNT(*) FROM chunks WHERE source_count = 0"))
+    // R1-7 補上的形狀
+    #expect(writesDerivedCounts(
+        "INSERT INTO chunks(uuid, text) VALUES(?, ?) ON CONFLICT(project_fingerprint, uuid) DO UPDATE SET text=excluded.text, source_count=excluded.source_count"))
+    #expect(writesDerivedCounts("DELETE FROM main.source_chunk_counts WHERE source_key = ?"))
+    #expect(writesDerivedCounts(#"INSERT INTO "source_chunk_counts"(source_key, n) VALUES(?, 1)"#))
+    #expect(writesDerivedCounts("UPDATE chunks AS c SET source_count = 2 WHERE c.id = ?"))
+    #expect(writesDerivedCounts("INSERT OR REPLACE INTO chunks(uuid, text) VALUES(?, ?)"))
+    #expect(writesDerivedCounts(
+        "CREATE TRIGGER IF NOT EXISTS chunks_reset AFTER INSERT ON chunks BEGIN UPDATE chunks SET source_count = 0 WHERE id = NEW.id; END"))
     #expect(!writesDerivedCounts(
-        "CREATE TRIGGER IF NOT EXISTS chunk_sources_ai AFTER INSERT ON chunk_sources BEGIN UPDATE chunks SET source_count = source_count + 1 WHERE id = NEW.chunk_id; END"))
+        "INSERT INTO chunks(project, uuid) VALUES(?, ?) ON CONFLICT(project_fingerprint, uuid) DO UPDATE SET text=excluded.text"))
+    #expect(!writesDerivedCounts(
+        "CREATE TRIGGER IF NOT EXISTS chunk_sources_count_delete AFTER DELETE ON chunk_sources BEGIN DELETE FROM source_chunk_counts WHERE source_key = OLD.source_key AND n = 1; END"))
+    #expect(!writesDerivedCounts(
+        "CREATE TRIGGER IF NOT EXISTS chunk_sources_count_insert AFTER INSERT ON chunk_sources BEGIN UPDATE chunks SET source_count = source_count + 1 WHERE id = NEW.chunk_id; END"))
 }
 
 /// `Sources/` 底下每個 Swift 檔的 SQL 字面（相對路徑 → 字面）。走訪失敗要拋錯，不能安靜地變成「沒有檔」。
@@ -299,12 +345,30 @@ func onlyTriggersWriteTheDerivedCounts() throws {
 
 // MARK: - 3. 閘的 Q1 走 partial index
 
-@Test("閘的孤兒計數查詢走 chunks_unsourced，不掃 chunks")
+/// 閘的第一條查詢，**從 `sourcesWithoutCursor()` 的原始碼抽出來**，不是測試裡的一份複本（R1-9：先前查的
+/// 是複本，閘改了而複本沒改時，這條測試會繼續綠著守一句已經不存在的 SQL）。抽法與 `GateProbeSQLSyncTests` 相同。
+private func gateOrphanCountSQL() throws -> String {
+    let tokens = try lexSwift(readRepoFile("Sources/LTMIndex/IndexDatabase.swift"))
+    var skeleton = ""
+    for token in try functionBody(of: "public func sourcesWithoutCursor()", in: tokens) {
+        switch token {
+        case .code(let text): skeleton += text
+        case .literal(let text):
+            if squash(skeleton).hasSuffix("query(") { return squash(text) }
+            skeleton += "\"" + text + "\""
+        }
+    }
+    throw LexError.unbalanced("sourcesWithoutCursor() 裡找不到 query( 之後的 SQL 字面")
+}
+
+@Test("閘的孤兒計數查詢（從原始碼抽出）走 chunks_unsourced，不掃 chunks")
 func orphanCountUsesThePartialIndex() throws {
     let (db, cleanup) = try makeTempDatabase()
     defer { cleanup() }
+    let sql = try gateOrphanCountSQL()
+    #expect(sql.contains("source_count"), "前提：抽到的是孤兒計數那一條：\(sql)")
     var plan: [String] = []
-    try db.query("EXPLAIN QUERY PLAN SELECT COUNT(*) FROM chunks WHERE source_count = 0") { statement in
+    try db.query("EXPLAIN QUERY PLAN " + sql) { statement in
         plan.append(text(statement, 3))
     }
     let touchingChunks = plan.filter { $0.range(of: #"\bchunks\b"#, options: .regularExpression) != nil }

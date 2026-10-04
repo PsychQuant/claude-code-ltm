@@ -1503,6 +1503,8 @@ func aChunkThatLostItsLastSourceIsRefused() throws {
         try database.execute("DELETE FROM chunk_sources WHERE chunk_id = (SELECT MIN(chunk_id) FROM chunk_sources)")
         #expect(try database.sourcesWithoutCursor() == ["(1 個 chunk 沒有任何 source mapping)"])
     }
+    // 語料多一則：閘在掃描之前拒絕，所以它不得被併入。
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容", "第三段內容"])
     let error = #expect(throws: IndexBuilder.BuildError.self) {
         _ = try IndexBuilder(location: derived, scanner: scanner,
                              embedder: StubEmbedder(revision: "rev-A")).build()
@@ -1512,6 +1514,9 @@ func aChunkThatLostItsLastSourceIsRefused() throws {
         return
     }
     #expect(detail.contains("1 個 chunk 沒有任何 source mapping"))
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.chunkCount() == 2, "閘拒絕時不得併入新內容")
 }
 
 // MARK: - 整份稽核（#61）
@@ -1529,13 +1534,129 @@ func auditRunsWhereItShould() throws {
         embedder: StubEmbedder(revision: "rev-A"))
 
     let first = try builder.build()
-    #expect(first.wasFullRebuild && first.audit != nil, "第一次是從零建，結尾要跑稽核")
-    #expect(try builder.build().audit == nil, "一般的增量 build 不跑稽核")
+    #expect(first.wasFullRebuild && first.audits.map(\.moment) == [.afterBuild], "第一次是從零建，結尾要跑稽核")
+    #expect(try builder.build().audits.isEmpty, "一般的增量 build 不跑稽核")
     let audited = try builder.build(audit: true)
-    #expect(audited.audit?.chunksChecked == 2)
-    #expect(audited.audit?.sourcesChecked == 1)
+    #expect(audited.audits.map(\.moment) == [.beforeScan])
+    #expect(audited.audits.first?.result.chunksChecked == 2)
+    #expect(audited.audits.first?.result.sourcesChecked == 1)
     let full = try builder.build(full: true)
-    #expect(full.wasFullRebuild && full.audit?.chunksChecked == 2, "--full 之後要跑稽核")
+    #expect(full.wasFullRebuild && full.audits.map(\.moment) == [.afterBuild], "--full 之後要跑稽核")
+    #expect(full.audits.first?.result.chunksChecked == 2)
+}
+
+/// R1-3（#61 verify）：從零重建一旦中斷，stamps 已經寫成新版，下一次 build 走增量續完——先前那條路徑
+/// 永遠不稽核。現在從零重建開始時記下「欠一次稽核」，續完的 build 在結尾補跑，通過才清掉。
+@Test("從零重建中途中斷，續完它的下一次 build 在結尾補跑稽核，通過後不再欠")
+func anInterruptedRebuildIsAuditedByTheBuildThatFinishesIt() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["甲", "乙", "丙", "丁"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    let doomed = FailingAfterNEmbedder(revision: "rev-A", failAfter: 2)
+    #expect(throws: FailingAfterNEmbedder.Boom.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner, embedder: doomed, batchChunkTarget: 1).build()
+    }
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        #expect(try database.meta("audit_pending") != nil, "從零重建開始時要記下欠一次稽核")
+    }
+    let finished = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")).build()
+    #expect(!finished.wasFullRebuild, "前提：續完走的是增量")
+    #expect(finished.audits.map(\.moment) == [.afterBuild])
+    #expect(finished.audits.first?.result.chunksChecked == 4)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.meta("audit_pending") == nil, "稽核通過之後不再欠")
+}
+
+@Test("查詢路徑（honorPendingAudit: false）不補跑欠著的稽核，旗標留給下一次 ltm build")
+func theQueryPathLeavesAPendingAuditToAnExplicitBuild() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["甲", "乙", "丙"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    #expect(throws: FailingAfterNEmbedder.Boom.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner,
+                             embedder: FailingAfterNEmbedder(revision: "rev-A", failAfter: 1), batchChunkTarget: 1).build()
+    }
+    let queried = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A"))
+        .build(refusingFullRebuild: true, honorPendingAudit: false)
+    #expect(queried.audits.isEmpty)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.meta("audit_pending") != nil)
+}
+
+/// R1-4：從零重建之後（含續完一次中斷的從零重建）稽核不通過，是 ltm 的缺陷，不是使用者的索引壞了——
+/// 錯誤要與掃描前的稽核分開，CLI 才說得出「再跑 --full 會重演」。這裡用「欠著稽核時手動改壞計數」造出它。
+@Test("欠著的稽核在建置結尾不通過：丟 postRebuildAuditFailed，旗標留著")
+func aFailedAuditAfterARebuildIsADistinctError() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["甲", "乙", "丙"])
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    #expect(throws: FailingAfterNEmbedder.Boom.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner,
+                             embedder: FailingAfterNEmbedder(revision: "rev-A", failAfter: 1), batchChunkTarget: 1).build()
+    }
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+    }
+    let error = #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")).build()
+    }
+    guard case .postRebuildAuditFailed(let chunks, let sources, let coverage) = error else {
+        Issue.record("應該是 postRebuildAuditFailed，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(chunks == 1 && sources == 0 && coverage.isEmpty)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.meta("audit_pending") != nil, "沒通過就繼續欠著")
+}
+
+/// R1-6：稽核的 per-source 那一半。三種壞法各自要被抓到，而且只算在來源那一側。
+@Test("source_chunk_counts 的三種壞法（多一列、n 不對、少一列）都讓 audit: true 拒絕，指名 0 個 chunk、1 個來源",
+      arguments: [
+          "INSERT INTO source_chunk_counts(source_key, n) VALUES ('proj-one/ghost.jsonl', 1)",
+          "UPDATE source_chunk_counts SET n = n + 1",
+          "DELETE FROM source_chunk_counts",
+      ])
+func auditCatchesEveryPerSourceDivergence(_ corruption: String) throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute(corruption)
+    }
+    let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
+    guard case .derivedCountsDiverged(let chunks, let sources) = error else {
+        Issue.record("應該是 derivedCountsDiverged，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(chunks == 0 && sources == 1)
 }
 
 @Test("audit: true 發現手動改壞的 source_count：具名指出 1 個 chunk、0 個來源，且不併入任何內容")

@@ -276,9 +276,10 @@ enum BuildCommand {
 
         選項：
           --full                捨棄既有索引，從零重建（重建完會跑一次整份稽核）
-          --audit               掃描之前先跑整份稽核：不讀任何維護中的計數，直接從
+          --audit               掃描之前先跑整份稽核：不拿維護中的計數當答案，直接從
                                 chunk_sources 重算閘的兩個判斷與兩份計數，逐一比對。
-                                成本與索引大小成正比，所以平常的 build 與查詢不跑。
+                                它要讀完整份 chunks 與 chunk_sources，所以平常的 build
+                                與查詢不跑。
           --quiet               不印進度（進度預設寫 stderr；CI／腳本可關掉）
           --batch-chunks N      一批 chunk 數的上界（預設 2000）。批次以 chunk 為
                                 粒度組裝、來源可在 chunk 邊界切開（#47），最大
@@ -366,8 +367,11 @@ enum BuildCommand {
                   新增 chunk：\(report.chunksIndexed)　索引總計：\(report.totalChunks)
                   作廢來源：\(report.sourcesInvalidated)　embedding revision：\(report.embeddingRevision)
                 """)
-            if let audit = report.audit {
-                print("  稽核：檢查 \(audit.chunksChecked) 個 chunk、\(audit.sourcesChecked) 個來源，計數與 chunk_sources 一致")
+            for audit in report.audits {
+                let moment = audit.moment == .beforeScan ? "掃描前" : "建置完成後"
+                print(
+                    "  稽核（\(moment)）：檢查 \(audit.result.chunksChecked) 個 chunk、"
+                        + "\(audit.result.sourcesChecked) 個來源，計數與 chunk_sources 一致")
             }
             if !report.sourcesUnreadable.isEmpty {
                 // 讀不到的來源**沒有**被作廢（那會刪掉還存在的內容），所以它們的
@@ -460,10 +464,23 @@ enum BuildCommand {
             case .derivedCountsDiverged(let chunks, let sources):
                 Output.error(
                     """
-                    ✗ 稽核發現衍生計數與 chunk_sources 不符：\(chunks) 個 chunk 的 source_count、\
+                    ✗ 掃描前的稽核發現衍生計數與 chunk_sources 不符：\(chunks) 個 chunk 的 source_count、\
                     \(sources) 個來源的 source_chunk_counts。
-                    每次 build 的閘讀的就是這兩份計數，所以它的判斷不能再信任；這次沒有併入任何內容。
-                    請跑 `ltm build --full` 從零重建。
+                    每次 build 的閘讀的就是這兩份計數，所以這次在掃描之前就停了，沒有併入任何內容。
+                    請跑 `ltm build --full` 從零重建：兩份計數會由 trigger 從頭長出來，重建的結尾也會再稽核一次。
+                    """)
+                return LTMCommandLine.ExitCode.indexStateError.rawValue
+            case .postRebuildAuditFailed(let chunks, let sources, let coverage):
+                let coverageLine = coverage.isEmpty
+                    ? ""
+                    : "\n另有 \(coverage.count) 個覆蓋缺口——例如 \(coverage.prefix(3).joined(separator: "、"))。"
+                Output.error(
+                    """
+                    ✗ 從零重建已經完成並提交，但結尾的稽核不通過：\(chunks) 個 chunk 的 source_count、\
+                    \(sources) 個來源的 source_chunk_counts 與 chunk_sources 不符。\(coverageLine)
+                    這兩份計數是這次重建中由 ltm 的 trigger 長出來的，所以這是 ltm 自己的缺陷，不是索引被弄壞了——
+                    再跑 `ltm build --full` 會重演同一個結果。請回報這個問題（附上這段訊息）。
+                    在修好之前索引仍可查詢，但每次 build 的閘讀的是這兩份計數；下一次 `ltm build` 會再稽核一次。
                     """)
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .sidecarShorterThanDeclared(let declared, let found):
@@ -734,6 +751,9 @@ enum QueryCommand {
                 // 查詢路徑不跑稽核、也不從零重建，所以照理到不了；到了就是 bug，照實說。
                 Output.error(
                     "✗ 意外的稽核錯誤（\(chunks) 個 chunk、\(sources) 個來源的計數不符）——查詢路徑不跑稽核。這是 bug。")
+            case .postRebuildAuditFailed(let chunks, let sources, _):
+                Output.error(
+                    "✗ 意外的稽核錯誤（建置結尾：\(chunks) 個 chunk、\(sources) 個來源的計數不符）——查詢路徑不跑稽核。這是 bug。")
             case .memoryBudgetExceeded(let estimated, let budget, _):
                 // **這條分支到得了，而且是設計如此。** 上一版的註解寫「查詢路徑不設
                 // 預算，所以這裡到不了」——那句話被同一次改動變成假的（#46 的 F 列
