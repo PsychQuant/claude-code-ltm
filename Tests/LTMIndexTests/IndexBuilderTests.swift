@@ -2955,6 +2955,43 @@ func aFailedMarkerWriteStillReportsTheAudit() throws {
     #expect(try database.meta("audit_pending") == nil)
 }
 
+/// R8（codex）：沒記上旗標時，之後的 build 與查詢只走結構性閘；閘看得到的不符（有連結的 chunk 的
+/// source_count 被改成 0）照樣讓兩者被拒，補救是 `--full`。`AuditMessage` 的那一句據此分成兩半。
+@Test("沒記上旗標、閘看得到的不符：之後的 build 與查詢都被閘拒絕，補救是 --full")
+func anUnrecordedFailureLeavesTheGateInCharge() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("UPDATE chunks SET source_count = 0 WHERE id = (SELECT MIN(id) FROM chunks)")
+        try database.execute(
+            "CREATE TRIGGER block_marker BEFORE INSERT ON meta WHEN NEW.key = 'audit_pending' BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+    }
+    let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
+    guard case .auditFailed(let failure) = error else {
+        Issue.record("應該是 auditFailed，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(failure.divergentChunks == 1 && !failure.recorded, "前提：計數不符、旗標沒記上")
+    for honor in [true, false] {
+        let refusal = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(honorPendingAudit: honor) }
+        guard case .stateUnreadable(let detail) = refusal else {
+            Issue.record("honorPendingAudit: \(honor) 應該被閘拒絕，實際是 \(String(describing: refusal))")
+            continue
+        }
+        #expect(detail.contains("ltm build --full"))
+    }
+}
+
 /// R6-8：欠著稽核的掃描前稽核也看得到懸空的連結（`isClean` 的第五項）。
 @Test("欠著稽核、有懸空的連結：ltm build 在掃描前就停下")
 func anOwedAuditCatchesDanglingLinksBeforeTheScan() throws {

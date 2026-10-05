@@ -1254,9 +1254,21 @@ func coverageOnlyMessage() {
 @Test("旗標寫入失敗：不說「記著欠一次稽核」，改說沒記上")
 func notRecordedMessage() {
     let text = AuditMessage.failure(failure(moment: .beforeScan, recorded: false))
-    #expect(text.contains("沒能把「欠一次稽核」寫進索引"))
+    #expect(text.contains("索引沒有記下欠一次稽核"))
     #expect(!text.contains("這份索引記著欠一次稽核"), "R5-4：不得同時說記了又沒記")
-    #expect(text.contains("也不會提示欠著"), "R7-6：沒記上時也要說查詢怎麼做")
+    #expect(text.contains("不會提示欠著"), "R7-6：沒記上時也要說查詢怎麼做")
+    // R8（codex）：閘看得到的不符照樣讓查詢與 build 被拒，補救是 --full（沒有旗標）。不得無條件說照常回答。
+    #expect(text.contains("閘放行時"))
+    #expect(text.contains("閘看得到這個問題時，兩者都會被拒絕、叫你跑 `ltm build --full`"))
+}
+
+/// R8（codex）：只有覆蓋缺口時閘必然拒絕，沒記上也一樣——那一句不得說「閘放行時照常回答」。
+@Test("沒記上旗標、只有覆蓋缺口：說 build 與查詢都會被拒、補救是 --full")
+func notRecordedCoverageOnlyMessage() {
+    let text = AuditMessage.failure(
+        failure(chunks: 0, sources: 0, coverage: ["/tmp/x/a.jsonl"], moment: .afterBuild, recorded: false))
+    #expect(text.contains("下一次 build 與查詢都會被拒絕、叫你跑 `ltm build --full`"))
+    #expect(!text.contains("閘放行時"))
 }
 
 /// R7-6：「N 個 chunk 沒有任何 source mapping」那一筆不是路徑，不得算成來源、也不得印在本機路徑那一行。

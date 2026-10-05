@@ -16,6 +16,8 @@ public enum AuditMessage {
             lines.append("✗ 建置結尾的整份稽核不通過；這次的併入已經提交。")
         }
         let countsDiverge = failure.divergentChunks > 0 || failure.divergentSources > 0
+        // 只有覆蓋缺口、計數一致、沒有懸空連結時，結構性閘看到的正是稽核的覆蓋缺口——閘必然拒絕（R6-2）。
+        let coverageOnly = !countsDiverge && failure.danglingLinks == 0 && !failure.coverageFindings.isEmpty
         if countsDiverge {
             lines.append(
                 "  計數不符：\(failure.divergentChunks) 個 chunk 的 source_count、\(failure.divergentSources) 個來源的 "
@@ -42,7 +44,7 @@ public enum AuditMessage {
                 "  這份索引記著欠一次稽核：之後的 `ltm build` 會在掃描前先稽核、不通過就不併入（從零重建——`--full`，或 "
                     + "embedding revision、layout 變動觸發的——會丟掉這個紀錄，只在它自己的結尾稽核）。")
             // R6-2：R5 把「閘拒絕時」那一半拿掉了，而只有覆蓋缺口、或計數一致時，閘與稽核看到的是同一件事。
-            if !countsDiverge && failure.danglingLinks == 0 && !failure.coverageFindings.isEmpty {
+            if coverageOnly {
                 lines.append(
                     "  查詢不跑稽核；這次的覆蓋缺口結構性閘也看得到，所以查詢會被拒絕、叫你先跑 `ltm build`（另一個行程正持有"
                         + "建置鎖、查詢這一輪沒有併入時不跑閘，會照常回答）。")
@@ -52,10 +54,24 @@ public enum AuditMessage {
                         + "叫你先跑 `ltm build`。")
             }
         } else {
-            // R7-6：沒記上時也要說查詢怎麼做；只有懸空連結時「信任計數」不是重點。
+            // 沒記上時也要說 build 與查詢怎麼做（R7-6），而且要跟記上時一樣分「閘放行」與「閘看得到」（R8，codex）：
+            // 先前無條件寫「查詢照常回答、照常併入」，但閘看得到的不符——例如有連結的 chunk 的 source_count 被改成 0——
+            // 照樣讓查詢與下一次 build 被拒。沒有旗標時閘拒絕的補救是 `--full`，不是 `ltm build`。
+            //
+            // 沒記上有兩種來源，訊息不分：寫旗標失敗（沒欠著時的 `--audit`），或旗標在這次 build 期間被移除
+            // （欠著時讀快照、或建置結尾的那一刻，旗標已經不在）。
             lines.append(
-                "  （這次沒能把「欠一次稽核」寫進索引：寫入旗標失敗。下一次 build 不會記得它，會照常走結構性閘，不再找這些"
-                    + "問題；查詢照常回答、照常併入，也不會提示欠著。修好寫入問題後再跑一次 `ltm build --audit`。）")
+                "  （索引沒有記下欠一次稽核：寫入旗標失敗，或旗標在這次 build 期間被移除。下一次 build 與查詢都不會記得它，"
+                    + "只走結構性閘。）")
+            if coverageOnly {
+                lines.append(
+                    "  這次的覆蓋缺口結構性閘也看得到，所以下一次 build 與查詢都會被拒絕、叫你跑 `ltm build --full`"
+                        + "（另一個行程正持有建置鎖、查詢這一輪沒有併入時不跑閘，會照常回答）。")
+            } else {
+                lines.append(
+                    "  閘放行時，build 照常併入、查詢照常回答與併入，不會提示欠著，也不再找這些問題；閘看得到這個問題時，"
+                        + "兩者都會被拒絕、叫你跑 `ltm build --full`。確認索引檔可以寫入之後，再跑一次 `ltm build --audit`。")
+            }
         }
         lines.append("  能做的事：")
         lines.append(

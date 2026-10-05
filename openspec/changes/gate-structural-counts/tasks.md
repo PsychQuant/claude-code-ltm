@@ -98,3 +98,8 @@
 - [x] 14.3 R7-7: a real layout-5 index (no `source_count`, no `source_chunk_counts`, no triggers or partial index) is rebuilt by the next build and passes the end audit. Verify: `aLayoutFiveIndexIsRebuilt`.
 - [x] 14.4 R7-3/4/5/8: spec (every *incremental* build audits while owed; the record-write and snapshot sentence; the coverage-only exception), corpus-indexing sentence repaired, "rejection message unchanged" narrowed to decisions and findings, the gate refusal names the index file, CHANGELOG, design, proposal, tasks. Verify: content review in R8.
 
+
+## 15. Verify R8 fixes (issuecomment-5992523682; partial round — only Codex completed)
+
+- [x] 15.1 R8-1: when the index holds no owed record (`recorded: false` — the write failed, or the key was removed during the build), the message no longer says unconditionally that queries keep answering and merging. Like the recorded branch, it splits on the structural gate: while the gate admits, builds merge and queries answer and merge without the owed line or these findings; when the gate sees the problem, both are refused and told to run `ltm build --full`. A coverage-only failure says plainly that both are refused. Verify: `anUnrecordedFailureLeavesTheGateInCharge` (a linked chunk with `source_count = 0` and the key write blocked: later builds with `honorPendingAudit` true and false are refused naming `--full`), `notRecordedMessage`, `notRecordedCoverageOnlyMessage` (replacing the branch's `coverageOnly` with `false` turns it red).
+- [x] 15.2 R8-1: ltm-cli spec (the record sentence in the failure-message list and in the write-failure paragraph), design. Verify: content review in R9.
