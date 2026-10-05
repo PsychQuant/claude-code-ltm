@@ -148,3 +148,19 @@ func owedAuditSurfacesInResponse() {
     #expect(text.contains(AuditMessage.owedLine(mergeDeferred: false)), "實得：\(text)")
     #expect(!RetrievalTool.render(outcome(deferred: false)).contains(AuditMessage.owedLine(mergeDeferred: false)))
 }
+
+/// R5-5：延後併入時，MCP 回應用延後的欠著行（呼叫點先前沒有測試）。
+@Test("延後併入且欠著稽核時，MCP 回應用延後的說法")
+func owedAuditWhileDeferredUsesTheDeferredLine() {
+    let owed = QueryOutcome(
+        hits: [], strategyID: "archival",
+        refresh: RefreshReport(
+            sourcesRefreshed: 0, sourcesUnreadable: [], sourcesInvalidated: 0,
+            skipped: SkipTally(), mergeDeferredForConcurrentBuild: true, auditOwed: true),
+        eventsRecorded: 0, unattributableResults: 0)
+    let text = RetrievalTool.render(owed)
+    #expect(text.contains(AuditMessage.mergeDeferredLine))
+    #expect(text.contains(AuditMessage.owedLine(mergeDeferred: true)))
+    #expect(!text.contains(AuditMessage.owedLine(mergeDeferred: false)))
+}
+

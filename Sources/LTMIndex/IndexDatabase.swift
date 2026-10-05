@@ -576,10 +576,16 @@ public final class IndexDatabase {
         public let divergentChunks: Int
         /// `source_chunk_counts` 與重算不符的來源數：計數不同、該有列卻沒有、不該有列卻有，都算。
         public let divergentSources: Int
+        /// 指向已不存在的 chunk 的 `chunk_sources` 列數（#61 R5-2）。`chunk_sources` 沒有外鍵、`chunks.id`
+        /// 會重用 rowid，所以一次外部刪除 chunk 之後，新 turn 可能撞上懸空的連結、upsert 走 DO UPDATE、
+        /// INSERT trigger 不觸發——先前四項檢查都看不到它，問題要到下一次寫入才以計數不符出現。
+        public let danglingLinks: Int
         /// 用舊寫法（直接走 `chunk_sources`）算出的閘結果，格式與 `sourcesWithoutCursor()` 相同。
         public let coverageFindings: [String]
 
         public var countsAgree: Bool { divergentChunks == 0 && divergentSources == 0 }
+        /// 五項都沒有發現。
+        public var isClean: Bool { countsAgree && danglingLinks == 0 && coverageFindings.isEmpty }
     }
 
     /// 不假設任何計數的整份稽核：閘的兩個全稱命題用直接走 `chunk_sources` 的舊寫法重算，兩份衍生計數
@@ -587,7 +593,7 @@ public final class IndexDatabase {
     /// 完成從零重建的那一次 build 的結尾、與欠著稽核時的 `ltm build` 跑，查詢路徑不跑。
     ///
     /// 「稽核者不得假設待稽核物」（#58 棄 count-diff 的理由）在這一層成立：判斷用的數字——孤兒 chunk、
-    /// 缺游標的來源、兩份計數各自與重算的差——都從 `chunks` 與 `chunk_sources` 本身算出來，trigger 維護的值
+    /// 缺游標的來源、懸空的連結、兩份計數各自與重算的差——都從 `chunks` 與 `chunk_sources` 本身算出來，trigger 維護的值
     /// 只是被比對的對象。例外是報告用的 `sourcesChecked`：它把 `source_chunk_counts` 的鍵也算進分母，因為多出
     /// 來的列同樣被檢查過（R1-17）；它不參與任何判斷。
     public func auditDerivedCounts() throws -> DerivedCountAudit {
@@ -617,6 +623,8 @@ public final class IndexDatabase {
                 WHERE NOT EXISTS (SELECT 1 FROM chunk_sources s WHERE s.source_key = c.source_key)
             )
             """)
+        let danglingLinks = try count(
+            "SELECT COUNT(*) FROM chunk_sources s WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.id = s.chunk_id)")
         var findings: [String] = []
         let orphanChunks = try count(
             "SELECT COUNT(*) FROM chunks WHERE id NOT IN (SELECT chunk_id FROM chunk_sources)")
@@ -632,7 +640,7 @@ public final class IndexDatabase {
         return DerivedCountAudit(
             chunksChecked: chunksChecked, sourcesChecked: sourcesChecked,
             divergentChunks: divergentChunks, divergentSources: divergentSources,
-            coverageFindings: findings.sorted())
+            danglingLinks: danglingLinks, coverageFindings: findings.sorted())
     }
 
     public func meta(_ key: String) throws -> String? {

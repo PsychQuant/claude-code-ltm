@@ -1190,76 +1190,61 @@ func theOwedGateRefusalCarriesItsRemedy() throws {
     #expect(rendered.contains("先跑 `ltm build`"), "MCP 看到的錯誤要帶補救：\(rendered)")
 }
 
-// MARK: - 稽核失敗訊息的每一種組合（#61 R3-9：不中斷重建的第一次失敗，CLI 造不出來）
+// MARK: - 稽核失敗訊息（#61 R3-9 起單元測試；R5 拿掉歸因）
 
 private func failure(
-    chunks: Int = 1, sources: Int = 0, coverage: [String] = [],
-    moment: BuildAudit.Moment, attribution: AuditFailure.Attribution,
-    previousDefect: Bool = false, recorded: Bool = true
+    chunks: Int = 1, sources: Int = 0, dangling: Int = 0, coverage: [String] = [],
+    moment: BuildAudit.Moment, recorded: Bool = true
 ) -> AuditFailure {
     AuditFailure(
         IndexDatabase.DerivedCountAudit(
             chunksChecked: 3, sourcesChecked: 1, divergentChunks: chunks, divergentSources: sources,
-            coverageFindings: coverage),
-        moment: moment, attribution: attribution, previousDefect: previousDefect, recorded: recorded)
+            danglingLinks: dangling, coverageFindings: coverage),
+        moment: moment, recorded: recorded)
 }
 
-@Test("建置結尾、缺陷：說明這次的併入已提交、不符長在這次的寫入裡，--full 不是補救")
-func defectAfterBuildMessage() {
-    let text = AuditMessage.failure(failure(moment: .afterBuild, attribution: .defect))
-    #expect(text.contains("這次的併入已經提交"))
-    #expect(text.contains("不符長在這一次的寫入裡"))
-    #expect(text.contains("是 ltm 自己的缺陷"))
-    #expect(text.contains("`ltm build --full` 不是補救"))
-    #expect(text.contains("丟掉索引裡記著的這筆判定"), "R4-4：--full 會抹掉判定，要說出來")
-    #expect(!text.contains("分不出是 ltm 的缺陷還是外部修改"))
-}
-
-/// R4-1：掃描前的失敗一律是「分不出」，先前的缺陷判定只在訊息裡提一句。
-@Test("掃描前、先前判定過缺陷：仍是分不出，提到先前的判定，什麼都沒併入")
-func previousDefectBeforeScanMessage() {
-    let text = AuditMessage.failure(
-        failure(moment: .beforeScan, attribution: .defectOrOutsideChange, previousDefect: true))
+@Test("掃描前：沒有併入、分不出原因、記著欠著稽核、--full 只驗得到從零重建的路徑")
+func beforeScanMessage() {
+    let text = AuditMessage.failure(failure(moment: .beforeScan))
     #expect(text.contains("沒有併入任何內容"))
-    #expect(text.contains("先前一次建置結尾的稽核已經判定過 ltm 的缺陷"))
-    #expect(text.contains("分不出是 ltm 的缺陷還是外部修改"))
-    #expect(!text.contains("不是補救"))
+    #expect(text.contains("計數不符：1 個 chunk"))
+    #expect(text.contains("ltm 分不出原因"))
+    #expect(text.contains("記著欠一次稽核"))
+    #expect(text.contains("照常把新內容併入"), "R5-7：查詢照常併入要說出來")
+    #expect(text.contains("`ltm build --full` 從零重建"))
+    #expect(text.contains("通過也不排除增量路徑"))
+    for word in ["是 ltm 自己的缺陷", "不是補救", "判定"] {
+        #expect(!text.contains(word), "R5：不歸因——不得出現「\(word)」")
+    }
 }
 
-/// R4-3：`--full` 不是判別試驗——它結尾通過不排除增量路徑的缺陷。
-@Test("掃描前、缺陷或外部修改：--full 讓計數重新長出來，但通過不排除增量路徑的缺陷")
-func defectOrOutsideChangeMessage() {
-    let text = AuditMessage.failure(failure(moment: .beforeScan, attribution: .defectOrOutsideChange))
-    #expect(text.contains("分不出是 ltm 的缺陷還是外部修改"))
-    #expect(text.contains("`ltm build --full` 會讓兩份計數從頭長出來"))
-    #expect(text.contains("通過不排除增量路徑"))
-    #expect(text.contains("`ltm build --audit`"))
-    #expect(!text.contains("若它結尾的稽核又不通過，那就是缺陷"), "R4-3 之前的說法把 --full 當成判別試驗")
+@Test("建置結尾：這次的併入已提交，其餘同掃描前")
+func afterBuildMessage() {
+    let text = AuditMessage.failure(failure(moment: .afterBuild))
+    #expect(text.contains("這次的併入已經提交"))
+    #expect(text.contains("ltm 分不出原因"))
+    #expect(!text.contains("是 ltm 自己的缺陷"))
 }
 
-@Test("旗標寫入失敗時，訊息說出這次的判定沒記上")
-func notRecordedMessage() {
-    let text = AuditMessage.failure(failure(moment: .afterBuild, attribution: .defect, recorded: false))
-    #expect(text.contains("沒能寫進索引"))
-    #expect(!AuditMessage.failure(failure(moment: .afterBuild, attribution: .defect)).contains("沒能寫進索引"))
-}
-
-@Test("只有覆蓋缺口：不提計數，路徑單獨一行標明遮掉")
-func coverageOnlyMessage() {
-    let text = AuditMessage.failure(
-        failure(chunks: 0, sources: 0, coverage: ["proj/s1.jsonl"], moment: .afterBuild, attribution: .defect))
+@Test("懸空的連結：具名指出")
+func danglingLinksMessage() {
+    let text = AuditMessage.failure(failure(chunks: 0, dangling: 2, moment: .beforeScan))
+    #expect(text.contains("懸空的連結：2 個"))
     #expect(!text.contains("計數不符"))
-    #expect(!text.contains("不符長在"), "R4-7：只有覆蓋缺口時不說「不符」")
-    #expect(text.contains("覆蓋缺口長在這一次的寫入裡"))
+}
+
+@Test("只有覆蓋缺口：不提計數與連結，路徑單獨一行標明遮掉")
+func coverageOnlyMessage() {
+    let text = AuditMessage.failure(failure(chunks: 0, sources: 0, coverage: ["proj/s1.jsonl"], moment: .afterBuild))
+    #expect(!text.contains("計數不符"))
+    #expect(!text.contains("兩份計數"), "R5-9：只有覆蓋缺口時 --full 那一句不講計數")
     #expect(text.contains("覆蓋缺口：1 個"))
     #expect(text.split(separator: "\n").last?.contains("本機路徑（貼到公開的 issue 之前請先遮掉）：proj/s1.jsonl") == true)
 }
 
-@Test("--audit 的計數不符：說明沒有併入、已記成欠著稽核，覆蓋缺口不丟掉")
-func divergedMessage() {
-    let text = AuditMessage.diverged(chunks: 1, sources: 0, coverageFindings: ["proj/s1.jsonl"], recorded: true)
-    #expect(text.contains("沒有併入任何內容"))
-    #expect(text.contains("記成欠一次稽核"))
-    #expect(text.contains("覆蓋缺口：1 個"))
-    #expect(text.contains("通過不排除增量路徑"))
+@Test("旗標寫入失敗：不說「記著欠一次稽核」，改說沒記上")
+func notRecordedMessage() {
+    let text = AuditMessage.failure(failure(moment: .beforeScan, recorded: false))
+    #expect(text.contains("沒能把「欠一次稽核」寫進索引"))
+    #expect(!text.contains("這份索引記著欠一次稽核"), "R5-4：不得同時說記了又沒記")
 }

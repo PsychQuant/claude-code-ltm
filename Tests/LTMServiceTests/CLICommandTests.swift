@@ -364,7 +364,7 @@ func auditFromTheCLI() throws {
     #expect(queried.err.contains("索引欠一次整份稽核"), "失敗的 --audit 之後查詢要提示：\(queried.err)")
     let next = try runCLI(["build"], environment: workspace.environment)
     #expect(next.code != 0, "失敗的 --audit 之後，下一次 build 不得照常信任計數")
-    #expect(next.err.contains("掃描前補跑"))
+    #expect(next.err.contains("掃描前的整份稽核不通過"))
 }
 
 @Test("ltm build --audit 遇到被刪掉的游標：非零結束，用閘的那一套訊息")
@@ -1425,36 +1425,23 @@ func theQueryPathRefusalNamesBuildWhenAnAuditIsOwed() throws {
     #expect(!result.err.contains("請跑 `ltm build --full` 從零重建"))
 }
 
-@Test("欠著稽核（重建被中斷）的 ltm build：掃描前補跑、不併入，歸因分不出，說明 --full 能做與不能做的事")
-func anOwedAuditFromAnInterruptedRebuildSuggestsOneFullRebuild() throws {
+@Test("欠著稽核（重建被中斷）的 ltm build：掃描前稽核、不併入，說分不出原因與 --full 能做與不能做的事")
+func anOwedAuditFromAnInterruptedRebuildIsReported() throws {
     let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
     defer { workspace.cleanup() }
     _ = try runCLI(["build"], environment: workspace.environment)
     try owedIndex(workspace, corruption: "UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
     let result = try runCLI(["build"], environment: workspace.environment)
     #expect(result.code != 0)
-    #expect(result.err.contains("掃描前補跑"))
+    #expect(result.err.contains("掃描前的整份稽核不通過"))
     #expect(result.err.contains("沒有併入任何內容"))
     #expect(result.err.contains("計數不符：1 個 chunk"))
-    #expect(result.err.contains("分不出是 ltm 的缺陷還是外部修改"))
-    #expect(result.err.contains("`ltm build --full` 會讓兩份計數從頭長出來"))
-    #expect(result.err.contains("通過不排除增量路徑"))
+    #expect(result.err.contains("ltm 分不出原因"))
+    #expect(result.err.contains("`ltm build --full` 從零重建"))
+    #expect(result.err.contains("通過也不排除增量路徑"))
     #expect(try pendingMarker(workspace) == "1")
 }
 
-@Test("先前判定過缺陷、掃描前又不通過：ltm build 說分不出，並提到先前的判定")
-func aFailedRebuildAuditIsReportedAsADefect() throws {
-    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
-    defer { workspace.cleanup() }
-    _ = try runCLI(["build"], environment: workspace.environment)
-    try owedIndex(workspace, marker: "defect",
-                  corruption: "UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
-    let result = try runCLI(["build"], environment: workspace.environment)
-    #expect(result.code != 0)
-    #expect(result.err.contains("先前一次建置結尾的稽核已經判定過 ltm 的缺陷"))
-    #expect(result.err.contains("分不出是 ltm 的缺陷還是外部修改"))
-    #expect(try pendingMarker(workspace) == "defect", "掃描前的失敗不得把先前的判定降級")
-}
 
 /// R2-11／R2-12：只有覆蓋缺口時不提計數；來源鍵是本機路徑，單獨一行並註明回報前遮掉。
 @Test("欠著稽核、只有覆蓋缺口：訊息不提計數不符，路徑單獨一行並註明遮掉")
@@ -1481,3 +1468,20 @@ func theRecallFormatSurfacesAnOwedAudit() throws {
     #expect(result.code == 0, "實得：\(result.err)")
     #expect(result.out.contains("索引欠一次整份稽核"), "recall 區塊要帶欠著那一行：\(result.out)")
 }
+
+/// R5-5：延後併入時的欠著行在 CLI 的呼叫點也要有人守（先前只有 recall 區塊有測試）。持鎖的是測試行程自己。
+@Test("建置鎖被持有、索引欠著稽核：ltm query 的 stderr 說另一個行程在跑，欠著行用延後的說法")
+func theCLIDescribesAnOwedAuditWhileTheLockIsHeld() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    try owedIndex(workspace, corruption: "SELECT 1")
+    let held = try FileLock.acquire(at: workspace.derived.appendingPathComponent("build.lock"))
+    defer { held.release() }
+    let result = try runCLI(["query", "內容", "--all-projects"], environment: workspace.environment)
+    #expect(result.code == 0, "實得：\(result.err)")
+    #expect(result.err.contains(AuditMessage.mergeDeferredLine))
+    #expect(result.err.contains(AuditMessage.owedLine(mergeDeferred: true)))
+    #expect(!result.err.contains(AuditMessage.owedLine(mergeDeferred: false)))
+}
+

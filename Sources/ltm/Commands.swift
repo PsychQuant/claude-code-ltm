@@ -462,10 +462,6 @@ enum BuildCommand {
             case .stateUnreadable(let detail):
                 Output.error("✗ 續讀狀態無法讀取：\(detail)。用 `ltm build --full` 從零重建。")
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
-            case .derivedCountsDiverged(let chunks, let sources, let coverage, let recorded):
-                Output.error(
-                    AuditMessage.diverged(chunks: chunks, sources: sources, coverageFindings: coverage, recorded: recorded))
-                return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .auditFailed(let failure):
                 Output.error(AuditMessage.failure(failure))
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
@@ -737,11 +733,8 @@ enum QueryCommand {
                     """)
             case .lockHeld(let path):
                 Output.error("✗ 意外的鎖錯誤（\(path)）——查詢路徑本應吞掉它。這是 bug。")
-            case .derivedCountsDiverged(let chunks, let sources, _, _):
-                // 查詢路徑不跑稽核、也不從零重建，所以照理到不了；到了就是 bug，照實說。
-                Output.error(
-                    "✗ 意外的稽核錯誤（\(chunks) 個 chunk、\(sources) 個來源的計數不符）——查詢路徑不跑稽核。這是 bug。")
             case .auditFailed(let failure):
+                // 查詢路徑不跑稽核、也不從零重建，所以照理到不了；到了就是 bug，照實說。
                 Output.error(
                     "✗ 意外的稽核錯誤（\(failure.divergentChunks) 個 chunk、\(failure.divergentSources) 個來源的計數不符）——查詢路徑不跑稽核。這是 bug。")
             case .stateUnreadableWhileAuditOwed(let detail):
