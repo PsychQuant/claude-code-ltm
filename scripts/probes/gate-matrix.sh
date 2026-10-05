@@ -13,7 +13,7 @@
 #   暖態四輪（兩臂都先暖過；每輪輪換兩臂的先後，各先兩次——三輪平衡不了，R2-19）、冷態每臂一個樣本；那是 #61 量測紀錄的 A/B。
 #   GATE_MATRIX_SECTIONS 選要跑的段（沒設是 ABCD；#61 的 6.1 只要 D：GATE_MATRIX_SECTIONS=D）。設成空字串會拒跑——
 #   先前空字串會被當成沒設、跑完全部 11 次 purge（R2-19）。
-#   layout 6 的檢查（四張表都在）在 sudo 之前做——GATE_MATRIX_DB，或不跑 A 段時；預設路徑又要跑 A 段時不做，
+#   layout 6 的檢查（四張表都在、meta 的 layout_version 是 6）在 sudo 之前做——GATE_MATRIX_DB，或不跑 A 段時；預設路徑又要跑 A 段時不做，
 #   因為它會讀索引的第 1 頁，A 段第一個樣本就不再是自然冷；那時 layout 5 的索引要到 sudo 之後的第一次 warmup 才停。
 # 用法：在自己的終端機執行  zsh scripts/probes/gate-matrix.sh
 #   不要用 sudo 跑整個腳本（ltm 開索引會檢查擁有者，root 會被拒）；開頭問一次 sudo 密碼，只給 purge 用，

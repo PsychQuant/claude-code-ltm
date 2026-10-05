@@ -331,7 +331,7 @@ public final class IndexDatabase {
         // **引擎維護的計數**，不再每次 build 走完 `chunk_sources`。
         //
         // 兩份計數都是 `chunk_sources` 的函數（純衍生物，`--full` 重建時由同一組 trigger 重新長出來），
-        // 而且**只有下面三個 trigger 寫它們**：它們與寫 `chunk_sources` 的那個敘述在同一個交易裡執行，
+        // 而且**只有下面前兩個 trigger 寫它們**（第三個只做中止）：它們與寫 `chunk_sources` 的那個敘述在同一個交易裡執行，
         // app 這邊沒有第二份實作可以漂移。
         //
         // 引擎保證的只有「trigger 會跑、與寫入同一個交易」，**不保證 trigger 本體寫對**（那是 app 寫的
@@ -342,7 +342,7 @@ public final class IndexDatabase {
         // 之前先插連結（trigger 的 UPDATE 打不到列）。
         // 所以每次 build 的閘是**信任**這份簿記，不是稽核它——這正是 #58 對 count-diff 的異議；差別是這裡
         // 有稽核那一層（`auditDerivedCounts()`）。R1-5（#61 verify）：最早寫「任何 SQL 寫入路徑都逃不掉」、
-        // 「引擎維護的事實」；R1 修正改成四類的「封閉列舉」，R2-9 又找到三類漏掉的——包括本 change 每一條稽核
+        // 「引擎維護的事實」；R1 修正改成四類的「封閉列舉」，R2-9 又找到四類漏掉的——包括本 change 每一條稽核
         // 測試自己用來造漂移的「直接寫計數」。列舉在這裡會漏，所以改寫成性質。
         //
         // **兩條使用規則，由 `DerivedCountTests` 的掃描守**：
@@ -502,7 +502,7 @@ public final class IndexDatabase {
     /// 索引裡有 chunk、但 `scan_state` 沒有游標的那些來源鍵。
     ///
     /// **#61 起它讀的是 trigger 維護的計數，所以它只在計數與 `chunk_sources` 一致時等於下面說的那個
-    /// 直接答案**；計數漂移（一次繞過 trigger 的寫入）時兩者可以往兩個方向分岔，只有
+    /// 直接答案**；計數漂移（`chunk_sources` 或計數被 trigger 以外的方式改動）時兩者可以往兩個方向分岔，只有
     /// `auditDerivedCounts()` 看得出來。下面幾段是 #44 時寫的，描述的是它要回答的問題。
     ///
     /// **這是「這份游標涵蓋得住索引嗎」的直接答案，不是代理。**

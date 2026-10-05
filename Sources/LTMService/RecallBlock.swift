@@ -78,8 +78,6 @@ public enum RecallBlock {
         return block
     }
 
-    /// 欠著稽核時附在區塊尾端的那一行（#61 R2-4）。CLI 的 stderr 與 MCP 用同一句的變體。
-    public static let auditOwedLine = "索引欠一次整份稽核（從零重建被中斷後由查詢續完，或稽核沒通過）：跑一次 ltm build"
 
     private static func compose(
         _ entries: [Entry], shortfall: (sources: Int, budgetSeconds: Int)?, auditOwed: Bool, snippetLimit: Int
@@ -105,7 +103,7 @@ public enum RecallBlock {
         if let shortfall {
             lines.append("索引落後 \(shortfall.sources) 個來源（有界併入未涵蓋，跑一次 ltm build 補齊）")
         }
-        if auditOwed { lines.append(auditOwedLine) }
+        if auditOwed { lines.append(AuditMessage.owedLine) }
         lines.append(RecallMarker.close)
         return lines.joined(separator: "\n")
     }

@@ -358,6 +358,13 @@ func auditFromTheCLI() throws {
     #expect(corrupted.err.contains("1 個 chunk 的 source_count、0 個來源的 source_chunk_counts"))
     #expect(corrupted.err.contains("沒有併入任何內容"))
     #expect(corrupted.err.contains("ltm build --full"))
+    // R3-4：失敗的稽核被記住——查詢提示欠著，下一次 build 在掃描前再稽核、不併入。
+    let queried = try runCLI(["query", "內容", "--all-projects"], environment: workspace.environment)
+    #expect(queried.code == 0)
+    #expect(queried.err.contains("索引欠一次整份稽核"), "失敗的 --audit 之後查詢要提示：\(queried.err)")
+    let next = try runCLI(["build"], environment: workspace.environment)
+    #expect(next.code != 0, "失敗的 --audit 之後，下一次 build 不得照常信任計數")
+    #expect(next.err.contains("掃描前補跑"))
 }
 
 @Test("ltm build --audit 遇到被刪掉的游標：非零結束，用閘的那一套訊息")
@@ -1439,12 +1446,12 @@ func aFailedRebuildAuditIsReportedAsADefect() throws {
     let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
     defer { workspace.cleanup() }
     _ = try runCLI(["build"], environment: workspace.environment)
-    try owedIndex(workspace, marker: "rebuild-failed",
+    try owedIndex(workspace, marker: "defect",
                   corruption: "UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
     let result = try runCLI(["build"], environment: workspace.environment)
     #expect(result.code != 0)
     #expect(result.err.contains("是 ltm 自己的缺陷"))
-    #expect(result.err.contains("同一個版本再跑 `ltm build --full` 會重演"))
+    #expect(result.err.contains("`ltm build --full` 不是補救"))
 }
 
 /// R2-11／R2-12：只有覆蓋缺口時不提計數；來源鍵是本機路徑，單獨一行並註明回報前遮掉。
@@ -1459,4 +1466,16 @@ func anOwedAuditWithOnlyCoverageGapsReadsConsistently() throws {
     #expect(result.err.contains("覆蓋缺口：1 個"))
     #expect(!result.err.contains("計數不符"), "只有覆蓋缺口時不該提計數：\(result.err)")
     #expect(result.err.contains("本機路徑（貼到公開的 issue 之前請先遮掉）"))
+}
+
+/// R3-9：hook 只把 stdout（recall 區塊）注入，所以欠著那一行在生產呼叫點也要有人守。
+@Test("欠著稽核時 --format recall 的區塊帶欠著那一行")
+func theRecallFormatSurfacesAnOwedAudit() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    try owedIndex(workspace, corruption: "UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+    let result = try runCLI(["query", "內容", "--all-projects", "--format", "recall"], environment: workspace.environment)
+    #expect(result.code == 0, "實得：\(result.err)")
+    #expect(result.out.contains("索引欠一次整份稽核"), "recall 區塊要帶欠著那一行：\(result.out)")
 }

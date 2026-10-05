@@ -182,7 +182,7 @@ public struct RefreshReport: Sendable {
     public let unmergedSources: Int
     /// 查詢前的併入是否因預算用完而在批次邊界提前停止。
     public let budgetExhausted: Bool
-    /// 索引欠一次整份稽核（見 `IndexBuilder.BuildReport.auditOwed`）。查詢路徑不補跑它，所以同一條原則：
+    /// 索引欠一次整份稽核（見 `BuildReport.auditOwed`）。查詢路徑不補跑它，所以同一條原則：
     /// 欠著就要說出來（#61 R2-4）——只用 hook／MCP 的使用者沒有別的管道知道要跑 `ltm build`。
     public let auditOwed: Bool
 
@@ -875,7 +875,7 @@ public struct LTMService {
         // 查詢時的 staleness 檢查：語料前進了就先把尾巴讀進來再回答。
         // 這裡**只做增量**——需要整份重建的情況（版本／revision 不符）在上面
         // 已經拒答了，不會走到這裡。
-        let refreshed = try refreshIncrementally(budget: refreshBudget)
+        let refreshed = try refreshIncrementally(budget: refreshBudget, database: database)
 
         let dimension = try database.meta("vector_dimension").flatMap(Int.init) ?? embedder.dimension
         let declaredVectors = try database.meta("vector_count").flatMap(Int.init) ?? 0
@@ -962,7 +962,8 @@ public struct LTMService {
     /// - **不可能觸發整份重建**：`query` 在呼叫這裡之前已經檢查過 layout 版本、
     ///   embedding revision 與 anchor 定址規則，三者不符都已拒答。所以
     ///   `build()` 內的 `stampsMismatch` 分支在這條路徑上到不了。
-    private func refreshIncrementally(budget: TimeInterval? = nil) throws -> RefreshReport {
+    /// - Parameter database: 查詢自己的連線。併入因鎖競爭延後時，用它讀「欠不欠稽核」——延後不代表不欠（R3-2）。
+    private func refreshIncrementally(budget: TimeInterval? = nil, database: IndexDatabase) throws -> RefreshReport {
         // **調校參數必須到得了這條路。** 先前這裡兩個參數都沒傳，而這條路正是
         // 增量併入實際發生的地方（每一次查詢前跑一次，含長駐的 `ltm mcp`）——
         // 所以 `--memory-budget-mb` 的環境變數形式從來沒在它最需要生效的地方
@@ -998,10 +999,14 @@ public struct LTMService {
             // 就好，降級一輪是正確的；`lockUnavailable`（權限、磁碟滿、EMFILE）
             // 不修不會好——若也降級，查詢會**永遠**跑在舊索引上而每一輪都「成功」，
             // 沒有人會發現。持續性的故障要具名失敗，不要變成永久的靜默降級。
+            //
+            // 欠不欠稽核照樣讀（#61 R3-2）：先前這裡沒帶，落到預設的 false，於是另一個行程持鎖的那一輪，
+            // 欠著的稽核從 CLI、recall、MCP 一起消失。讀失敗就讓查詢失敗——這條連線馬上要拿來讀索引。
             return RefreshReport(
                 sourcesRefreshed: 0, sourcesUnreadable: [], sourcesInvalidated: 0,
                 skipped: SkipTally(), mergeDeferredForConcurrentBuild: true,
-                tuningRejections: tuningRejections)
+                tuningRejections: tuningRejections,
+                auditOwed: try database.meta(IndexBuilder.auditPendingKey) != nil)
         }
     }
 

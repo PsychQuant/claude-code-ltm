@@ -1095,9 +1095,9 @@ func recallBlockSurfacesAnOwedAudit() {
         sessions: ["s-1"], uuid: "00000001-aaaa-bbbb-cccc-dddddddddddd")
     let owed = RecallBlock.render(entries: [entry], shortfall: nil, auditOwed: true)
     let lines = owed.split(separator: "\n").map(String.init)
-    #expect(lines.dropLast().last == RecallBlock.auditOwedLine)
+    #expect(lines.dropLast().last == AuditMessage.owedLine)
     #expect(lines.last == RecallMarker.close)
-    #expect(!RecallBlock.render(entries: [entry], shortfall: nil).contains(RecallBlock.auditOwedLine))
+    #expect(!RecallBlock.render(entries: [entry], shortfall: nil).contains(AuditMessage.owedLine))
 }
 
 // MARK: - verify R1 finding 3：k 在排除後**真正**補滿，不是 4·k 啟發式
@@ -1138,4 +1138,104 @@ func snippetContainingCloseMarkerDoesNotClosePrematurely() throws {
     // snippet 那一行不含未中和的閉合標記字面。
     let snippetLine = lines.first { $0.hasPrefix("   他貼了") }
     #expect(snippetLine != nil && !snippetLine!.contains("<!-- /ltm:recall -->"))
+}
+
+// MARK: - 欠著稽核在查詢路徑上的兩個缺口（#61 R3-1、R3-2）
+
+private func markOwed(_ workspace: Workspace, corruption: String? = nil) throws {
+    let database = try IndexDatabase(path: workspace.derived.databaseURL.path)
+    defer { database.close() }
+    try database.setMeta(IndexBuilder.auditPendingKey, IndexBuilder.owedMarker)
+    if let corruption { try database.execute(corruption) }
+}
+
+/// R3-2：另一個行程持鎖時，查詢降級回答——延後併入不代表不欠稽核。
+@Test("建置鎖被別人持有時，查詢照樣回報欠著的稽核")
+func aDeferredMergeStillReportsAnOwedAudit() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["最初的內容"])
+    let service = try workspace.service()
+    try service.build()
+    try markOwed(workspace)
+    let held = try FileLock.acquire(at: workspace.derived.lockURL)
+    defer { held.release() }
+    let outcome = try service.query(text: "最初", limit: 10, scope: .allProjects)
+    #expect(outcome.refresh.mergeDeferredForConcurrentBuild, "前提：這一輪是延後併入")
+    #expect(outcome.refresh.auditOwed, "延後併入的那一輪也要說出欠著的稽核")
+}
+
+/// R3-1：MCP 把查詢路徑的錯誤原樣印出（`"✗ \(error)"`），所以補救必須在錯誤本身，不能只在 CLI 的訊息裡。
+@Test("欠著稽核時閘拒絕：錯誤本身就指向 ltm build（MCP 印的就是它）")
+func theOwedGateRefusalCarriesItsRemedy() throws {
+    let workspace = try Workspace.make()
+    defer { workspace.cleanup() }
+    try workspace.writeSession(texts: ["最初的內容", "第二段內容"])
+    let service = try workspace.service()
+    try service.build()
+    try markOwed(workspace, corruption: "UPDATE chunks SET source_count = 0 WHERE id = (SELECT MIN(id) FROM chunks)")
+    let error = #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try service.query(text: "最初", limit: 10, scope: .allProjects)
+    }
+    let rendered = "✗ \(String(describing: error))"
+    #expect(rendered.contains("stateUnreadableWhileAuditOwed"))
+    #expect(rendered.contains("先跑 `ltm build`"), "MCP 看到的錯誤要帶補救：\(rendered)")
+}
+
+// MARK: - 稽核失敗訊息的每一種組合（#61 R3-9：不中斷重建的第一次失敗，CLI 造不出來）
+
+private func failure(
+    chunks: Int = 1, sources: Int = 0, coverage: [String] = [],
+    moment: BuildAudit.Moment, attribution: AuditFailure.Attribution
+) -> AuditFailure {
+    AuditFailure(
+        IndexDatabase.DerivedCountAudit(
+            chunksChecked: 3, sourcesChecked: 1, divergentChunks: chunks, divergentSources: sources,
+            coverageFindings: coverage),
+        moment: moment, attribution: attribution)
+}
+
+@Test("建置結尾、缺陷：說明這次的併入已提交、不符長在這次的寫入裡，--full 不是補救")
+func defectAfterBuildMessage() {
+    let text = AuditMessage.failure(failure(moment: .afterBuild, attribution: .defect))
+    #expect(text.contains("這次的併入已經提交"))
+    #expect(text.contains("不符長在這一次的寫入裡"))
+    #expect(text.contains("是 ltm 自己的缺陷"))
+    #expect(text.contains("`ltm build --full` 不是補救"))
+    #expect(!text.contains("分不出是 ltm 的缺陷還是外部修改"))
+}
+
+@Test("掃描前、缺陷：先前已判定缺陷，這次的不符未必是同一個，什麼都沒併入")
+func defectBeforeScanMessage() {
+    let text = AuditMessage.failure(failure(moment: .beforeScan, attribution: .defect))
+    #expect(text.contains("沒有併入任何內容"))
+    #expect(text.contains("先前一次 build 的結尾稽核已經判定是 ltm 自己的缺陷"))
+    #expect(text.contains("未必是同一個"))
+    #expect(text.contains("`ltm build --full` 不是補救"))
+}
+
+@Test("掃描前、缺陷或外部修改：叫你跑一次 --full，並說明它結尾再失敗才是缺陷")
+func defectOrOutsideChangeMessage() {
+    let text = AuditMessage.failure(failure(moment: .beforeScan, attribution: .defectOrOutsideChange))
+    #expect(text.contains("分不出是 ltm 的缺陷還是外部修改"))
+    #expect(text.contains("跑一次 `ltm build --full`"))
+    #expect(!text.contains("不是補救"))
+}
+
+@Test("只有覆蓋缺口：不提計數，路徑單獨一行標明遮掉")
+func coverageOnlyMessage() {
+    let text = AuditMessage.failure(
+        failure(chunks: 0, sources: 0, coverage: ["proj/s1.jsonl"], moment: .afterBuild, attribution: .defect))
+    #expect(!text.contains("計數不符"))
+    #expect(text.contains("覆蓋缺口：1 個"))
+    #expect(text.split(separator: "\n").last?.contains("本機路徑（貼到公開的 issue 之前請先遮掉）：proj/s1.jsonl") == true)
+}
+
+@Test("--audit 的計數不符：說明沒有併入、已記成欠著稽核，覆蓋缺口不丟掉")
+func divergedMessage() {
+    let text = AuditMessage.diverged(chunks: 1, sources: 0, coverageFindings: ["proj/s1.jsonl"])
+    #expect(text.contains("沒有併入任何內容"))
+    #expect(text.contains("記成欠一次稽核"))
+    #expect(text.contains("覆蓋缺口：1 個"))
+    #expect(text.contains("ltm build --full"))
 }

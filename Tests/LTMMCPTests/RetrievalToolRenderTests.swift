@@ -145,6 +145,6 @@ func owedAuditSurfacesInResponse() {
             skipped: SkipTally(), auditOwed: true),
         eventsRecorded: 0, unattributableResults: 0)
     let text = RetrievalTool.render(owed)
-    #expect(text.contains(RecallBlock.auditOwedLine), "實得：\(text)")
-    #expect(!RetrievalTool.render(outcome(deferred: false)).contains(RecallBlock.auditOwedLine))
+    #expect(text.contains(AuditMessage.owedLine), "實得：\(text)")
+    #expect(!RetrievalTool.render(outcome(deferred: false)).contains(AuditMessage.owedLine))
 }

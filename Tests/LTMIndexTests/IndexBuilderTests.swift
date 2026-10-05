@@ -1546,8 +1546,8 @@ func auditRunsWhereItShould() throws {
 }
 
 /// R1-3（#61 verify）：從零重建一旦中斷，stamps 已經寫成新版，下一次 build 走增量續完——先前那條路徑
-/// 永遠不稽核。現在從零重建開始時記下「欠一次稽核」，續完的 build 在結尾補跑，通過才清掉。
-@Test("從零重建中途中斷，續完它的下一次 build 在結尾補跑稽核，通過後不再欠")
+/// 永遠不稽核。現在從零重建開始時記下「欠一次稽核」，續完的 build 在掃描前與結尾各稽核一次，通過才清掉。
+@Test("從零重建中途中斷，續完它的下一次 build 在掃描前與結尾各稽核一次，通過後不再欠")
 func anInterruptedRebuildIsAuditedByTheBuildThatFinishesIt() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
@@ -1577,7 +1577,7 @@ func anInterruptedRebuildIsAuditedByTheBuildThatFinishesIt() throws {
 
 /// R1-3 的同一個洞換一條路：有界的從零重建沒併完時，它沒有完成從零重建的工作，不得在半份索引上
 /// 稽核、清掉旗標——否則續完的部分永遠不被稽核。
-@Test("有界的從零重建沒併完：不稽核、旗標留著；續完它的 build 在結尾稽核整份")
+@Test("有界的從零重建沒併完：不稽核、旗標留著；續完它的 build 在掃描前與結尾各稽核一次")
 func aBoundedRebuildThatStopsShortLeavesTheAuditOwed() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
@@ -1722,8 +1722,15 @@ func anUninterruptedRebuildThatFailsItsAuditIsADefect() throws {
     do {
         let database = try IndexDatabase(path: derived.databaseURL.path)
         defer { database.close() }
-        #expect(try database.meta("audit_pending") == "rebuild-failed")
+        #expect(try database.meta("audit_pending") == "defect")
     }
+    let committed: Int
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        committed = try database.chunkCount()
+    }
+    try writeTurns(in: corpus, texts: ["甲", "乙", "丙", "丁"])
     let next = #expect(throws: IndexBuilder.BuildError.self) {
         _ = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")).build()
     }
@@ -1732,6 +1739,92 @@ func anUninterruptedRebuildThatFailsItsAuditIsADefect() throws {
         return
     }
     #expect(again.moment == .beforeScan && again.attribution == .defect)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.chunkCount() == committed, "掃描前的稽核失敗時不得併入新內容")
+    #expect(try database.meta("audit_pending") == "defect", "仍然欠著，而且沿用缺陷的判定")
+}
+
+/// R3-3：欠著稽核的 build，掃描前的稽核通過、結尾的稽核失敗——開始時計數已知正確，不符長在這次 build 的寫入裡，
+/// 所以是 `.defect`，不是「缺陷或外部修改」（後者會叫使用者跑 `--full`，而從零重建驗不到增量路徑）。
+@Test("欠著稽核、掃描前通過、結尾失敗：歸因 defect，旗標記成 defect")
+func anOwedBuildThatPassesThenFailsIsADefect() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeSixSources(in: corpus)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")).build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "1")
+    }
+    // 新增一個來源檔（既有的六個不動，所以被改壞的那個 chunk 不會被作廢、重建洗掉）。
+    let session = "00000006-0000-0000-0000-000000000000"
+    _ = try writeSession(
+        in: corpus, project: "proj-one", file: "s6.jsonl",
+        lines: [turnLine(uuid: "00000006-aaaa-bbbb-cccc-000000000000", session: session, role: "user", text: "新來源的內容")])
+    let corrupting = CorruptingEmbedder(revision: "rev-A", databasePath: derived.databaseURL.path, corruptOnCall: 1)
+    let error = #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner, embedder: corrupting).build()
+    }
+    guard case .auditFailed(let failure) = error else {
+        Issue.record("應該是 auditFailed，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(failure.moment == .afterBuild && failure.attribution == .defect)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.meta("audit_pending") == "defect")
+}
+
+/// R3-4：沒有欠著稽核時失敗的 `--audit` 要被記住，而且同一次找到的覆蓋缺口不丟掉。
+@Test("失敗的 audit: true 記成欠著稽核，帶出覆蓋缺口；下一次 build 在掃描前由稽核攔下")
+func aFailedAuditIsRemembered() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+        try database.execute("DELETE FROM scan_state")
+    }
+    let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
+    guard case .derivedCountsDiverged(let chunks, _, let coverage) = error else {
+        Issue.record("應該是 derivedCountsDiverged，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(chunks == 1 && coverage.count == 1, "覆蓋缺口要一起帶出：\(coverage)")
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        #expect(try database.meta("audit_pending") == "1")
+    }
+    // 這裡的漂移含覆蓋缺口，查詢路徑的結構性閘會拒絕——而拒絕要指向 `ltm build`，因為索引已經記成欠著稽核。
+    let queried = #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try builder.build(refusingFullRebuild: true, honorPendingAudit: false)
+    }
+    guard case .stateUnreadableWhileAuditOwed = queried else {
+        Issue.record("查詢路徑應該是 stateUnreadableWhileAuditOwed，實際是 \(String(describing: queried))")
+        return
+    }
+    let next = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build() }
+    guard case .auditFailed(let again) = next else {
+        Issue.record("下一次 build 應該由掃描前的稽核攔下，實際是 \(String(describing: next))")
+        return
+    }
+    #expect(again.moment == .beforeScan && again.attribution == .defectOrOutsideChange)
 }
 
 /// R2-2：結構性閘看得到的漂移（仍有連結的 chunk 被算成 0）。欠著稽核時 `ltm build` 不讓閘擋路，而是由稽核
@@ -1825,7 +1918,7 @@ func auditCatchesEveryPerSourceDivergence(_ corruption: String) throws {
         try database.execute(corruption)
     }
     let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
-    guard case .derivedCountsDiverged(let chunks, let sources) = error else {
+    guard case .derivedCountsDiverged(let chunks, let sources, _) = error else {
         Issue.record("應該是 derivedCountsDiverged，實際是 \(String(describing: error))")
         return
     }
@@ -1853,7 +1946,7 @@ func auditRefusesDivergentCounts() throws {
     try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容", "第三段內容"])
 
     let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
-    guard case .derivedCountsDiverged(let chunks, let sources) = error else {
+    guard case .derivedCountsDiverged(let chunks, let sources, _) = error else {
         Issue.record("應該是 derivedCountsDiverged，實際是 \(String(describing: error))")
         return
     }
@@ -1861,6 +1954,7 @@ func auditRefusesDivergentCounts() throws {
     let database = try IndexDatabase(path: derived.databaseURL.path)
     defer { database.close() }
     #expect(try database.chunkCount() == 2, "稽核失敗時不得併入新內容")
+    #expect(try database.meta("audit_pending") == "1", "失敗的稽核要記住（R3-4）")
 }
 
 @Test("audit: true 遇到被刪掉的游標：計數一致，照既有的 stateUnreadable 拒絕並指名來源")
