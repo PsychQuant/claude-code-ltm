@@ -462,8 +462,9 @@ enum BuildCommand {
             case .stateUnreadable(let detail):
                 Output.error("✗ 續讀狀態無法讀取：\(detail)。用 `ltm build --full` 從零重建。")
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
-            case .derivedCountsDiverged(let chunks, let sources, let coverage):
-                Output.error(AuditMessage.diverged(chunks: chunks, sources: sources, coverageFindings: coverage))
+            case .derivedCountsDiverged(let chunks, let sources, let coverage, let recorded):
+                Output.error(
+                    AuditMessage.diverged(chunks: chunks, sources: sources, coverageFindings: coverage, recorded: recorded))
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .auditFailed(let failure):
                 Output.error(AuditMessage.failure(failure))
@@ -736,7 +737,7 @@ enum QueryCommand {
                     """)
             case .lockHeld(let path):
                 Output.error("✗ 意外的鎖錯誤（\(path)）——查詢路徑本應吞掉它。這是 bug。")
-            case .derivedCountsDiverged(let chunks, let sources, _):
+            case .derivedCountsDiverged(let chunks, let sources, _, _):
                 // 查詢路徑不跑稽核、也不從零重建，所以照理到不了；到了就是 bug，照實說。
                 Output.error(
                     "✗ 意外的稽核錯誤（\(chunks) 個 chunk、\(sources) 個來源的計數不符）——查詢路徑不跑稽核。這是 bug。")
@@ -1006,7 +1007,7 @@ enum QueryCommand {
         // 而他從答案本身看不出這件事。
         if refresh.mergeDeferredForConcurrentBuild {
             Output.error(
-                "  ⚠ 有另一個 `ltm build` 正在跑，本輪未併入新內容（答案來自既有索引）")
+                "  ⚠ \(AuditMessage.mergeDeferredLine)")
         }
         // 同一條原則的第三個實例：使用者設的保護沒生效，就要說。安靜地忽略一個
         // 打錯的環境變數，等於讓他以為記憶體預算還在守著（#46 R3 verify）。
@@ -1015,7 +1016,7 @@ enum QueryCommand {
         }
         // #61 R2-4：查詢不補跑欠著的稽核，所以要說出來，否則只靠查詢續完重建的人永遠不會跑 `ltm build`。
         if refresh.auditOwed {
-            Output.error("  ⚠ \(AuditMessage.owedLine)")
+            Output.error("  ⚠ \(AuditMessage.owedLine(mergeDeferred: refresh.mergeDeferredForConcurrentBuild))")
         }
     }
 

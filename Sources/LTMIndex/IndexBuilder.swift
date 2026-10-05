@@ -45,7 +45,7 @@ public struct BuildAudit: Sendable, Equatable {
     public enum Moment: Sendable, Equatable {
         /// 掃描之前，取代結構性閘：`audit: true`，或索引欠著一次稽核（#61 R2-2）。這時這次 build 還沒併入任何內容。
         case beforeScan
-        /// 從零重建的結尾，或續完一次中斷的從零重建的那一次 build 的結尾。
+        /// 完成從零重建的那一次 build 的結尾，或任何欠著稽核的 build 的結尾。
         case afterBuild
     }
 
@@ -55,20 +55,21 @@ public struct BuildAudit: Sendable, Equatable {
 
 /// 一次不通過的整份稽核：發生在欠著稽核的索引上（掃描前或結尾），或從零重建的結尾（#61 R1-4、R2-2／3）。
 public struct AuditFailure: Sendable, Equatable {
-    /// 不符要歸給誰。**只有兩種，不得依性質類推第三種**——判準是「**這次 build 開始時，計數是不是已知正確**」：
-    /// 從零開始，或這次掃描前的稽核剛通過。是的話，不符長在這一次 build 自己的寫入裡；不是的話，開始之前有
-    /// 一段沒驗過的期間。兩種都有同一個但書：讀者與外部 sqlite3 不取建置鎖，所以**建置期間**ltm 以外的程式
-    /// 寫這個檔，一樣會造出不符（`CorruptingEmbedder` 正是這樣造的）——ltm 分不出來。（#61 R2-3 的判準是
-    /// 「是不是不中斷的從零重建」，R3-3 指出欠著稽核、掃描前通過、結尾失敗的 build 落在兩種之外。）
+    /// 不符要歸給誰。**只有兩種，不得依性質類推第三種**——判準是「**這次 build 開始時，計數是不是已知正確**」，
+    /// 而它在程式裡等於發生的時點：建置**結尾**的失敗一律是 `defect`（從零開始，或掃描前的稽核剛通過，才走得到
+    /// 結尾），**掃描前**的失敗一律是 `defectOrOutsideChange`（開始前有一段沒驗過的期間）。兩種有同一個但書：讀者
+    /// 與外部 sqlite3 不取建置鎖，所以**建置期間**ltm 以外的程式寫這個檔，一樣會造出不符（`CorruptingEmbedder`
+    /// 正是這樣造的）——ltm 分不出來。（R2-3 的判準是「是不是不中斷的從零重建」；R3-3 換成現在的判準，卻又把「旗標
+    /// 記著先前的缺陷」列成 `defect` 的第三種情形，R4-1 指出它照判準屬於另一種——先前的判定改由 `previousDefect`
+    /// 帶給訊息，不再決定歸因。）
     public enum Attribution: Sendable, Equatable {
-        /// 開始時計數已知正確，不符長在這次 build 的寫入裡（建置結尾的失敗一律是這種：欠著稽核的 build 必然
-        /// 先通過掃描前的稽核才走得到結尾）；或旗標記著先前已經有一次這樣的判定（`IndexBuilder.defectMarker`）。
-        /// 除非建置期間有 ltm 以外的程式寫這個檔，否則是 ltm 的缺陷。`--full` 不是補救：它重跑同樣的程式，
-        /// 而從零重建不經過增量的作廢與刪除路徑，所以它通過也不代表沒有缺陷。
+        /// 開始時計數已知正確，不符長在這次 build 的寫入裡。除非建置期間有 ltm 以外的程式寫這個檔，否則是 ltm 的
+        /// 缺陷。`--full` 不是補救：它重跑同樣的程式，而從零重建不經過增量的作廢與刪除路徑，所以它通過也不代表
+        /// 沒有缺陷；它還會連這筆判定一起丟掉（R4-4）。
         case defect
-        /// 開始之前的計數沒驗過：從零重建被中斷、之後由別的 build 續完，或一般的 build 之間（一次失敗的
-        /// `--audit`）。那段期間 ltm 以外的程式可以改這個檔，所以分不出是缺陷還是外部修改。跑一次 `--full`：
-        /// 它結尾的稽核若又不通過，那一次的歸因就是 `defect`。
+        /// 開始之前的計數沒驗過：從零重建被中斷、之後由別的 build 續完，失敗的 `--audit` 之前的那段期間，或先前
+        /// 判定過缺陷之後。那段期間 ltm 以外的程式可以改這個檔，所以分不出是缺陷還是外部修改。`--full` 會讓計數
+        /// 從頭長出來，但它結尾的稽核只驗得到從零重建的路徑：不通過就是缺陷，通過也不排除增量路徑的缺陷（R4-3）。
         case defectOrOutsideChange
     }
 
@@ -79,13 +80,22 @@ public struct AuditFailure: Sendable, Equatable {
     /// `.beforeScan`：這次什麼都沒併入；`.afterBuild`：這次的併入已經提交。
     public let moment: BuildAudit.Moment
     public let attribution: Attribution
+    /// 旗標記著先前一次建置結尾的稽核判定過缺陷（只給訊息用，不影響歸因——R4-1）。
+    public let previousDefect: Bool
+    /// 這次的判定有沒有記進索引的旗標。寫入失敗時仍拋出稽核結果，而不是讓 SQLite 錯誤蓋掉它（R4-9）。
+    public let recorded: Bool
 
-    public init(_ result: IndexDatabase.DerivedCountAudit, moment: BuildAudit.Moment, attribution: Attribution) {
+    public init(
+        _ result: IndexDatabase.DerivedCountAudit, moment: BuildAudit.Moment, attribution: Attribution,
+        previousDefect: Bool = false, recorded: Bool = true
+    ) {
         divergentChunks = result.divergentChunks
         divergentSources = result.divergentSources
         coverageFindings = result.coverageFindings
         self.moment = moment
         self.attribution = attribution
+        self.previousDefect = previousDefect
+        self.recorded = recorded
     }
 }
 
@@ -240,8 +250,8 @@ public struct IndexBuilder: Sendable {
         case stateUnreadable(detail: String)
         /// 結構性閘拒絕，而索引欠著一次整份稽核（#61 R2-2）。只有不補跑稽核的路徑（查詢）會拋它：
         /// `ltm build` 遇到欠著的稽核會在掃描前改跑稽核、不跑這道閘。與 `stateUnreadable` 分開，因為補救不同——
-        /// 那個是 `--full`，這個是先跑 `ltm build`，讓稽核說出是哪裡不符；欠著的狀態可能正是一次失敗的稽核，
-        /// 那時 `--full` 會重演。
+        /// 那個是 `--full`，這個是先跑 `ltm build`，讓稽核說出是哪裡不符——欠著的狀態可能正是一次判定過缺陷的
+        /// 稽核，而 `--full` 會連那筆判定一起丟掉、又驗不到增量路徑（R4-4）。補救寫在 detail 裡（R3-1）。
         case stateUnreadableWhileAuditOwed(detail: String)
         /// 整份稽核發現 trigger 維護的計數與 `chunk_sources` 重算的結果不符（#61）：`chunks` 是
         /// `source_count` 不符的 chunk 數，`sources` 是 `source_chunk_counts` 不符的來源數。
@@ -250,8 +260,9 @@ public struct IndexBuilder: Sendable {
         /// `stateUnreadable` 分開：那個說「索引的內容涵蓋不到」，這個說「閘每次讀的那兩份計數本身不可信」。
         /// 補救是 `--full`——計數若是被外部寫壞的，重建會讓 trigger 從頭長出正確的值。拋之前把索引記成欠著
         /// 稽核（R3-4），所以在 `--full` 之前，之後的 `ltm build` 都在掃描前再稽核、查詢也會提示。
-        /// `coverageFindings` 是同一次稽核找到的覆蓋缺口（R3-4：先前被丟掉）。欠著稽核時改拋 `auditFailed`。
-        case derivedCountsDiverged(chunks: Int, sources: Int, coverageFindings: [String])
+        /// `coverageFindings` 是同一次稽核找到的覆蓋缺口（R3-4：先前被丟掉）。`recorded` 是旗標有沒有寫進去
+        /// （R4-9）。欠著稽核時改拋 `auditFailed`。
+        case derivedCountsDiverged(chunks: Int, sources: Int, coverageFindings: [String], recorded: Bool)
         /// 欠著稽核的索引（掃描前或結尾）、或從零重建的結尾，整份稽核不通過（#61 R1-4、R2-2／3）。歸因與
         /// 補救見 `AuditFailure.Attribution`。旗標不清掉：下一次 `ltm build` 在掃描前再稽核一次。
         case auditFailed(AuditFailure)
@@ -472,8 +483,7 @@ public struct IndexBuilder: Sendable {
         // 稽核的路徑（查詢）也讀：閘拒絕時要說「先跑 ltm build」而不是 `--full`（#61 R2-2）。
         let pendingMarker = rebuildFromScratch ? nil : try database.meta(Self.auditPendingKey)
         let owesAudit = honorPendingAudit && pendingMarker != nil
-        let owedAttribution: AuditFailure.Attribution =
-            pendingMarker == Self.defectMarker ? .defect : .defectOrOutsideChange
+        let previousDefect = pendingMarker == Self.defectMarker
         if !rebuildFromScratch {
             previousState = try database.scanState()
             // **判準是「這份游標涵蓋得住索引嗎」，不是「表是不是空的」。**
@@ -489,23 +499,27 @@ public struct IndexBuilder: Sendable {
             // 不可信就先停在那裡，不拿它的閘結果做決定。
             //
             // 欠著稽核時也一樣（#61 R2-2）：結構性閘讀的正是還沒被稽核過的那兩份計數，拿它擋路，一次失敗的
-            // 稽核留下的狀態就會被閘以「請跑 --full」攔下，而 --full 可能正是會重演的那條路。
+            // 稽核留下的狀態就會被閘以「請跑 --full」攔下——而 --full 會丟掉先前的判定，又驗不到增量路徑。
             let orphaned: [String]
             if audit || owesAudit {
                 let result = try database.auditDerivedCounts()
                 if owesAudit {
+                    // 掃描前的失敗一律是「分不出」：開始前有一段沒驗過的期間（R4-1）。旗標不動——記著缺陷就仍記著。
                     guard result.countsAgree, result.coverageFindings.isEmpty else {
                         throw BuildError.auditFailed(
-                            AuditFailure(result, moment: .beforeScan, attribution: owedAttribution))
+                            AuditFailure(result, moment: .beforeScan, attribution: .defectOrOutsideChange,
+                                         previousDefect: previousDefect))
                     }
                 } else {
                     guard result.countsAgree else {
                         // 失敗的稽核要記住（R3-4）：不記的話，下一次 `ltm build` 又回到結構性閘、信任剛判定不符的
                         // 計數。記成「欠著」：之後的 build 在掃描前再稽核，查詢會提示，`--full` 之後隨索引一起清掉。
-                        try database.setMeta(Self.auditPendingKey, Self.owedMarker)
+                        // 只在沒有旗標時寫——公開組合 `audit: true, honorPendingAudit: false` 會走到這裡，而那時
+                        // 覆寫會把 `defect` 降成「欠著」（R4-9）。
+                        let recorded = pendingMarker != nil || Self.recordMarker(Self.owedMarker, in: database)
                         throw BuildError.derivedCountsDiverged(
                             chunks: result.divergentChunks, sources: result.divergentSources,
-                            coverageFindings: result.coverageFindings)
+                            coverageFindings: result.coverageFindings, recorded: recorded)
                     }
                 }
                 audits.append(BuildAudit(moment: .beforeScan, result: result))
@@ -941,7 +955,8 @@ public struct IndexBuilder: Sendable {
 
         // 完成從零重建的那一次 build、與欠著稽核的 build，在結尾跑一次整份稽核（#61）。走到這裡時，這次 build
         // 開始時的計數已知正確（從零開始，或掃描前的稽核剛通過），所以不符長在這一次的寫入裡：歸因一律是
-        // `.defect`（R3-3），旗標記成 `defectMarker`，之後的 build 在掃描前沿用這個歸因。資料已提交。
+        // `.defect`（R3-3），旗標記成 `defectMarker`——之後的 build 在掃描前補跑稽核時，訊息會提到它（R4-1：
+        // 只提，不沿用歸因）。資料已提交。
         //
         // 有界併入留下未併入的來源時，這一次沒有完成從零重建的工作：不稽核、旗標留著，由真正完成它的
         // 那一次 build 跑。今天出貨的呼叫端不會走到這裡（查詢路徑拒絕從零重建、也不補跑稽核），但
@@ -950,8 +965,10 @@ public struct IndexBuilder: Sendable {
         if (rebuildFromScratch || owesAudit) && unmergedSourceKeys.isEmpty {
             let result = try database.auditDerivedCounts()
             guard result.countsAgree, result.coverageFindings.isEmpty else {
-                try database.setMeta(Self.auditPendingKey, Self.defectMarker)
-                throw BuildError.auditFailed(AuditFailure(result, moment: .afterBuild, attribution: .defect))
+                let recorded = Self.recordMarker(Self.defectMarker, in: database)
+                throw BuildError.auditFailed(
+                    AuditFailure(result, moment: .afterBuild, attribution: .defect,
+                                 previousDefect: previousDefect, recorded: recorded))
             }
             try database.removeMeta(Self.auditPendingKey)
             audits.append(BuildAudit(moment: .afterBuild, result: result))
@@ -984,12 +1001,23 @@ public struct IndexBuilder: Sendable {
         return try database.stamps()
     }
 
-    /// 從零重建欠著、還沒通過的整份稽核（#61 R1-3）。值無意義，有這個鍵就是欠著。
+    /// 欠著、還沒通過的整份稽核（#61）。有這個鍵就是欠著：`ltm build` 在掃描前與結尾補跑稽核，查詢提示。
+    /// 值只有兩種——`owedMarker`（從零重建開始、或一次失敗的 `--audit`）與 `defectMarker`（建置結尾的稽核判定
+    /// 過缺陷）——而值只影響訊息（`AuditFailure.previousDefect`），不影響歸因（R4-1）。其他值被當成 `owedMarker`。
     public static let auditPendingKey = "audit_pending"
-    /// `audit_pending` 的兩個值：欠著（從零重建開始、或一次失敗的 `--audit`），與「建置結尾的稽核已判定是 ltm
-    /// 的缺陷」（#61 R2-3、R3-3）。
     public static let owedMarker = "1"
     public static let defectMarker = "defect"
+
+    /// 寫旗標；失敗時回 false 而不拋——呼叫端緊接著要拋稽核結果，不能讓 SQLite 錯誤蓋掉它（R4-9）。
+    /// 回報由呼叫端放進錯誤（`recorded`），不是吞掉。
+    private static func recordMarker(_ value: String, in database: IndexDatabase) -> Bool {
+        do {
+            try database.setMeta(auditPendingKey, value)
+            return true
+        } catch {
+            return false
+        }
+    }
 
     private func discardDerivedArtifacts() throws {
         let fm = FileManager.default

@@ -55,32 +55,33 @@ public enum RecallBlock {
             (outcome.refresh.unmergedSources > 0 && budgetSeconds != nil)
             ? (outcome.refresh.unmergedSources, budgetSeconds!) : nil
         return render(entries: entries, shortfall: shortfall, auditOwed: outcome.refresh.auditOwed,
-                      characterLimit: characterLimit)
+                      mergeDeferred: outcome.refresh.mergeDeferredForConcurrentBuild, characterLimit: characterLimit)
     }
 
     public static func render(
         entries: [Entry], shortfall: (sources: Int, budgetSeconds: Int)?, auditOwed: Bool = false,
-        characterLimit: Int = defaultCharacterLimit
+        mergeDeferred: Bool = false, characterLimit: Int = defaultCharacterLimit
     ) -> String {
         var kept = entries
         var snippetLimit = defaultSnippetLimit
-        var block = compose(kept, shortfall: shortfall, auditOwed: auditOwed, snippetLimit: snippetLimit)
+        var block = compose(kept, shortfall: shortfall, auditOwed: auditOwed, mergeDeferred: mergeDeferred, snippetLimit: snippetLimit)
         // 1) 縮 snippet：200 → 100 → 50 → 20。
         while block.count > characterLimit, snippetLimit > minimumSnippetLimit {
             snippetLimit = max(minimumSnippetLimit, snippetLimit / 2)
-            block = compose(kept, shortfall: shortfall, auditOwed: auditOwed, snippetLimit: snippetLimit)
+            block = compose(kept, shortfall: shortfall, auditOwed: auditOwed, mergeDeferred: mergeDeferred, snippetLimit: snippetLimit)
         }
         // 2) 從尾端丟命中。
         while block.count > characterLimit, !kept.isEmpty {
             kept.removeLast()
-            block = compose(kept, shortfall: shortfall, auditOwed: auditOwed, snippetLimit: snippetLimit)
+            block = compose(kept, shortfall: shortfall, auditOwed: auditOwed, mergeDeferred: mergeDeferred, snippetLimit: snippetLimit)
         }
         return block
     }
 
 
     private static func compose(
-        _ entries: [Entry], shortfall: (sources: Int, budgetSeconds: Int)?, auditOwed: Bool, snippetLimit: Int
+        _ entries: [Entry], shortfall: (sources: Int, budgetSeconds: Int)?, auditOwed: Bool, mergeDeferred: Bool,
+        snippetLimit: Int
     ) -> String {
         let formatter = ISO8601DateFormatter()
         var lines = [RecallMarker.open, RetrievalBanner.untrusted, RetrievalBanner.authorityRule]
@@ -103,7 +104,9 @@ public enum RecallBlock {
         if let shortfall {
             lines.append("索引落後 \(shortfall.sources) 個來源（有界併入未涵蓋，跑一次 ltm build 補齊）")
         }
-        if auditOwed { lines.append(AuditMessage.owedLine) }
+        // hook 只把這個區塊注入，所以延後併入那一行也要在這裡（R4-2：先前只有 CLI 的 stderr 與 MCP 有）。
+        if mergeDeferred { lines.append(AuditMessage.mergeDeferredLine) }
+        if auditOwed { lines.append(AuditMessage.owedLine(mergeDeferred: mergeDeferred)) }
         lines.append(RecallMarker.close)
         return lines.joined(separator: "\n")
     }

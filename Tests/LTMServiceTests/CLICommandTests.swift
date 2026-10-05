@@ -1425,7 +1425,7 @@ func theQueryPathRefusalNamesBuildWhenAnAuditIsOwed() throws {
     #expect(!result.err.contains("請跑 `ltm build --full` 從零重建"))
 }
 
-@Test("欠著稽核（重建被中斷）的 ltm build：掃描前補跑、不併入，歸因是缺陷或外部修改，建議跑一次 --full")
+@Test("欠著稽核（重建被中斷）的 ltm build：掃描前補跑、不併入，歸因分不出，說明 --full 能做與不能做的事")
 func anOwedAuditFromAnInterruptedRebuildSuggestsOneFullRebuild() throws {
     let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
     defer { workspace.cleanup() }
@@ -1437,11 +1437,12 @@ func anOwedAuditFromAnInterruptedRebuildSuggestsOneFullRebuild() throws {
     #expect(result.err.contains("沒有併入任何內容"))
     #expect(result.err.contains("計數不符：1 個 chunk"))
     #expect(result.err.contains("分不出是 ltm 的缺陷還是外部修改"))
-    #expect(result.err.contains("跑一次 `ltm build --full`"))
+    #expect(result.err.contains("`ltm build --full` 會讓兩份計數從頭長出來"))
+    #expect(result.err.contains("通過不排除增量路徑"))
     #expect(try pendingMarker(workspace) == "1")
 }
 
-@Test("上一次不中斷的重建結尾稽核已失敗：ltm build 歸為缺陷，說明再跑 --full 會重演")
+@Test("先前判定過缺陷、掃描前又不通過：ltm build 說分不出，並提到先前的判定")
 func aFailedRebuildAuditIsReportedAsADefect() throws {
     let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
     defer { workspace.cleanup() }
@@ -1450,8 +1451,9 @@ func aFailedRebuildAuditIsReportedAsADefect() throws {
                   corruption: "UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
     let result = try runCLI(["build"], environment: workspace.environment)
     #expect(result.code != 0)
-    #expect(result.err.contains("是 ltm 自己的缺陷"))
-    #expect(result.err.contains("`ltm build --full` 不是補救"))
+    #expect(result.err.contains("先前一次建置結尾的稽核已經判定過 ltm 的缺陷"))
+    #expect(result.err.contains("分不出是 ltm 的缺陷還是外部修改"))
+    #expect(try pendingMarker(workspace) == "defect", "掃描前的失敗不得把先前的判定降級")
 }
 
 /// R2-11／R2-12：只有覆蓋缺口時不提計數；來源鍵是本機路徑，單獨一行並註明回報前遮掉。

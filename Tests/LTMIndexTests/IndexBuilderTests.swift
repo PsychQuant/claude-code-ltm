@@ -1668,8 +1668,9 @@ func anOwedAuditFailsBeforeTheScanAndMergesNothing() throws {
     #expect(try database.meta("audit_pending") == "1", "沒通過就繼續欠著")
 }
 
-/// 在建置途中，從另一條連線改壞一個已提交的計數——模擬「同一次不中斷的重建裡長出錯的計數」，也就是
-/// trigger 缺陷的形狀（真正的 trigger 缺陷在出貨碼上造不出來）。
+/// 在建置途中，從另一條連線改壞一個已提交的計數——模擬「這次 build 的寫入長出錯的計數」，也就是 trigger
+/// 缺陷的形狀（真正的 trigger 缺陷在出貨碼上造不出來）。它同時正是歸因的但書：建置期間 ltm 以外的寫入，
+/// ltm 分不出來，也判成缺陷。
 final class CorruptingEmbedder: EmbeddingProvider, @unchecked Sendable {
     let revision: String
     let dimension: Int = 4
@@ -1698,9 +1699,9 @@ final class CorruptingEmbedder: EmbeddingProvider, @unchecked Sendable {
     }
 }
 
-/// R2-3：一次不中斷的從零重建，結尾稽核失敗才歸為缺陷；旗標記成 rebuild-failed，之後的 build 在掃描前就以
-/// 同一個歸因停下，不再要使用者跑一次會重演的 --full。
-@Test("不中斷的從零重建結尾稽核失敗：歸因 defect、旗標記成 rebuild-failed；下一次 build 掃描前同一個歸因")
+/// R2-3 → R4-1：從零重建的結尾稽核失敗是缺陷，旗標記成 defect；下一次 build 在掃描前就停下——但那時計數自上次
+/// 失敗後沒驗過，所以歸因是「分不出」，只在訊息裡帶著先前的判定。
+@Test("從零重建結尾稽核失敗：歸因 defect、旗標記成 defect；下一次 build 掃描前停下，歸因分不出、帶著先前的判定")
 func anUninterruptedRebuildThatFailsItsAuditIsADefect() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
@@ -1738,11 +1739,11 @@ func anUninterruptedRebuildThatFailsItsAuditIsADefect() throws {
         Issue.record("應該是 auditFailed，實際是 \(String(describing: next))")
         return
     }
-    #expect(again.moment == .beforeScan && again.attribution == .defect)
+    #expect(again.moment == .beforeScan && again.attribution == .defectOrOutsideChange && again.previousDefect)
     let database = try IndexDatabase(path: derived.databaseURL.path)
     defer { database.close() }
     #expect(try database.chunkCount() == committed, "掃描前的稽核失敗時不得併入新內容")
-    #expect(try database.meta("audit_pending") == "defect", "仍然欠著，而且沿用缺陷的判定")
+    #expect(try database.meta("audit_pending") == "defect", "仍然欠著，先前的判定不被降級")
 }
 
 /// R3-3：欠著稽核的 build，掃描前的稽核通過、結尾的稽核失敗——開始時計數已知正確，不符長在這次 build 的寫入裡，
@@ -1801,11 +1802,12 @@ func aFailedAuditIsRemembered() throws {
         try database.execute("DELETE FROM scan_state")
     }
     let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
-    guard case .derivedCountsDiverged(let chunks, _, let coverage) = error else {
+    guard case .derivedCountsDiverged(let chunks, _, let coverage, let recorded) = error else {
         Issue.record("應該是 derivedCountsDiverged，實際是 \(String(describing: error))")
         return
     }
     #expect(chunks == 1 && coverage.count == 1, "覆蓋缺口要一起帶出：\(coverage)")
+    #expect(recorded)
     do {
         let database = try IndexDatabase(path: derived.databaseURL.path)
         defer { database.close() }
@@ -1918,7 +1920,7 @@ func auditCatchesEveryPerSourceDivergence(_ corruption: String) throws {
         try database.execute(corruption)
     }
     let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
-    guard case .derivedCountsDiverged(let chunks, let sources, _) = error else {
+    guard case .derivedCountsDiverged(let chunks, let sources, _, _) = error else {
         Issue.record("應該是 derivedCountsDiverged，實際是 \(String(describing: error))")
         return
     }
@@ -1946,7 +1948,7 @@ func auditRefusesDivergentCounts() throws {
     try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容", "第三段內容"])
 
     let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
-    guard case .derivedCountsDiverged(let chunks, let sources, _) = error else {
+    guard case .derivedCountsDiverged(let chunks, let sources, _, _) = error else {
         Issue.record("應該是 derivedCountsDiverged，實際是 \(String(describing: error))")
         return
     }
@@ -2877,4 +2879,29 @@ func budgetDeadlineIsFixedBeforeTheScan() throws {
     var chunks = 0
     try database.query("SELECT COUNT(*) FROM chunks") { chunks = Int(sqlite3_column_int64($0, 0)) }
     #expect(chunks == 0)
+}
+
+/// R4-9：公開組合 `audit: true, honorPendingAudit: false` 走「沒有欠著」那一支；旗標已是 defect 時不得被降成「欠著」。
+@Test("audit: true 而不補跑欠著稽核時失敗：不覆寫已記著的 defect")
+func aFailedAuditDoesNotDowngradeADefect() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "defect")
+        try database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+    }
+    #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true, honorPendingAudit: false) }
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.meta("audit_pending") == "defect")
 }

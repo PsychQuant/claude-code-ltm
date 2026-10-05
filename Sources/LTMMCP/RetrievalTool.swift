@@ -85,7 +85,7 @@ public enum RetrievalTool {
         // 新內容還沒併入。
         var warnings: [String] = []
         if outcome.refresh.mergeDeferredForConcurrentBuild {
-            warnings.append("⚠ 有另一個 `ltm build` 正在跑，本輪未併入新內容（答案來自既有索引）")
+            warnings.append("⚠ \(AuditMessage.mergeDeferredLine)")
         }
         // #54：「沒有命中」可能因為來源根本讀不到——模型讀者無法從答案本身看出。
         // 報**數量**不列路徑（路徑清單對模型是雜訊；明細在 `ltm build` 的 stderr）。
@@ -103,7 +103,7 @@ public enum RetrievalTool {
         }
         // #61 R2-4：查詢路徑不補跑欠著的稽核；模型讀者是使用者唯一可能聽到這件事的管道。
         if outcome.refresh.auditOwed {
-            warnings.append("⚠ \(AuditMessage.owedLine)")
+            warnings.append("⚠ \(AuditMessage.owedLine(mergeDeferred: outcome.refresh.mergeDeferredForConcurrentBuild))")
         }
         guard !outcome.hits.isEmpty else {
             return (warnings + ["（沒有命中）"]).joined(separator: "\n")
