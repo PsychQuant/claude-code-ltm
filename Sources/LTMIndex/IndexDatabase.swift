@@ -936,6 +936,20 @@ public final class IndexDatabase {
 
     // MARK: - 交易
 
+    /// 只讀的交易（#61 R7-1）：`BEGIN`（DEFERRED）讓裡面的每一條 SELECT 讀同一個快照，不拿寫鎖——所以
+    /// 外部連線正持有寫鎖時照樣讀得到，也不會因為索引沒設 busy timeout 而立刻失敗。
+    public func readTransaction<T>(_ body: () throws -> T) throws -> T {
+        try execute("BEGIN")
+        do {
+            let value = try body()
+            try execute("COMMIT")
+            return value
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
     public func transaction<T>(_ body: () throws -> T) throws -> T {
         try execute("BEGIN IMMEDIATE")
         do {

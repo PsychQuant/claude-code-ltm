@@ -24,12 +24,17 @@ public enum AuditMessage {
         if failure.danglingLinks > 0 {
             lines.append(
                 "  懸空的連結：\(failure.danglingLinks) 個 chunk_sources 列指向已不存在的 chunk。結構性閘看不到它們；在處理之前，"
-                    + "新的 turn 若重用那個 id，可能接上錯的來源（R6-4）。")
+                    + "新的 turn 若重用那個 id，可能接上錯的來源，也會帶著被刪的那則 turn 留下的舊索引詞。")
         }
+        // 覆蓋缺口有兩種條目：沒有游標的來源鍵（本機路徑），與「N 個 chunk 沒有任何 source mapping」那一筆（不是路徑，
+        // R7-6：先前被算成 1 個缺口、印在本機路徑那一行）。
+        let orphanEntries = failure.coverageFindings.filter { $0.hasPrefix("(") }
+        let sourceKeys = failure.coverageFindings.filter { !$0.hasPrefix("(") }
         if !failure.coverageFindings.isEmpty {
-            lines.append(
-                "  覆蓋缺口：\(failure.coverageFindings.count) 個（有 chunk 卻沒有續讀游標的來源，或沒有任何 source mapping "
-                    + "的 chunk）。")
+            var parts: [String] = []
+            if !sourceKeys.isEmpty { parts.append("\(sourceKeys.count) 個來源有 chunk 卻沒有續讀游標") }
+            parts += orphanEntries.map { String($0.dropFirst().dropLast()) }
+            lines.append("  覆蓋缺口：\(parts.joined(separator: "；"))。")
         }
         lines.append("  ltm 分不出原因：可能出在 ltm 自己，也可能是 ltm 以外的程式改過這個檔。")
         if failure.recorded {
@@ -38,20 +43,23 @@ public enum AuditMessage {
                     + "embedding revision、layout 變動觸發的——會丟掉這個紀錄，只在它自己的結尾稽核）。")
             // R6-2：R5 把「閘拒絕時」那一半拿掉了，而只有覆蓋缺口、或計數一致時，閘與稽核看到的是同一件事。
             if !countsDiverge && failure.danglingLinks == 0 && !failure.coverageFindings.isEmpty {
-                lines.append("  查詢不跑稽核；這次的覆蓋缺口結構性閘也看得到，所以查詢會被拒絕、叫你先跑 `ltm build`。")
+                lines.append(
+                    "  查詢不跑稽核；這次的覆蓋缺口結構性閘也看得到，所以查詢會被拒絕、叫你先跑 `ltm build`（另一個行程正持有"
+                        + "建置鎖、查詢這一輪沒有併入時不跑閘，會照常回答）。")
             } else {
                 lines.append(
                     "  查詢不跑稽核：結構性閘放行時照常回答、照常併入新內容並提示欠著稽核；閘看得到這個問題時，查詢會被拒絕、"
                         + "叫你先跑 `ltm build`。")
             }
         } else {
+            // R7-6：沒記上時也要說查詢怎麼做；只有懸空連結時「信任計數」不是重點。
             lines.append(
-                "  （這次沒能把「欠一次稽核」寫進索引：寫入旗標失敗。下一次 build 不會記得它，會照常信任這兩份計數——"
-                    + "修好寫入問題後再跑一次 `ltm build --audit`。）")
+                "  （這次沒能把「欠一次稽核」寫進索引：寫入旗標失敗。下一次 build 不會記得它，會照常走結構性閘，不再找這些"
+                    + "問題；查詢照常回答、照常併入，也不會提示欠著。修好寫入問題後再跑一次 `ltm build --audit`。）")
         }
         lines.append("  能做的事：")
         lines.append(
-            failure.coverageFindings.isEmpty
+            sourceKeys.isEmpty
                 ? "  - 回報這個問題（附上面的數字）。"
                 : "  - 回報這個問題（附上面的數字；下面的本機路徑貼到公開的 issue 之前請先遮掉）。")
         let what = countsDiverge || failure.danglingLinks > 0 ? "兩份計數與連結" : "索引"
@@ -59,8 +67,8 @@ public enum AuditMessage {
             "  - `ltm build --full` 從零重建：\(what)從頭長出來，結尾再稽核一次。它驗得到的只有從零重建的路徑——結尾若又"
                 + "不通過，請回報；通過也不排除增量路徑（來源被改寫時的作廢與刪除）的問題，那要等之後有來源被改寫的 "
                 + "build 跑過，再跑一次 `ltm build --audit` 才看得到。")
-        if !failure.coverageFindings.isEmpty {
-            lines.append("  本機路徑（貼到公開的 issue 之前請先遮掉）：\(failure.coverageFindings.prefix(3).joined(separator: "、"))")
+        if !sourceKeys.isEmpty {
+            lines.append("  本機路徑（貼到公開的 issue 之前請先遮掉）：\(sourceKeys.prefix(3).joined(separator: "、"))")
         }
         return lines.joined(separator: "\n")
     }
@@ -70,8 +78,8 @@ public enum AuditMessage {
     /// 從零重建在它的 stamps 提交之後（第一批之前）就記下欠著、結尾才稽核。持鎖的也可能是另一個查詢的併入（R5-6）。
     public static func owedLine(mergeDeferred: Bool) -> String {
         mergeDeferred
-            ? "索引記著欠一次整份稽核，而另一個行程正持有建置鎖：若那是 ltm build（例如升版後的從零重建），它結尾會"
-                + "自己稽核；之後查詢若仍提示，再跑一次 ltm build 看說明"
+            ? "索引記著欠一次整份稽核，而另一個行程正持有建置鎖：若那是 ltm build，它會自己補跑這次稽核（不通過時它自己會"
+                + "說明）；之後查詢若仍提示，再跑一次 ltm build 看說明"
             : "索引欠一次整份稽核（從零重建被中斷，或稽核沒通過）：跑一次 ltm build 看說明"
     }
 

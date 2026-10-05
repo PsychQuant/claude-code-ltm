@@ -475,22 +475,25 @@ public struct IndexBuilder: Sendable {
             // 稽核留下的狀態就會被閘以「請跑 --full」攔下。
             let orphaned: [String]
             if audit || owesAudit {
-                // 整份稽核與寫旗標在同一個寫入交易裡（R6-1）：五條查詢讀同一個快照，而建置鎖擋不住的外部連線
-                // 不能在稽核與寫旗標之間插進來。
-                let (result, recorded) = try database.transaction { () -> (IndexDatabase.DerivedCountAudit, Bool) in
-                    let result = try database.auditDerivedCounts()
-                    guard !owesAudit, !(result.countsAgree && result.danglingLinks == 0) else { return (result, true) }
-                    // 失敗的稽核要記住（R3-4）：不記的話，下一次 `ltm build` 又回到結構性閘、信任剛判定不符的
-                    // 計數。記成「欠著」：之後的 build 在掃描前再稽核，查詢會提示，`--full` 之後隨索引一起清掉。
-                    // 已經有旗標（公開組合 `audit: true, honorPendingAudit: false` 會走到這裡）就不必再寫。
-                    return (result, pendingMarker != nil || Self.recordMarker(in: database))
+                // 稽核的每一條查詢在同一個讀取快照裡跑（R6-1），連同旗標在不在（R7-8）。
+                let (result, markerPresent) = try database.readTransaction {
+                    () -> (IndexDatabase.DerivedCountAudit, Bool) in
+                    (try database.auditDerivedCounts(), try database.meta(Self.auditPendingKey) != nil)
                 }
                 if owesAudit {
                     guard result.isClean else {
-                        throw BuildError.auditFailed(AuditFailure(result, moment: .beforeScan))
+                        throw BuildError.auditFailed(AuditFailure(result, moment: .beforeScan, recorded: markerPresent))
                     }
                 } else {
                     guard result.countsAgree, result.danglingLinks == 0 else {
+                        // 失敗的稽核要記住（R3-4）：不記的話，下一次 `ltm build` 又回到結構性閘、信任剛判定不符的
+                        // 計數。記成「欠著」：之後的 build 在掃描前再稽核，查詢會提示，`--full` 之後隨索引一起清掉。
+                        // 已經有旗標（公開組合 `audit: true, honorPendingAudit: false` 會走到這裡）就不必再寫。
+                        //
+                        // 旗標在快照之外、autocommit 寫（R7-1）：R6 把它放進寫入交易，於是會回滾整個交易的失敗、以及
+                        // WAL 下在 COMMIT 才出現的磁碟滿與 I/O 錯誤，都讓 COMMIT 拋出原始錯誤、蓋掉稽核結果。寫旗標
+                        // 不必與稽核原子化——它只會讓之後的 build 更嚴格。
+                        let recorded = markerPresent || Self.recordMarker(in: database)
                         throw BuildError.auditFailed(AuditFailure(result, moment: .beforeScan, recorded: recorded))
                     }
                 }
@@ -503,7 +506,7 @@ public struct IndexBuilder: Sendable {
                 // **不可**當成空 state 繼續：那會在既有索引上重掃全語料 upsert，
                 // 而使用者不會知道發生過什麼。
                 let detail = "索引裡有 \(orphaned.count) 個來源沒有續讀游標"
-                    + "（原因 ltm 分不出：可能出在 ltm 自己，也可能是 ltm 以外的程式改過這個檔）"
+                    + "（原因 ltm 分不出：可能出在 ltm 自己，也可能是 ltm 以外的程式改過索引檔）"
                     + "——例如 \(orphaned.prefix(3).joined(separator: "、"))。"
                     + "續讀點與索引內容是否一致無法從磁碟上驗證，所以這裡不猜"
                 // 補救寫進錯誤本身（R3-1）：MCP 直接把錯誤印出來，不經過 CLI 的訊息函式。
@@ -935,14 +938,27 @@ public struct IndexBuilder: Sendable {
         // 就永遠不再被稽核——R1-3 那個洞換一條路回來（#61 verify-fix R1 自查）。
         if (rebuildFromScratch || owesAudit) && unmergedSourceKeys.isEmpty {
             // 稽核與清旗標同一個寫入交易（R6-1）：先前分開執行，稽核讀到一半被外部連線改掉的計數可能被判成通過、
-            // 旗標被清掉。
-            let result = try database.transaction { () -> IndexDatabase.DerivedCountAudit in
-                let result = try database.auditDerivedCounts()
-                if result.isClean { try database.removeMeta(Self.auditPendingKey) }
-                return result
+            // 旗標被清掉。不通過的那一邊這個交易什麼都不寫，所以交易本身出錯（例如 COMMIT 失敗）不改變發現——照樣
+            // 拋稽核結果（R7-1）；通過而清旗標失敗時，旗標還在、下一次 build 會再稽核，拋原本的錯誤。
+            var audited: IndexDatabase.DerivedCountAudit?
+            var markerPresent = true
+            do {
+                try database.transaction {
+                    let result = try database.auditDerivedCounts()
+                    audited = result
+                    if result.isClean {
+                        try database.removeMeta(Self.auditPendingKey)
+                    } else {
+                        markerPresent = try database.meta(Self.auditPendingKey) != nil
+                    }
+                }
+            } catch {
+                guard let result = audited, !result.isClean else { throw error }
+                throw BuildError.auditFailed(AuditFailure(result, moment: .afterBuild, recorded: markerPresent))
             }
+            guard let result = audited else { preconditionFailure("交易成功卻沒有稽核結果") }
             guard result.isClean else {
-                throw BuildError.auditFailed(AuditFailure(result, moment: .afterBuild))
+                throw BuildError.auditFailed(AuditFailure(result, moment: .afterBuild, recorded: markerPresent))
             }
             audits.append(BuildAudit(moment: .afterBuild, result: result))
         }

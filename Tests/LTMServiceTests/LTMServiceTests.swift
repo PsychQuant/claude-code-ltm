@@ -1212,7 +1212,7 @@ func beforeScanMessage() {
     #expect(text.contains("記著欠一次稽核"))
     #expect(text.contains("結構性閘放行時照常回答、照常併入新內容"), "R5-7：查詢照常併入要說出來")
     #expect(text.contains("閘看得到這個問題時，查詢會被拒絕"), "R6-2：閘拒絕的那一半不能拿掉")
-    #expect(text.contains("從零重建"), "R6-3：從零重建會丟掉欠著的紀錄")
+    #expect(text.contains("會丟掉這個紀錄"), "R6-3：從零重建會丟掉欠著的紀錄")
     #expect(text.contains("`ltm build --full` 從零重建"))
     #expect(text.contains("通過也不排除增量路徑"))
     for word in ["是 ltm 自己的缺陷", "不是補救", "判定"] {
@@ -1233,6 +1233,8 @@ func danglingLinksMessage() {
     let text = AuditMessage.failure(failure(chunks: 0, dangling: 2, moment: .beforeScan))
     #expect(text.contains("懸空的連結：2 個"))
     #expect(text.contains("可能接上錯的來源"), "R6-4")
+    #expect(text.contains("舊索引詞"), "R7-6：重用的 id 也帶著被刪 turn 的索引詞")
+    #expect(!text.contains("R6-"), "R7-2：訊息裡不得夾內部編號")
     #expect(!text.contains("下面的本機路徑"), "R6-6：沒有路徑時不說「下面」")
     #expect(!text.contains("計數不符"))
 }
@@ -1243,6 +1245,7 @@ func coverageOnlyMessage() {
     #expect(!text.contains("計數不符"))
     #expect(!text.contains("兩份計數"), "R5-9：只有覆蓋缺口時 --full 那一句不講計數")
     #expect(text.contains("結構性閘也看得到，所以查詢會被拒絕"), "R6-2：只有覆蓋缺口時查詢一定被拒絕")
+    #expect(text.contains("查詢這一輪沒有併入時不跑閘"), "R7-6：延後併入的查詢不跑閘")
     #expect(!text.contains("結構性閘放行時照常回答"))
     #expect(text.contains("覆蓋缺口：1 個"))
     #expect(text.split(separator: "\n").last?.contains("本機路徑（貼到公開的 issue 之前請先遮掉）：proj/s1.jsonl") == true)
@@ -1253,4 +1256,15 @@ func notRecordedMessage() {
     let text = AuditMessage.failure(failure(moment: .beforeScan, recorded: false))
     #expect(text.contains("沒能把「欠一次稽核」寫進索引"))
     #expect(!text.contains("這份索引記著欠一次稽核"), "R5-4：不得同時說記了又沒記")
+    #expect(text.contains("也不會提示欠著"), "R7-6：沒記上時也要說查詢怎麼做")
+}
+
+/// R7-6：「N 個 chunk 沒有任何 source mapping」那一筆不是路徑，不得算成來源、也不得印在本機路徑那一行。
+@Test("孤兒 chunk 那一筆照數量說、不當成本機路徑")
+func orphanEntryIsNotAPath() {
+    let text = AuditMessage.failure(
+        failure(chunks: 0, sources: 0, coverage: ["(2 個 chunk 沒有任何 source mapping)"], moment: .beforeScan))
+    #expect(text.contains("覆蓋缺口：2 個 chunk 沒有任何 source mapping"))
+    #expect(!text.contains("本機路徑"))
+    #expect(!text.contains("下面的本機路徑"))
 }

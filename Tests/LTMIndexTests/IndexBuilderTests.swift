@@ -3049,3 +3049,64 @@ func anExistingMarkerIsNotRewritten() throws {
     #expect(failure.recorded, "旗標本來就在：不得因為一次多餘的重寫失敗而說沒記上")
 }
 
+/// R7-1：會回滾整個交易的寫入失敗（`RAISE(ROLLBACK)`；磁碟滿、I/O 錯誤同形）也不得蓋掉稽核結果。R6 把寫旗標放進
+/// 寫入交易時，這條會拋 `statementFailed(sql: "COMMIT", …)`。
+@Test("寫入欠著稽核的旗標時整個交易被回滾：照樣拋出稽核結果，recorded 為 false")
+func aRolledBackMarkerWriteStillReportsTheAudit() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+        try database.execute(
+            "CREATE TRIGGER block_marker BEFORE INSERT ON meta WHEN NEW.key = 'audit_pending' BEGIN SELECT RAISE(ROLLBACK, 'blocked'); END")
+    }
+    let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
+    guard case .auditFailed(let failure) = error else {
+        Issue.record("回滾整個交易的寫入失敗不得蓋掉稽核結果，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(failure.divergentChunks == 1 && !failure.recorded)
+}
+
+/// R7-7：真正的 layout 5 索引（沒有 `source_count`、`source_chunk_counts`、trigger 與 partial index）升上來：
+/// `ltm build` 整份重建，結尾的稽核通過。
+@Test("layout 5 的索引：下一次 build 整份重建到 layout 6，結尾稽核通過")
+func aLayoutFiveIndexIsRebuilt() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        for statement in [
+            "DROP TRIGGER chunk_sources_count_insert", "DROP TRIGGER chunk_sources_count_delete",
+            "DROP TRIGGER chunk_sources_keys_immutable", "DROP INDEX chunks_unsourced",
+            "DROP TABLE source_chunk_counts", "ALTER TABLE chunks DROP COLUMN source_count",
+        ] { try database.execute(statement) }
+        try database.setMeta("layout_version", "5")
+    }
+    let report = try builder.build()
+    #expect(report.wasFullRebuild)
+    #expect(report.audits.map(\.moment) == [.afterBuild])
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.stamps().layoutVersion == 6)
+    #expect(try database.auditDerivedCounts().isClean)
+}
