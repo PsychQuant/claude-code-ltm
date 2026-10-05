@@ -22,7 +22,9 @@ public enum AuditMessage {
                     + "source_chunk_counts 與 chunk_sources 重算的結果不同。")
         }
         if failure.danglingLinks > 0 {
-            lines.append("  懸空的連結：\(failure.danglingLinks) 個 chunk_sources 列指向已不存在的 chunk。")
+            lines.append(
+                "  懸空的連結：\(failure.danglingLinks) 個 chunk_sources 列指向已不存在的 chunk。結構性閘看不到它們；在處理之前，"
+                    + "新的 turn 若重用那個 id，可能接上錯的來源（R6-4）。")
         }
         if !failure.coverageFindings.isEmpty {
             lines.append(
@@ -32,15 +34,26 @@ public enum AuditMessage {
         lines.append("  ltm 分不出原因：可能出在 ltm 自己，也可能是 ltm 以外的程式改過這個檔。")
         if failure.recorded {
             lines.append(
-                "  這份索引記著欠一次稽核：之後每次 `ltm build` 會在掃描前先稽核、不通過就不併入；查詢不跑稽核，照常回答，"
-                    + "也照常把新內容併入（閘照舊讀維護中的計數），並提示欠著稽核。")
+                "  這份索引記著欠一次稽核：之後的 `ltm build` 會在掃描前先稽核、不通過就不併入（從零重建——`--full`，或 "
+                    + "embedding revision、layout 變動觸發的——會丟掉這個紀錄，只在它自己的結尾稽核）。")
+            // R6-2：R5 把「閘拒絕時」那一半拿掉了，而只有覆蓋缺口、或計數一致時，閘與稽核看到的是同一件事。
+            if !countsDiverge && failure.danglingLinks == 0 && !failure.coverageFindings.isEmpty {
+                lines.append("  查詢不跑稽核；這次的覆蓋缺口結構性閘也看得到，所以查詢會被拒絕、叫你先跑 `ltm build`。")
+            } else {
+                lines.append(
+                    "  查詢不跑稽核：結構性閘放行時照常回答、照常併入新內容並提示欠著稽核；閘看得到這個問題時，查詢會被拒絕、"
+                        + "叫你先跑 `ltm build`。")
+            }
         } else {
             lines.append(
                 "  （這次沒能把「欠一次稽核」寫進索引：寫入旗標失敗。下一次 build 不會記得它，會照常信任這兩份計數——"
                     + "修好寫入問題後再跑一次 `ltm build --audit`。）")
         }
         lines.append("  能做的事：")
-        lines.append("  - 回報這個問題（附上面的數字；下面的本機路徑貼到公開的 issue 之前請先遮掉）。")
+        lines.append(
+            failure.coverageFindings.isEmpty
+                ? "  - 回報這個問題（附上面的數字）。"
+                : "  - 回報這個問題（附上面的數字；下面的本機路徑貼到公開的 issue 之前請先遮掉）。")
         let what = countsDiverge || failure.danglingLinks > 0 ? "兩份計數與連結" : "索引"
         lines.append(
             "  - `ltm build --full` 從零重建：\(what)從頭長出來，結尾再稽核一次。它驗得到的只有從零重建的路徑——結尾若又"

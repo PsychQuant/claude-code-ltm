@@ -475,17 +475,22 @@ public struct IndexBuilder: Sendable {
             // 稽核留下的狀態就會被閘以「請跑 --full」攔下。
             let orphaned: [String]
             if audit || owesAudit {
-                let result = try database.auditDerivedCounts()
+                // 整份稽核與寫旗標在同一個寫入交易裡（R6-1）：五條查詢讀同一個快照，而建置鎖擋不住的外部連線
+                // 不能在稽核與寫旗標之間插進來。
+                let (result, recorded) = try database.transaction { () -> (IndexDatabase.DerivedCountAudit, Bool) in
+                    let result = try database.auditDerivedCounts()
+                    guard !owesAudit, !(result.countsAgree && result.danglingLinks == 0) else { return (result, true) }
+                    // 失敗的稽核要記住（R3-4）：不記的話，下一次 `ltm build` 又回到結構性閘、信任剛判定不符的
+                    // 計數。記成「欠著」：之後的 build 在掃描前再稽核，查詢會提示，`--full` 之後隨索引一起清掉。
+                    // 已經有旗標（公開組合 `audit: true, honorPendingAudit: false` 會走到這裡）就不必再寫。
+                    return (result, pendingMarker != nil || Self.recordMarker(in: database))
+                }
                 if owesAudit {
                     guard result.isClean else {
                         throw BuildError.auditFailed(AuditFailure(result, moment: .beforeScan))
                     }
                 } else {
                     guard result.countsAgree, result.danglingLinks == 0 else {
-                        // 失敗的稽核要記住（R3-4）：不記的話，下一次 `ltm build` 又回到結構性閘、信任剛判定不符的
-                        // 計數。記成「欠著」：之後的 build 在掃描前再稽核，查詢會提示，`--full` 之後隨索引一起清掉。
-                        // 已經有旗標（公開組合 `audit: true, honorPendingAudit: false` 會走到這裡）就不必再寫。
-                        let recorded = pendingMarker != nil || Self.recordMarker(in: database)
                         throw BuildError.auditFailed(AuditFailure(result, moment: .beforeScan, recorded: recorded))
                     }
                 }
@@ -498,7 +503,7 @@ public struct IndexBuilder: Sendable {
                 // **不可**當成空 state 繼續：那會在既有索引上重掃全語料 upsert，
                 // 而使用者不會知道發生過什麼。
                 let detail = "索引裡有 \(orphaned.count) 個來源沒有續讀游標"
-                    + "（舊版本建立的索引、或一次回滾之後）"
+                    + "（原因 ltm 分不出：可能出在 ltm 自己，也可能是 ltm 以外的程式改過這個檔）"
                     + "——例如 \(orphaned.prefix(3).joined(separator: "、"))。"
                     + "續讀點與索引內容是否一致無法從磁碟上驗證，所以這裡不猜"
                 // 補救寫進錯誤本身（R3-1）：MCP 直接把錯誤印出來，不經過 CLI 的訊息函式。
@@ -929,11 +934,16 @@ public struct IndexBuilder: Sendable {
         // `build(full:budget:)` 是公開的組合，而先前它會在半份索引上稽核、清掉旗標，之後續完的部分
         // 就永遠不再被稽核——R1-3 那個洞換一條路回來（#61 verify-fix R1 自查）。
         if (rebuildFromScratch || owesAudit) && unmergedSourceKeys.isEmpty {
-            let result = try database.auditDerivedCounts()
+            // 稽核與清旗標同一個寫入交易（R6-1）：先前分開執行，稽核讀到一半被外部連線改掉的計數可能被判成通過、
+            // 旗標被清掉。
+            let result = try database.transaction { () -> IndexDatabase.DerivedCountAudit in
+                let result = try database.auditDerivedCounts()
+                if result.isClean { try database.removeMeta(Self.auditPendingKey) }
+                return result
+            }
             guard result.isClean else {
                 throw BuildError.auditFailed(AuditFailure(result, moment: .afterBuild))
             }
-            try database.removeMeta(Self.auditPendingKey)
             audits.append(BuildAudit(moment: .afterBuild, result: result))
         }
         let auditOwed = try database.meta(Self.auditPendingKey) != nil

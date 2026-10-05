@@ -1210,7 +1210,9 @@ func beforeScanMessage() {
     #expect(text.contains("計數不符：1 個 chunk"))
     #expect(text.contains("ltm 分不出原因"))
     #expect(text.contains("記著欠一次稽核"))
-    #expect(text.contains("照常把新內容併入"), "R5-7：查詢照常併入要說出來")
+    #expect(text.contains("結構性閘放行時照常回答、照常併入新內容"), "R5-7：查詢照常併入要說出來")
+    #expect(text.contains("閘看得到這個問題時，查詢會被拒絕"), "R6-2：閘拒絕的那一半不能拿掉")
+    #expect(text.contains("從零重建"), "R6-3：從零重建會丟掉欠著的紀錄")
     #expect(text.contains("`ltm build --full` 從零重建"))
     #expect(text.contains("通過也不排除增量路徑"))
     for word in ["是 ltm 自己的缺陷", "不是補救", "判定"] {
@@ -1230,6 +1232,8 @@ func afterBuildMessage() {
 func danglingLinksMessage() {
     let text = AuditMessage.failure(failure(chunks: 0, dangling: 2, moment: .beforeScan))
     #expect(text.contains("懸空的連結：2 個"))
+    #expect(text.contains("可能接上錯的來源"), "R6-4")
+    #expect(!text.contains("下面的本機路徑"), "R6-6：沒有路徑時不說「下面」")
     #expect(!text.contains("計數不符"))
 }
 
@@ -1238,6 +1242,8 @@ func coverageOnlyMessage() {
     let text = AuditMessage.failure(failure(chunks: 0, sources: 0, coverage: ["proj/s1.jsonl"], moment: .afterBuild))
     #expect(!text.contains("計數不符"))
     #expect(!text.contains("兩份計數"), "R5-9：只有覆蓋缺口時 --full 那一句不講計數")
+    #expect(text.contains("結構性閘也看得到，所以查詢會被拒絕"), "R6-2：只有覆蓋缺口時查詢一定被拒絕")
+    #expect(!text.contains("結構性閘放行時照常回答"))
     #expect(text.contains("覆蓋缺口：1 個"))
     #expect(text.split(separator: "\n").last?.contains("本機路徑（貼到公開的 issue 之前請先遮掉）：proj/s1.jsonl") == true)
 }

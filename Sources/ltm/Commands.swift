@@ -277,10 +277,11 @@ enum BuildCommand {
         選項：
           --full                捨棄既有索引，從零重建（重建完會跑一次整份稽核）
           --audit               增量 build 時，掃描之前先跑整份稽核：不拿維護中的計數當
-                                答案，直接從 chunk_sources 重算閘的兩個判斷與兩份計數，
-                                逐一比對。它要讀完整份 chunks 與 chunk_sources，所以
-                                一般的增量 build 與查詢不跑；從零重建（--full、版本不符）
-                                只在結尾跑一次，欠著稽核時每次 build 都在掃描前與結尾跑。
+                                答案，直接從 chunk_sources 重算閘的兩個判斷與兩份計數、
+                                找指向已不存在 chunk 的連結，逐一比對。它要讀完整份
+                                chunks 與 chunk_sources，所以一般的增量 build 與查詢
+                                不跑；從零重建（--full、版本不符）只在結尾跑一次，欠著
+                                稽核時增量 build 在掃描前與結尾都跑。
           --quiet               不印進度（進度預設寫 stderr；CI／腳本可關掉）
           --batch-chunks N      一批 chunk 數的上界（預設 2000）。批次以 chunk 為
                                 粒度組裝、來源可在 chunk 邊界切開（#47），最大
@@ -736,7 +737,8 @@ enum QueryCommand {
             case .auditFailed(let failure):
                 // 查詢路徑不跑稽核、也不從零重建，所以照理到不了；到了就是 bug，照實說。
                 Output.error(
-                    "✗ 意外的稽核錯誤（\(failure.divergentChunks) 個 chunk、\(failure.divergentSources) 個來源的計數不符）——查詢路徑不跑稽核。這是 bug。")
+                    "✗ 意外的稽核錯誤（\(failure.divergentChunks) 個 chunk、\(failure.divergentSources) 個來源的計數不符，"
+                        + "\(failure.danglingLinks) 個懸空連結，\(failure.coverageFindings.count) 個覆蓋缺口）——查詢路徑不跑稽核。這是 bug。")
             case .stateUnreadableWhileAuditOwed(let detail):
                 Output.error("✗ 續讀狀態無法讀取：\(detail)。")
             case .memoryBudgetExceeded(let estimated, let budget, _):

@@ -1667,20 +1667,25 @@ func anOwedAuditFailsBeforeTheScanAndMergesNothing() throws {
 }
 
 /// 在建置途中，從另一條連線改壞一個已提交的計數——模擬「這次 build 的寫入長出錯的計數」，也就是 trigger
-/// 缺陷的形狀（真正的 trigger 缺陷在出貨碼上造不出來）。它同時正是歸因的但書：建置期間 ltm 以外的寫入，
-/// ltm 分不出來，也判成缺陷。
+/// 缺陷的形狀（真正的 trigger 缺陷在出貨碼上造不出來）。它同時說明了為什麼稽核失敗不歸因：建置期間 ltm
+/// 以外的寫入與 ltm 自己的缺陷，從索引上看不出差別。
 final class CorruptingEmbedder: EmbeddingProvider, @unchecked Sendable {
     let revision: String
     let dimension: Int = 4
     private let databasePath: String
     private let corruptOnCall: Int
+    private let sql: String
     private let lock = NSLock()
     private var calls = 0
 
-    init(revision: String, databasePath: String, corruptOnCall: Int) {
+    init(
+        revision: String, databasePath: String, corruptOnCall: Int,
+        sql: String = "UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)"
+    ) {
         self.revision = revision
         self.databasePath = databasePath
         self.corruptOnCall = corruptOnCall
+        self.sql = sql
     }
 
     func vector(for text: String) throws -> [Float]? {
@@ -1691,7 +1696,7 @@ final class CorruptingEmbedder: EmbeddingProvider, @unchecked Sendable {
         if n == corruptOnCall {
             let database = try IndexDatabase(path: databasePath)
             defer { database.close() }
-            try database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+            try database.execute(sql)
         }
         return try StubEmbedder(revision: revision).vector(for: text)
     }
@@ -1861,7 +1866,7 @@ func gateVisibleDriftOnAnOwedIndexIsReportedByTheAudit() throws {
     #expect(failure.moment == .beforeScan && failure.divergentChunks == 1)
     let audited = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
     guard case .auditFailed = audited else {
-        Issue.record("欠著稽核時 audit: true 也應該是 auditFailed（不是 derivedCountsDiverged），實際是 \(String(describing: audited))")
+        Issue.record("欠著稽核時 audit: true 也應該是 auditFailed，實際是 \(String(describing: audited))")
         return
     }
 }
@@ -1892,6 +1897,12 @@ func anOwedAuditWithOnlyCoverageGapsNamesThem() throws {
     }
     #expect(failure.divergentChunks == 0 && failure.divergentSources == 0)
     #expect(failure.coverageFindings.count == 1)
+    // 欠著優先（R6-8）：沒有欠著稽核時，`--audit` 只找到覆蓋缺口會拋閘的 `stateUnreadable`；欠著時一律是稽核失敗。
+    let audited = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
+    guard case .auditFailed = audited else {
+        Issue.record("欠著稽核時 audit: true 的覆蓋缺口應該是 auditFailed，實際是 \(String(describing: audited))")
+        return
+    }
 }
 
 /// R1-6：稽核的 per-source 那一半。三種壞法各自要被抓到，而且只算在來源那一側。
@@ -2942,5 +2953,99 @@ func aFailedMarkerWriteStillReportsTheAudit() throws {
     let database = try IndexDatabase(path: derived.databaseURL.path)
     defer { database.close() }
     #expect(try database.meta("audit_pending") == nil)
+}
+
+/// R6-8：欠著稽核的掃描前稽核也看得到懸空的連結（`isClean` 的第五項）。
+@Test("欠著稽核、有懸空的連結：ltm build 在掃描前就停下")
+func anOwedAuditCatchesDanglingLinksBeforeTheScan() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "1")
+        try database.execute("DELETE FROM chunks WHERE id = (SELECT MAX(id) FROM chunks)")
+    }
+    let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build() }
+    guard case .auditFailed(let failure) = error else {
+        Issue.record("應該是 auditFailed，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(failure.moment == .beforeScan && failure.danglingLinks == 1)
+}
+
+/// R6-8：建置結尾的稽核也看得到懸空的連結——建置途中另一條連線刪掉一個不會被這次改寫的 chunk。
+@Test("欠著稽核的 build 途中出現懸空的連結：結尾的稽核抓到它，旗標留著")
+func theEndAuditCatchesDanglingLinks() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeSixSources(in: corpus)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")).build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "1")
+    }
+    let session = "00000006-0000-0000-0000-000000000000"
+    _ = try writeSession(
+        in: corpus, project: "proj-one", file: "s6.jsonl",
+        lines: [turnLine(uuid: "00000006-aaaa-bbbb-cccc-000000000000", session: session, role: "user", text: "新來源的內容")])
+    let deleting = CorruptingEmbedder(
+        revision: "rev-A", databasePath: derived.databaseURL.path, corruptOnCall: 1,
+        sql: "DELETE FROM chunks WHERE id = (SELECT MIN(id) FROM chunks)")
+    let error = #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner, embedder: deleting).build()
+    }
+    guard case .auditFailed(let failure) = error else {
+        Issue.record("應該是 auditFailed，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(failure.moment == .afterBuild && failure.danglingLinks == 1)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.meta("audit_pending") == "1")
+}
+
+/// R6-8：旗標已經在的時候不重寫——否則一次失敗的重寫會讓 `recorded` 誤報「沒記上」。用擋住寫入的 trigger 驗。
+@Test("audit: true 而不補跑欠著稽核時失敗：旗標已在就不重寫，recorded 為 true")
+func anExistingMarkerIsNotRewritten() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "1")
+        try database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+        try database.execute(
+            "CREATE TRIGGER block_marker BEFORE INSERT ON meta WHEN NEW.key = 'audit_pending' BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+    }
+    let error = #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try builder.build(audit: true, honorPendingAudit: false)
+    }
+    guard case .auditFailed(let failure) = error else {
+        Issue.record("應該是 auditFailed，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(failure.recorded, "旗標本來就在：不得因為一次多餘的重寫失敗而說沒記上")
 }
 
