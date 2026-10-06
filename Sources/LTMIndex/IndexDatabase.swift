@@ -566,6 +566,22 @@ public final class IndexDatabase {
         "(\(count) 個 chunk 沒有任何 source mapping)"
     }
 
+    /// 覆蓋發現裡「N 個 chunk 沒有任何 source mapping」那一筆的 N；其他條目（來源鍵）回 nil。
+    ///
+    /// 比對完整格式，不只看第一個字元（#61 R9）：來源鍵是 `<project>/<file>`，project 是語料根底下第一層目錄的
+    /// 名字，可以以 `(` 開頭——先前用 `hasPrefix("(")` 時，那種來源鍵會被當成孤兒那一筆，印在沒有遮掉標記的那一行。
+    public static func orphanChunkCount(in finding: String) -> Int? {
+        let prefix = "(", suffix = " 個 chunk 沒有任何 source mapping)"
+        guard finding.hasPrefix(prefix), finding.hasSuffix(suffix),
+            finding.count > prefix.count + suffix.count
+        else { return nil }
+        let digits = finding.dropFirst(prefix.count).dropLast(suffix.count)
+        guard digits.allSatisfy({ $0.isASCII && $0.isNumber }), let count = Int(digits),
+            orphanFinding(count) == finding
+        else { return nil }
+        return count
+    }
+
     /// 整份稽核的結果（#61）。
     public struct DerivedCountAudit: Sendable, Equatable {
         /// 檢查了幾個 chunk、幾個來源（`chunk_sources` 與 `source_chunk_counts` 兩邊出現過的 `source_key`

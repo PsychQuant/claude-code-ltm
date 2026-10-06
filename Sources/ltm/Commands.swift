@@ -375,6 +375,11 @@ enum BuildCommand {
                     "  稽核（\(moment)）：檢查 \(audit.result.chunksChecked) 個 chunk、"
                         + "\(audit.result.sourcesChecked) 個來源，計數與 chunk_sources 一致")
             }
+            if report.auditOwed {
+                // R9-7：先前 build 從不印這件事——清除紀錄被靜默略過時，build 每次報稽核通過、查詢每次說欠著。
+                Output.error(
+                    "  ⚠ " + AuditMessage.owedAfterBuild(auditedAtEnd: report.audits.contains { $0.moment == .afterBuild }))
+            }
             if !report.sourcesUnreadable.isEmpty {
                 // 讀不到的來源**沒有**被作廢（那會刪掉還存在的內容），所以它們的
                 // 內容仍在索引裡、只是不會更新。沉默地繼續會讓這次建置看起來完整。

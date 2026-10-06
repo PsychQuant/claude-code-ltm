@@ -1443,6 +1443,24 @@ func anOwedAuditFromAnInterruptedRebuildIsReported() throws {
 }
 
 
+/// R9-7：清除紀錄被 trigger 靜默略過時，build 兩次稽核都通過、exit 0，但索引仍欠著——先前 CLI 從不印 `auditOwed`，
+/// 查詢每次說欠著而 build 什麼都沒說。
+@Test("ltm build 結束時索引仍欠著稽核：stderr 說清除沒有生效")
+func theCLISaysWhenAnOwedAuditDidNotClear() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    try owedIndex(
+        workspace,
+        corruption: "CREATE TRIGGER keep_marker BEFORE DELETE ON meta WHEN OLD.key = 'audit_pending' "
+            + "BEGIN SELECT RAISE(IGNORE); END")
+    let result = try runCLI(["build"], environment: workspace.environment)
+    #expect(result.code == 0, "實得：\(result.err)")
+    #expect(result.out.contains("稽核（建置完成後）"), "前提：結尾稽核通過：\(result.out)")
+    #expect(result.err.contains("清除這個紀錄沒有生效"), "實得：\(result.err)")
+    #expect(try pendingMarker(workspace) == "1")
+}
+
 /// R2-11／R2-12：只有覆蓋缺口時不提計數；來源鍵是本機路徑，單獨一行並註明回報前遮掉。
 @Test("欠著稽核、只有覆蓋缺口：訊息不提計數不符，路徑單獨一行並註明遮掉")
 func anOwedAuditWithOnlyCoverageGapsReadsConsistently() throws {

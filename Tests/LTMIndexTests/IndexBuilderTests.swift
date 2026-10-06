@@ -1514,6 +1514,7 @@ func aChunkThatLostItsLastSourceIsRefused() throws {
         return
     }
     #expect(detail.contains("1 個 chunk 沒有任何 source mapping"))
+    #expect(!detail.contains("個來源"), "R9：孤兒那一筆不是來源，不得算成來源、也不得印在「例如」後面")
     let database = try IndexDatabase(path: derived.databaseURL.path)
     defer { database.close() }
     #expect(try database.chunkCount() == 2, "閘拒絕時不得併入新內容")
@@ -2990,6 +2991,148 @@ func anUnrecordedFailureLeavesTheGateInCharge() throws {
         }
         #expect(detail.contains("ltm build --full"))
     }
+}
+
+/// R9：寫旗標被 trigger 靜默略過（`RAISE(IGNORE)`，不報錯）時，`recorded` 由讀回決定——先前只看「沒拋錯」，報成已記下。
+@Test("寫入欠著稽核的旗標被靜默略過：recorded 為 false")
+func aSilentlyIgnoredMarkerWriteIsNotReportedAsRecorded() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+        try database.execute(
+            "CREATE TRIGGER ignore_marker BEFORE INSERT ON meta WHEN NEW.key = 'audit_pending' BEGIN SELECT RAISE(IGNORE); END")
+    }
+    let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build(audit: true) }
+    guard case .auditFailed(let failure) = error else {
+        Issue.record("應該是 auditFailed，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(!failure.recorded, "寫入沒有生效：不得說記上了")
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.meta("audit_pending") == nil, "前提：旗標真的不在")
+}
+
+/// R9：清旗標被靜默略過時，build 照樣報稽核通過——`BuildReport.auditOwed` 必須仍為 true，讓 `ltm build` 說出來
+/// （先前 CLI 從不印它，查詢每次說欠著、build 什麼都沒說）。
+@Test("清除欠著稽核的紀錄被靜默略過：結尾稽核通過，報告仍說欠著")
+func aSilentlyIgnoredClearIsReportedAsOwed() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "1")
+        try database.execute(
+            "CREATE TRIGGER keep_marker BEFORE DELETE ON meta WHEN OLD.key = 'audit_pending' BEGIN SELECT RAISE(IGNORE); END")
+    }
+    let report = try builder.build()
+    #expect(report.audits.map(\.moment) == [.beforeScan, .afterBuild], "前提：兩次稽核都通過")
+    #expect(report.auditOwed, "紀錄沒清掉：報告不得說不欠")
+}
+
+/// R9：建置途中旗標被移除、結尾稽核又不通過時，結尾那條路徑在交易之外重寫旗標——先前只回報 `recorded: false`，
+/// 下一次 build 就回到結構性閘、信任剛判定不符的計數。用一個「刪旗標時順手改壞計數」的 trigger，讓一條陳述式做兩件事。
+@Test("建置途中旗標被移除而結尾稽核不通過：重寫旗標，recorded 為 true")
+func anEndAuditFailureRerecordsARemovedMarker() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeSixSources(in: corpus)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")).build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "1")
+        try database.execute(
+            """
+            CREATE TRIGGER corrupt_on_clear AFTER DELETE ON meta WHEN OLD.key = 'audit_pending'
+            BEGIN UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks); END
+            """)
+    }
+    let session = "00000006-0000-0000-0000-000000000000"
+    _ = try writeSession(
+        in: corpus, project: "proj-one", file: "s6.jsonl",
+        lines: [turnLine(uuid: "00000006-aaaa-bbbb-cccc-000000000000", session: session, role: "user", text: "新來源的內容")])
+    let removing = CorruptingEmbedder(
+        revision: "rev-A", databasePath: derived.databaseURL.path, corruptOnCall: 1,
+        sql: "DELETE FROM meta WHERE key = 'audit_pending'")
+    let error = #expect(throws: IndexBuilder.BuildError.self) {
+        _ = try IndexBuilder(location: derived, scanner: scanner, embedder: removing).build()
+    }
+    guard case .auditFailed(let failure) = error else {
+        Issue.record("應該是 auditFailed，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(failure.moment == .afterBuild && failure.divergentChunks == 1, "前提：結尾稽核看到被改壞的計數")
+    #expect(failure.recorded)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.meta("audit_pending") == "1", "下一次 build 要在掃描前再稽核")
+}
+
+/// R9（regression lens 的變異 B）：結尾稽核不通過之後交易才出錯時，照樣拋稽核結果（R7-1）——先前沒有測試驅動這條
+/// catch，讓它直接拋原始錯誤也全綠。最後一批提交之後丟掉 `meta` 表（批次提交會寫 `vector_count`，所以要等最後一批之後）：
+/// 結尾交易裡讀旗標拋錯、交易回滾；旗標寫不回去，`recorded` 為 false。
+@Test("結尾稽核不通過之後交易出錯：照樣拋稽核結果，recorded 為 false")
+func anEndAuditFailureSurvivesAFailingTransaction() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeSixSources(in: corpus)
+    let scanner = CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting)
+    _ = try IndexBuilder(location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A")).build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "1")
+    }
+    let session = "00000006-0000-0000-0000-000000000000"
+    _ = try writeSession(
+        in: corpus, project: "proj-one", file: "s6.jsonl",
+        lines: [turnLine(uuid: "00000006-aaaa-bbbb-cccc-000000000000", session: session, role: "user", text: "新來源的內容")])
+    let path = derived.databaseURL.path
+    let breaking = IndexBuilder(
+        location: derived, scanner: scanner, embedder: StubEmbedder(revision: "rev-A"),
+        progress: { event in
+            guard case .batchCommitted(let batch, let total, _, _, _) = event, batch == total,
+                let database = try? IndexDatabase(path: path)
+            else { return }
+            defer { database.close() }
+            try? database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+            try? database.execute("DROP TABLE meta")
+        })
+    let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try breaking.build() }
+    guard case .auditFailed(let failure) = error else {
+        Issue.record("交易出錯不得蓋掉稽核結果，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(failure.moment == .afterBuild && failure.divergentChunks == 1)
+    #expect(!failure.recorded, "meta 表不在：旗標寫不回去，不得說記上了")
 }
 
 /// R6-8：欠著稽核的掃描前稽核也看得到懸空的連結（`isClean` 的第五項）。

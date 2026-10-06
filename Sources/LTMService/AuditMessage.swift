@@ -29,16 +29,16 @@ public enum AuditMessage {
                     + "新的 turn 若重用那個 id，可能接上錯的來源，也會帶著被刪的那則 turn 留下的舊索引詞。")
         }
         // 覆蓋缺口有兩種條目：沒有游標的來源鍵（本機路徑），與「N 個 chunk 沒有任何 source mapping」那一筆（不是路徑，
-        // R7-6：先前被算成 1 個缺口、印在本機路徑那一行）。
-        let orphanEntries = failure.coverageFindings.filter { $0.hasPrefix("(") }
-        let sourceKeys = failure.coverageFindings.filter { !$0.hasPrefix("(") }
+        // R7-6：先前被算成 1 個缺口、印在本機路徑那一行）。辨識比對完整格式（R9：只看 `(` 會誤判來源鍵）。
+        let orphanCounts = failure.coverageFindings.compactMap(IndexDatabase.orphanChunkCount(in:))
+        let sourceKeys = failure.coverageFindings.filter { IndexDatabase.orphanChunkCount(in: $0) == nil }
         if !failure.coverageFindings.isEmpty {
             var parts: [String] = []
             if !sourceKeys.isEmpty { parts.append("\(sourceKeys.count) 個來源有 chunk 卻沒有續讀游標") }
-            parts += orphanEntries.map { String($0.dropFirst().dropLast()) }
+            parts += orphanCounts.map { "\($0) 個 chunk 沒有任何 source mapping" }
             lines.append("  覆蓋缺口：\(parts.joined(separator: "；"))。")
         }
-        lines.append("  ltm 分不出原因：可能出在 ltm 自己，也可能是 ltm 以外的程式改過這個檔。")
+        lines.append("  ltm 分不出原因：可能出在 ltm 自己，也可能是 ltm 以外的程式改過索引檔。")
         if failure.recorded {
             lines.append(
                 "  這份索引記著欠一次稽核：之後的 `ltm build` 會在掃描前先稽核、不通過就不併入（從零重建——`--full`，或 "
@@ -58,19 +58,22 @@ public enum AuditMessage {
             // 先前無條件寫「查詢照常回答、照常併入」，但閘看得到的不符——例如有連結的 chunk 的 source_count 被改成 0——
             // 照樣讓查詢與下一次 build 被拒。沒有旗標時閘拒絕的補救是 `--full`，不是 `ltm build`。
             //
-            // 沒記上有兩種來源，訊息不分：寫旗標失敗（沒欠著時的 `--audit`），或旗標在這次 build 期間被移除
-            // （欠著時讀快照、或建置結尾的那一刻，旗標已經不在）。
+            // R9：三條失敗路徑都在旗標不在時寫一次、寫完讀回（`IndexBuilder.recordMarker`），所以沒記上只剩一種意思：
+            // 寫入沒有生效（拋錯，或被 trigger 靜默略過）。「之後的 build」限定成不帶 `--audit` 的增量 build——`--audit`
+            // 與從零重建都不走閘（R9-8）。
             lines.append(
-                "  （索引沒有記下欠一次稽核：寫入旗標失敗，或旗標在這次 build 期間被移除。下一次 build 與查詢都不會記得它，"
-                    + "只走結構性閘。）")
+                "  （這次沒能把「欠一次稽核」寫進索引：寫入旗標沒有生效。之後不帶 `--audit` 的增量 `ltm build` 與查詢都"
+                    + "不會記得它，只走結構性閘；從零重建——`--full`，或 embedding revision、layout 變動觸發的——不走閘，"
+                    + "只在自己的結尾稽核。）")
             if coverageOnly {
                 lines.append(
-                    "  這次的覆蓋缺口結構性閘也看得到，所以下一次 build 與查詢都會被拒絕、叫你跑 `ltm build --full`"
+                    "  這次的覆蓋缺口結構性閘也看得到，所以之後的增量 `ltm build` 與查詢都會被拒絕、叫你跑 `ltm build --full`"
                         + "（另一個行程正持有建置鎖、查詢這一輪沒有併入時不跑閘，會照常回答）。")
             } else {
                 lines.append(
                     "  閘放行時，build 照常併入、查詢照常回答與併入，不會提示欠著，也不再找這些問題；閘看得到這個問題時，"
-                        + "兩者都會被拒絕、叫你跑 `ltm build --full`。確認索引檔可以寫入之後，再跑一次 `ltm build --audit`。")
+                        + "兩者都會被拒絕、叫你跑 `ltm build --full`。確認索引檔可以寫入之後，再跑一次 `ltm build --audit`"
+                        + "（它會重新稽核、再試一次寫入）。")
             }
         }
         lines.append("  能做的事：")
@@ -97,6 +100,15 @@ public enum AuditMessage {
             ? "索引記著欠一次整份稽核，而另一個行程正持有建置鎖：若那是 ltm build，它會自己補跑這次稽核（不通過時它自己會"
                 + "說明）；之後查詢若仍提示，再跑一次 ltm build 看說明"
             : "索引欠一次整份稽核（從零重建被中斷，或稽核沒通過）：跑一次 ltm build 看說明"
+    }
+
+    /// `ltm build` 成功結束、索引卻仍記著欠一次稽核時印的那一行（R9-7）。先前 build 從不印 `auditOwed`：清除紀錄被
+    /// trigger 靜默略過時，build 每次都報稽核通過、查詢每次都說欠著，而 build 這邊什麼都沒說。
+    public static func owedAfterBuild(auditedAtEnd: Bool) -> String {
+        auditedAtEnd
+            ? "這次 build 結尾的稽核通過了，但索引仍記著欠一次整份稽核（清除這個紀錄沒有生效）：之後的 `ltm build` 會再"
+                + "稽核；一直如此，請回報"
+            : "索引仍記著欠一次整份稽核：這次沒有完成從零重建的工作（有來源未併入），留給之後完成它的 `ltm build`"
     }
 
     /// 這一輪因另一個行程持鎖而沒有併入新內容（#51）。CLI、MCP、recall 區塊共用（R4-2：recall 先前沒有）。

@@ -1254,7 +1254,7 @@ func coverageOnlyMessage() {
 @Test("旗標寫入失敗：不說「記著欠一次稽核」，改說沒記上")
 func notRecordedMessage() {
     let text = AuditMessage.failure(failure(moment: .beforeScan, recorded: false))
-    #expect(text.contains("索引沒有記下欠一次稽核"))
+    #expect(text.contains("沒能把「欠一次稽核」寫進索引"))
     #expect(!text.contains("這份索引記著欠一次稽核"), "R5-4：不得同時說記了又沒記")
     #expect(text.contains("不會提示欠著"), "R7-6：沒記上時也要說查詢怎麼做")
     // R8（codex）：閘看得到的不符照樣讓查詢與 build 被拒，補救是 --full（沒有旗標）。不得無條件說照常回答。
@@ -1267,8 +1267,44 @@ func notRecordedMessage() {
 func notRecordedCoverageOnlyMessage() {
     let text = AuditMessage.failure(
         failure(chunks: 0, sources: 0, coverage: ["/tmp/x/a.jsonl"], moment: .afterBuild, recorded: false))
-    #expect(text.contains("下一次 build 與查詢都會被拒絕、叫你跑 `ltm build --full`"))
+    #expect(text.contains("之後的增量 `ltm build` 與查詢都會被拒絕、叫你跑 `ltm build --full`"))
     #expect(!text.contains("閘放行時"))
+}
+
+/// R9-8：沒記上那一句只講不帶 `--audit` 的增量 build；從零重建要排除，否則與同一則訊息建議的 `--full` 矛盾。
+@Test("沒記上旗標：只走結構性閘的是不帶 --audit 的增量 build，從零重建另外說")
+func notRecordedMessageScopesTheGate() {
+    let text = AuditMessage.failure(failure(moment: .beforeScan, recorded: false))
+    #expect(text.contains("之後不帶 `--audit` 的增量 `ltm build` 與查詢都不會記得它，只走結構性閘"))
+    #expect(text.contains("從零重建——`--full`，或 embedding revision、layout 變動觸發的——不走閘"))
+    #expect(!text.contains("下一次 build 與查詢都不會記得它"))
+}
+
+/// R9-5：「改過」要有先行詞——接著印的是語料路徑，「這個檔」會被讀成語料檔。
+@Test("稽核失敗訊息說的是索引檔")
+func auditMessageNamesTheIndexFile() {
+    let text = AuditMessage.failure(failure(moment: .beforeScan))
+    #expect(text.contains("ltm 以外的程式改過索引檔"))
+    #expect(!text.contains("改過這個檔"))
+}
+
+/// R9-10：來源鍵的第一層目錄可以以 `(` 開頭；它仍是本機路徑，必須印在有遮掉標記的那一行。
+@Test("以 ( 開頭的來源鍵仍當成本機路徑")
+func aSourceKeyStartingWithAParenIsStillAPath() {
+    let text = AuditMessage.failure(
+        failure(chunks: 0, sources: 0, coverage: ["(client-x)/s.jsonl"], moment: .beforeScan))
+    #expect(text.contains("本機路徑（貼到公開的 issue 之前請先遮掉）：(client-x)/s.jsonl"))
+    #expect(text.contains("覆蓋缺口：1 個來源有 chunk 卻沒有續讀游標。"))
+    #expect(IndexDatabase.orphanChunkCount(in: "(client-x)/s.jsonl") == nil)
+    #expect(IndexDatabase.orphanChunkCount(in: "(12 個 chunk 沒有任何 source mapping)") == 12)
+    #expect(IndexDatabase.orphanChunkCount(in: "(x 個 chunk 沒有任何 source mapping)") == nil)
+}
+
+/// R9-7：build 成功結束而索引仍欠著時，兩種情形各說各的。
+@Test("build 結束仍欠著稽核：結尾稽核過了卻沒清掉，與從零重建沒做完，說法不同")
+func owedAfterBuildMessage() {
+    #expect(AuditMessage.owedAfterBuild(auditedAtEnd: true).contains("清除這個紀錄沒有生效"))
+    #expect(AuditMessage.owedAfterBuild(auditedAtEnd: false).contains("有來源未併入"))
 }
 
 /// R7-6：「N 個 chunk 沒有任何 source mapping」那一筆不是路徑，不得算成來源、也不得印在本機路徑那一行。
