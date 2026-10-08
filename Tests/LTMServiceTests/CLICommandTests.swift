@@ -381,6 +381,12 @@ func auditRefusesAMissingCursorFromTheCLI() throws {
     let result = try runCLI(["build", "--audit"], environment: workspace.environment)
     #expect(result.code != 0)
     #expect(result.err.contains("續讀狀態無法讀取"))
+    // R10-11：補救寫在錯誤本身（R3-1），CLI 不再另加一句——先前 `ltm build` 印兩次 `--full`。
+    #expect(result.err.components(separatedBy: "ltm build --full").count == 2, "補救只印一次：\(result.err)")
+    // 查詢路徑的包裝同一件事。
+    let queried = try runCLI(["query", "內容", "--all-projects"], environment: workspace.environment)
+    #expect(queried.code != 0)
+    #expect(queried.err.components(separatedBy: "ltm build --full").count == 2, "補救只印一次：\(queried.err)")
 }
 
 /// spec：`ltm query` 的併入不跑稽核。把一個 chunk 的計數改成錯的非零值——結構性閘不會因此拒絕，
@@ -1386,10 +1392,10 @@ func compareRefusesBudgetAndDoubleDashTerminatesOptions() throws {
 // MARK: - 欠著稽核（#61 R2）
 
 /// 在一份建好的索引上造出「欠著稽核」的狀態，再用 `corruption` 改壞它。
-private func owedIndex(_ workspace: CLIWorkspace, marker: String = "1", corruption: String) throws {
+private func owedIndex(_ workspace: CLIWorkspace, corruption: String) throws {
     let database = try IndexDatabase(path: workspace.derived.appendingPathComponent("index.sqlite3").path)
     defer { database.close() }
-    try database.setMeta("audit_pending", marker)
+    try database.setMeta("audit_pending", IndexBuilder.owedMarker)
     try database.execute(corruption)
 }
 
@@ -1457,7 +1463,7 @@ func theCLISaysWhenAnOwedAuditDidNotClear() throws {
     let result = try runCLI(["build"], environment: workspace.environment)
     #expect(result.code == 0, "實得：\(result.err)")
     #expect(result.out.contains("稽核（建置完成後）"), "前提：結尾稽核通過：\(result.out)")
-    #expect(result.err.contains("清除這個紀錄沒有生效"), "實得：\(result.err)")
+    #expect(result.err.contains("結束時它仍在"), "實得：\(result.err)")
     #expect(try pendingMarker(workspace) == "1")
 }
 

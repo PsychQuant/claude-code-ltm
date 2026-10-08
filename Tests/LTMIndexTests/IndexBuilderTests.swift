@@ -1513,7 +1513,10 @@ func aChunkThatLostItsLastSourceIsRefused() throws {
         Issue.record("應該是 stateUnreadable，實際是 \(String(describing: error))")
         return
     }
-    #expect(detail.contains("1 個 chunk 沒有任何 source mapping"))
+    // R10-6：閘讀的是維護中的計數，計數漂移時「沒有 source mapping」可以是假的，所以照實說是計數的讀值。
+    #expect(detail.contains("依維護中的計數"))
+    #expect(detail.contains("1 個 chunk 的來源數（source_count）為 0"))
+    #expect(!detail.contains("沒有任何 source mapping"))
     #expect(!detail.contains("個來源"), "R9：孤兒那一筆不是來源，不得算成來源、也不得印在「例如」後面")
     let database = try IndexDatabase(path: derived.databaseURL.path)
     defer { database.close() }
@@ -1994,6 +1997,9 @@ func auditRefusesAMissingCursorLikeTheGate() throws {
         return
     }
     #expect(detail.contains("proj-one/session.jsonl"))
+    // R10-6：`--audit` 的覆蓋發現從 `chunk_sources` 算，說成映射的事實；結構性閘讀計數，才說「依維護中的計數」。
+    #expect(detail.contains("1 個來源有 chunk 卻沒有續讀游標"))
+    #expect(!detail.contains("依維護中的計數"))
 }
 
 /// `vectors.bin.tmp` 是連結時，**受害者一個 byte 都不得變**。

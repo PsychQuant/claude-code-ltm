@@ -222,7 +222,7 @@ swift build                      # 產出 .build/debug/ltm
 ltm build                        # 掃語料、建索引（預設增量，--full 從零重建；完成從零重建的那一次結尾會跑一次整份稽核）
                                  #   進度寫 stderr（--quiet 關掉），stdout 只有最終報告
                                  #   --audit：增量 build 時，掃描之前先整份稽核閘讀的兩份計數與 chunk_sources 的連結（#61）
-                                 #   欠著稽核時（重建被中斷或稽核沒過），之後的增量 build 在掃描前先稽核；查詢會提示
+                                 #   欠著稽核時，之後的增量 build 在掃描前先稽核；查詢會提示
                                  #   --batch-chunks N / --memory-budget-mb N 見 `ltm build --help`
 ltm query "要找的內容" --json     # 查詢；預設只搜當前 project
 ltm memory                       # 檢查記憶層，列出讀不回來的紀錄（唯讀）

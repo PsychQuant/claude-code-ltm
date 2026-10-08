@@ -58,13 +58,14 @@ public enum AuditMessage {
             // 先前無條件寫「查詢照常回答、照常併入」，但閘看得到的不符——例如有連結的 chunk 的 source_count 被改成 0——
             // 照樣讓查詢與下一次 build 被拒。沒有旗標時閘拒絕的補救是 `--full`，不是 `ltm build`。
             //
-            // R9：三條失敗路徑都在旗標不在時寫一次、寫完讀回（`IndexBuilder.recordMarker`），所以沒記上只剩一種意思：
-            // 寫入沒有生效（拋錯，或被 trigger 靜默略過）。「之後的 build」限定成不帶 `--audit` 的增量 build——`--audit`
-            // 與從零重建都不走閘（R9-8）。
+            // R9：三條失敗路徑都在旗標不在時寫一次、寫完讀回（`IndexBuilder.recordMarker`）。沒記上的意思是讀回時看不到：
+            // 寫入出錯、被 trigger 靜默略過，或讀回本身失敗（R10-4：最後一種其實可能寫進去了，所以訊息說「沒能確認」、
+            // 並以「沒有這個紀錄時」為條件）。「之後的 build」限定成不帶 `--audit` 的增量 build——`--audit` 與從零重建
+            // 都不走閘（R9-8）。
             lines.append(
-                "  （這次沒能把「欠一次稽核」寫進索引：寫入旗標沒有生效。之後不帶 `--audit` 的增量 `ltm build` 與查詢都"
-                    + "不會記得它，只走結構性閘；從零重建——`--full`，或 embedding revision、layout 變動觸發的——不走閘，"
-                    + "只在自己的結尾稽核。）")
+                "  （這次沒能確認「欠一次稽核」寫進了索引：寫完讀回時看不到。沒有這個紀錄時，之後不帶 `--audit` 的增量 "
+                    + "`ltm build` 與查詢都不會記得它，只走結構性閘；從零重建——`--full`，或 embedding revision、layout "
+                    + "變動觸發的——不走閘，只在自己的結尾稽核。）")
             if coverageOnly {
                 lines.append(
                     "  這次的覆蓋缺口結構性閘也看得到，所以之後的增量 `ltm build` 與查詢都會被拒絕、叫你跑 `ltm build --full`"
@@ -99,16 +100,20 @@ public enum AuditMessage {
         mergeDeferred
             ? "索引記著欠一次整份稽核，而另一個行程正持有建置鎖：若那是 ltm build，它會自己補跑這次稽核（不通過時它自己會"
                 + "說明）；之後查詢若仍提示，再跑一次 ltm build 看說明"
-            : "索引欠一次整份稽核（從零重建被中斷，或稽核沒通過）：跑一次 ltm build 看說明"
+            : "索引欠一次整份稽核：跑一次 ltm build 看說明"
     }
 
     /// `ltm build` 成功結束、索引卻仍記著欠一次稽核時印的那一行（R9-7）。先前 build 從不印 `auditOwed`：清除紀錄被
     /// trigger 靜默略過時，build 每次都報稽核通過、查詢每次都說欠著，而 build 這邊什麼都沒說。
+    ///
+    /// 只陳述觀察到的事，不寫原因（R10-1）：先前 `false` 那一支寫「有來源未併入」，而 `ltm build` 不帶時間預算，那個
+    /// 情形在 exit 0 時走不到；走得到的是別的寫者在這次 build 期間寫下旗標。清不掉的那一支補上 `--full` 這個出口——
+    /// 只說「再跑 `ltm build`」，清除一直被略過時是一個不會結束的循環（R10-1，DA）。
     public static func owedAfterBuild(auditedAtEnd: Bool) -> String {
         auditedAtEnd
-            ? "這次 build 結尾的稽核通過了，但索引仍記著欠一次整份稽核（清除這個紀錄沒有生效）：之後的 `ltm build` 會再"
-                + "稽核；一直如此，請回報"
-            : "索引仍記著欠一次整份稽核：這次沒有完成從零重建的工作（有來源未併入），留給之後完成它的 `ltm build`"
+            ? "這次 build 結尾的稽核通過了、也清除了欠一次稽核的紀錄，但結束時它仍在：之後的 `ltm build` 會再稽核。一直如此，"
+                + "可以回報，或跑 `ltm build --full` 從零重建——它會丟掉這個紀錄"
+            : "這次 build 結束時，索引記著欠一次整份稽核，而這次沒有跑結尾稽核：再跑一次 `ltm build`"
     }
 
     /// 這一輪因另一個行程持鎖而沒有併入新內容（#51）。CLI、MCP、recall 區塊共用（R4-2：recall 先前沒有）。

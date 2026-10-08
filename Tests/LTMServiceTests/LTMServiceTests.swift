@@ -1254,7 +1254,7 @@ func coverageOnlyMessage() {
 @Test("旗標寫入失敗：不說「記著欠一次稽核」，改說沒記上")
 func notRecordedMessage() {
     let text = AuditMessage.failure(failure(moment: .beforeScan, recorded: false))
-    #expect(text.contains("沒能把「欠一次稽核」寫進索引"))
+    #expect(text.contains("沒能確認「欠一次稽核」寫進了索引"))
     #expect(!text.contains("這份索引記著欠一次稽核"), "R5-4：不得同時說記了又沒記")
     #expect(text.contains("不會提示欠著"), "R7-6：沒記上時也要說查詢怎麼做")
     // R8（codex）：閘看得到的不符照樣讓查詢與 build 被拒，補救是 --full（沒有旗標）。不得無條件說照常回答。
@@ -1303,8 +1303,14 @@ func aSourceKeyStartingWithAParenIsStillAPath() {
 /// R9-7：build 成功結束而索引仍欠著時，兩種情形各說各的。
 @Test("build 結束仍欠著稽核：結尾稽核過了卻沒清掉，與從零重建沒做完，說法不同")
 func owedAfterBuildMessage() {
-    #expect(AuditMessage.owedAfterBuild(auditedAtEnd: true).contains("清除這個紀錄沒有生效"))
-    #expect(AuditMessage.owedAfterBuild(auditedAtEnd: false).contains("有來源未併入"))
+    let notCleared = AuditMessage.owedAfterBuild(auditedAtEnd: true)
+    #expect(notCleared.contains("結束時它仍在"))
+    #expect(notCleared.contains("`ltm build --full` 從零重建——它會丟掉這個紀錄"), "R10-1：清不掉時要有出口")
+    let noEndAudit = AuditMessage.owedAfterBuild(auditedAtEnd: false)
+    #expect(noEndAudit.contains("這次沒有跑結尾稽核"))
+    #expect(!noEndAudit.contains("有來源未併入"), "R10-1：`ltm build` 不帶時間預算，這個原因在 exit 0 時走不到")
+    // R10-1：欠著那一行不列原因——先前的「從零重建被中斷，或稽核沒通過」漏了「清除沒有生效」，與 build 的 stderr 矛盾。
+    #expect(!AuditMessage.owedLine(mergeDeferred: false).contains("從零重建被中斷"))
 }
 
 /// R7-6：「N 個 chunk 沒有任何 source mapping」那一筆不是路徑，不得算成來源、也不得印在本機路徑那一行。

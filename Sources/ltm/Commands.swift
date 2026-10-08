@@ -466,7 +466,8 @@ enum BuildCommand {
                     """)
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .stateUnreadable(let detail):
-                Output.error("✗ 續讀狀態無法讀取：\(detail)。用 `ltm build --full` 從零重建。")
+                // 補救已經在 detail 裡（R3-1）；先前這裡再加一次，`ltm build` 印出兩句 `--full`（R10-11）。
+                Output.error("✗ 續讀狀態無法讀取：\(detail)。")
                 return LTMCommandLine.ExitCode.indexStateError.rawValue
             case .auditFailed(let failure):
                 Output.error(AuditMessage.failure(failure))
@@ -719,9 +720,8 @@ enum QueryCommand {
             case .stateUnreadable(let detail):
                 Output.error(
                     """
-                    ✗ 續讀狀態無法讀取：\(detail)
+                    ✗ 續讀狀態無法讀取：\(detail)。
                     索引還在，但無法判斷該從哪裡接著讀——照樣回答會安靜地漏掉新內容。
-                    請跑 `ltm build --full` 從零重建。
                     """)
             case .sidecarShorterThanDeclared(let declared, let found):
                 Output.error(
@@ -741,9 +741,13 @@ enum QueryCommand {
                 Output.error("✗ 意外的鎖錯誤（\(path)）——查詢路徑本應吞掉它。這是 bug。")
             case .auditFailed(let failure):
                 // 查詢路徑不跑稽核、也不從零重建，所以照理到不了；到了就是 bug，照實說。
+                // 孤兒那一筆不是來源（R10-11，與 `AuditMessage` 同一個辨識）。
+                let orphans = failure.coverageFindings.compactMap(IndexDatabase.orphanChunkCount(in:)).reduce(0, +)
+                let uncursored = failure.coverageFindings.filter { IndexDatabase.orphanChunkCount(in: $0) == nil }.count
                 Output.error(
                     "✗ 意外的稽核錯誤（\(failure.divergentChunks) 個 chunk、\(failure.divergentSources) 個來源的計數不符，"
-                        + "\(failure.danglingLinks) 個懸空連結，\(failure.coverageFindings.count) 個覆蓋缺口）——查詢路徑不跑稽核。這是 bug。")
+                        + "\(failure.danglingLinks) 個懸空連結，\(uncursored) 個來源缺游標、\(orphans) 個 chunk 沒有 source "
+                        + "mapping）——查詢路徑不跑稽核。這是 bug。")
             case .stateUnreadableWhileAuditOwed(let detail):
                 Output.error("✗ 續讀狀態無法讀取：\(detail)。")
             case .memoryBudgetExceeded(let estimated, let budget, _):

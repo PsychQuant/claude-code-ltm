@@ -487,7 +487,9 @@ public struct IndexBuilder: Sendable {
                     // 失敗的稽核要記住（R3-4）：不記的話，下一次 `ltm build` 又回到結構性閘、信任剛判定不符的
                     // 計數。記成「欠著」：之後的增量 build 在掃描前再稽核，查詢會提示，從零重建隨索引一起丟掉。
                     // 旗標已經在就不必再寫（公開組合 `audit: true, honorPendingAudit: false` 會走到這裡）；欠著而旗標
-                    // 在快照那一刻已經不在（被移除）時也寫（R9）。兩種情形同一行，所以同一組測試驅動它。
+                    // 在快照那一刻已經不在（被移除）時也寫（R9）。兩種情形同一行；欠著那一半**沒有確定性測試**：窗口在
+                    // `pendingMarker` 那次讀取與快照之間，只有外部寫者碰得到，測試找不到掛點（R10-2——只關掉那一半的
+                    // 變異全套照綠）。
                     //
                     // 旗標在快照之外、autocommit 寫（R7-1）：R6 把它放進寫入交易，於是會回滾整個交易的失敗、以及
                     // WAL 下在 COMMIT 才出現的磁碟滿與 I/O 錯誤，都讓 COMMIT 拋出原始錯誤、蓋掉稽核結果。寫旗標
@@ -508,19 +510,33 @@ public struct IndexBuilder: Sendable {
                 // 「例如」後面——這個 change 讓 `--audit` 的覆蓋缺口拒絕與 R8 的 `--full` 補救都把使用者帶到這裡。
                 let sourceKeys = orphaned.filter { IndexDatabase.orphanChunkCount(in: $0) == nil }
                 let orphanChunks = orphaned.compactMap(IndexDatabase.orphanChunkCount(in:)).reduce(0, +)
+                //
+                // 說法依來源分兩種（R10-6）：結構性閘讀的是維護中的計數，計數漂移時「沒有任何 source mapping」可以是假的
+                // （有連結的 chunk 被改成 `source_count = 0`，正是 R8 那個情境），所以照實說是計數的讀值；`--audit` 的
+                // 覆蓋發現直接從 `chunk_sources` 算，才說成映射的事實。
+                let readFromCounts = !(audit || owesAudit)
                 var found: [String] = []
                 if !sourceKeys.isEmpty {
+                    let keys = sourceKeys.prefix(3).joined(separator: "、")
                     found.append(
-                        "\(sourceKeys.count) 個來源有 chunk 卻沒有續讀游標（例如 \(sourceKeys.prefix(3).joined(separator: "、"))）")
+                        readFromCounts
+                            ? "\(sourceKeys.count) 個來源在計數表裡有 chunk、卻沒有續讀游標（例如 \(keys)）"
+                            : "\(sourceKeys.count) 個來源有 chunk 卻沒有續讀游標（例如 \(keys)）")
                 }
-                if orphanChunks > 0 { found.append("\(orphanChunks) 個 chunk 沒有任何 source mapping") }
-                let detail = "索引的覆蓋不完整：\(found.joined(separator: "；"))"
+                if orphanChunks > 0 {
+                    found.append(
+                        readFromCounts
+                            ? "\(orphanChunks) 個 chunk 的來源數（source_count）為 0"
+                            : "\(orphanChunks) 個 chunk 沒有任何 source mapping")
+                }
+                let detail = (readFromCounts ? "依維護中的計數，索引的覆蓋不完整：" : "索引的覆蓋不完整：")
+                    + found.joined(separator: "；")
                     + "（原因 ltm 分不出：可能出在 ltm 自己，也可能是 ltm 以外的程式改過索引檔）。"
                     + "續讀點與索引內容是否一致無法從磁碟上驗證，所以這裡不猜"
                 // 補救寫進錯誤本身（R3-1）：MCP 直接把錯誤印出來，不經過 CLI 的訊息函式。
                 if pendingMarker != nil {
                     throw BuildError.stateUnreadableWhileAuditOwed(
-                        detail: detail + "。這份索引還欠一次整份稽核（從零重建被中斷，或稽核沒通過），"
+                        detail: detail + "。這份索引還欠一次整份稽核，"
                             + "而這道閘讀的正是還沒稽核過的計數：先跑 `ltm build`，它會在併入之前補跑稽核、說明找到什麼與能做什麼")
                 }
                 throw BuildError.stateUnreadable(detail: detail + "：請跑 `ltm build --full` 從零重建")
@@ -937,8 +953,8 @@ public struct IndexBuilder: Sendable {
         // `scan_state` 表。
 
         // 完成從零重建的那一次 build、與欠著稽核的 build，在結尾跑一次整份稽核（#61）。不通過時資料已提交，旗標
-        // 本來就在（從零重建在 stamps 交易裡寫、欠著稽核的 build 開始時就有），留著它：下一次 `ltm build` 在掃描前
-        // 再稽核。
+        // 通常本來就在（從零重建在 stamps 交易裡寫、欠著稽核的 build 開始時就有），留著它；在這次 build 期間被移除了
+        // 就重寫（R9）。下一次增量 `ltm build` 在掃描前再稽核。
         //
         // 有界併入留下未併入的來源時，這一次沒有完成從零重建的工作：不稽核、旗標留著，由真正完成它的
         // 那一次 build 跑。今天出貨的呼叫端不會走到這裡（查詢路徑拒絕從零重建、也不補跑稽核），但
@@ -1004,8 +1020,9 @@ public struct IndexBuilder: Sendable {
         return try database.stamps()
     }
 
-    /// 欠著、還沒通過的整份稽核（#61）。有這個鍵就是欠著：`ltm build` 在掃描前與結尾補跑稽核，查詢提示。
-    /// 寫入者：從零重建（stamps 交易裡）與失敗的 `--audit`。值只有 `owedMarker` 一種，讀的人只看鍵在不在
+    /// 欠著、還沒通過的整份稽核（#61）。有這個鍵就是欠著：增量 `ltm build` 在掃描前、完成從零重建工作的 build 在
+    /// 結尾補跑稽核，查詢提示。寫入者：從零重建（stamps 交易裡），以及每一條稽核失敗的路徑——沒欠著時的 `--audit`、
+    /// 欠著時的掃描前、建置結尾——在旗標不在時經 `recordMarker` 寫（R9）。值只有 `owedMarker` 一種，讀的人只看鍵在不在
     /// （R3、R4 曾用第二個值記「判定過缺陷」，R5 拿掉歸因時一起拿掉）。
     public static let auditPendingKey = "audit_pending"
     public static let owedMarker = "1"
