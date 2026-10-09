@@ -1834,6 +1834,8 @@ func aFailedAuditIsRemembered() throws {
         // R10-1／R11-13：欠著時的閘拒絕不列「為什麼欠著」的原因。
         #expect(!detail.contains("從零重建被中斷"), "實得：\(detail)")
         #expect(detail.contains("先跑 `ltm build`"))
+        // R12：查詢路徑的發現來自閘，所以說「這道閘讀的正是還沒稽核過的計數」。
+        #expect(detail.contains("這道閘讀的正是還沒稽核過的計數"))
     }
     guard case .stateUnreadableWhileAuditOwed = queried else {
         Issue.record("查詢路徑應該是 stateUnreadableWhileAuditOwed，實際是 \(String(describing: queried))")
@@ -3110,10 +3112,10 @@ func anEndAuditFailureRerecordsARemovedMarker() throws {
     #expect(try database.meta("audit_pending") == "1", "下一次 build 要在掃描前再稽核")
 }
 
-/// R9（regression lens 的變異 B）：結尾稽核不通過之後交易才出錯時，照樣拋稽核結果（R7-1）——先前沒有測試驅動這條
-/// catch，讓它直接拋原始錯誤也全綠。最後一批提交之後丟掉 `meta` 表（批次提交會寫 `vector_count`，所以要等最後一批之後）：
-/// 結尾交易裡讀旗標拋錯、交易回滾；旗標寫不回去，`recorded` 為 false。
-@Test("結尾稽核不通過之後交易出錯：照樣拋稽核結果，recorded 為 false")
+/// R9（regression lens 的變異 B）起守結尾那條 catch：稽核不通過時照樣拋稽核結果，不讓 SQLite 錯誤蓋掉它。最後一批
+/// 提交之後丟掉 `meta` 表（批次提交會寫 `vector_count`，所以要等最後一批之後）：清除旗標失敗（只撤回那一條）、稽核
+/// 不通過、交易回滾；旗標寫不回去，`recorded` 為 false。（R12：先清再稽核之後，這裡不再有「不通過之後交易才出錯」。）
+@Test("結尾稽核不通過而 meta 表不在：照樣拋稽核結果，recorded 為 false")
 func anEndAuditFailureSurvivesAFailingTransaction() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
@@ -3186,6 +3188,35 @@ func aChangeCausedByClearingIsCaughtByTheEndAudit() throws {
     defer { database.close() }
     #expect(try database.meta("audit_pending") == "1", "回滾之後旗標還在")
     #expect(try database.auditDerivedCounts().isClean, "回滾也撤掉 trigger 改壞的計數")
+}
+
+/// R12（四個讀者＋DA）：清除旗標時整個交易被回滾（`RAISE(ROLLBACK)`），build 以清除自己的錯誤結束、旗標仍在。
+/// 先前 `try?` 吞掉它，稽核在 autocommit 下跑，最後以「cannot commit - no transaction is active」結束。
+@Test("清除旗標時整個交易被回滾：以清除自己的錯誤結束，旗標仍在")
+func aClearThatRollsBackEndsWithItsOwnError() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "1")
+        try database.execute(
+            "CREATE TRIGGER rollback_clear BEFORE DELETE ON meta WHEN OLD.key = 'audit_pending' BEGIN SELECT RAISE(ROLLBACK, 'blocked'); END")
+    }
+    let error = #expect(throws: IndexDatabase.DatabaseError.self) { _ = try builder.build() }
+    #expect(String(describing: error).contains("blocked"), "拋的是清除自己的錯誤：\(String(describing: error))")
+    #expect(!String(describing: error).contains("no transaction is active"))
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.meta("audit_pending") == "1")
 }
 
 /// R11-2（DA）：清除旗標拋錯（`RAISE(ABORT)`）時，build 不得以原始 SQLite 錯誤結束——那一條陳述式撤回、稽核照跑，

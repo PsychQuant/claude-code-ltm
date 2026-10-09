@@ -426,6 +426,11 @@ public final class IndexDatabase {
             bind: [.text(key), .text(value)])
     }
 
+    /// 這條連線現在是不是在交易裡（`sqlite3_get_autocommit` 為 0）。一條陳述式的錯誤可能讓 SQLite 自動回滾整個交易
+    /// （`RAISE(ROLLBACK)`、`SQLITE_IOERR`、`SQLITE_NOMEM`、磁碟滿），之後的陳述式就在 autocommit 下各自提交——吞掉
+    /// 錯誤繼續之前要先問這一句（#61 R12）。
+    public var isInTransaction: Bool { sqlite3_get_autocommit(handle) == 0 }
+
     /// 寫入一個來源的續讀游標。**呼叫端必須在批次的交易內呼叫它**——放在交易外
     /// 就等於把先前那個跨持久性域的窗口原樣搬進 DB。
     public func upsertScanState(sourceKey: String, prefixHash: String, processedBytes: Int) throws {

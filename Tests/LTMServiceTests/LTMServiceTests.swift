@@ -1265,6 +1265,7 @@ func notRecordedMessage() {
     #expect(text.contains("沒有這個紀錄時，之後不帶 `--audit` 的增量 `ltm build` 與查詢都不會記得它"))
     #expect(!text.contains("寫完讀回時看不到"))
     #expect(!text.contains("確認索引檔可以寫入"))
+    #expect(text.contains("再跑一次 `ltm build --audit` 會重新稽核、再試一次寫入"))
 }
 
 /// R8（codex）：只有覆蓋缺口時閘必然拒絕，沒記上也一樣——那一句不得說「閘放行時照常回答」。
@@ -1272,7 +1273,9 @@ func notRecordedMessage() {
 func notRecordedCoverageOnlyMessage() {
     let text = AuditMessage.failure(
         failure(chunks: 0, sources: 0, coverage: ["/tmp/x/a.jsonl"], moment: .afterBuild, recorded: false))
-    #expect(text.contains("沒有這個紀錄時，之後的增量 `ltm build` 與查詢都會被拒絕、叫你跑 `ltm build --full`"))
+    #expect(text.contains("沒有這個紀錄時，之後的增量 `ltm build` 與查詢都不會記得它，而且都會被拒絕、叫你跑 `ltm build --full`"))
+    // R12：只有覆蓋缺口時 `--audit` 照閘的方式拒絕、不寫旗標，所以不承諾「再試一次寫入」。
+    #expect(!text.contains("再試一次寫入"))
     #expect(!text.contains("閘放行時"))
 }
 
@@ -1309,7 +1312,8 @@ func aSourceKeyStartingWithAParenIsStillAPath() {
 @Test("build 結束仍欠著稽核：結尾稽核通過而紀錄仍在時指出 --full；沒跑結尾稽核時不寫原因")
 func owedAfterBuildMessage() {
     let notCleared = AuditMessage.owedAfterBuild(auditedAtEnd: true)
-    #expect(notCleared.contains("沒有清掉、結束時仍在"))
+    #expect(notCleared.contains("紀錄在結束時仍在"))
+    #expect(!notCleared.contains("沒有清掉"), "R12：清除可能成功、再被寫回；ltm 只看到結束時仍在")
     #expect(!notCleared.contains("也清除了"), "R11-3：ltm 沒有觀察到清除生效，只看到結束時仍在")
     #expect(notCleared.contains("`ltm build --full` 從零重建——它會丟掉這個紀錄"), "R10-1：清不掉時要有出口")
     let noEndAudit = AuditMessage.owedAfterBuild(auditedAtEnd: false)

@@ -66,7 +66,7 @@ public struct AuditFailure: Sendable, Equatable {
     public let coverageFindings: [String]
     /// `.beforeScan`：這次什麼都沒併入；`.afterBuild`：這次的併入已經提交。
     public let moment: BuildAudit.Moment
-    /// 拋出當下讀回時看得到「欠一次稽核」的旗標。`false` 代表沒能確認：寫入拋錯、被 trigger 略過、撞上別人的寫鎖，
+    /// 拋出前重新讀一次時看得到「欠一次稽核」的旗標（`ensureMarker`）。`false` 代表沒能確認：寫入拋錯、被 trigger 略過、撞上別人的寫鎖，
     /// 或讀回本身失敗（最後一種寫入其實可能成功）；`true` 只證明那一刻、那條連線看得到，`synchronous=NORMAL` 下不證明
     /// 已落地（R10-4）。寫入失敗時仍拋出稽核結果，而不是讓 SQLite 錯誤蓋掉它（R4-9）。
     public let recorded: Bool
@@ -477,26 +477,23 @@ public struct IndexBuilder: Sendable {
             // 稽核留下的狀態就會被閘以「請跑 --full」攔下。
             let orphaned: [String]
             if audit || owesAudit {
-                // 稽核的每一條查詢在同一個讀取快照裡跑（R6-1），連同旗標在不在（R7-8）。
-                let (result, markerPresent) = try database.readTransaction {
-                    () -> (IndexDatabase.DerivedCountAudit, Bool) in
-                    (try database.auditDerivedCounts(), try database.meta(Self.auditPendingKey) != nil)
-                }
+                // 稽核的每一條查詢在同一個讀取快照裡跑（R6-1）。旗標在不在不從快照拿：快照結束之後別的連線可以刪掉它，
+                // 失敗路徑要在拋出前重新讀（R12-1，codex；R7-8 曾把它放進快照）。
+                let result = try database.readTransaction { try database.auditDerivedCounts() }
                 // 欠著時任何發現都不通過；沒欠著的 `--audit` 只有計數不符或懸空連結算不通過，只有覆蓋缺口時照結構性閘的
                 // 方式拒絕（下面）。
                 let failed = owesAudit ? !result.isClean : !(result.countsAgree && result.danglingLinks == 0)
                 if failed {
                     // 失敗的稽核要記住（R3-4）：不記的話，下一次 `ltm build` 又回到結構性閘、信任剛判定不符的
                     // 計數。記成「欠著」：之後的增量 build 在掃描前再稽核，查詢會提示，從零重建隨索引一起丟掉。
-                    // 旗標已經在就不必再寫（公開組合 `audit: true, honorPendingAudit: false` 會走到這裡）；欠著而旗標
-                    // 在快照那一刻已經不在（被移除）時也寫（R9）。兩種情形同一行；欠著那一半**沒有確定性測試**：窗口在
-                    // `pendingMarker` 那次讀取與快照之間，只有外部寫者碰得到，測試找不到掛點（R10-2——只關掉那一半的
-                    // 變異全套照綠）。
+                    // `ensureMarker` 在拋出前重新讀一次：旗標在就不寫（公開組合 `audit: true, honorPendingAudit: false`
+                    // 會走到這裡），不在——包括欠著卻在這次 build 期間被移除——就寫一次、讀回（R9、R12-1）。被移除的
+                    // 那一半**沒有確定性測試**：只有外部寫者碰得到那個窗口，測試找不到掛點（R10-2）。
                     //
                     // 旗標在快照之外、autocommit 寫（R7-1）：R6 把它放進寫入交易，於是會回滾整個交易的失敗、以及
                     // WAL 下在 COMMIT 才出現的磁碟滿與 I/O 錯誤，都讓 COMMIT 拋出原始錯誤、蓋掉稽核結果。寫旗標
                     // 不必與稽核原子化——它只會讓之後的 build 更嚴格。
-                    let recorded = markerPresent || Self.recordMarker(in: database)
+                    let recorded = Self.ensureMarker(in: database)
                     throw BuildError.auditFailed(AuditFailure(result, moment: .beforeScan, recorded: recorded))
                 }
                 audits.append(BuildAudit(moment: .beforeScan, result: result))
@@ -516,7 +513,8 @@ public struct IndexBuilder: Sendable {
                 // 說法依來源分兩種（R10-6）：結構性閘讀的是維護中的計數，計數漂移時「沒有任何 source mapping」可以是假的
                 // （有連結的 chunk 被改成 `source_count = 0`，正是 R8 那個情境），所以照實說是計數的讀值；`--audit` 的
                 // 覆蓋發現直接從 `chunk_sources` 算，才說成映射的事實。
-                // 走到這裡而欠著稽核時，稽核必然已經通過（任何發現都會先拋 `auditFailed`），所以只看 `audit`（R11-13）。
+                // 發現來自稽核還是閘：`owesAudit` 為真時任何發現都先拋 `auditFailed`，所以走到這裡的發現來自稽核，就是
+                // `audit` 為真；查詢路徑（`honorPendingAudit: false`）即使旗標在也只跑閘（R11-13、R12）。
                 let readFromCounts = !audit
                 var found: [String] = []
                 if !sourceKeys.isEmpty {
@@ -973,20 +971,20 @@ public struct IndexBuilder: Sendable {
             // 連線，擋不住清除自己引發的寫入。現在稽核看的是清除之後的狀態；不通過就拋出、整個回滾，清除與它引發的
             // 寫入一起撤掉，旗標回到交易開始時的樣子，再拋稽核結果。
             //
-            // 清除本身出錯（例如 trigger 的 `RAISE(ABORT)`）不中止：那一條陳述式撤回、旗標留著，稽核照跑；通過時交易
-            // 照常提交，報告的 `auditOwed` 為真、`ltm build` 說出來（R11-2：先前每一次 build 都以原始錯誤結束、旗標
-            // 永遠清不掉）。會回滾整個交易的錯誤（`RAISE(ROLLBACK)`、磁碟滿）之後的 COMMIT 會失敗，稽核通過時拋原本的
-            // 錯誤，旗標仍在。
-            //
-            // 交易本身在稽核不通過之後出錯（例如 COMMIT 失敗）不改變發現，照樣拋稽核結果（R7-1）。
+            // 清除出錯分兩種（R12，四個讀者＋DA）。只撤回那一條陳述式（trigger 的 `RAISE(ABORT)`、constraint）時交易
+            // 還在：旗標留著，稽核照跑；通過時交易照常提交，報告的 `auditOwed` 為真、`ltm build` 說出來（R11-2：先前
+            // 每一次 build 都以原始錯誤結束）。整個交易被回滾（`RAISE(ROLLBACK)`、`SQLITE_IOERR`、磁碟滿）時拋清除自己
+            // 的錯誤、旗標仍在——先前的 `try?` 在這裡讓稽核在 autocommit 下跑、最後以「cannot commit - no transaction
+            // is active」結束，原本的錯誤不見了。
             var audited: IndexDatabase.DerivedCountAudit?
-            // 預設「不在」（R9）：讀旗標失敗時當成不在；不通過時在交易之外寫一次、讀回。
-            var markerPresent = false
             let result: IndexDatabase.DerivedCountAudit
             do {
                 try database.transaction {
-                    markerPresent = (try? database.meta(Self.auditPendingKey)) != nil
-                    try? database.removeMeta(Self.auditPendingKey)
+                    do {
+                        try database.removeMeta(Self.auditPendingKey)
+                    } catch {
+                        guard database.isInTransaction else { throw error }
+                    }
                     let result = try database.auditDerivedCounts()
                     audited = result
                     if !result.isClean { throw EndAuditFailed() }
@@ -994,13 +992,12 @@ public struct IndexBuilder: Sendable {
                 guard let audited else { preconditionFailure("交易成功卻沒有稽核結果") }
                 result = audited
             } catch {
-                // 稽核不通過（含上面那個用來回滾的拋出），或不通過之後交易才出錯：照樣拋稽核結果。稽核通過、或還沒
-                // 稽核完就出錯：拋原本的錯誤。
+                // 稽核不通過：上面那個拋出讓交易回滾，照樣拋稽核結果。稽核通過、或還沒稽核完就出錯：拋原本的錯誤。
                 guard let audited, !audited.isClean else { throw error }
                 result = audited
             }
             guard result.isClean else {
-                let recorded = markerPresent || Self.recordMarker(in: database)
+                let recorded = Self.ensureMarker(in: database)
                 throw BuildError.auditFailed(AuditFailure(result, moment: .afterBuild, recorded: recorded))
             }
             audits.append(BuildAudit(moment: .afterBuild, result: result))
@@ -1042,6 +1039,14 @@ public struct IndexBuilder: Sendable {
 
     /// 結尾稽核不通過時用來回滾那個寫入交易（連同已執行的清除）的內部訊號；不會離開 `build`。
     private struct EndAuditFailed: Error {}
+
+    /// 稽核失敗時在拋出前讀一次旗標：在就回 true、不寫；不在就寫一次、讀回（`recordMarker`）。不重用先前讀到的值——
+    /// 那一刻之後別的連線可以刪掉它，而重用的值會讓失敗路徑跳過這次的檢查與寫入（R12-1，codex）。擋不住拋出之後
+    /// 才被刪掉。
+    private static func ensureMarker(in database: IndexDatabase) -> Bool {
+        if (try? database.meta(auditPendingKey)) != nil { return true }
+        return recordMarker(in: database)
+    }
 
     /// 寫旗標、讀回；旗標不在就回 false 而不拋——呼叫端緊接著要拋稽核結果，不能讓 SQLite 錯誤蓋掉它（R4-9）。
     /// 回報由呼叫端放進錯誤（`recorded`），不是吞掉。

@@ -68,18 +68,17 @@ public enum AuditMessage {
             // 都只對其中一種成立。
             lines.append("  （這次沒能確認「欠一次稽核」寫進了索引：寫入或讀回沒有成功。）")
             if coverageOnly {
+                // R12：`--audit` 只有覆蓋缺口時照結構性閘的方式拒絕、不寫旗標，所以這一支不提「再跑 --audit 會再試寫入」。
                 lines.append(
-                    "  沒有這個紀錄時，之後的增量 `ltm build` 與查詢都會被拒絕、叫你跑 `ltm build --full`——這次的覆蓋缺口"
-                        + "結構性閘也看得到（另一個行程正持有建置鎖、查詢這一輪沒有併入時不跑閘，會照常回答）。")
+                    "  沒有這個紀錄時，之後的增量 `ltm build` 與查詢都不會記得它，而且都會被拒絕、叫你跑 `ltm build --full`"
+                        + "——這次的覆蓋缺口結構性閘也看得到（另一個行程正持有建置鎖、查詢這一輪沒有併入時不跑閘，會照常回答）。")
             } else {
                 lines.append(
                     "  沒有這個紀錄時，之後不帶 `--audit` 的增量 `ltm build` 與查詢都不會記得它，只走結構性閘：閘放行時，"
                         + "build 照常併入、查詢照常回答與併入，不會提示欠著，也不再找這些問題；閘看得到這個問題時，兩者都會"
-                        + "被拒絕、叫你跑 `ltm build --full`。")
+                        + "被拒絕、叫你跑 `ltm build --full`。再跑一次 `ltm build --audit` 會重新稽核、再試一次寫入。")
             }
-            lines.append(
-                "  從零重建——`--full`，或 embedding revision、layout 變動觸發的——不走閘，只在自己的結尾稽核。"
-                    + "再跑一次 `ltm build --audit` 會重新稽核、再試一次寫入。")
+            lines.append("  從零重建——`--full`，或 embedding revision、layout 變動觸發的——不走閘，只在自己的結尾稽核。")
         }
         lines.append("  能做的事：")
         lines.append(
@@ -112,11 +111,11 @@ public enum AuditMessage {
     ///
     /// 只陳述觀察到的事，不寫原因（R10-1）：先前 `false` 那一支寫「有來源未併入」，而 `ltm build` 不帶時間預算，那個
     /// 情形在 exit 0 時走不到；走得到的是別的寫者在這次 build 期間寫下旗標。清不掉的那一支補上 `--full` 這個出口——
-    /// 只說「再跑 `ltm build`」，清除一直被略過時是一個不會結束的循環（R10-1，DA）。清除被略過或拋錯，ltm 都只看到
-    /// 「結束時仍在」，所以不說「清除了」（R11-3）。
+    /// 只說「再跑 `ltm build`」，清除一直被略過時是一個不會結束的循環（R10-1，DA）。只說「結束時仍在」：ltm 看到的
+    /// 只有 COMMIT 之後那一次讀取——「清除了」（R11-3）與「沒有清掉」（R12：清除可能成功、再被 trigger 寫回）都是推論。
     public static func owedAfterBuild(auditedAtEnd: Bool) -> String {
         auditedAtEnd
-            ? "這次 build 結尾的稽核通過了，但欠一次稽核的紀錄沒有清掉、結束時仍在：之後的 `ltm build` 會再稽核。一直如此，"
+            ? "這次 build 結尾的稽核通過了，但欠一次稽核的紀錄在結束時仍在：之後的 `ltm build` 會再稽核。一直如此，"
                 + "可以回報，或跑 `ltm build --full` 從零重建——它會丟掉這個紀錄"
             : "這次 build 結束時，索引記著欠一次整份稽核，而這次沒有跑結尾稽核：再跑一次 `ltm build`"
     }
