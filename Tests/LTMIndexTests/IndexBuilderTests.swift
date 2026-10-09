@@ -2970,6 +2970,7 @@ func aFailedMarkerWriteStillReportsTheAudit() throws {
     }
     #expect(failure.divergentChunks == 1)
     #expect(!failure.recorded)
+    #expect(failure.recordError == "blocked", "R13-5：實際拋出的錯誤照原文附上，不附 SQL")
     let database = try IndexDatabase(path: derived.databaseURL.path)
     defer { database.close() }
     #expect(try database.meta("audit_pending") == nil)
@@ -3116,7 +3117,7 @@ func anEndAuditFailureRerecordsARemovedMarker() throws {
 /// 提交之後丟掉 `meta` 表（批次提交會寫 `vector_count`，所以要等最後一批之後）：清除旗標失敗（只撤回那一條）、稽核
 /// 不通過、交易回滾；旗標寫不回去，`recorded` 為 false。（R12：先清再稽核之後，這裡不再有「不通過之後交易才出錯」。）
 @Test("結尾稽核不通過而 meta 表不在：照樣拋稽核結果，recorded 為 false")
-func anEndAuditFailureSurvivesAFailingTransaction() throws {
+func anEndAuditFailureWithMetaGoneStillReportsTheAudit() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
         try? FileManager.default.removeItem(at: corpus)
@@ -3221,7 +3222,7 @@ func aClearThatRollsBackEndsWithItsOwnError() throws {
 
 /// R11-2（DA）：清除旗標拋錯（`RAISE(ABORT)`）時，build 不得以原始 SQLite 錯誤結束——那一條陳述式撤回、稽核照跑，
 /// 通過時照常提交，報告說仍欠著（`ltm build` 據此印出含 `--full` 的那一行）。
-@Test("清除旗標拋錯：build 照常完成，兩次稽核都通過，報告說仍欠著")
+@Test("清除旗標時只撤回那一條陳述式（RAISE(ABORT)）：build 照常完成，兩次稽核都通過，報告說仍欠著")
 func aFailingClearIsReportedAsOwed() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
@@ -3308,8 +3309,10 @@ func theEndAuditCatchesDanglingLinks() throws {
     #expect(try database.meta("audit_pending") == "1")
 }
 
-/// R6-8：旗標已經在的時候不重寫——否則一次失敗的重寫會讓 `recorded` 誤報「沒記上」。用擋住寫入的 trigger 驗。
-@Test("audit: true 而不補跑欠著稽核時失敗：旗標已在就不重寫，recorded 為 true")
+/// R6-8：旗標已經在的時候不重寫。R9 起 `recordMarker` 以讀回決定，擋住寫入的 trigger 分不出「有沒有重寫」——這條
+/// 從 R9 到 R13 都不可能變紅（R13-3，三個讀者各自刪掉 `ensureMarker` 的那一行，全套照綠）。現在用一個計數的
+/// trigger 直接數寫入次數。
+@Test("audit: true 而不補跑欠著稽核時失敗：旗標已在就不重寫（寫入次數為 0），recorded 為 true")
 func anExistingMarkerIsNotRewritten() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
@@ -3326,8 +3329,12 @@ func anExistingMarkerIsNotRewritten() throws {
         defer { database.close() }
         try database.setMeta("audit_pending", "1")
         try database.execute("UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks)")
+        try database.execute("CREATE TABLE marker_writes(n INTEGER)")
         try database.execute(
-            "CREATE TRIGGER block_marker BEFORE INSERT ON meta WHEN NEW.key = 'audit_pending' BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+            """
+            CREATE TRIGGER count_marker_write BEFORE INSERT ON meta WHEN NEW.key = 'audit_pending'
+            BEGIN INSERT INTO marker_writes VALUES(1); END
+            """)
     }
     let error = #expect(throws: IndexBuilder.BuildError.self) {
         _ = try builder.build(audit: true, honorPendingAudit: false)
@@ -3336,7 +3343,12 @@ func anExistingMarkerIsNotRewritten() throws {
         Issue.record("應該是 auditFailed，實際是 \(String(describing: error))")
         return
     }
-    #expect(failure.recorded, "旗標本來就在：不得因為一次多餘的重寫失敗而說沒記上")
+    #expect(failure.recorded)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    var writes = -1
+    try database.query("SELECT COUNT(*) FROM marker_writes") { writes = Int(sqlite3_column_int64($0, 0)) }
+    #expect(writes == 0, "旗標本來就在：不得再寫一次")
 }
 
 /// R7-1：會回滾整個交易的寫入失敗（`RAISE(ROLLBACK)`；磁碟滿、I/O 錯誤同形）也不得蓋掉稽核結果。R6 把寫旗標放進

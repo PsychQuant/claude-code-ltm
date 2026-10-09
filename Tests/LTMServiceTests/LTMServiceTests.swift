@@ -1194,13 +1194,13 @@ func theOwedGateRefusalCarriesItsRemedy() throws {
 
 private func failure(
     chunks: Int = 1, sources: Int = 0, dangling: Int = 0, coverage: [String] = [],
-    moment: BuildAudit.Moment, recorded: Bool = true
+    moment: BuildAudit.Moment, recorded: Bool = true, recordError: String? = nil
 ) -> AuditFailure {
     AuditFailure(
         IndexDatabase.DerivedCountAudit(
             chunksChecked: 3, sourcesChecked: 1, divergentChunks: chunks, divergentSources: sources,
             danglingLinks: dangling, coverageFindings: coverage),
-        moment: moment, recorded: recorded)
+        moment: moment, recorded: recorded, recordError: recordError)
 }
 
 @Test("掃描前：沒有併入、分不出原因、記著欠著稽核、--full 只驗得到從零重建的路徑")
@@ -1286,6 +1286,19 @@ func notRecordedMessageScopesTheGate() {
     #expect(text.contains("之後不帶 `--audit` 的增量 `ltm build` 與查詢都不會記得它，只走結構性閘"))
     #expect(text.contains("從零重建——`--full`，或 embedding revision、layout 變動觸發的——不走閘"))
     #expect(!text.contains("下一次 build 與查詢都不會記得它"))
+}
+
+/// R13-5：沒能確認記下時，實際拋出的錯誤照原文附上；沒有拋錯（被靜默略過）時不附。
+@Test("沒能確認旗標寫進索引：有觀察到的 SQLite 錯誤就照原文附上")
+func notRecordedMessageCarriesTheObservedError() {
+    let withError = AuditMessage.failure(
+        failure(moment: .beforeScan, recorded: false, recordError: "database or disk is full"))
+    #expect(withError.contains("寫入或讀回沒有成功——SQLite 回報：database or disk is full。"))
+    let silent = AuditMessage.failure(failure(moment: .beforeScan, recorded: false))
+    #expect(silent.contains("寫入或讀回沒有成功。"))
+    #expect(!silent.contains("SQLite 回報"))
+    // 記上了就不附（`AuditFailure` 在 recorded 時丟掉錯誤）。
+    #expect(failure(moment: .beforeScan, recorded: true, recordError: "x").recordError == nil)
 }
 
 /// R9-5：「改過」要有先行詞——接著印的是語料路徑，「這個檔」會被讀成語料檔。

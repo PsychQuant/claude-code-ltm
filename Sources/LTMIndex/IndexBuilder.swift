@@ -70,14 +70,21 @@ public struct AuditFailure: Sendable, Equatable {
     /// 或讀回本身失敗（最後一種寫入其實可能成功）；`true` 只證明那一刻、那條連線看得到，`synchronous=NORMAL` 下不證明
     /// 已落地（R10-4）。寫入失敗時仍拋出稽核結果，而不是讓 SQLite 錯誤蓋掉它（R4-9）。
     public let recorded: Bool
+    /// 沒能確認時，寫入或讀回實際拋出的 SQLite 錯誤（例如磁碟滿、唯讀、被鎖、trigger 的訊息）；沒有拋錯（寫入被靜默
+    /// 略過）時為 nil。這是觀察到的事，不是推斷的原因——訊息照原文附上，回報時才有東西可附（R13-5）。
+    public let recordError: String?
 
-    public init(_ result: IndexDatabase.DerivedCountAudit, moment: BuildAudit.Moment, recorded: Bool = true) {
+    public init(
+        _ result: IndexDatabase.DerivedCountAudit, moment: BuildAudit.Moment, recorded: Bool = true,
+        recordError: String? = nil
+    ) {
         divergentChunks = result.divergentChunks
         divergentSources = result.divergentSources
         danglingLinks = result.danglingLinks
         coverageFindings = result.coverageFindings
         self.moment = moment
         self.recorded = recorded
+        self.recordError = recorded ? nil : recordError
     }
 }
 
@@ -493,8 +500,9 @@ public struct IndexBuilder: Sendable {
                     // 旗標在快照之外、autocommit 寫（R7-1）：R6 把它放進寫入交易，於是會回滾整個交易的失敗、以及
                     // WAL 下在 COMMIT 才出現的磁碟滿與 I/O 錯誤，都讓 COMMIT 拋出原始錯誤、蓋掉稽核結果。寫旗標
                     // 不必與稽核原子化——它只會讓之後的 build 更嚴格。
-                    let recorded = Self.ensureMarker(in: database)
-                    throw BuildError.auditFailed(AuditFailure(result, moment: .beforeScan, recorded: recorded))
+                    let marker = Self.ensureMarker(in: database)
+                    throw BuildError.auditFailed(
+                        AuditFailure(result, moment: .beforeScan, recorded: marker.recorded, recordError: marker.error))
                 }
                 audits.append(BuildAudit(moment: .beforeScan, result: result))
                 orphaned = result.coverageFindings
@@ -973,8 +981,8 @@ public struct IndexBuilder: Sendable {
             //
             // 清除出錯分兩種（R12，四個讀者＋DA）。只撤回那一條陳述式（trigger 的 `RAISE(ABORT)`、constraint）時交易
             // 還在：旗標留著，稽核照跑；通過時交易照常提交，報告的 `auditOwed` 為真、`ltm build` 說出來（R11-2：先前
-            // 每一次 build 都以原始錯誤結束）。整個交易被回滾（`RAISE(ROLLBACK)`、`SQLITE_IOERR`、磁碟滿）時拋清除自己
-            // 的錯誤、旗標仍在——先前的 `try?` 在這裡讓稽核在 autocommit 下跑、最後以「cannot commit - no transaction
+            // 每一次 build 都以原始錯誤結束）。整個交易被回滾（`RAISE(ROLLBACK)`；SQLite 在某些 I/O 錯誤、記憶體不足、
+            // 磁碟滿的情形也可能自動回滾整個交易，多數時候只撤回那一條陳述式）時拋清除自己的錯誤、旗標仍在——先前的 `try?` 在這裡讓稽核在 autocommit 下跑、最後以「cannot commit - no transaction
             // is active」結束，原本的錯誤不見了。
             var audited: IndexDatabase.DerivedCountAudit?
             let result: IndexDatabase.DerivedCountAudit
@@ -997,8 +1005,9 @@ public struct IndexBuilder: Sendable {
                 result = audited
             }
             guard result.isClean else {
-                let recorded = Self.ensureMarker(in: database)
-                throw BuildError.auditFailed(AuditFailure(result, moment: .afterBuild, recorded: recorded))
+                let marker = Self.ensureMarker(in: database)
+                throw BuildError.auditFailed(
+                    AuditFailure(result, moment: .afterBuild, recorded: marker.recorded, recordError: marker.error))
             }
             audits.append(BuildAudit(moment: .afterBuild, result: result))
         }
@@ -1043,9 +1052,15 @@ public struct IndexBuilder: Sendable {
     /// 稽核失敗時在拋出前讀一次旗標：在就回 true、不寫；不在就寫一次、讀回（`recordMarker`）。不重用先前讀到的值——
     /// 那一刻之後別的連線可以刪掉它，而重用的值會讓失敗路徑跳過這次的檢查與寫入（R12-1，codex）。擋不住拋出之後
     /// 才被刪掉。
-    private static func ensureMarker(in database: IndexDatabase) -> Bool {
-        if (try? database.meta(auditPendingKey)) != nil { return true }
+    private static func ensureMarker(in database: IndexDatabase) -> MarkerWrite {
+        if (try? database.meta(auditPendingKey)) != nil { return MarkerWrite(recorded: true, error: nil) }
         return recordMarker(in: database)
+    }
+
+    /// 寫旗標的結果：讀回看不看得到，以及沒看到時實際拋出的錯誤（R13-5）。
+    private struct MarkerWrite {
+        let recorded: Bool
+        let error: String?
     }
 
     /// 寫旗標、讀回；旗標不在就回 false 而不拋——呼叫端緊接著要拋稽核結果，不能讓 SQLite 錯誤蓋掉它（R4-9）。
@@ -1054,9 +1069,25 @@ public struct IndexBuilder: Sendable {
     /// **判準是讀回，不是「陳述式沒拋錯」**（R9-7）：`meta` 上的 `RAISE(IGNORE)` trigger 讓寫入靜默略過、不報錯，
     /// 先前因此回 true 而旗標不存在。讀回本身失敗也算不在：說「沒記上」而其實記上了，之後的 build 只會更嚴格；
     /// 反過來說「記上了」而其實沒有，之後的 build 會安靜地信任計數。
-    private static func recordMarker(in database: IndexDatabase) -> Bool {
-        try? database.setMeta(auditPendingKey, owedMarker)
-        return (try? database.meta(auditPendingKey)) != nil
+    private static func recordMarker(in database: IndexDatabase) -> MarkerWrite {
+        var observed: String?
+        do {
+            try database.setMeta(auditPendingKey, owedMarker)
+        } catch {
+            observed = describe(error)
+        }
+        do {
+            let present = try database.meta(auditPendingKey) != nil
+            return MarkerWrite(recorded: present, error: present ? nil : observed)
+        } catch {
+            return MarkerWrite(recorded: false, error: observed ?? describe(error))
+        }
+    }
+
+    /// SQLite 錯誤的訊息本文；陳述式本身（SQL 文字）不附——它對回報沒有幫助。
+    private static func describe(_ error: Error) -> String {
+        if case IndexDatabase.DatabaseError.statementFailed(_, let message) = error { return message }
+        return String(describing: error)
     }
 
     private func discardDerivedArtifacts() throws {
