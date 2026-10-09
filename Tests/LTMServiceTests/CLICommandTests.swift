@@ -367,7 +367,7 @@ func auditFromTheCLI() throws {
     #expect(next.err.contains("掃描前的整份稽核不通過"))
 }
 
-@Test("ltm build --audit 遇到被刪掉的游標：非零結束，用閘的那一套訊息")
+@Test("ltm build --audit 遇到被刪掉的游標：非零結束，用閘的那一套錯誤與補救")
 func auditRefusesAMissingCursorFromTheCLI() throws {
     let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
     defer { workspace.cleanup() }
@@ -1451,7 +1451,7 @@ func anOwedAuditFromAnInterruptedRebuildIsReported() throws {
 
 /// R9-7：清除紀錄被 trigger 靜默略過時，build 兩次稽核都通過、exit 0，但索引仍欠著——先前 CLI 從不印 `auditOwed`，
 /// 查詢每次說欠著而 build 什麼都沒說。
-@Test("ltm build 結束時索引仍欠著稽核：stderr 說清除沒有生效")
+@Test("ltm build 結束時索引仍欠著稽核：stderr 說紀錄結束時仍在，並指出 --full")
 func theCLISaysWhenAnOwedAuditDidNotClear() throws {
     let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
     defer { workspace.cleanup() }
@@ -1463,7 +1463,8 @@ func theCLISaysWhenAnOwedAuditDidNotClear() throws {
     let result = try runCLI(["build"], environment: workspace.environment)
     #expect(result.code == 0, "實得：\(result.err)")
     #expect(result.out.contains("稽核（建置完成後）"), "前提：結尾稽核通過：\(result.out)")
-    #expect(result.err.contains("結束時它仍在"), "實得：\(result.err)")
+    #expect(result.err.contains("結束時仍在"), "實得：\(result.err)")
+    #expect(result.err.contains("ltm build --full"), "實得：\(result.err)")
     #expect(try pendingMarker(workspace) == "1")
 }
 

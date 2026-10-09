@@ -66,7 +66,9 @@ public struct AuditFailure: Sendable, Equatable {
     public let coverageFindings: [String]
     /// `.beforeScan`：這次什麼都沒併入；`.afterBuild`：這次的併入已經提交。
     public let moment: BuildAudit.Moment
-    /// 索引有沒有記著「欠一次稽核」。寫入旗標失敗時仍拋出稽核結果，而不是讓 SQLite 錯誤蓋掉它（R4-9）。
+    /// 拋出當下讀回時看得到「欠一次稽核」的旗標。`false` 代表沒能確認：寫入拋錯、被 trigger 略過、撞上別人的寫鎖，
+    /// 或讀回本身失敗（最後一種寫入其實可能成功）；`true` 只證明那一刻、那條連線看得到，`synchronous=NORMAL` 下不證明
+    /// 已落地（R10-4）。寫入失敗時仍拋出稽核結果，而不是讓 SQLite 錯誤蓋掉它（R4-9）。
     public let recorded: Bool
 
     public init(_ result: IndexDatabase.DerivedCountAudit, moment: BuildAudit.Moment, recorded: Bool = true) {
@@ -237,8 +239,8 @@ public struct IndexBuilder: Sendable {
         /// 增量 `ltm build` 都在掃描前再稽核、查詢也會提示（從零重建丟掉這個紀錄，只在自己的結尾稽核）。不帶歸因——見 `AuditFailure`。（R3-4 起失敗的 `--audit` 也記成欠著；
         /// R5 把先前分開的 `derivedCountsDiverged` 併進來，兩者只差在發生在哪裡，而 `moment` 已經說了。）
         ///
-        /// 沒有欠著稽核時，`--audit` 只找到覆蓋缺口（計數一致、沒有懸空連結）的情形仍拋 `stateUnreadable`，
-        /// 與結構性閘相同。
+        /// 沒有欠著稽核時，`--audit` 只找到覆蓋缺口（計數一致、沒有懸空連結）的情形仍拋 `stateUnreadable`：錯誤與
+        /// 補救（`--full`）與結構性閘相同、列出同樣的發現，措辭說成 `chunk_sources` 的事實而不是計數的讀值（R10-6）。
         case auditFailed(AuditFailure)
         /// 估算的向量累積超過使用者設定的預算。
         ///
@@ -514,7 +516,8 @@ public struct IndexBuilder: Sendable {
                 // 說法依來源分兩種（R10-6）：結構性閘讀的是維護中的計數，計數漂移時「沒有任何 source mapping」可以是假的
                 // （有連結的 chunk 被改成 `source_count = 0`，正是 R8 那個情境），所以照實說是計數的讀值；`--audit` 的
                 // 覆蓋發現直接從 `chunk_sources` 算，才說成映射的事實。
-                let readFromCounts = !(audit || owesAudit)
+                // 走到這裡而欠著稽核時，稽核必然已經通過（任何發現都會先拋 `auditFailed`），所以只看 `audit`（R11-13）。
+                let readFromCounts = !audit
                 var found: [String] = []
                 if !sourceKeys.isEmpty {
                     let keys = sourceKeys.prefix(3).joined(separator: "、")
@@ -536,8 +539,9 @@ public struct IndexBuilder: Sendable {
                 // 補救寫進錯誤本身（R3-1）：MCP 直接把錯誤印出來，不經過 CLI 的訊息函式。
                 if pendingMarker != nil {
                     throw BuildError.stateUnreadableWhileAuditOwed(
-                        detail: detail + "。這份索引還欠一次整份稽核，"
-                            + "而這道閘讀的正是還沒稽核過的計數：先跑 `ltm build`，它會在併入之前補跑稽核、說明找到什麼與能做什麼")
+                        detail: detail + "。這份索引還欠一次整份稽核"
+                            + (readFromCounts ? "，而這道閘讀的正是還沒稽核過的計數" : "")
+                            + "：先跑 `ltm build`，它會在併入之前補跑稽核、說明找到什麼與能做什麼")
                 }
                 throw BuildError.stateUnreadable(detail: detail + "：請跑 `ltm build --full` 從零重建")
             }
@@ -962,27 +966,36 @@ public struct IndexBuilder: Sendable {
         // 就永遠不再被稽核——R1-3 那個洞換一條路回來（#61 verify-fix R1 自查）。
         if (rebuildFromScratch || owesAudit) && unmergedSourceKeys.isEmpty {
             // 稽核與清旗標同一個寫入交易（R6-1）：先前分開執行，稽核讀到一半被外部連線改掉的計數可能被判成通過、
-            // 旗標被清掉。不通過的那一邊這個交易什麼都不寫，所以交易本身出錯（例如 COMMIT 失敗）不改變發現——照樣
-            // 拋稽核結果（R7-1）；通過而清旗標失敗時，旗標還在、下一次 build 會再稽核，拋原本的錯誤。
+            // 旗標被清掉。
+            //
+            // **先清、再稽核**（R11-1，codex）：先前稽核通過才 `DELETE` 旗標，於是清除本身引發的寫入——`meta` 上的
+            // trigger 去改計數——與清除一起提交，build 報通過、不再欠著，再稽核一次卻不通過。同一個交易擋得住別的
+            // 連線，擋不住清除自己引發的寫入。現在稽核看的是清除之後的狀態；不通過就拋出、整個回滾，清除與它引發的
+            // 寫入一起撤掉，旗標回到交易開始時的樣子，再拋稽核結果。
+            //
+            // 清除本身出錯（例如 trigger 的 `RAISE(ABORT)`）不中止：那一條陳述式撤回、旗標留著，稽核照跑；通過時交易
+            // 照常提交，報告的 `auditOwed` 為真、`ltm build` 說出來（R11-2：先前每一次 build 都以原始錯誤結束、旗標
+            // 永遠清不掉）。會回滾整個交易的錯誤（`RAISE(ROLLBACK)`、磁碟滿）之後的 COMMIT 會失敗，稽核通過時拋原本的
+            // 錯誤，旗標仍在。
+            //
+            // 交易本身在稽核不通過之後出錯（例如 COMMIT 失敗）不改變發現，照樣拋稽核結果（R7-1）。
             var audited: IndexDatabase.DerivedCountAudit?
-            // 預設「不在」（R9）：交易裡讀旗標失敗時，先前預設成「在」，於是沒讀到的旗標被報成已記下。現在不在或沒讀到，
-            // 都在交易之外寫一次、讀回。
+            // 預設「不在」（R9）：讀旗標失敗時當成不在；不通過時在交易之外寫一次、讀回。
             var markerPresent = false
             let result: IndexDatabase.DerivedCountAudit
             do {
                 try database.transaction {
+                    markerPresent = (try? database.meta(Self.auditPendingKey)) != nil
+                    try? database.removeMeta(Self.auditPendingKey)
                     let result = try database.auditDerivedCounts()
                     audited = result
-                    if result.isClean {
-                        try database.removeMeta(Self.auditPendingKey)
-                    } else {
-                        markerPresent = try database.meta(Self.auditPendingKey) != nil
-                    }
+                    if !result.isClean { throw EndAuditFailed() }
                 }
                 guard let audited else { preconditionFailure("交易成功卻沒有稽核結果") }
                 result = audited
             } catch {
-                // 稽核不通過之後交易才出錯：照樣拋稽核結果（R7-1）。稽核通過、或還沒稽核完就出錯：拋原本的錯誤。
+                // 稽核不通過（含上面那個用來回滾的拋出），或不通過之後交易才出錯：照樣拋稽核結果。稽核通過、或還沒
+                // 稽核完就出錯：拋原本的錯誤。
                 guard let audited, !audited.isClean else { throw error }
                 result = audited
             }
@@ -1026,6 +1039,9 @@ public struct IndexBuilder: Sendable {
     /// （R3、R4 曾用第二個值記「判定過缺陷」，R5 拿掉歸因時一起拿掉）。
     public static let auditPendingKey = "audit_pending"
     public static let owedMarker = "1"
+
+    /// 結尾稽核不通過時用來回滾那個寫入交易（連同已執行的清除）的內部訊號；不會離開 `build`。
+    private struct EndAuditFailed: Error {}
 
     /// 寫旗標、讀回；旗標不在就回 false 而不拋——呼叫端緊接著要拋稽核結果，不能讓 SQLite 錯誤蓋掉它（R4-9）。
     /// 回報由呼叫端放進錯誤（`recorded`），不是吞掉。

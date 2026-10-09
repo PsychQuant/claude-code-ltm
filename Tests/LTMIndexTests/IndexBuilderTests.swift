@@ -575,9 +575,15 @@ func anIndexWithContentButNoCursorAnywhereIsRefused() throws {
         #expect(try database.chunkCount() > 0, "前提：索引裡確實有內容")
     }
 
-    #expect(throws: IndexBuilder.BuildError.self) {
+    let refusal = #expect(throws: IndexBuilder.BuildError.self) {
         _ = try IndexBuilder(location: derived, scanner: scanner,
                              embedder: StubEmbedder(revision: "rev-A")).build()
+    }
+    // R10-6／R11-13：閘讀的是計數，來源鍵那一筆也說成計數的讀值。
+    if case .stateUnreadable(let detail) = refusal {
+        #expect(detail.contains("在計數表裡有 chunk、卻沒有續讀游標"), "實得：\(detail)")
+    } else {
+        Issue.record("應該是 stateUnreadable，實際是 \(String(describing: refusal))")
     }
     // --full 仍然可用（那正是錯誤訊息指引的路）。
     let recovered = try IndexBuilder(location: derived, scanner: scanner,
@@ -1823,6 +1829,11 @@ func aFailedAuditIsRemembered() throws {
     // 這裡的漂移含覆蓋缺口，查詢路徑的結構性閘會拒絕——而拒絕要指向 `ltm build`，因為索引已經記成欠著稽核。
     let queried = #expect(throws: IndexBuilder.BuildError.self) {
         _ = try builder.build(refusingFullRebuild: true, honorPendingAudit: false)
+    }
+    if case .stateUnreadableWhileAuditOwed(let detail) = queried {
+        // R10-1／R11-13：欠著時的閘拒絕不列「為什麼欠著」的原因。
+        #expect(!detail.contains("從零重建被中斷"), "實得：\(detail)")
+        #expect(detail.contains("先跑 `ltm build`"))
     }
     guard case .stateUnreadableWhileAuditOwed = queried else {
         Issue.record("查詢路徑應該是 stateUnreadableWhileAuditOwed，實際是 \(String(describing: queried))")
@@ -3139,6 +3150,68 @@ func anEndAuditFailureSurvivesAFailingTransaction() throws {
     }
     #expect(failure.moment == .afterBuild && failure.divergentChunks == 1)
     #expect(!failure.recorded, "meta 表不在：旗標寫不回去，不得說記上了")
+}
+
+/// R11-1（codex）：清除旗標本身引發的寫入要被結尾稽核看到。先前稽核通過才清除，`meta` 上的 `AFTER DELETE` trigger
+/// 去改計數，那個改動與清除一起提交，build 報通過、不再欠著。現在先清再稽核，不通過就整個回滾。
+@Test("清除旗標時 trigger 改壞計數：結尾稽核看到、回滾清除，旗標留著")
+func aChangeCausedByClearingIsCaughtByTheEndAudit() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "1")
+        try database.execute(
+            """
+            CREATE TRIGGER corrupt_on_clear AFTER DELETE ON meta WHEN OLD.key = 'audit_pending'
+            BEGIN UPDATE chunks SET source_count = 7 WHERE id = (SELECT MIN(id) FROM chunks); END
+            """)
+    }
+    let error = #expect(throws: IndexBuilder.BuildError.self) { _ = try builder.build() }
+    guard case .auditFailed(let failure) = error else {
+        Issue.record("清除引發的改動不得與清除一起提交，實際是 \(String(describing: error))")
+        return
+    }
+    #expect(failure.moment == .afterBuild && failure.divergentChunks == 1 && failure.recorded)
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.meta("audit_pending") == "1", "回滾之後旗標還在")
+    #expect(try database.auditDerivedCounts().isClean, "回滾也撤掉 trigger 改壞的計數")
+}
+
+/// R11-2（DA）：清除旗標拋錯（`RAISE(ABORT)`）時，build 不得以原始 SQLite 錯誤結束——那一條陳述式撤回、稽核照跑，
+/// 通過時照常提交，報告說仍欠著（`ltm build` 據此印出含 `--full` 的那一行）。
+@Test("清除旗標拋錯：build 照常完成，兩次稽核都通過，報告說仍欠著")
+func aFailingClearIsReportedAsOwed() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "1")
+        try database.execute(
+            "CREATE TRIGGER abort_clear BEFORE DELETE ON meta WHEN OLD.key = 'audit_pending' BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+    }
+    let report = try builder.build()
+    #expect(report.audits.map(\.moment) == [.beforeScan, .afterBuild])
+    #expect(report.auditOwed)
 }
 
 /// R6-8：欠著稽核的掃描前稽核也看得到懸空的連結（`isClean` 的第五項）。

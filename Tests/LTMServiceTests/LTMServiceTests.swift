@@ -1251,7 +1251,7 @@ func coverageOnlyMessage() {
     #expect(text.split(separator: "\n").last?.contains("本機路徑（貼到公開的 issue 之前請先遮掉）：proj/s1.jsonl") == true)
 }
 
-@Test("旗標寫入失敗：不說「記著欠一次稽核」，改說沒記上")
+@Test("沒能確認旗標寫進索引：不說「記著欠一次稽核」，說沒能確認，條件管到每個分支")
 func notRecordedMessage() {
     let text = AuditMessage.failure(failure(moment: .beforeScan, recorded: false))
     #expect(text.contains("沒能確認「欠一次稽核」寫進了索引"))
@@ -1259,7 +1259,12 @@ func notRecordedMessage() {
     #expect(text.contains("不會提示欠著"), "R7-6：沒記上時也要說查詢怎麼做")
     // R8（codex）：閘看得到的不符照樣讓查詢與 build 被拒，補救是 --full（沒有旗標）。不得無條件說照常回答。
     #expect(text.contains("閘放行時"))
-    #expect(text.contains("閘看得到這個問題時，兩者都會被拒絕、叫你跑 `ltm build --full`"))
+    #expect(text.contains("閘看得到這個問題時，兩者都會"))
+    #expect(text.contains("叫你跑 `ltm build --full`"))
+    // R11-4：「沒有這個紀錄時」要管到分支那一句；不寫只對其中一種情形成立的原因。
+    #expect(text.contains("沒有這個紀錄時，之後不帶 `--audit` 的增量 `ltm build` 與查詢都不會記得它"))
+    #expect(!text.contains("寫完讀回時看不到"))
+    #expect(!text.contains("確認索引檔可以寫入"))
 }
 
 /// R8（codex）：只有覆蓋缺口時閘必然拒絕，沒記上也一樣——那一句不得說「閘放行時照常回答」。
@@ -1267,7 +1272,7 @@ func notRecordedMessage() {
 func notRecordedCoverageOnlyMessage() {
     let text = AuditMessage.failure(
         failure(chunks: 0, sources: 0, coverage: ["/tmp/x/a.jsonl"], moment: .afterBuild, recorded: false))
-    #expect(text.contains("之後的增量 `ltm build` 與查詢都會被拒絕、叫你跑 `ltm build --full`"))
+    #expect(text.contains("沒有這個紀錄時，之後的增量 `ltm build` 與查詢都會被拒絕、叫你跑 `ltm build --full`"))
     #expect(!text.contains("閘放行時"))
 }
 
@@ -1301,10 +1306,11 @@ func aSourceKeyStartingWithAParenIsStillAPath() {
 }
 
 /// R9-7：build 成功結束而索引仍欠著時，兩種情形各說各的。
-@Test("build 結束仍欠著稽核：結尾稽核過了卻沒清掉，與從零重建沒做完，說法不同")
+@Test("build 結束仍欠著稽核：結尾稽核通過而紀錄仍在時指出 --full；沒跑結尾稽核時不寫原因")
 func owedAfterBuildMessage() {
     let notCleared = AuditMessage.owedAfterBuild(auditedAtEnd: true)
-    #expect(notCleared.contains("結束時它仍在"))
+    #expect(notCleared.contains("沒有清掉、結束時仍在"))
+    #expect(!notCleared.contains("也清除了"), "R11-3：ltm 沒有觀察到清除生效，只看到結束時仍在")
     #expect(notCleared.contains("`ltm build --full` 從零重建——它會丟掉這個紀錄"), "R10-1：清不掉時要有出口")
     let noEndAudit = AuditMessage.owedAfterBuild(auditedAtEnd: false)
     #expect(noEndAudit.contains("這次沒有跑結尾稽核"))

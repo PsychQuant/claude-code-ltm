@@ -36,7 +36,7 @@ Before an incremental build scans the corpus, unless it runs the whole-index aud
 #### Scenario: A chunk that lost its last source is refused
 
 - **WHEN** the last `chunk_sources` row of a chunk is deleted and an incremental build runs
-- **THEN** the build refuses, naming one chunk without a source mapping, and merges nothing
+- **THEN** the build refuses, naming one chunk whose `source_count` is 0 as a reading of the maintained counts, and merges nothing
 
 #### Scenario: A source without a cursor is refused
 
