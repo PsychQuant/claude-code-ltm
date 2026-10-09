@@ -37,6 +37,9 @@ public struct BuildReport: Sendable, Equatable {
     /// 所以由它續完一次中斷的從零重建之後，這個旗標會一直是 true，直到下一次 `ltm build`——呈現層
     /// 必須把它說出來（#61 R2-4），否則只用 hook／MCP 的使用者永遠不知道要跑。
     public let auditOwed: Bool
+    /// 結尾清除這個紀錄時只撤回了那一條陳述式、SQLite 實際拋出的錯誤（例如暫時性的 I/O 錯誤、trigger 的訊息）；
+    /// 只在 `auditOwed` 為真時有值。觀察到的事照原文帶出，`ltm build` 說「一直如此，可以回報」時才有東西可附（R14-3）。
+    public let auditClearError: String?
 }
 
 /// 一次通過的整份稽核，與它發生在建置的哪個時點（#61 R1-17：`--audit` 的數字是掃描前的，從零重建的
@@ -970,6 +973,7 @@ public struct IndexBuilder: Sendable {
         // 那一次 build 跑。今天出貨的呼叫端不會走到這裡（查詢路徑拒絕從零重建、也不補跑稽核），但
         // `build(full:budget:)` 是公開的組合，而先前它會在半份索引上稽核、清掉旗標，之後續完的部分
         // 就永遠不再被稽核——R1-3 那個洞換一條路回來（#61 verify-fix R1 自查）。
+        var clearError: String?
         if (rebuildFromScratch || owesAudit) && unmergedSourceKeys.isEmpty {
             // 稽核與清旗標同一個寫入交易（R6-1）：先前分開執行，稽核讀到一半被外部連線改掉的計數可能被判成通過、
             // 旗標被清掉。
@@ -992,6 +996,9 @@ public struct IndexBuilder: Sendable {
                         try database.removeMeta(Self.auditPendingKey)
                     } catch {
                         guard database.isInTransaction else { throw error }
+                        // 只撤回那一條：不需要外部寫者也走得到（暫時性的 I/O 錯誤、記憶體不足），所以把錯誤留下來
+                        // 報（R14-3：先前算進外部寫者上限而丟掉）。
+                        clearError = Self.describe(error)
                     }
                     let result = try database.auditDerivedCounts()
                     audited = result
@@ -1025,7 +1032,8 @@ public struct IndexBuilder: Sendable {
             unmergedSources: unmergedSourceKeys.count,
             budgetExhausted: budgetExhausted,
             audits: audits,
-            auditOwed: auditOwed)
+            auditOwed: auditOwed,
+            auditClearError: auditOwed ? clearError : nil)
     }
 
     // MARK: - 衍生產物
@@ -1049,7 +1057,8 @@ public struct IndexBuilder: Sendable {
     /// 結尾稽核不通過時用來回滾那個寫入交易（連同已執行的清除）的內部訊號；不會離開 `build`。
     private struct EndAuditFailed: Error {}
 
-    /// 稽核失敗時在拋出前讀一次旗標：在就回 true、不寫；不在就寫一次、讀回（`recordMarker`）。不重用先前讀到的值——
+    /// 稽核失敗時在拋出前讀一次旗標：在就回 recorded、不寫；不在就寫一次、讀回（`recordMarker`），連同沒看到時實際
+    /// 拋出的錯誤（`MarkerWrite`）。不重用先前讀到的值——
     /// 那一刻之後別的連線可以刪掉它，而重用的值會讓失敗路徑跳過這次的檢查與寫入（R12-1，codex）。擋不住拋出之後
     /// 才被刪掉。
     private static func ensureMarker(in database: IndexDatabase) -> MarkerWrite {
@@ -1063,7 +1072,7 @@ public struct IndexBuilder: Sendable {
         let error: String?
     }
 
-    /// 寫旗標、讀回；旗標不在就回 false 而不拋——呼叫端緊接著要拋稽核結果，不能讓 SQLite 錯誤蓋掉它（R4-9）。
+    /// 寫旗標、讀回；讀回看不到就回 `recorded: false` 與寫入（或讀回）拋出的錯誤，而不拋——呼叫端緊接著要拋稽核結果，不能讓 SQLite 錯誤蓋掉它（R4-9）。
     /// 回報由呼叫端放進錯誤（`recorded`），不是吞掉。
     ///
     /// **判準是讀回，不是「陳述式沒拋錯」**（R9-7）：`meta` 上的 `RAISE(IGNORE)` trigger 讓寫入靜默略過、不報錯，

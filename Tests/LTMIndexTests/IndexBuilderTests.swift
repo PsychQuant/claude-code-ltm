@@ -3068,6 +3068,7 @@ func aSilentlyIgnoredClearIsReportedAsOwed() throws {
     let report = try builder.build()
     #expect(report.audits.map(\.moment) == [.beforeScan, .afterBuild], "前提：兩次稽核都通過")
     #expect(report.auditOwed, "紀錄沒清掉：報告不得說不欠")
+    #expect(report.auditClearError == nil, "被靜默略過：沒有錯誤可附")
 }
 
 /// R9：建置途中旗標被移除、結尾稽核又不通過時，結尾那條路徑在交易之外重寫旗標——先前只回報 `recorded: false`，
@@ -3244,6 +3245,7 @@ func aFailingClearIsReportedAsOwed() throws {
     let report = try builder.build()
     #expect(report.audits.map(\.moment) == [.beforeScan, .afterBuild])
     #expect(report.auditOwed)
+    #expect(report.auditClearError == "blocked", "R14-3：清除時實際拋出的錯誤照原文帶出")
 }
 
 /// R6-8：欠著稽核的掃描前稽核也看得到懸空的連結（`isClean` 的第五項）。
@@ -3310,7 +3312,7 @@ func theEndAuditCatchesDanglingLinks() throws {
 }
 
 /// R6-8：旗標已經在的時候不重寫。R9 起 `recordMarker` 以讀回決定，擋住寫入的 trigger 分不出「有沒有重寫」——這條
-/// 從 R9 到 R13 都不可能變紅（R13-3，三個讀者各自刪掉 `ensureMarker` 的那一行，全套照綠）。現在用一個計數的
+/// 從 R9 到 R13 都不可能變紅（R13-3：三個讀者提出，其中兩個各自刪掉 `ensureMarker` 的那一行、全套照綠——`issuecomment-6077726057` 第 3 列）。現在用一個計數的
 /// trigger 直接數寫入次數。
 @Test("audit: true 而不補跑欠著稽核時失敗：旗標已在就不重寫（寫入次數為 0），recorded 為 true")
 func anExistingMarkerIsNotRewritten() throws {
@@ -3351,7 +3353,7 @@ func anExistingMarkerIsNotRewritten() throws {
     #expect(writes == 0, "旗標本來就在：不得再寫一次")
 }
 
-/// R7-1：會回滾整個交易的寫入失敗（`RAISE(ROLLBACK)`；磁碟滿、I/O 錯誤同形）也不得蓋掉稽核結果。R6 把寫旗標放進
+/// R7-1：會回滾整個交易的寫入失敗（`RAISE(ROLLBACK)`；SQLite 在某些磁碟滿、I/O 錯誤時也可能自動回滾整個交易，多數時候只撤回那一條陳述式）也不得蓋掉稽核結果。R6 把寫旗標放進
 /// 寫入交易時，這條會拋 `statementFailed(sql: "COMMIT", …)`。
 @Test("寫入欠著稽核的旗標時整個交易被回滾：照樣拋出稽核結果，recorded 為 false")
 func aRolledBackMarkerWriteStillReportsTheAudit() throws {

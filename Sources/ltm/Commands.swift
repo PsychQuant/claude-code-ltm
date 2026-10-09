@@ -378,7 +378,10 @@ enum BuildCommand {
             if report.auditOwed {
                 // R9-7：先前 build 從不印這件事——清除紀錄被靜默略過時，build 每次報稽核通過、查詢每次說欠著。
                 Output.error(
-                    "  ⚠ " + AuditMessage.owedAfterBuild(auditedAtEnd: report.audits.contains { $0.moment == .afterBuild }))
+                    "  ⚠ "
+                        + AuditMessage.owedAfterBuild(
+                            auditedAtEnd: report.audits.contains { $0.moment == .afterBuild },
+                            clearError: report.auditClearError))
             }
             if !report.sourcesUnreadable.isEmpty {
                 // 讀不到的來源**沒有**被作廢（那會刪掉還存在的內容），所以它們的

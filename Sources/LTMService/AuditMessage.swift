@@ -115,11 +115,15 @@ public enum AuditMessage {
     /// 情形在 exit 0 時走不到；走得到的是別的寫者在這次 build 期間寫下旗標。清不掉的那一支補上 `--full` 這個出口——
     /// 只說「再跑 `ltm build`」，清除一直被略過時是一個不會結束的循環（R10-1，DA）。只說「結束時仍在」：ltm 看到的
     /// 只有 COMMIT 之後那一次讀取——「清除了」（R11-3）與「沒有清掉」（R12：清除可能成功、再被 trigger 寫回）都是推論。
-    public static func owedAfterBuild(auditedAtEnd: Bool) -> String {
-        auditedAtEnd
-            ? "這次 build 結尾的稽核通過了，但欠一次稽核的紀錄在結束時仍在：之後的 `ltm build` 會再稽核。一直如此，"
-                + "可以回報，或跑 `ltm build --full` 從零重建——它會丟掉這個紀錄"
-            : "這次 build 結束時，索引記著欠一次整份稽核，而這次沒有跑結尾稽核：再跑一次 `ltm build`"
+    ///
+    /// `clearError`：清除那一條陳述式被撤回時 SQLite 實際拋出的錯誤，照原文附上（R14-3）。
+    public static func owedAfterBuild(auditedAtEnd: Bool, clearError: String? = nil) -> String {
+        guard auditedAtEnd else {
+            return "這次 build 結束時，索引記著欠一次整份稽核，而這次沒有跑結尾稽核：再跑一次 `ltm build`"
+        }
+        let observed = clearError.map { "（清除這個紀錄時 SQLite 回報：\($0)）" } ?? ""
+        return "這次 build 結尾的稽核通過了，但欠一次稽核的紀錄在結束時仍在\(observed)：之後的 `ltm build` 會再稽核。"
+            + "一直如此，可以回報，或跑 `ltm build --full` 從零重建——它會丟掉這個紀錄"
     }
 
     /// 這一輪因另一個行程持鎖而沒有併入新內容（#51）。CLI、MCP、recall 區塊共用（R4-2：recall 先前沒有）。

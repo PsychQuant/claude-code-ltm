@@ -1468,6 +1468,23 @@ func theCLISaysWhenAnOwedAuditDidNotClear() throws {
     #expect(try pendingMarker(workspace) == "1")
 }
 
+/// R14-3：清除這個紀錄只撤回那一條陳述式時，`ltm build` 把 SQLite 實際拋出的錯誤印出來——說「一直如此，可以回報」
+/// 時才有東西可附。
+@Test("清除紀錄的陳述式失敗而 build 完成：stderr 附上 SQLite 原文與 --full")
+func theCLIShowsTheClearErrorWhenTheRecordRemains() throws {
+    let workspace = try CLIWorkspace.make(texts: ["記憶策略的內容", "檢索量測的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    try owedIndex(
+        workspace,
+        corruption: "CREATE TRIGGER abort_clear BEFORE DELETE ON meta WHEN OLD.key = 'audit_pending' "
+            + "BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+    let result = try runCLI(["build"], environment: workspace.environment)
+    #expect(result.code == 0, "實得：\(result.err)")
+    #expect(result.err.contains("清除這個紀錄時 SQLite 回報：blocked"), "實得：\(result.err)")
+    #expect(result.err.contains("ltm build --full"))
+}
+
 /// R2-11／R2-12：只有覆蓋缺口時不提計數；來源鍵是本機路徑，單獨一行並註明回報前遮掉。
 @Test("欠著稽核、只有覆蓋缺口：訊息不提計數不符，路徑單獨一行並註明遮掉")
 func anOwedAuditWithOnlyCoverageGapsReadsConsistently() throws {
