@@ -90,7 +90,7 @@
   若那是 ltm build，它會自己補跑這次稽核。
   **升版成本**：layout 6 的索引結構不同，舊索引在第一次 `ltm build` 時整份重建；查詢路徑在那之前照舊拒絕並指名
   `ltm build --full`。**這次升版在 #61 要求的前後量測完成之前出貨**（使用者的決定）：量測（change
-  `gate-structural-counts` 的 task 6.1）做完時，在當時的 Unreleased 另加一條引用那份 `docs/measurements/` 紀錄，
+  `gate-structural-counts` 的 task 6.1，現由 #75 追蹤）做完時，在當時的 Unreleased 另加一條引用那份 `docs/measurements/` 紀錄，
   不回頭改這一條；這裡不寫任何數字。#67 若也要改索引結構，應與這次併在同一次升版（release 時協調）。
 
 ## [0.5.0] - 2026-09-05
