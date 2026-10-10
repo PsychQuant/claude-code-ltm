@@ -3221,6 +3221,33 @@ func aClearThatRollsBackEndsWithItsOwnError() throws {
     #expect(try database.meta("audit_pending") == "1")
 }
 
+/// R15（DA）：清除拋錯而交易仍在，但刪除保留（trigger 的 `RAISE(FAIL)`）時，旗標已不在：build 完成、不欠著，也不帶
+/// 清除的錯誤——`BuildReport.auditClearError` 只在仍欠著時有值。釘住 `auditOwed ? clearError : nil` 那道守衛。
+@Test("清除拋錯但刪除保留（RAISE(FAIL)）：build 完成、不欠著、不帶清除的錯誤")
+func aClearThatKeepsTheDeleteReportsNothing() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    try writeTurns(in: corpus, texts: ["第一段內容", "第二段內容"])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        try database.setMeta("audit_pending", "1")
+        try database.execute(
+            "CREATE TRIGGER fail_after_clear AFTER DELETE ON meta WHEN OLD.key = 'audit_pending' BEGIN SELECT RAISE(FAIL, 'blocked-after'); END")
+    }
+    let report = try builder.build()
+    #expect(report.audits.map(\.moment) == [.beforeScan, .afterBuild])
+    #expect(!report.auditOwed, "前提：刪除保留，旗標已不在")
+    #expect(report.auditClearError == nil, "不欠著就不帶清除的錯誤")
+}
+
 /// R11-2（DA）：清除旗標拋錯（`RAISE(ABORT)`）時，build 不得以原始 SQLite 錯誤結束——那一條陳述式撤回、稽核照跑，
 /// 通過時照常提交，報告說仍欠著（`ltm build` 據此印出含 `--full` 的那一行）。
 @Test("清除旗標時只撤回那一條陳述式（RAISE(ABORT)）：build 照常完成，兩次稽核都通過，報告說仍欠著")

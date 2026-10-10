@@ -114,9 +114,9 @@ public enum AuditMessage {
     /// 只陳述觀察到的事，不寫原因（R10-1）：先前 `false` 那一支寫「有來源未併入」，而 `ltm build` 不帶時間預算，那個
     /// 情形在 exit 0 時走不到；走得到的是別的寫者在這次 build 期間寫下旗標。清不掉的那一支補上 `--full` 這個出口——
     /// 只說「再跑 `ltm build`」，清除一直被略過時是一個不會結束的循環（R10-1，DA）。只說「結束時仍在」：ltm 看到的
-    /// 只有 COMMIT 之後那一次讀取——「清除了」（R11-3）與「沒有清掉」（R12：清除可能成功、再被 trigger 寫回）都是推論。
+    /// 是 COMMIT 之後那一次讀取（與清除時拋出的錯誤，有的話）——「清除了」（R11-3）與「沒有清掉」（R12：清除可能成功、再被 trigger 寫回）都是推論。
     ///
-    /// `clearError`：清除那一條陳述式被撤回時 SQLite 實際拋出的錯誤，照原文附上（R14-3）。
+    /// `clearError`：清除時拋錯而交易仍在、SQLite 實際拋出的錯誤，照原文附上（R14-3）。
     public static func owedAfterBuild(auditedAtEnd: Bool, clearError: String? = nil) -> String {
         guard auditedAtEnd else {
             return "這次 build 結束時，索引記著欠一次整份稽核，而這次沒有跑結尾稽核：再跑一次 `ltm build`"

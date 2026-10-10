@@ -37,7 +37,7 @@ public struct BuildReport: Sendable, Equatable {
     /// 所以由它續完一次中斷的從零重建之後，這個旗標會一直是 true，直到下一次 `ltm build`——呈現層
     /// 必須把它說出來（#61 R2-4），否則只用 hook／MCP 的使用者永遠不知道要跑。
     public let auditOwed: Bool
-    /// 結尾清除這個紀錄時只撤回了那一條陳述式、SQLite 實際拋出的錯誤（例如暫時性的 I/O 錯誤、trigger 的訊息）；
+    /// 結尾清除這個紀錄時拋錯而交易仍在、SQLite 實際拋出的錯誤（例如暫時性的 I/O 錯誤、trigger 的訊息）；
     /// 只在 `auditOwed` 為真時有值。觀察到的事照原文帶出，`ltm build` 說「一直如此，可以回報」時才有東西可附（R14-3）。
     public let auditClearError: String?
 }
@@ -983,11 +983,13 @@ public struct IndexBuilder: Sendable {
             // 連線，擋不住清除自己引發的寫入。現在稽核看的是清除之後的狀態；不通過就拋出、整個回滾，清除與它引發的
             // 寫入一起撤掉，旗標回到交易開始時的樣子，再拋稽核結果。
             //
-            // 清除出錯分兩種（R12，四個讀者＋DA）。只撤回那一條陳述式（trigger 的 `RAISE(ABORT)`、constraint）時交易
-            // 還在：旗標留著，稽核照跑；通過時交易照常提交，報告的 `auditOwed` 為真、`ltm build` 說出來（R11-2：先前
-            // 每一次 build 都以原始錯誤結束）。整個交易被回滾（`RAISE(ROLLBACK)`；SQLite 在某些 I/O 錯誤、記憶體不足、
-            // 磁碟滿的情形也可能自動回滾整個交易，多數時候只撤回那一條陳述式）時拋清除自己的錯誤、旗標仍在——先前的 `try?` 在這裡讓稽核在 autocommit 下跑、最後以「cannot commit - no transaction
-            // is active」結束，原本的錯誤不見了。
+            // 清除出錯時看交易還在不在（R12，四個讀者＋DA）：
+            // - 交易還在：稽核照跑。多半只撤回那一條陳述式（trigger 的 `RAISE(ABORT)`、constraint、暫時性的 I/O 錯誤），
+            //   旗標留著；通過時交易照常提交，`auditOwed` 為真、`ltm build` 連同清除拋出的錯誤說出來（R11-2、R14-3）。
+            //   trigger 的 `RAISE(FAIL)` 則刪除保留、旗標已不在，`auditOwed` 為假、什麼都不印（R15，外部寫者）。
+            // - 整個交易被回滾（`RAISE(ROLLBACK)`；SQLite 在某些 I/O 錯誤、記憶體不足、磁碟滿的情形也可能自動回滾）：拋
+            //   清除自己的錯誤、旗標仍在。先前的 `try?` 讓稽核在 autocommit 下跑、最後以「cannot commit - no transaction
+            //   is active」結束，原本的錯誤不見了。
             var audited: IndexDatabase.DerivedCountAudit?
             let result: IndexDatabase.DerivedCountAudit
             do {
