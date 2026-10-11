@@ -179,6 +179,31 @@ func buildSucceedsAndLeavesCorpusUntouched() throws {
             atPath: workspace.derived.appendingPathComponent("index.sqlite3").path))
 }
 
+@Test("ltm build 的跳過明細另列「只有工具殘影」（#67）")
+func buildReportsToolTraceOnlySkipsSeparately() throws {
+    let workspace = try CLIWorkspace.make(texts: ["一則有內容的 turn"])
+    defer { workspace.cleanup() }
+    let trace: [String: Any] = [
+        "type": "user",
+        "uuid": "99999999-aaaa-bbbb-cccc-dddddddddddd",
+        "sessionId": "11111111-2222-3333-4444-555555555555",
+        "timestamp": "2026-08-17T06:00:01.000Z",
+        "message": ["role": "user", "content": [["type": "tool_result", "content": "x"]]],
+    ]
+    let line = String(data: try JSONSerialization.data(withJSONObject: trace), encoding: .utf8)!
+    let file = workspace.corpus.appendingPathComponent("proj-demo/s.jsonl")
+    let handle = try FileHandle(forWritingTo: file)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((line + "\n").utf8))
+    try handle.close()
+
+    let result = try runCLI(["build"], environment: workspace.environment)
+
+    #expect(result.code == 0)
+    #expect(result.out.contains("只有工具殘影 1"), "跳過明細要另列只有工具殘影的 turn：\(result.out)")
+    #expect(result.out.contains("無可索引文字 0"))
+}
+
 // MARK: - 進度輸出（#45）
 //
 // 這一組先前**完全不存在**——#45 的診斷 Blast radius 明列了要釘住的性質，而

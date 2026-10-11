@@ -39,7 +39,10 @@ public final class IndexDatabase {
     ///
     /// 5 → 6（#61）：`chunks.source_count`、`source_chunk_counts` 與維護它們的三個 trigger，
     /// 以及閘用的 partial index。舊索引沒有這些結構，只能從零重建。
-    public static let layoutVersion = 6
+    ///
+    /// 6 → 7（#67）：只有工具殘影的 turn 不再產出 chunk。結構沒變，但索引內容的意思變了——
+    /// 用未發版 build 建過的 layout 6 索引仍留著那些 chunk，升版讓它們從零重建。
+    public static let layoutVersion = 7
 
     public enum DatabaseError: Error, Sendable, Equatable {
         case openFailed(path: String, message: String)

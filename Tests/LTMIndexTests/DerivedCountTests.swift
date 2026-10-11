@@ -389,6 +389,8 @@ func orphanCountUsesThePartialIndex() throws {
 /// 的釘值就對不上。**補救是升 `layoutVersion` 並新增一列，不是改舊的那一列**——舊列是已出貨索引的事實。
 private let pinnedCountSchemaSHA256: [Int: String] = [
     6: "8dca07c0ed8e7c8c5a6d0e3d44c42d31f1e5ee6bb89da126a229b53fe59b3f70",
+    // 7（#67）：只改了哪些 turn 產出 chunk，trigger 與 partial index 的定義沒變，所以雜湊與 6 相同。
+    7: "8dca07c0ed8e7c8c5a6d0e3d44c42d31f1e5ee6bb89da126a229b53fe59b3f70",
 ]
 
 @Test("trigger 與 partial index 的定義一改就要升 layoutVersion（每個版本一個釘值）")

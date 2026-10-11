@@ -22,7 +22,7 @@
 | `message.content` 是**純字串**（使用者鍵入的 prompt 常是這一種） | **會**，整段、不截斷 | `Sources/LTMIndex/CorpusScanner.swift` 的 `indexableText` 第一行 `if let text = content as? String`。結構普查（只印計數；掃 `~/.claude/projects/**/*.jsonl`，留頂層 `type` 為 user／assistant 的紀錄，統計 `message.content` 是字串還是陣列）：2026-09-07 全語料 user 紀錄約 8% 走這條路 |
 | `text` block（使用者輸入、Claude 的散文、compaction 摘要） | **會**，全文 | 同檔 `indexableText`，`case "text"`。compaction 摘要那句的查法：掃 `~/.claude/projects/**/*.jsonl` 含 `isCompactSummary` 的行、統計頂層 `type`——全部是 `user`，所以通得過 `chunk(from:)` 的 user/assistant 守衛（只印計數，不讀內容） |
 | `tool_use` 的工具名＋七個 metadata 欄位：`command` / `file_path` / `path` / `pattern` / `query` / `url` / `description`，各取前 200 字元 | **會** | 同檔 `toolMetadataFields`（封閉列舉，隨該常數變動；改它就要回來改這段）與 `toolUseMetadata`（工具名先進 `pieces`） |
-| `tool_result` 的內容（Bash 的 stdout、`Read` 讀到的檔案） | 今天**不會**，只記 `⟨tool_result ok\|error⟩` 標記 | 同檔 `case "tool_result"`；`Tests/LTMIndexTests/CorpusScannerTests.swift` 的「tool_result 只記成敗，不記內容」。**這是 #6 追蹤中的決定，可能改變** |
+| `tool_result` 的內容（Bash 的 stdout、`Read` 讀到的檔案） | 今天**不會**，只記 `⟨tool_result ok\|error⟩` 標記；**整則只有這種標記、或只有沒有 metadata 欄位的 `tool_use` 的 turn 不產出 chunk**（#67） | 同檔 `case "tool_result"` 與 `isToolTraceOnly`；`Tests/LTMIndexTests/CorpusScannerTests.swift` 的「tool_result 只記成敗，不記內容」（混合 turn）與「只有工具殘影」那一組。**這是 #6 追蹤中的決定，可能改變** |
 | `tool_use` 的其他欄位（Write 的 `content`、Edit 的 `old_string`／`new_string`、Agent 的 `prompt`） | 今天**不會** | 不在 `toolMetadataFields` 裡（同上，隨常數變動） |
 | `thinking`／`image`／`document` block；頂層 `toolUseResult`；非 user/assistant 的紀錄（`attachment`、`system`） | 不會 | `indexableText` 的 `default: continue`；`chunk(from:)` 只讀 user/assistant 的 `message.content` |
 
@@ -108,7 +108,7 @@
   排在前面但不含原文的殘影，它看不見。`empty` 是零命中——查詢已經對不到任何東西，這不是 clean。
 - **`tool=<n>`** = 前 k 名裡含 `⟨tool ` 的 snippet 數。**它不是污染訊號**，理由是它量的不是「這條
   查詢」而是「前 k 名裡有沒有工具 chunk」——而後者的預期是常見的：工具 metadata chunk 佔 chunk 表
-  **至少**四成（#67 的 41.7% 只數 metadata-only chunk，而 `tool=<n>` 數的是任何含 `⟨tool ` 的 snippet，所以那是下界；**那是 chunk 表的份額、不是前 k 名的出現率**——檢索不是均勻抽樣，
+  **至少**四成（#67 的 41.7% 只數 metadata-only chunk——2026-10-11 後記：那是 #67 之前、layout 5 的份額；#67 之後只有工具名、沒有 metadata 欄位的那一類不再產出 chunk，之後的份額沒有量——而 `tool=<n>` 數的是任何含 `⟨tool ` 的 snippet，所以那是下界；**那是 chunk 表的份額、不是前 k 名的出現率**——檢索不是均勻抽樣，
   兩者不相等，實際的前 k 名出現率要在真索引上跑一次才知道，而那一次還沒跑），拿它當 dirty 會讓
   每一個前 k 名含工具 chunk 的列不可比——有多少列，同一句：還沒量。它是 #62（self-hit 的檢索層排除）要移動的那個量，印出來給 #62 的前後比較看
   ——**所以 #62 前後 `self`／`tool` 的變化量的是 #62 的效果加上兩次量測之間語料的成長，不是語料

@@ -52,6 +52,12 @@
 
 ### Changed
 
+- **只有工具殘影的 turn 不再產出 chunk；索引 layout 6 → 7（#67）**：Claude Code 把每個 `tool_result` 寫成獨立
+  紀錄，先前每一筆都變成一個文字只有 `⟨tool_result ok|error⟩` 的 chunk；沒有任何 metadata 欄位的 `tool_use`
+  也一樣只剩工具名。這兩類 chunk 文字大量重複、沒有內容線索，卻佔著向量通道的名次（#67 diagnosis）。現在整則
+  只有這兩種殘影的 turn 不產出 chunk；混合 turn（還有其他文字、或帶 metadata 欄位的 `tool_use`）照舊，文字與
+  anchor 都不變。`ltm build` 的跳過明細多一項「只有工具殘影」。layout 7 與 #61 的 layout 6 同屬這次發版：從
+  layout 5 升上來的索引只會從零重建一次。這裡不寫任何效果數字；量測歸 #75、#79。
 - **閘改讀結構計數；索引 layout 5 → 6，升版後要從零重建一次（#61）**：每次 build（因此每次 `ltm query` 的
   併入）都跑的 #44 閘，兩個全稱命題——每個 chunk 至少一個來源、每個持有 chunk 的來源都有游標——先前每次都走完
   `chunk_sources`。現在改讀由 SQLite trigger 在同一交易裡維護的兩份衍生計數：`chunks.source_count`（加上
