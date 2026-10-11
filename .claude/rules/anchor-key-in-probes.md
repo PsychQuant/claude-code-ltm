@@ -49,5 +49,5 @@ LTM_ANCHOR_KEY="$(~/bin/ltm memory --export-key)" .build/release/ltm query "…"
 
 `plugin/hooks/ltm-recall-gate.sh` 每個命中線索的 prompt 都會跑一次 `~/bin/ltm query`。它用的是
 `~/bin/ltm`（wrapper 安裝的那一份），第一次跑要按一次「永遠允許」；沒按的話每一輪都會跳密碼視窗，
-而 hook 撞到 `hooks.json` 宣告的 28 秒逾時時，Claude Code 會取消它、丟掉它的輸出，transcript 只顯示一則
-逾時通知（官方 `hooks.md`）——回想就此沒有送到模型。
+而那次 `ltm query` 會一直卡在密碼視窗上，直到 hook 自己的 `GUARD`（預設 20 秒）把它殺掉、印一行逾時通知——
+那行通知只交給模型，使用者除了密碼視窗什麼都看不到。`hooks.json` 宣告的 28 秒逾時只在 hook 自己沒殺掉時才會到。

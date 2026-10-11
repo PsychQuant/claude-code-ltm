@@ -5,8 +5,8 @@
 # 都在 ltm query 裡，CLI 與 MCP 共用。規格：openspec specs/proactive-recall-hook。
 #
 # 三條硬規則：永不 exit 2（那會擋掉使用者的 prompt）；閘門放行後**絕不靜默**
-# （失敗一律印一行通知——Claude Code 會取消逾時的 hook、丟掉它的輸出，transcript 只顯示
-# 一則不帶原因的逾時通知；我們得在那之前自己說話。這行通知走 stdout，只有模型看得到）；閘門未命中、off 模式、系統產生的 prompt 才是空輸出。
+# （失敗一律印一行通知——Claude Code 會取消逾時的 hook、丟掉它的輸出，transcript 的通知
+# 只寫 hook 名與逾時，不帶我們的失敗原因；所以要在那之前自己說話。這行通知走 stdout，只有模型看得到）；閘門未命中、off 模式、系統產生的 prompt 才是空輸出。
 #
 # 閘門形狀（verify R3 codex）：python **直接**解碼 hook JSON（~22 ms），閘門比對**解碼後的**
 # prompt。先前為省 python 而先對原始 JSON bytes 做 raw grep——被 codex 推翻為不可靠的過近似
