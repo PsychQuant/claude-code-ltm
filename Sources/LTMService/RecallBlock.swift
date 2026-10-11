@@ -102,7 +102,7 @@ public enum RecallBlock {
             lines.append("   ↳ \(label) \(sources)  turn \(entry.uuid)")
         }
         if let shortfall {
-            lines.append("索引落後 \(shortfall.sources) 個來源（有界併入未涵蓋，跑一次 ltm build 補齊）")
+            lines.append(ShortfallMessage.line(unmergedSources: shortfall.sources))
         }
         // hook 只把這個區塊注入，所以延後併入那一行也要在這裡（R4-2：先前只有 CLI 的 stderr 與 MCP 有）。
         if mergeDeferred { lines.append(AuditMessage.mergeDeferredLine) }

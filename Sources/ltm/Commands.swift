@@ -699,8 +699,7 @@ enum QueryCommand {
             // 落後行兩種模式都走 stderr：`--json` 的 stdout 是已發布的純陣列契約。
             if let refreshBudgetSeconds, outcome.refresh.unmergedSources > 0, !recallFormat {   // recall 區塊自己有落後行
                 _ = refreshBudgetSeconds
-                Output.error(
-                    "  ⚠ 索引落後 \(outcome.refresh.unmergedSources) 個來源（有界併入未涵蓋，跑一次 ltm build 補齊）")
+                Output.error("  ⚠ " + ShortfallMessage.line(unmergedSources: outcome.refresh.unmergedSources))
             }
             return LTMCommandLine.ExitCode.success.rawValue
         } catch let error as InterleavingViolation {

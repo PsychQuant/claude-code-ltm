@@ -45,6 +45,9 @@ enum MCPCommand {
 
         查詢前要先有索引：`ltm build`。
 
+        每次查詢前會先併入新內容，上限預設 20 秒（只在批次開頭檢查，所以不是查詢的總時間上限）；
+        環境變數 LTM_MCP_REFRESH_SECONDS 可改（正整數秒）。沒併完時回應會帶一行「索引落後 N 個來源」。
+
         選項：
           -h, --help    顯示本說明
         """
@@ -76,7 +79,12 @@ enum MCPCommand {
             return LTMCommandLine.ExitCode.usageError.rawValue
         }
 
-        let tools = [RetrievalTool.make(service: makeService)]
+        // 查詢前併入的上限在啟動時讀一次（#71）；設錯的值用預設、在每個回應裡說出來，不讓工具失敗。
+        let budget = RetrievalTool.resolveRefreshBudget(environment: ProcessInfo.processInfo.environment)
+        let tools = [
+            RetrievalTool.make(
+                service: makeService, refreshBudget: TimeInterval(budget.seconds), rejections: budget.rejections)
+        ]
 
         // 逐行讀。MCP 的 stdio 傳輸是一行一則 JSON 訊息。
         //

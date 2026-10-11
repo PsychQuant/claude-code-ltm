@@ -25,7 +25,38 @@ public enum RetrievalTool {
     public static let untrustedBanner = RetrievalBanner.untrusted
     public static let authorityRule = RetrievalBanner.authorityRule
 
-    public static func make(service: @escaping @Sendable () throws -> LTMService) -> MCPTool {
+    /// MCP 查詢前併入的預設上限（秒，#71）。**這是起始值，不是量測值**：#76 定的 MCP 端到端預算是 30 秒，
+    /// 要扣掉檢索本身的時間，而那段在今天的索引規模上沒有量過——20 秒留給併入、約 10 秒留給檢索是猜的。
+    /// 上限只在批次開頭檢查，所以它不是端到端的上界。要改它，先照 `docs/latency-budget.md` 量。
+    public static let defaultRefreshBudgetSeconds = 20
+
+    /// 由環境決定 MCP 查詢前併入的上限（server 啟動時讀一次，#71）。
+    ///
+    /// `LTM_MCP_REFRESH_SECONDS` 是正整數就用它；沒設用預設；其他值（含空字串、0）也用預設，並回傳一則
+    /// 指名變數與值的拒絕，讓這個 server 的每個回應都帶著它。不讓呼叫失敗：幾天前設錯的一個環境變數不該讓
+    /// 工具壞掉，`BuildTuning` 對查詢路徑也是同一個取捨。
+    public static func resolveRefreshBudget(environment: [String: String]) -> (seconds: Int, rejections: [String]) {
+        // 字面鍵：`BaselineQueryFileTests` 只認「以字串字面量當鍵」的讀法，收集 ltm 讀的環境變數、與量測腳本的白名單對帳。
+        guard let raw = environment["LTM_MCP_REFRESH_SECONDS"] else { return (defaultRefreshBudgetSeconds, []) }
+        switch BuildTuning.parsePositive(raw, variable: "LTM_MCP_REFRESH_SECONDS") {
+        case .success(let seconds):
+            return (seconds, [])
+        case .failure(let rejection):
+            return (
+                defaultRefreshBudgetSeconds,
+                [LTMService.describe(rejection) + "（MCP 查詢前併入改用預設的 \(defaultRefreshBudgetSeconds) 秒）"]
+            )
+        }
+    }
+
+    /// - Parameters:
+    ///   - refreshBudget: 查詢前併入的上限（秒）。**刻意沒有預設值**：先前這一層呼叫 `service.query` 時根本
+    ///     沒傳上限，每次查詢都要併完整段落後的語料才回答（#71 的根因）。`nil` 是「不設限」，要明寫。
+    ///   - rejections: server 啟動時解析上限被拒絕的說明，每個回應都帶。
+    public static func make(
+        service: @escaping @Sendable () throws -> LTMService, refreshBudget: TimeInterval?,
+        rejections: [String] = []
+    ) -> MCPTool {
         MCPTool(
             name: "ltm_query",
             description: """
@@ -61,8 +92,8 @@ public enum RetrievalTool {
             let service = try service()
             let scope: RetrievalEngine.Scope =
                 allProjects ? .allProjects : try currentProjectScope()
-            let outcome = try service.query(text: query, limit: limit, scope: scope)
-            return render(outcome)
+            let outcome = try service.query(text: query, limit: limit, scope: scope, refreshBudget: refreshBudget)
+            return render(outcome, startupRejections: rejections)
         }
     }
 
@@ -78,7 +109,7 @@ public enum RetrievalTool {
         return .project(project)
     }
 
-    static func render(_ outcome: QueryOutcome) -> String {
+    static func render(_ outcome: QueryOutcome, startupRejections: [String] = []) -> String {
         // **兩個門面消費同一個旗標**（#51）：CLI 早就把「本輪未併入新內容」說出來
         // 了，而 MCP 的讀者是模型——它更沒有辦法從答案本身看出「使用者剛講的那段
         // 可能不在這次結果裡」。沒有命中時也要說：那個「沒有命中」可能正是因為
@@ -86,6 +117,10 @@ public enum RetrievalTool {
         var warnings: [String] = []
         if outcome.refresh.mergeDeferredForConcurrentBuild {
             warnings.append("⚠ \(AuditMessage.mergeDeferredLine)")
+        }
+        // #71：有界併入沒併完時說出來，有沒有命中都說——「沒有命中」可能正是因為那些來源還沒併入。
+        if outcome.refresh.unmergedSources > 0 {
+            warnings.append("⚠ \(ShortfallMessage.line(unmergedSources: outcome.refresh.unmergedSources))")
         }
         // #54：「沒有命中」可能因為來源根本讀不到——模型讀者無法從答案本身看出。
         // 報**數量**不列路徑（路徑清單對模型是雜訊；明細在 `ltm build` 的 stderr）。
@@ -98,7 +133,7 @@ public enum RetrievalTool {
                 "⚠ \(outcome.refresh.sourcesUnreadable.count) 個來源檔讀不到，"
                     + "本輪未更新（若有既有索引則保留）——明細見 `ltm build`")
         }
-        for rejection in outcome.refresh.tuningRejections {
+        for rejection in outcome.refresh.tuningRejections + startupRejections {
             warnings.append("⚠ \(rejection)")
         }
         // #61 R2-4：查詢路徑不補跑欠著的稽核；模型讀者是使用者唯一可能聽到這件事的管道。

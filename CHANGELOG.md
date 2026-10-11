@@ -52,6 +52,12 @@
 
 ### Changed
 
+- **MCP `ltm_query` 的查詢前併入有上限，沒併完會說（#71）**：先前 MCP 工具呼叫 `service.query` 時沒有傳上限，
+  每次查詢都要併完整段落後的語料才回答——落後很多時，工具呼叫會一直沒有回應，直到 Claude Code 把它中止。現在
+  預設上限 20 秒（起始值，不是量測值；從 `docs/latency-budget.md` 的 MCP 30 秒預算扣掉檢索的時間猜的），環境
+  變數 `LTM_MCP_REFRESH_SECONDS` 可改、server 啟動時讀一次；設錯的值用預設，並在每個回應裡帶一行說明。沒併完時
+  回應帶「索引落後 N 個來源」——與 CLI、recall 區塊共用同一句。上限只在批次開頭檢查，所以它不是查詢的總時間
+  上限；這裡不寫任何效果數字。ltm-cli spec 裡「有界併入大約 N 秒」那句一併改正（它不是上界）。
 - **只有 tool_result 的 turn 不再產出 chunk；索引 layout 6 → 7（#67）**：Claude Code 把每個 `tool_result` 寫成
   獨立紀錄，先前每一筆都變成一個文字只有 `⟨tool_result ok|error⟩` 的 chunk——幾十萬筆、兩種文字、沒有內容線索
   （#67 diagnosis）；同一個向量在跟它相近的查詢裡可能佔滿向量通道的候選段。現在整則只有 tool_result 的 turn

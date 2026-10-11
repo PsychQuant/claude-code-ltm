@@ -466,7 +466,8 @@ public struct LTMService {
         describe(rejection)
     }
 
-    private static func describe(_ rejection: BuildTuning.Rejection) -> String {
+    /// 調校參數被拒絕時的那一句（值經 `flattenedForDisplay` 消毒）。MCP 解析 `LTM_MCP_REFRESH_SECONDS` 也用它（#71）。
+    public static func describe(_ rejection: BuildTuning.Rejection) -> String {
         switch rejection {
         case .notAPositiveInteger(let variable, let value):
             return "\(variable)=\(Self.flattenedForDisplay(value)) 不是正整數，已忽略"

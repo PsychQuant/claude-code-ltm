@@ -7,7 +7,7 @@
 | 入口 | 誰在等 | 硬上限（超過就壞） | 預算（超過就算慢） | 現行設定 | 設定與預算的落差 | 決定 |
 |---|---|---|---|---|---|---|
 | recall hook（`UserPromptSubmit`） | 使用者：prompt 送出後，hook 跑完才進模型 | 28 秒，`plugin/hooks/hooks.json` 的 `timeout`。逾時時 Claude Code 怎麼處理，見官方 `hooks.md` 的 `UserPromptSubmit` 一節 | **5 秒** | `GUARD` 預設 20 秒、不超過 25 秒，查詢前併入預算是 `GUARD − 5`（`GUARD` 不大於 5 時是 1 秒），批次預設 200 個 chunk（環境裡的 `LTM_BUILD_BATCH_CHUNKS` 是非空值時原樣傳下去：有效就用它；無效則被 ltm 拒絕、退回 2,000，而那則拒絕 hook 看不到——#83）——`plugin/hooks/ltm-recall-gate.sh` 的 `GUARD`、`CEILING`、`REFRESH` 與 `LTM_BUILD_BATCH_CHUNKS`。到了 `GUARD`，hook 自己結束查詢並印一行 notice；那行走 stdout，只交給模型，使用者看不到（官方 `hooks.md`；#81） | 設定比預算長。這是兩個設定值的比較，不是量到的耗時；要不要改，先量再決定：#79 | 2026-10-11，使用者，#76 `issuecomment-6106345492` |
-| MCP `ltm_query` | agent：工具呼叫回來之前，那一輪停著 | Claude Code 的 MCP 工具呼叫逾時，種類、預設值與調整方式見官方 `mcp.md`。#71 的兩次實例都是 1800 秒沒有回應或 progress 時被中止 | **30 秒** | 查詢前併入沒有上限：`Sources/LTMMCP/RetrievalTool.swift` 呼叫 `service.query` 時沒有傳 `refreshBudget` | 沒有上限。#71 會加上限，但那個上限不是端到端上界：併入預算只在批次邊界檢查（`docs/measurements/2026-09-04-proactive-recall.md` §2 量到 15 秒的併入預算下，二十輪全部撞上 hook 的 20 秒 `GUARD`、每輪約 21.5 秒（那是第一版 hook 的設定，之後 hook 把批次預設改成 200）），MCP 路徑又沒有外層的 kill。一個批次的大小預設是 2,000 個 chunk（`BuildTuning.defaultBatchChunkTarget`，`LTM_BUILD_BATCH_CHUNKS` 可改） | 2026-10-11，使用者，#76 `issuecomment-6106345492`；R3 之後重新確認，`issuecomment-6108082810` |
+| MCP `ltm_query` | agent：工具呼叫回來之前，那一輪停著 | Claude Code 的 MCP 工具呼叫逾時，種類、預設值與調整方式見官方 `mcp.md`。#71 的兩次實例都是 1800 秒沒有回應或 progress 時被中止 | **30 秒** | 查詢前併入上限預設 20 秒（`RetrievalTool.defaultRefreshBudgetSeconds`；起始值，不是量測值），環境變數 `LTM_MCP_REFRESH_SECONDS` 可改、server 啟動時讀一次；沒併完時回應帶一行「索引落後 N 個來源」——`Sources/LTMMCP/RetrievalTool.swift`、`Sources/ltm/MCPCommand.swift`（#71） | 上限不是端到端上界：預算只在每一批開頭檢查，第一個檢查點之前（取鎖、結構性閘、掃描、純刪除的交易）、期限到時正在跑的那一批、最後一批之後（寫游標的交易、chunk 計數）都不受它限制，檢索又在它之後（`docs/measurements/2026-09-04-proactive-recall.md` §2：第一版 hook 用 15 秒的併入預算時，每輪約 21.5 秒），MCP 路徑也沒有外層的 kill。一個批次的大小預設是 2,000 個 chunk（`BuildTuning.defaultBatchChunkTarget`，`LTM_BUILD_BATCH_CHUNKS` 可改）。端到端多久沒有量過。 | 2026-10-11，使用者，#76 `issuecomment-6106345492`；R3 之後重新確認，`issuecomment-6108082810` |
 | CLI `ltm query` | 在終端機打指令的人 | 無 | 不設 | 預設無上限；`--max-refresh-seconds N` 只限制查詢前的併入、只在批次邊界檢查（同上紀錄），不限制檢索本身 | — | 2026-10-11，使用者，#76 `issuecomment-6106345492`；R2 之後重新確認，`issuecomment-6107451314` |
 
 決定出處那則 comment 對 hook 後果的描述，另見 #76 的兩則 errata。
@@ -41,7 +41,7 @@
 只量了某一段成本的紀錄（例如 build 路徑上的一個固定項）不能直接拿來比，也不能從「這段省了多少」推算「改完之後會不會落在預算內」——那是沒有量測支撐的預測。
 
 - **#73、#75**：量的是 build 路徑上的成本。要以延遲為理由下「值不值得改」的結論，需要另外照上面的方式量入口的端到端，再跟預算比；只回答「這段成本是多少」不需要這份文件。
-- **#71**：MCP 查詢前併入的預設上限從 30 秒導出。上限要扣掉檢索本身的時間，而且如表中所寫，它不是端到端上界；怎麼分配在 #71 決定。今天的索引規模上檢索本身要多久沒有量過；640,760 個 chunk 時的拆解見 `docs/measurements/2026-08-27-query-latency-decomposition.md`。
+- **#71**：MCP 查詢前併入的預設上限從 30 秒導出，定為 20 秒——約 10 秒留給檢索是猜的，因為今天的索引規模上檢索本身要多久沒有量過（640,760 個 chunk 時的拆解見 `docs/measurements/2026-08-27-query-latency-decomposition.md`）；如表中所寫，它也不是端到端上界。要改這個值，先照上面的方式量 MCP 的端到端。
 - **#79**：hook 的現行設定比預算長，先量再決定要不要改。
 
 ## 與 #56「1 秒以內」的關係

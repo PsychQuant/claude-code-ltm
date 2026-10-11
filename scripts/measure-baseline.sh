@@ -49,7 +49,7 @@
 #      與 R20 對兩個迴圈退回的同一句）。
 #   白名單：HOME、LC_ALL、LANG、TMPDIR、LTM_BIN、LTM_BASELINE_QUERIES、以及 ltm 自己讀的 CLAUDE_CONFIG_DIR、LTM_ANCHOR_KEY、
 #   LTM_ANCHOR_KEY_SERVICE、LTM_BUILD_BATCH_CHUNKS、LTM_BUILD_MEMORY_BUDGET_MB、LTM_CORPUS_ROOT、LTM_DERIVED_ROOT、LTM_MEMORY_ROOT、
-#   LTM_TEST_CLOCK_STEP_SECONDS（R14 版只傳三個 LTM_*，指向受控索引的量測會靜默量到真索引，R15）。白名單裡的東西**原樣轉發**：
+#   LTM_MCP_REFRESH_SECONDS（#71；只有 `ltm mcp` 讀）、LTM_TEST_CLOCK_STEP_SECONDS（R14 版只傳三個 LTM_*，指向受控索引的量測會靜默量到真索引，R15）。白名單裡的東西**原樣轉發**：
 #   呼叫端殘留的 `LTM_DERIVED_ROOT` 會讓這一輪量到別棵索引而指紋不變（指紋只認查詢集）、rc 0；`LTM_ANCHOR_KEY` 值錯 → 事件全
 #   orphan 而 rc 0（.claude/rules/anchor-key-in-probes.md）；PATH 上的 python3 被換掉 → 查詢集上該行程的 stdout（揭露），而且它可以
 #   先把 fd 3 讀光再交給真的 python3 → 指紋是**空集合**的、每一列照量、rc 0（完整性，R18）——所以有非註解行卻算出空集合的指紋
@@ -231,7 +231,7 @@
 #   靠這句話立起來的）——所以不要用 `flock <file> 本腳本` 這種把鎖寄託在繼承 fd 上的呼叫法（R21）。
 builtin trap - DEBUG ERR RETURN EXIT
 builtin set +x
-LTM_MB_WHITELIST="HOME LC_ALL LANG TMPDIR LTM_BIN LTM_BASELINE_QUERIES CLAUDE_CONFIG_DIR LTM_ANCHOR_KEY LTM_ANCHOR_KEY_SERVICE LTM_BUILD_BATCH_CHUNKS LTM_BUILD_MEMORY_BUDGET_MB LTM_CORPUS_ROOT LTM_DERIVED_ROOT LTM_MEMORY_ROOT LTM_TEST_CLOCK_STEP_SECONDS"
+LTM_MB_WHITELIST="HOME LC_ALL LANG TMPDIR LTM_BIN LTM_BASELINE_QUERIES CLAUDE_CONFIG_DIR LTM_ANCHOR_KEY LTM_ANCHOR_KEY_SERVICE LTM_BUILD_BATCH_CHUNKS LTM_BUILD_MEMORY_BUDGET_MB LTM_CORPUS_ROOT LTM_DERIVED_ROOT LTM_MEMORY_ROOT LTM_MCP_REFRESH_SECONDS LTM_TEST_CLOCK_STEP_SECONDS"
 case "${LTM_MB_CLEAN-}" in
     "$$")
         { IFS= read -t 10 -r -d '' kv && [ "$kv" = "LTM_MB_FD3=$$" ]; } 2>/dev/null <&3 || { echo "白名單沒有經 fd 3 到達（頭標記缺、值錯或讀取逾時）" >&2; exit 70; }

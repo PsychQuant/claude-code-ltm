@@ -14,15 +14,77 @@ import LTMCore
 
 private func outcome(
     deferred: Bool, rejections: [String] = [], unreadable: [String] = [],
-    hits: [QueryHit] = []
+    hits: [QueryHit] = [], unmerged: Int = 0
 ) -> QueryOutcome {
     QueryOutcome(
         hits: hits, strategyID: "archival",
         refresh: RefreshReport(
             sourcesRefreshed: 0, sourcesUnreadable: unreadable, sourcesInvalidated: 0,
             skipped: SkipTally(), mergeDeferredForConcurrentBuild: deferred,
-            tuningRejections: rejections),
+            tuningRejections: rejections, unmergedSources: unmerged, budgetExhausted: unmerged > 0),
         eventsRecorded: 0, unattributableResults: 0)
+}
+
+/// 一筆命中。
+private func sampleHit() -> QueryHit {
+    QueryHit(
+        project: "proj-a", sessionSources: ["s-1"],
+        uuid: "00000000-aaaa-bbbb-cccc-dddddddddddd",
+        timestamp: Date(timeIntervalSince1970: 1_760_000_000),
+        snippet: "內容片段", score: 1.0, band: 1, displacement: 0,
+        historyDescription: "", movementDescription: "",
+        anchor: Anchor(
+            source: "fixture-a",
+            turn: Turn(
+                id: "00000000-aaaa-bbbb-cccc-dddddddddddd", role: "user",
+                timestamp: Date(timeIntervalSince1970: 1_760_000_000),
+                text: "內容片段內容片段內容片段"),
+            span: 0..<4, key: .forTesting),
+        channels: ["trigram"], presentation: nil)
+}
+
+// MARK: - 有界併入的落後行與啟動時的拒絕（#71）
+
+@Test("落後行的措辭只有一份：CLI、recall 區塊、MCP 共用（#71）")
+func theLagLineHasOneWording() {
+    #expect(ShortfallMessage.line(unmergedSources: 7) == "索引落後 7 個來源（有界併入未涵蓋，跑一次 ltm build 補齊）")
+}
+
+@Test("有界併入沒併完時，零命中與有命中的 MCP 回應都帶落後行；沒有未併入的來源時不帶（#71）")
+func theLagLineAppearsWheneverSourcesAreUnmerged() {
+    let line = "⚠ " + ShortfallMessage.line(unmergedSources: 3)
+    let empty = RetrievalTool.render(outcome(deferred: false, unmerged: 3))
+    #expect(empty.contains(line), "實得：\(empty)")
+    #expect(empty.contains("（沒有命中）"))
+    let withHits = RetrievalTool.render(outcome(deferred: false, hits: [sampleHit()], unmerged: 3))
+    #expect(withHits.contains(line), "實得：\(withHits)")
+    #expect(withHits.contains("內容片段"))
+    let merged = RetrievalTool.render(outcome(deferred: false, hits: [sampleHit()], unmerged: 0))
+    #expect(!merged.contains("索引落後"), "沒有未併入的來源時不該有落後行，實得：\(merged)")
+}
+
+@Test("啟動時被拒絕的 LTM_MCP_REFRESH_SECONDS 以警告行出現在回應裡（#71）")
+func aStartupRejectionAppearsAsAWarning() {
+    let rejection = "LTM_MCP_REFRESH_SECONDS=abc 不是正整數，已忽略"
+    let empty = RetrievalTool.render(outcome(deferred: false), startupRejections: [rejection])
+    #expect(empty.contains("⚠ " + rejection), "實得：\(empty)")
+    let withHits = RetrievalTool.render(outcome(deferred: false, hits: [sampleHit()]), startupRejections: [rejection])
+    #expect(withHits.contains("⚠ " + rejection), "實得：\(withHits)")
+}
+
+@Test("LTM_MCP_REFRESH_SECONDS 的解析：沒設是 20、45 是 45、0 與 abc 是 20 加一則指名變數與值的拒絕（#71）")
+func theMCPRefreshBudgetResolvesFromTheEnvironment() {
+    #expect(RetrievalTool.defaultRefreshBudgetSeconds == 20)
+    let unset = RetrievalTool.resolveRefreshBudget(environment: [:])
+    #expect(unset.seconds == 20 && unset.rejections.isEmpty)
+    let set = RetrievalTool.resolveRefreshBudget(environment: ["LTM_MCP_REFRESH_SECONDS": "45"])
+    #expect(set.seconds == 45 && set.rejections.isEmpty)
+    for bad in ["0", "abc"] {
+        let resolved = RetrievalTool.resolveRefreshBudget(environment: ["LTM_MCP_REFRESH_SECONDS": bad])
+        #expect(resolved.seconds == 20, "\(bad)")
+        #expect(resolved.rejections.count == 1, "\(bad)")
+        #expect(resolved.rejections.allSatisfy { $0.contains("LTM_MCP_REFRESH_SECONDS=\(bad)") }, "\(resolved.rejections)")
+    }
 }
 
 @Test("併入被延後時，MCP 回應（零命中）帶警告行")
