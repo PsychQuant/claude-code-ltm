@@ -179,8 +179,8 @@ func buildSucceedsAndLeavesCorpusUntouched() throws {
             atPath: workspace.derived.appendingPathComponent("index.sqlite3").path))
 }
 
-@Test("ltm build 的跳過明細另列「只有工具殘影」（#67）")
-func buildReportsToolTraceOnlySkipsSeparately() throws {
+@Test("ltm build 的跳過明細另列「只有 tool_result」（#67）")
+func buildReportsToolResultOnlySkipsSeparately() throws {
     let workspace = try CLIWorkspace.make(texts: ["一則有內容的 turn"])
     defer { workspace.cleanup() }
     let trace: [String: Any] = [
@@ -200,7 +200,7 @@ func buildReportsToolTraceOnlySkipsSeparately() throws {
     let result = try runCLI(["build"], environment: workspace.environment)
 
     #expect(result.code == 0)
-    #expect(result.out.contains("只有工具殘影 1"), "跳過明細要另列只有工具殘影的 turn：\(result.out)")
+    #expect(result.out.contains("只有 tool_result 1"), "跳過明細要另列只有 tool_result 的 turn：\(result.out)")
     #expect(result.out.contains("無可索引文字 0"))
 }
 

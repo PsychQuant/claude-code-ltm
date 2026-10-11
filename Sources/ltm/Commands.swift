@@ -403,7 +403,7 @@ enum BuildCommand {
                     "缺欄位 \(report.skipped.missingPointerField)",
                     "識別碼異常 \(report.skipped.malformedIdentifier)",
                     "無可索引文字 \(report.skipped.noIndexableText)",
-                    "只有工具殘影 \(report.skipped.toolTraceOnly)",
+                    "只有 tool_result \(report.skipped.toolResultOnly)",
                     "無法解析 \(report.skipped.unparseableLine)",
                 ].joined(separator: "、")
                 print("  跳過 \(report.skipped.total) 筆紀錄（\(breakdown)）")

@@ -129,13 +129,15 @@ private struct TurnSpec {
 /// 見 `docs/measurements/2026-08-18-resume-duplication.md`）。跳過路徑與它的分類
 /// 計數因此在這個性質測試裡零覆蓋。
 ///
-/// 四種各自打到 `SkipTally` 的不同欄位——**分類本身也要在增量與全量之間相同**，
-/// 否則「跳過的理由」會靜默漂移。
+/// 每種各自打到 `SkipTally` 的不同欄位——**分類本身也要在增量與全量之間相同**，
+/// 否則「跳過的理由」會靜默漂移。`toolResultOnly`（#67）是一則指標欄位齊全、只因內容被跳過的
+/// turn：它走的是游標照常前進、卻不產出 chunk 的那條路（#67 verify R1-13：先前這裡沒有它）。
 private enum SkipLine: CaseIterable {
     case notATurn
     case missingPointerField
     case malformedIdentifier
     case unparseableLine
+    case toolResultOnly
 
     var text: String {
         switch self {
@@ -147,6 +149,8 @@ private enum SkipLine: CaseIterable {
             return #"{"uuid":"not-a-uuid","sessionId":"also-not","timestamp":"2026-08-17T06:00:00Z","type":"user","message":{"role":"user","content":"識別碼形狀不對"}}"#
         case .unparseableLine:
             return "{ this is not json"
+        case .toolResultOnly:
+            return #"{"uuid":"eeeeeeee-0000-0000-0000-000000000067","sessionId":"eeeeeeee-1111-2222-3333-444444444444","timestamp":"2026-08-17T06:00:00Z","type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"x"}]}}"#
         }
     }
 }
@@ -440,7 +444,7 @@ private func runIncremental(
     func flush(_ name: String) throws {
         let turns = model.files[name] ?? []
         let project = model.fileProjects[name] ?? projectFor(name)
-        // **每個檔混入全部四種跳過行**（#29 缺口 3）。
+        // **每個檔混入全部的跳過行**（#29 缺口 3；#67 加了第五種）。
         //
         // 第一版是「種類由檔名決定，一個檔一種」，而那對**檔數少的 seed 蓋不到四種**
         // ——實測 seed 99/100 就漏掉兩種。四種都放才讓覆蓋不依賴變異序列碰巧產生
@@ -599,6 +603,7 @@ func incrementalMatchesFullRebuild(seed: UInt64) throws {
         fullReport.skipped.notATurn > 0,
         "生成語料混入的 queue-operation 行沒有被算進 notATurn —— 跳過路徑或它的分類壞了")
     #expect(fullReport.skipped.unparseableLine > 0, "非法 JSON 行沒有被算進 unparseableLine")
+    #expect(fullReport.skipped.toolResultOnly > 0, "只有 tool_result 的 turn 沒有被算進 toolResultOnly")
     #expect(
         fullReport.skipped.missingPointerField + fullReport.skipped.malformedIdentifier > 0,
         "缺欄位／識別碼形狀不符的行沒有被算進對應分類")

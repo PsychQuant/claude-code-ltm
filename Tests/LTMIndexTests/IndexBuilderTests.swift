@@ -3411,7 +3411,7 @@ func aRolledBackMarkerWriteStillReportsTheAudit() throws {
 
 /// R7-7：真正的 layout 5 索引（沒有 `source_count`、`source_chunk_counts`、trigger 與 partial index）升上來：
 /// `ltm build` 整份重建，結尾的稽核通過。
-@Test("layout 5 的索引：下一次 build 整份重建到目前的 layout，結尾稽核通過")
+@Test("layout 5 的索引：下一次 build 整份重建到 layout 7，結尾稽核通過")
 func aLayoutFiveIndexIsRebuilt() throws {
     let (corpus, derived) = try makeWorkspace()
     defer {
@@ -3438,6 +3438,8 @@ func aLayoutFiveIndexIsRebuilt() throws {
     #expect(report.audits.map(\.moment) == [.afterBuild])
     let database = try IndexDatabase(path: derived.databaseURL.path)
     defer { database.close() }
-    #expect(try database.stamps().layoutVersion == IndexDatabase.layoutVersion)
+    // 字面值，不是 `IndexDatabase.layoutVersion`：builder 蓋的就是那個常數，拿它比永遠成立。這裡是 #67 的
+    // 6 → 7 唯一的釘子——改回 6 時要紅（#67 verify R1-3：只比常數時全套照樣綠）。
+    #expect(try database.stamps().layoutVersion == 7)
     #expect(try database.auditDerivedCounts().isClean)
 }

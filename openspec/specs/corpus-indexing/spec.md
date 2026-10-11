@@ -166,5 +166,5 @@ Before an incremental build scans the corpus, unless it runs the whole-index aud
 
 #### Scenario: The orphan check uses the partial index
 
-- **WHEN** the query plan of the orphan-count statement is inspected on a layout-6 index
+- **WHEN** the query plan of the orphan-count statement is inspected on an index at layout 6 or later (the layout that introduced the partial index)
 - **THEN** every step of the plan that reads `chunks` goes through the partial index over `source_count = 0`

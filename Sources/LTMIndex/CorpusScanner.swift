@@ -125,10 +125,10 @@ public struct SkipTally: Sendable, Equatable {
     public var malformedIdentifier = 0
     /// 正規化之後沒有文字可綁（空的，或只有空白）。
     public var noIndexableText = 0
-    /// 只有工具殘影：content 是 block 陣列，至少一個 `tool_result` 或沒有任何 metadata 欄位的
-    /// `tool_use`，其餘 block 正規化後都沒有文字（#67）。與 `noIndexableText` 分開記：這一類預期有
-    /// 幾十萬筆，混在一起會讓真正有文字的紀錄變空的異常看不出來。
-    public var toolTraceOnly = 0
+    /// 只有 tool_result：content 是 block 陣列、至少一個 `tool_result`，其餘每個 block 都不產出
+    /// 正規化後非空的文字（#67；判定見 `CorpusScanner.isToolResultOnly`）。與 `noIndexableText` 分開記：
+    /// 這一類預期有幾十萬筆，混在一起會讓真正有文字的紀錄變空的異常看不出來。
+    public var toolResultOnly = 0
     /// 這一行不是合法 JSON。
     public var unparseableLine = 0
     /// 檔案結尾的半行（正在被寫入）。**與 malformed 分開記**：把並行寫入報成
@@ -138,7 +138,7 @@ public struct SkipTally: Sendable, Equatable {
     public init() {}
 
     public var total: Int {
-        notATurn + missingPointerField + malformedIdentifier + noIndexableText + toolTraceOnly
+        notATurn + missingPointerField + malformedIdentifier + noIndexableText + toolResultOnly
             + unparseableLine + incompleteTrailingRecord
     }
 }
@@ -154,7 +154,7 @@ extension SkipTally {
         missingPointerField += other.missingPointerField
         malformedIdentifier += other.malformedIdentifier
         noIndexableText += other.noIndexableText
-        toolTraceOnly += other.toolTraceOnly
+        toolResultOnly += other.toolResultOnly
         unparseableLine += other.unparseableLine
         incompleteTrailingRecord += other.incompleteTrailingRecord
     }
@@ -851,10 +851,11 @@ public struct CorpusScanner: Sendable {
             tally.noIndexableText += 1
             return nil
         }
-        // 只有工具殘影的 turn 不產出 chunk（#67）：它的文字與幾十萬筆完全相同，沒有內容線索能把它
-        // 單獨叫出來，卻佔著向量通道的名次。判定看 block 結構、不比對文字（純字串 prompt 永遠不算）。
-        guard !Self.isToolTraceOnly(message["content"]) else {
-            tally.toolTraceOnly += 1
+        // 只有 tool_result 的 turn 不產出 chunk（#67）：它的文字只有兩種、幾十萬筆，沒有內容線索能把它
+        // 單獨叫出來；同一個向量又可能在某些查詢佔滿向量通道的候選段。判定看 block 結構、不比對文字
+        // （純字串 prompt 永遠不算）。
+        guard !Self.isToolResultOnly(message["content"]) else {
+            tally.toolResultOnly += 1
             return nil
         }
         let turn = Turn(id: uuid, role: role, timestamp: timestamp, text: text)
@@ -918,11 +919,12 @@ public struct CorpusScanner: Sendable {
     /// 現在收 `tool_use` 的**工具名與封閉列舉的識別欄位**，以及 `tool_result` 的
     /// **成敗**。這讓「那次跑 benchmark 的對話在哪」搜得到，而不把 payload 收進來。
     ///
-    /// **但整則只有工具殘影的 turn 不產出 chunk（#67）**：這個函式照樣為它產出標記文字，
-    /// `chunk(from:)` 再用 `isToolTraceOnly` 判定、計入 `SkipTally.toolTraceOnly`。混合 turn（標記之外
-    /// 還有正規化後非空的文字，或帶 metadata 欄位的 `tool_use`）照舊，文字與 anchor 都不變。
+    /// **但整則只有 tool_result 的 turn 不產出 chunk（#67）**：這個函式照樣為它產出標記文字，
+    /// `chunk(from:)` 再用 `isToolResultOnly` 判定、計入 `SkipTally.toolResultOnly`。其他 turn 照舊，
+    /// 文字與 anchor 都不變——包括只有工具名的 `tool_use`（`⟨tool NAME⟩`）：少見的工具名用它查正好
+    /// 找得到那一兩個 turn，所以整類保留（#67 Decision `issuecomment-6109083299`）。
     /// 理由：Claude Code 把每個 `tool_result` 寫成獨立紀錄，於是它們的 chunk 只有兩種文字、幾十萬筆，
-    /// 沒有內容線索，卻佔著向量通道的名次（#67 diagnosis 的計數與查法）。
+    /// 沒有內容線索（#67 diagnosis 的計數與查法）。
     ///
     /// **payload 沒有被收，理由不是它沒價值，是還沒有東西能判斷它有多少價值**
     /// ——那需要一組 `(查詢, 應命中的 turn)` 的評估集（#33）。而它含檔案內容與
@@ -956,49 +958,39 @@ public struct CorpusScanner: Sendable {
         return parts.joined(separator: "\n")
     }
 
-    /// 一個 `tool_use` block 裡有值的 metadata 欄位，依 `toolMetadataFields` 的順序。
+    /// 這則 content 是不是**只有 tool_result**（#67）。
     ///
-    /// `toolUseMetadata` 與 `isToolTraceOnly` 共用這一個判準：「這個 tool_use 有沒有 metadata」
-    /// 只有一份定義，兩邊不會漂移。
-    static func metadataValues(of block: [String: Any]) -> [(field: String, raw: String)] {
-        let input = (block["input"] as? [String: Any]) ?? [:]
-        return toolMetadataFields.compactMap { field in
-            guard let raw = input[field] as? String, !raw.isEmpty else { return nil }
-            return (field, raw)
-        }
-    }
-
-    /// 這則 content 是不是**只有工具殘影**（#67）。
-    ///
-    /// 成立的條件：content 是 block 陣列；至少有一個工具殘影 block——`tool_result`，或
-    /// `metadataValues` 為空的 `tool_use`；其餘 block 正規化後都沒有文字。帶 metadata 欄位的
-    /// `tool_use`、或任何正規化後非空的 `text` block，都讓它不成立。純字串 content 永遠不成立：
-    /// 判定看結構，不比對文字，使用者自己打出標記字樣的 prompt 照常索引。
-    static func isToolTraceOnly(_ content: Any?) -> Bool {
+    /// 成立的條件：content 是 block 陣列；至少有一個 `tool_result` block；其餘每個 block 都不在
+    /// `indexableText` 裡產出正規化後非空的文字——也就是：沒有 `tool_use`（不論有沒有 metadata 欄位，
+    /// 它都產出 `⟨tool NAME…⟩`），`text` block 正規化後是空的，其他型別（`thinking`、`image`、
+    /// `document` 等）本來就不產出文字。純字串 content 永遠不成立：判定看結構，不比對文字，使用者
+    /// 自己打出標記字樣的 prompt 照常索引。
+    static func isToolResultOnly(_ content: Any?) -> Bool {
         guard let blocks = content as? [[String: Any]] else { return false }
-        var sawTrace = false
+        var sawResult = false
         for block in blocks {
             guard let kind = block["type"] as? String else { continue }
             switch kind {
             case "tool_result":
-                sawTrace = true
+                sawResult = true
             case "tool_use":
-                guard metadataValues(of: block).isEmpty else { return false }
-                sawTrace = true
+                return false
             case "text":
                 if let text = block["text"] as? String, !Anchor.normalize(text).isEmpty { return false }
             default:
                 continue
             }
         }
-        return sawTrace
+        return sawResult
     }
 
     /// 一個 `tool_use` block 的 metadata 摘要。
     static func toolUseMetadata(from block: [String: Any]) -> String {
         let name = (block["name"] as? String) ?? "?"
         var pieces = ["⟨tool \(name)"]
-        for (field, raw) in metadataValues(of: block) {
+        let input = (block["input"] as? [String: Any]) ?? [:]
+        for field in toolMetadataFields {
+            guard let raw = input[field] as? String, !raw.isEmpty else { continue }
             let flattened = raw.replacingOccurrences(of: "\n", with: " ")
             let clipped =
                 flattened.count > toolMetadataFieldLimit

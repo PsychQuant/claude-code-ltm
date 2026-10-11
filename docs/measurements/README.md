@@ -21,8 +21,8 @@
 |---|---|---|
 | `message.content` 是**純字串**（使用者鍵入的 prompt 常是這一種） | **會**，整段、不截斷 | `Sources/LTMIndex/CorpusScanner.swift` 的 `indexableText` 第一行 `if let text = content as? String`。結構普查（只印計數；掃 `~/.claude/projects/**/*.jsonl`，留頂層 `type` 為 user／assistant 的紀錄，統計 `message.content` 是字串還是陣列）：2026-09-07 全語料 user 紀錄約 8% 走這條路 |
 | `text` block（使用者輸入、Claude 的散文、compaction 摘要） | **會**，全文 | 同檔 `indexableText`，`case "text"`。compaction 摘要那句的查法：掃 `~/.claude/projects/**/*.jsonl` 含 `isCompactSummary` 的行、統計頂層 `type`——全部是 `user`，所以通得過 `chunk(from:)` 的 user/assistant 守衛（只印計數，不讀內容） |
-| `tool_use` 的工具名＋七個 metadata 欄位：`command` / `file_path` / `path` / `pattern` / `query` / `url` / `description`，各取前 200 字元 | **會** | 同檔 `toolMetadataFields`（封閉列舉，隨該常數變動；改它就要回來改這段）與 `toolUseMetadata`（工具名先進 `pieces`） |
-| `tool_result` 的內容（Bash 的 stdout、`Read` 讀到的檔案） | 今天**不會**，只記 `⟨tool_result ok\|error⟩` 標記；**整則只有這種標記、或只有沒有 metadata 欄位的 `tool_use` 的 turn 不產出 chunk**（#67） | 同檔 `case "tool_result"` 與 `isToolTraceOnly`；`Tests/LTMIndexTests/CorpusScannerTests.swift` 的「tool_result 只記成敗，不記內容」（混合 turn）與「只有工具殘影」那一組。**這是 #6 追蹤中的決定，可能改變** |
+| `tool_use` 的工具名＋七個 metadata 欄位：`command` / `file_path` / `path` / `pattern` / `query` / `url` / `description`，各取前 200 字元 | **會**（沒有任何 metadata 欄位時只有工具名，也會） | 同檔 `toolMetadataFields`（封閉列舉，隨該常數變動；改它就要回來改這段）與 `toolUseMetadata`（工具名先進 `pieces`） |
+| `tool_result` 的內容（Bash 的 stdout、`Read` 讀到的檔案） | 今天**不會**，只記 `⟨tool_result ok\|error⟩` 標記；**整則只有 tool_result 的 turn 連標記都不進**——不產出 chunk（#67：block 陣列裡至少一個 `tool_result`、沒有 `tool_use`、`text` block 正規化後都是空的；其他型別的 block 不算） | 同檔 `case "tool_result"` 與 `isToolResultOnly`；`Tests/LTMIndexTests/CorpusScannerTests.swift` 的「tool_result 只記成敗，不記內容」、「混合 turn 裡的 tool_result 經過 chunk(from:) 也只留成敗」與「只有 tool_result 的 turn 不產出 chunk」那一組。**這是 #6 追蹤中的決定，可能改變** |
 | `tool_use` 的其他欄位（Write 的 `content`、Edit 的 `old_string`／`new_string`、Agent 的 `prompt`） | 今天**不會** | 不在 `toolMetadataFields` 裡（同上，隨常數變動） |
 | `thinking`／`image`／`document` block；頂層 `toolUseResult`；非 user/assistant 的紀錄（`attachment`、`system`） | 不會 | `indexableText` 的 `default: continue`；`chunk(from:)` 只讀 user/assistant 的 `message.content` |
 
@@ -108,11 +108,13 @@
   排在前面但不含原文的殘影，它看不見。`empty` 是零命中——查詢已經對不到任何東西，這不是 clean。
 - **`tool=<n>`** = 前 k 名裡含 `⟨tool ` 的 snippet 數。**它不是污染訊號**，理由是它量的不是「這條
   查詢」而是「前 k 名裡有沒有工具 chunk」——而後者的預期是常見的：工具 metadata chunk 佔 chunk 表
-  **至少**四成（#67 的 41.7% 只數 metadata-only chunk——2026-10-11 後記：那是 #67 之前、layout 5 的份額；#67 之後只有工具名、沒有 metadata 欄位的那一類不再產出 chunk，之後的份額沒有量——而 `tool=<n>` 數的是任何含 `⟨tool ` 的 snippet，所以那是下界；**那是 chunk 表的份額、不是前 k 名的出現率**——檢索不是均勻抽樣，
+  **至少**四成（#67 的 41.7% 只數 metadata-only chunk——2026-10-11 後記：那是 #67 之前、layout 5 的份額。#67 之後這一類照舊產出，但只有 tool_result 的 turn（文字是 `⟨tool_result …⟩`，不含 `⟨tool `）不再產出 chunk，總數變小，所以份額會上升；以 #67 diagnosis 的計數算——算術，不是量測——tool_use chunk 共 496,224 筆，在扣掉 496,411 筆之後的 633,855 筆裡約佔 78%；發版後的實際份額在 #84 量——而 `tool=<n>` 數的是任何含 `⟨tool ` 的 snippet，所以那是下界；**那是 chunk 表的份額、不是前 k 名的出現率**——檢索不是均勻抽樣，
   兩者不相等，實際的前 k 名出現率要在真索引上跑一次才知道，而那一次還沒跑），拿它當 dirty 會讓
   每一個前 k 名含工具 chunk 的列不可比——有多少列，同一句：還沒量。它是 #62（self-hit 的檢索層排除）要移動的那個量，印出來給 #62 的前後比較看
   ——**所以 #62 前後 `self`／`tool` 的變化量的是 #62 的效果加上兩次量測之間語料的成長，不是語料
-  變乾淨了**（#62 自己的實作 session 就在談 self-hit 與工具 chunk，特別容易排進這些查詢的前 k 名）。
+  變乾淨了**；兩次量測若跨過 #67 的發版（layout 7），還要再加上 #67 的效果——它移除約 50 萬個共用同一向量的
+  tool_result chunk，前 k 名的組成會因此改變，`tool=<n>` 的基準也會跟著份額上升。要分開它們，兩次都在同一個
+  layout 上量（#62 自己的實作 session 就在談 self-hit 與工具 chunk，特別容易排進這些查詢的前 k 名）。
   另外，`tool=<n>` 也會數到**談論**這個標記的散文——純字串 `message.content` 不截斷、整段進索引；
   這種紀錄幾乎全是 #63 自己的 session 寫的，而且**會隨討論儀器的 session 增加**（verify 的兩輪之間就
   多了一筆），所以這裡不給計數只給查法：掃 `~/.claude/projects/**/*.jsonl`（計數這一句只關心 message 紀錄，spill 檔沒有

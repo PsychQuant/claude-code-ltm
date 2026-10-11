@@ -672,7 +672,7 @@ CLI 只跑過 Q1——但那個順序本紀錄沒有重跑。它的誠實邊界�
   `GateProbeSQLSyncTests.gateSQLCopiesMatch` 釘住。#61 之前的閘 SQL 在 #61 之後由 `gate-harness --pre61-sql` 與 P1／P2 跑，
   只用在 #61 的 A/B。
   本紀錄的條件**重現不了**：表 1–10 量在 2026-09-30 前後那份老化的 layout 5 索引上（當時的語料、頁面配置與常駐
-  記憶體歷史），那份索引已不存在。發版後線上索引是 layout 6，在它上面跑 `1f4123b`（#60 的最後一個 commit）的工具，
+  記憶體歷史），那份索引已不存在。發版後線上索引是 layout 7（#61 的 layout 6 與 #67 的 layout 7 同一次發版，兩者的表結構相同；本條原寫 layout 6，2026-10-11 依 #67 更正），在它上面跑 `1f4123b`（#60 的最後一個 commit）的工具，
   量到的是舊 SQL 跑在另一種頁面配置上（#61 R2-15）。最接近的做法是在旁路（`LTM_DERIVED_ROOT`）用 `1f4123b` 的
   binary 新建一份 layout 5——它近似 SQL 與 layout，不近似語料與索引的年紀（#61 R3-12）；`1f4123b` 的 `gate-matrix.sh`
   把 `GATE_MATRIX_DB` 當成測試用、會在 log 標記，那樣的一次跑本來就不是本紀錄的條件。

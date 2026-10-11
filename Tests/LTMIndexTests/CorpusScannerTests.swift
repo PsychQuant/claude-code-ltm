@@ -161,10 +161,11 @@ func malformedRecordsAreSkippedAndTallied() throws {
     #expect(result.skipped.unparseableLine == 1)
 }
 
-@Test("只有 tool block 的 turn 現在會產出 chunk——但只含 metadata")
+@Test("只有 tool_use 的 turn 會產出 chunk——但只含 metadata")
 func toolOnlyTurnIsIndexedAsMetadata() throws {
     // **這條測試先前編碼的是相反的行為**（tool-only turn 被跳過）。#6 改掉了它：
     // 實測語料裡 78.7% 的字元量對檢索完全不可見，而 tool-only turn 正是其中一大類。
+    // #67 又把其中一種改回不產出：整則只有 `tool_result` 的 turn（見檔尾那一段）；只有 `tool_use` 的照舊。
     //
     // 改的是「收不收」，不是「收多少」——payload 仍然不收，見下一條。
     let root = try makeFixtureCorpus()
@@ -209,9 +210,22 @@ func toolPayloadFieldsAreNotIndexed() {
 }
 
 @Test("tool_result 只記成敗，不記內容")
-func toolResultRecordsOutcomeNotContent() throws {
-    // 丟掉的 65.7% 就是這一項。只有工具殘影的 turn 從 #67 起不再產出 chunk，所以這條改在**混合 turn**
-    // 上看：文字之外的 tool_result 仍只留成敗標記，內容不得進索引。
+func toolResultRecordsOutcomeNotContent() {
+    // 丟掉的 65.7% 就是這一項。收成敗讓「那次跑掛了嗎」搜得到，而不把輸出收進來。
+    let ok: [String: Any] = ["type": "tool_result", "content": "SENTINEL-命令輸出"]
+    let bad: [String: Any] = [
+        "type": "tool_result", "is_error": true, "content": "SENTINEL-錯誤訊息",
+    ]
+    let text = CorpusScanner.indexableText(from: [ok, bad])
+
+    #expect(text.contains("ok"))
+    #expect(text.contains("error"))
+    #expect(!text.contains("SENTINEL"), "tool_result 的內容外洩到索引")
+}
+
+@Test("混合 turn 裡的 tool_result 經過 chunk(from:) 也只留成敗")
+func aMixedTurnKeepsOnlyTheResultOutcome() throws {
+    // 上一條只看 `indexableText`；這條走到 chunk，確認 #67 的判定不會讓混合 turn 帶出內容。
     let root = try makeFixtureCorpus()
     defer { try? FileManager.default.removeItem(at: root) }
     _ = try writeSession(
@@ -224,7 +238,7 @@ func toolResultRecordsOutcomeNotContent() throws {
     let chunk = try #require(result.chunks.first?.chunk)
     #expect(chunk.text == "看一下這次失敗\n⟨tool_result error⟩")
     #expect(!chunk.text.contains("SENTINEL"), "tool_result 的內容外洩到索引")
-    #expect(result.skipped.toolTraceOnly == 0)
+    #expect(result.skipped.toolResultOnly == 0)
 }
 
 @Test("指令裡夾帶的長內容被截斷——而那不是一道邊界")
@@ -890,7 +904,7 @@ func attachmentRecordsAreNeverTurns() throws {
     #expect(result.skipped.notATurn == 3)
 }
 
-// MARK: - 只有工具殘影的 turn 不產出 chunk（#67）
+// MARK: - 只有 tool_result 的 turn 不產出 chunk（#67）
 
 /// 一則 content 為 block 陣列的 turn 紀錄。
 func blockTurnLine(uuid: String, role: String, blocks: [[String: Any]]) -> String {
@@ -906,98 +920,116 @@ func blockTurnLine(uuid: String, role: String, blocks: [[String: Any]]) -> Strin
 }
 
 /// 掃一則紀錄，回傳產出的 chunk 文字與兩個計數。
-private func scanOne(_ line: String) throws -> (texts: [String], toolTraceOnly: Int, noIndexableText: Int) {
+private func scanOne(_ line: String) throws -> (texts: [String], toolResultOnly: Int, noIndexableText: Int) {
     let root = try makeFixtureCorpus()
     defer { try? FileManager.default.removeItem(at: root) }
     _ = try writeSession(in: root, project: "proj-one", file: "session.jsonl", lines: [line])
     let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
-    return (result.chunks.map(\.chunk.text), result.skipped.toolTraceOnly, result.skipped.noIndexableText)
+    return (result.chunks.map(\.chunk.text), result.skipped.toolResultOnly, result.skipped.noIndexableText)
 }
 
 private let traceUUID = "aaaaaaaa-0000-0000-0000-0000000000c1"
 
-@Test("只有一個 tool_result 的紀錄不產出 chunk，計入 toolTraceOnly")
-func aLoneToolResultProducesNoChunk() throws {
-    let r = try scanOne(blockTurnLine(uuid: traceUUID, role: "user", blocks: [
-        ["type": "tool_result", "content": "SENTINEL-輸出"],
-    ]))
+/// 斷言這則紀錄不產出 chunk、只計入 `toolResultOnly`。
+private func expectSkippedAsResultOnly(_ blocks: [[String: Any]], role: String = "user") throws {
+    let r = try scanOne(blockTurnLine(uuid: traceUUID, role: role, blocks: blocks))
     #expect(r.texts.isEmpty)
-    #expect(r.toolTraceOnly == 1)
+    #expect(r.toolResultOnly == 1)
     #expect(r.noIndexableText == 0)
+}
+
+/// 斷言這則紀錄照舊產出 `text` 這一個 chunk、兩個計數都是 0。
+private func expectKept(_ line: String, as text: String) throws {
+    let r = try scanOne(line)
+    #expect(r.texts == [text])
+    #expect(r.toolResultOnly == 0)
+    #expect(r.noIndexableText == 0)
+}
+
+@Test("只有一個 tool_result 的紀錄不產出 chunk，計入 toolResultOnly")
+func aLoneToolResultProducesNoChunk() throws {
+    try expectSkippedAsResultOnly([["type": "tool_result", "content": "SENTINEL-輸出"]])
 }
 
 @Test("兩個 tool_result 的紀錄不產出 chunk")
 func twoToolResultsProduceNoChunk() throws {
-    let r = try scanOne(blockTurnLine(uuid: traceUUID, role: "user", blocks: [
+    try expectSkippedAsResultOnly([
         ["type": "tool_result", "content": "a"],
         ["type": "tool_result", "is_error": true, "content": "b"],
-    ]))
-    #expect(r.texts.isEmpty)
-    #expect(r.toolTraceOnly == 1)
-    #expect(r.noIndexableText == 0)
+    ])
 }
 
-@Test("沒有任何 metadata 欄位的 tool_use 不產出 chunk")
-func aMetadataLessToolUseProducesNoChunk() throws {
-    let r = try scanOne(blockTurnLine(uuid: traceUUID, role: "assistant", blocks: [
-        ["type": "tool_use", "name": "TodoWrite", "input": ["todos": ["寫測試"]]],
-    ]))
-    #expect(r.texts.isEmpty)
-    #expect(r.toolTraceOnly == 1)
-    #expect(r.noIndexableText == 0)
-}
-
-@Test("只有空白的 text block 加一個 tool_result：仍算只有工具殘影")
-func whitespaceTextNextToAToolResultIsTraceOnly() throws {
-    let r = try scanOne(blockTurnLine(uuid: traceUUID, role: "user", blocks: [
+@Test("只有空白的 text block 加一個 tool_result：仍算只有 tool_result")
+func whitespaceTextNextToAToolResultIsResultOnly() throws {
+    try expectSkippedAsResultOnly([
         ["type": "text", "text": "   "],
         ["type": "tool_result", "content": "x"],
-    ]))
-    #expect(r.texts.isEmpty)
-    #expect(r.toolTraceOnly == 1)
-    #expect(r.noIndexableText == 0)
+    ])
+}
+
+@Test("不產出文字的 block（thinking、image）加一個 tool_result：仍算只有 tool_result")
+func aNonTextBlockNextToAToolResultIsResultOnly() throws {
+    // `isToolResultOnly` 對 text／tool_use／tool_result 以外的型別一律跳過——它們在 `indexableText` 裡本來就
+    // 不產出文字。#67 verify R1-12：把那一支改成「不成立」全套照樣綠，所以這裡釘住。
+    try expectSkippedAsResultOnly([
+        ["type": "thinking", "thinking": "想一下"],
+        ["type": "tool_result", "content": "x"],
+    ], role: "assistant")
+    try expectSkippedAsResultOnly([
+        ["type": "image", "source": ["type": "base64", "data": "AAAA"]],
+        ["type": "tool_result", "content": "x"],
+    ])
+}
+
+@Test("沒有 metadata 欄位的 tool_use 照常產出 chunk（#67 R1：整類保留）")
+func aMetadataLessToolUseIsKept() throws {
+    // 少見的工具名用它查正好找得到那一兩個 turn（#67 Decision `issuecomment-6109083299`）。
+    try expectKept(blockTurnLine(uuid: traceUUID, role: "assistant", blocks: [
+        ["type": "tool_use", "name": "TodoWrite", "input": ["todos": ["寫測試"]]],
+    ]), as: "⟨tool TodoWrite⟩")
+}
+
+@Test("只有工具名的 tool_use 加 tool_result：照常產出 chunk，文字不變")
+func aNameOnlyToolUseWithAToolResultIsKept() throws {
+    try expectKept(blockTurnLine(uuid: traceUUID, role: "assistant", blocks: [
+        ["type": "tool_use", "name": "TodoWrite", "input": [:]],
+        ["type": "tool_result", "content": "x"],
+    ]), as: "⟨tool TodoWrite⟩\n⟨tool_result ok⟩")
 }
 
 @Test("帶 metadata 欄位的 tool_use 照常產出 chunk")
 func aToolUseWithAMetadataFieldIsIndexed() throws {
-    let read = try scanOne(blockTurnLine(uuid: traceUUID, role: "assistant", blocks: [
+    try expectKept(blockTurnLine(uuid: traceUUID, role: "assistant", blocks: [
         ["type": "tool_use", "name": "Read", "input": ["file_path": "/tmp/a.swift"]],
-    ]))
-    #expect(read.texts == ["⟨tool Read file_path=/tmp/a.swift⟩"])
-    #expect(read.toolTraceOnly == 0)
-    let bash = try scanOne(blockTurnLine(uuid: traceUUID, role: "assistant", blocks: [
+    ]), as: "⟨tool Read file_path=/tmp/a.swift⟩")
+    try expectKept(blockTurnLine(uuid: traceUUID, role: "assistant", blocks: [
         ["type": "tool_use", "name": "Bash", "input": ["command": "ls"]],
-    ]))
-    #expect(bash.texts == ["⟨tool Bash command=ls⟩"])
+    ]), as: "⟨tool Bash command=ls⟩")
 }
 
 @Test("text 加 tool_result 的混合 turn：文字與標記不變")
 func aTextAndToolResultTurnIsUnchanged() throws {
-    let r = try scanOne(blockTurnLine(uuid: traceUUID, role: "user", blocks: [
+    try expectKept(blockTurnLine(uuid: traceUUID, role: "user", blocks: [
         ["type": "text", "text": "checking"],
         ["type": "tool_result", "content": "x"],
-    ]))
-    #expect(r.texts == ["checking\n⟨tool_result ok⟩"])
-    #expect(r.toolTraceOnly == 0)
+    ]), as: "checking\n⟨tool_result ok⟩")
 }
 
 @Test("純字串 prompt 長得像標記也照常索引——判定看 block 結構，不比對文字")
 func aPlainStringThatLooksLikeAMarkerIsKept() throws {
-    let r = try scanOne(turnLine(
+    try expectKept(turnLine(
         uuid: traceUUID, session: "11111111-2222-3333-4444-555555555555", role: "user",
-        text: "⟨tool_result ok⟩"))
-    #expect(r.texts == ["⟨tool_result ok⟩"])
-    #expect(r.toolTraceOnly == 0)
+        text: "⟨tool_result ok⟩"), as: "⟨tool_result ok⟩")
 }
 
-@Test("只有空白 text block 的紀錄仍計入 noIndexableText，不計入 toolTraceOnly")
+@Test("只有空白 text block 的紀錄仍計入 noIndexableText，不計入 toolResultOnly")
 func aWhitespaceOnlyTextBlockIsNoIndexableText() throws {
     let r = try scanOne(blockTurnLine(uuid: traceUUID, role: "user", blocks: [
         ["type": "text", "text": "   "],
     ]))
     #expect(r.texts.isEmpty)
     #expect(r.noIndexableText == 1)
-    #expect(r.toolTraceOnly == 0)
+    #expect(r.toolResultOnly == 0)
 }
 
 @Test("混合 turn 的文字、span 與 anchor 與規則存在之前相同")
@@ -1023,15 +1055,15 @@ func aMixedTurnKeepsItsTextAndAnchor() throws {
     #expect(chunk.anchor.span == 0..<expectedText.unicodeScalars.count)
 }
 
-@Test("SkipTally 的 merge 與 total 都含 toolTraceOnly")
-func skipTallyCountsToolTraceOnly() {
+@Test("SkipTally 的 add 與 total 都含 toolResultOnly")
+func skipTallyCountsToolResultOnly() {
     var a = SkipTally()
-    a.toolTraceOnly = 2
+    a.toolResultOnly = 2
     var b = SkipTally()
-    b.toolTraceOnly = 3
+    b.toolResultOnly = 3
     b.noIndexableText = 1
     a.add(b)
-    #expect(a.toolTraceOnly == 5)
+    #expect(a.toolResultOnly == 5)
     #expect(a.total == 6)
 }
 

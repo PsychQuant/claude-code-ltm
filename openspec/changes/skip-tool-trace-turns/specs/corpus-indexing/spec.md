@@ -2,7 +2,7 @@
 
 ### Requirement: Chunk granularity is one conversation turn with full pointer metadata
 
-Indexing SHALL create exactly one chunk per jsonl conversation turn that has indexable content, and no chunk for the turns enumerated in "Turns that are only tool traces produce no chunk". Each chunk SHALL be addressable by the pointer tuple `(project, sessions, uuid, timestamp)` alongside its text and vector, and the tuple SHALL be returned with any retrieval hit derived from that chunk. The `sessions` component is a set held in `chunk_sources`, one entry per source file holding the chunk; the other three are scalar columns on the chunk row.
+Indexing SHALL create exactly one chunk per jsonl conversation turn, except the turns enumerated in "Turns with no text or only tool results produce no chunk", which produce none. Each chunk SHALL be addressable by the pointer tuple `(project, sessions, uuid, timestamp)` alongside its text and vector, and the tuple SHALL be returned with any retrieval hit derived from that chunk. The `sessions` component is a set held in `chunk_sources`, one entry per source file holding the chunk; the other three are scalar columns on the chunk row.
 
 **A chunk is routinely held by more than one source file.** Session resume copies the same turn into a new file, so one turn commonly exists in several session files; deduplication is by content, so those copies produce exactly one chunk. The chunk SHALL therefore additionally carry the set of session identifiers of every source file that holds it — one entry per holding source, each entry being that source's own session identifier. **This capability owns the definition of that set**; the `retrieval` and `ltm-cli` capabilities reference it and specify only how their own layer surfaces it.
 
@@ -37,31 +37,36 @@ This replaces an earlier rule that stored one chosen session identifier per chun
 
 ## ADDED Requirements
 
-### Requirement: Turns that are only tool traces produce no chunk
+### Requirement: Turns with no text or only tool results produce no chunk
 
-Among records that are conversation turns with valid pointer fields, indexing SHALL produce no chunk in exactly the following two cases, and in no other case on account of the turn's content. This is a closed enumeration: a further case SHALL NOT be added by analogy to these two.
+This requirement covers records whose top-level `type` is `user` or `assistant`, whose pointer fields are present and valid, and that carry a `message` object. Among those records, indexing SHALL produce no chunk in exactly the following two cases, and in no other case on account of the turn's content. This is a closed enumeration: a further case SHALL NOT be added by analogy to these two.
 
 1. **No indexable text**: the turn's indexable text is empty, or empty after normalization. The scan SHALL count it under `noIndexableText`.
-2. **Tool traces only**: the turn's `message.content` is a block array that contains at least one tool-trace block, and no other block contributes indexable text that is non-empty after normalization. A tool-trace block is either a `tool_result` block, or a `tool_use` block in which none of the seven metadata fields (`command`, `file_path`, `path`, `pattern`, `query`, `url`, `description`) holds a non-empty string. The scan SHALL count it under `toolTraceOnly`. Case 1 is checked first; a turn counted under case 1 SHALL NOT also be counted under case 2.
+2. **Tool results only**: the turn's `message.content` is a block array that contains at least one `tool_result` block, and every other block yields no indexable text: it is not a `tool_use` block (a `tool_use` block always yields a `⟨tool NAME…⟩` marker, whether or not it has metadata fields), and if it is a `text` block its text is empty after normalization. Blocks of any other type yield no indexable text. The scan SHALL count such a turn under `toolResultOnly`. Case 1 is checked first; a turn counted under case 1 SHALL NOT also be counted under case 2. (A turn in case 2 always has the non-empty indexable text `⟨tool_result ok⟩` or `⟨tool_result error⟩`, so the two cases do not overlap in practice.)
 
-A turn whose content is a plain string SHALL NOT fall under case 2, whatever the string says: the decision is made from the block structure, never by matching the text against a marker. A turn that contains a tool-trace block together with any block that contributes non-empty normalized text SHALL be indexed with exactly the text, span and anchor it would have had without this requirement.
+A turn whose content is a plain string SHALL NOT fall under case 2, whatever the string says: the decision is made from the block structure, never by matching the text against a marker. Every turn covered by this requirement and falling under neither case SHALL be indexed with exactly the text, span and anchor it would have had without this requirement — in particular a turn that holds a `tool_use` block, with or without metadata fields.
 
-Both counters SHALL be part of the scan's skip tally, included in its total and summed when tallies are merged, so that a change in either count is visible on its own.
+Both counters SHALL be part of the scan's skip tally, included in its total and summed when tallies are combined, so that a change in either count is visible on its own.
 
 #### Scenario: A record holding only a tool result produces no chunk
 
 - **WHEN** a corpus whose only conversation turn is a `type: user` record with one `tool_result` block is scanned
-- **THEN** the scan produces no chunk, `skipped.toolTraceOnly` equals 1, and `skipped.noIndexableText` equals 0
+- **THEN** the scan produces no chunk, `skipped.toolResultOnly` equals 1, and `skipped.noIndexableText` equals 0
 
-#### Scenario: A tool call without metadata fields produces no chunk
+#### Scenario: A tool call without metadata fields is still indexed
 
-- **WHEN** a `type: assistant` record holds one `tool_use` block whose `input` has none of the seven metadata fields
-- **THEN** the record produces no chunk and is counted under `toolTraceOnly`
+- **WHEN** a `type: assistant` record holds one `tool_use` block named `TodoWrite` whose `input` has none of the metadata fields
+- **THEN** the record produces one chunk whose text is `⟨tool TodoWrite⟩`, and nothing is counted under `toolResultOnly`
 
 #### Scenario: A tool call with a metadata field is still indexed
 
 - **WHEN** a `type: assistant` record holds one `tool_use` block named `Bash` whose `input.command` is `ls`
 - **THEN** the record produces one chunk whose text is `⟨tool Bash command=ls⟩`
+
+#### Scenario: A block that yields no text does not keep a tool result
+
+- **WHEN** a `type: assistant` record holds a `thinking` block followed by a `tool_result` block
+- **THEN** the record produces no chunk and is counted under `toolResultOnly`
 
 #### Scenario: A mixed turn keeps its text and anchor
 
@@ -72,10 +77,13 @@ Both counters SHALL be part of the scan's skip tally, included in its total and 
 
 | Content of the record | Chunk | Counted under |
 | --- | --- | --- |
-| block array: one `tool_result` | none | `toolTraceOnly` |
-| block array: two `tool_result` blocks | none | `toolTraceOnly` |
-| block array: `tool_use` with no metadata field | none | `toolTraceOnly` |
-| block array: whitespace-only `text` block and one `tool_result` | none | `toolTraceOnly` |
+| block array: one `tool_result` | none | `toolResultOnly` |
+| block array: two `tool_result` blocks | none | `toolResultOnly` |
+| block array: whitespace-only `text` block and one `tool_result` | none | `toolResultOnly` |
+| block array: `thinking` block and one `tool_result` | none | `toolResultOnly` |
+| block array: `image` block and one `tool_result` | none | `toolResultOnly` |
+| block array: `tool_use` named `TodoWrite` with no metadata field | `⟨tool TodoWrite⟩` | — |
+| block array: `tool_use` with no metadata field and one `tool_result` | `⟨tool TodoWrite⟩` and the marker, on two lines | — |
 | block array: `tool_use` named `Read` with `file_path` set | `⟨tool Read file_path=…⟩` | — |
 | block array: `text` block and `tool_result` | text and marker, unchanged | — |
 | plain string equal to `⟨tool_result ok⟩` | the string, unchanged | — |
@@ -84,4 +92,4 @@ Both counters SHALL be part of the scan's skip tally, included in its total and 
 #### Scenario: A plain-string prompt that looks like a marker is kept
 
 - **WHEN** a `type: user` record's `message.content` is the plain string `⟨tool_result ok⟩`
-- **THEN** the record produces one chunk with that text and nothing is counted under `toolTraceOnly`
+- **THEN** the record produces one chunk with that text and nothing is counted under `toolResultOnly`
