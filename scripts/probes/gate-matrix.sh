@@ -8,12 +8,13 @@
 #   cache_size=2000；前置檢查不跳過 dangling symlink；下面列的路徑有未 commit 的改動就拒跑（建置前後各查一次）；
 #   harness 建好後複製到暫存目錄再跑，log 記它的 SHA-256；路徑含 URI 特殊字元就拒跑；mtime 連日期記；結束時撤銷
 #   sudo；GATE_MATRIX_DB（測試用）。
-# #61（gate-structural-counts）：Q1／Q2 與 A、B 段量的是結構計數版的閘（layout 6；在 layout 5 的索引上 harness、探針
+# #61（gate-structural-counts）：Q1／Q2 與 A、B 段量的是結構計數版的閘（layout 6 起；在 layout 5 的索引上 harness、探針
 #   與 CLI 都會報 no such column 而停）。D 段在同一個檔、同一個窗口交錯量 #61 之前（--pre61-sql、P1／P2）與之後的閘，
 #   暖態四輪（兩臂都先暖過；每輪輪換兩臂的先後，各先兩次——三輪平衡不了，R2-19）、冷態每臂一個樣本；那是 #61 量測紀錄的 A/B。
 #   GATE_MATRIX_SECTIONS 選要跑的段（沒設是 ABCD；#61 的 6.1 只要 D：GATE_MATRIX_SECTIONS=D）。設成空字串會拒跑——
 #   先前空字串會被當成沒設、跑完全部 11 次 purge（R2-19）。
-#   layout 6 的檢查（四張表都在、meta 的 layout_version 是 6）在 sudo 之前做——GATE_MATRIX_DB，或不跑 A 段時；預設路徑又要跑 A 段時不做，
+#   layout 的檢查（四張表都在、meta 的 layout_version 是 6 或 7——#67 的 layout 7 只改哪些 turn 產出 chunk，表結構與 6 相同，
+#   而兩者同一次發版，線上索引會是 7）在 sudo 之前做——GATE_MATRIX_DB，或不跑 A 段時；預設路徑又要跑 A 段時不做，
 #   因為它會讀索引的第 1 頁，A 段第一個樣本就不再是自然冷；那時 layout 5 的索引要到 sudo 之後的第一次 warmup 才停。
 # 用法：在自己的終端機執行  zsh scripts/probes/gate-matrix.sh
 #   不要用 sudo 跑整個腳本（ltm 開索引會檢查擁有者，root 會被拒）；開頭問一次 sudo 密碼，只給 purge 用，
@@ -76,14 +77,18 @@ require_clean
 SECTIONS="${GATE_MATRIX_SECTIONS-ABCD}"
 [[ "$SECTIONS" =~ '^[ABCD]+$' ]] || fail "GATE_MATRIX_SECTIONS 只能由 A、B、C、D 組成：$SECTIONS"
 has() { [[ "$SECTIONS" == *$1* ]]; }
-# 覆寫時先以唯讀確認它是 layout 6 的 ltm 索引（不然 harness 會把它改成 WAL 才失敗，或要到 sudo 之後才因
+# 覆寫時先以唯讀確認它是 layout 6 或 7 的 ltm 索引（不然 harness 會把它改成 WAL 才失敗，或要到 sudo 之後才因
 # no such column 停下）。immutable 只看主檔，schema 還在 WAL 裡時會誤拒（安全的方向）。
 # 預設路徑又要跑 A 段時不做這一步：它會讀索引的第 1 頁，A 段的 warmup 就不再是自然冷。
 if [ -n "${GATE_MATRIX_DB:-}" ] || ! has A; then
   n=$(sqlite3 -init /dev/null "file:$DB?mode=ro&immutable=1" \
         "SELECT (SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('chunks','chunk_sources','scan_state','source_chunk_counts')) || ':' || coalesce((SELECT value FROM meta WHERE key='layout_version'), '');" 2>&1) \
     || fail "讀不到 $DB 的 schema"
-  [ "$n" = 4:6 ] || fail "$DB 不是 layout 6 的 ltm 索引（要四張表 chunks／chunk_sources／scan_state／source_chunk_counts、meta 的 layout_version 是 6；讀到 $n）"
+  # 封閉列舉：只收表結構已知相同的 layout（6、7）。之後的 layout 若改了結構，要回來看過再加。
+  case "$n" in
+    4:6|4:7) ;;
+    *) fail "$DB 不是 layout 6 或 7 的 ltm 索引（要四張表 chunks／chunk_sources／scan_state／source_chunk_counts、meta 的 layout_version 是 6 或 7；讀到 $n）" ;;
+  esac
 fi
 # 沒有 -wal 就拒跑：harness 以讀寫開檔會建出它，後面 mtime 的比對會因此誤停。
 [ -f "$DB-wal" ] || fail "沒有 $DB-wal（harness 以讀寫開檔會建出它，mtime 的比對會因此誤停）：先建出它——預設路徑跑一次 ltm query；GATE_MATRIX_DB 跑 /usr/bin/sqlite3 -init /dev/null <檔> 'PRAGMA journal_mode;'（要印出 wal；只開檔、不跑語句不會建出 -wal）"

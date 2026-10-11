@@ -17,7 +17,7 @@ Stakeholders: every retrieval entry point (CLI, MCP, recall hook) reads the same
 
 **Non-Goals:**
 
-- Claims about query latency, index size on disk, build time or retrieval quality. The row recount, index size, build time and #62's two query groups' top three are measured after the release in #84; end-to-end latency belongs to #75 and #79. This change states only which rows are no longer produced.
+- Claims about query latency, index size on disk, build time or retrieval quality. The row recount, index size, build time, query latency and #62's two query groups' top three are measured in #84, on one corpus snapshot in side-path indexes built with and without this change. This change states only which rows are no longer produced.
 - Attaching a tool result's success or failure to the `tool_use` chunk it belongs to. The result arrives in a later record; attaching it would rewrite an already indexed chunk (its anchor is content-addressed), and an incremental build would differ from a full rebuild.
 - Filtering at retrieval time (#62's eligibility filter). It would leave the rows and vectors in the index.
 - Identical-text duplicates among substantive turns (#77) and `tool_use` chunks that carry metadata fields (they are 407,230 distinct texts out of 455,605 and are the reason #6 indexes tool metadata).
@@ -26,7 +26,7 @@ Stakeholders: every retrieval entry point (CLI, MCP, recall hook) reads the same
 
 ### Result-only is decided from the block structure, not from the text
 
-A turn is result-only when its `message.content` is a block array with at least one `tool_result` block and every other block yields no text in `indexableText` after normalization: no `tool_use` block at all (with or without metadata it yields `⟨tool NAME…⟩`), every `text` block empty after normalization, and any other block type (`thinking`, `image`, `document`, …), which `indexableText` never reads. Text-pattern matching was rejected: a user who types `⟨tool_result ok⟩` as a plain-string prompt would lose that turn, and a text check could not tell a marker from a quotation of one.
+A turn is result-only when its `message.content` is a block array with at least one `tool_result` block and every block that is not a `tool_result` block yields no text in `indexableText` after normalization: no `tool_use` block at all (with or without metadata it yields `⟨tool NAME…⟩`), every `text` block empty after normalization, and any other block type (`thinking`, `image`, `document`, …) or a block without `type`, which `indexableText` never reads. Text-pattern matching was rejected: a user who types `⟨tool_result ok⟩` as a plain-string prompt would lose that turn, and a text check could not tell a marker from a quotation of one.
 
 ### The rule applies per record; mixed turns are indexed as today
 
@@ -34,7 +34,7 @@ Alternative considered: drop the markers at block level everywhere. That changes
 
 ### Metadata-less tool_use blocks are kept
 
-The first version of this change dropped them too, reasoning that with 40,619 chunks over 222 texts a tool name returns whichever rowid sorts first and so navigates to no particular turn. Verify R1 refuted that for the long tail: a read-only scan of the corpus (histogram only; 43,327 such records, 235 texts) found 96 texts that occur at most three times, about 150 records, where the tool name is exactly the cue that finds them; the top five texts hold 82% of the class. Keeping only the frequent names would make a chunk's existence depend on corpus-wide statistics, which breaks invariant 2, so the choice is the whole class or none. The user kept the whole class (`issuecomment-6109083299`, which also records the original spectra-discuss decisions).
+The first version of this change dropped them too, reasoning that with 40,619 chunks over 222 texts a tool name returns whichever rowid sorts first and so navigates to no particular turn. Verify R1 refuted that for the long tail. Its method: a read-only scan of `~/.claude/projects/**/*.jsonl` on 2026-10-11 (19,441 files), parsing only lines that contain `"tool_use"`, re-implementing the first version's predicate in Python, keeping records it classified as trace-only that hold a `tool_use`, deduplicating by (project directory, uuid) — the shape of the index's identity key — and grouping by the sequence of tool names, printing only a histogram. Result, counted in records: 43,327 records over 235 texts; 96 texts occur at most three times (about 150 records); the top five texts hold 82%. This measures frequency only: a rare tool name may be the only cue to its turn, but whether a query by that name actually ranks the turn first was not measured (`tool_use` chunks with metadata for the same tool and prose that names it compete for the same hits). Keeping only the frequent names would make a chunk's existence depend on corpus-wide statistics, which breaks invariant 2, so the choice is the whole class or none. The user kept the whole class (`issuecomment-6109083299`, which also records the original spectra-discuss decisions).
 
 ### A separate skip counter, `toolResultOnly`
 
@@ -48,7 +48,7 @@ Alternative considered: fold the change into the unreleased layout 6. An index a
 
 - **Observable behavior**: scanning a corpus yields no chunk for a result-only turn and increments `skipped.toolResultOnly` once per such turn; every other turn yields the same chunk, byte for byte, as before this change.
 - **Interface**: `SkipTally.toolResultOnly: Int` (public, default 0), counted in `total` and summed by `add`; a scanner-internal predicate `isToolResultOnly`; `IndexDatabase.layoutVersion == 7`.
-- **Command output**: `ltm build`'s skip breakdown gains one item for result-only turns, next to "no indexable text"; the `⚠ 併入時跳過 N 筆紀錄` stderr line counts them in N. MCP responses do not carry the skip tally, so they do not change.
+- **Command output**: every count that is derived from which records produce chunks changes accordingly. Today that means: `ltm build`'s skip breakdown gains one item for result-only turns, next to "no indexable text"; the `⚠ 併入時跳過 N 筆紀錄` stderr line counts them in N; and the query footer `查詢前併入 N 個來源檔的新內容` no longer counts a source whose only new records since the last merge are result-only (its cursor still advances), so the footer can disappear where it used to show such a source. MCP responses carry neither the skip tally nor that footer, so they do not change.
 - **Failure modes**: none new. A malformed block (missing `type`) is skipped exactly as `indexableText` skips it; a block array with no `tool_result` block is never result-only.
 - **Acceptance**:
   - CorpusScannerTests cover every row of the spec's example table, each asserting the chunk texts and both counters, plus a mixed turn whose text and anchor span equal the pre-change values.

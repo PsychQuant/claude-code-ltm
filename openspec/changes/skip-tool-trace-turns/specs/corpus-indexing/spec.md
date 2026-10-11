@@ -2,7 +2,7 @@
 
 ### Requirement: Chunk granularity is one conversation turn with full pointer metadata
 
-Indexing SHALL create exactly one chunk per jsonl conversation turn, except the turns enumerated in "Turns with no text or only tool results produce no chunk", which produce none. Each chunk SHALL be addressable by the pointer tuple `(project, sessions, uuid, timestamp)` alongside its text and vector, and the tuple SHALL be returned with any retrieval hit derived from that chunk. The `sessions` component is a set held in `chunk_sources`, one entry per source file holding the chunk; the other three are scalar columns on the chunk row.
+Indexing SHALL create exactly one chunk per jsonl conversation turn — a record whose top-level `type` is `user` or `assistant`, whose pointer fields are present and valid, and that carries a `message` object — except the turns enumerated in "Turns with no text or only tool results produce no chunk", which produce none. Records outside that definition (other record types, missing or malformed pointer fields, no `message` object) produce no chunk either; they are skipped and counted in the scan's skip tally. Each chunk SHALL be addressable by the pointer tuple `(project, sessions, uuid, timestamp)` alongside its text and vector, and the tuple SHALL be returned with any retrieval hit derived from that chunk. The `sessions` component is a set held in `chunk_sources`, one entry per source file holding the chunk; the other three are scalar columns on the chunk row.
 
 **A chunk is routinely held by more than one source file.** Session resume copies the same turn into a new file, so one turn commonly exists in several session files; deduplication is by content, so those copies produce exactly one chunk. The chunk SHALL therefore additionally carry the set of session identifiers of every source file that holds it — one entry per holding source, each entry being that source's own session identifier. **This capability owns the definition of that set**; the `retrieval` and `ltm-cli` capabilities reference it and specify only how their own layer surfaces it.
 
@@ -42,7 +42,9 @@ This replaces an earlier rule that stored one chosen session identifier per chun
 This requirement covers records whose top-level `type` is `user` or `assistant`, whose pointer fields are present and valid, and that carry a `message` object. Among those records, indexing SHALL produce no chunk in exactly the following two cases, and in no other case on account of the turn's content. This is a closed enumeration: a further case SHALL NOT be added by analogy to these two.
 
 1. **No indexable text**: the turn's indexable text is empty, or empty after normalization. The scan SHALL count it under `noIndexableText`.
-2. **Tool results only**: the turn's `message.content` is a block array that contains at least one `tool_result` block, and every other block yields no indexable text: it is not a `tool_use` block (a `tool_use` block always yields a `⟨tool NAME…⟩` marker, whether or not it has metadata fields), and if it is a `text` block its text is empty after normalization. Blocks of any other type yield no indexable text. The scan SHALL count such a turn under `toolResultOnly`. Case 1 is checked first; a turn counted under case 1 SHALL NOT also be counted under case 2. (A turn in case 2 always has the non-empty indexable text `⟨tool_result ok⟩` or `⟨tool_result error⟩`, so the two cases do not overlap in practice.)
+2. **Tool results only**: the turn's `message.content` is a block array that contains at least one `tool_result` block, and every block that is not a `tool_result` block yields no indexable text: it is not a `tool_use` block (a `tool_use` block always yields a `⟨tool NAME…⟩` marker, whether or not it has metadata fields), and if it is a `text` block its text is empty after normalization. Blocks of types other than `tool_result`, `tool_use` and `text`, and blocks without a `type`, yield no indexable text. The scan SHALL count such a turn under `toolResultOnly`.
+
+The two cases are mutually exclusive: a turn under case 2 always has the non-empty indexable text `⟨tool_result ok⟩` or `⟨tool_result error⟩`, so it never falls under case 1. No turn SHALL be counted under both.
 
 A turn whose content is a plain string SHALL NOT fall under case 2, whatever the string says: the decision is made from the block structure, never by matching the text against a marker. Every turn covered by this requirement and falling under neither case SHALL be indexed with exactly the text, span and anchor it would have had without this requirement — in particular a turn that holds a `tool_use` block, with or without metadata fields.
 
@@ -70,8 +72,8 @@ Both counters SHALL be part of the scan's skip tally, included in its total and 
 
 #### Scenario: A mixed turn keeps its text and anchor
 
-- **WHEN** a `type: assistant` record holds a `text` block `checking the build` followed by a `tool_use` block without metadata fields
-- **THEN** the record produces one chunk whose text, span and anchor equal those produced before this requirement existed
+- **WHEN** a `type: assistant` record holds a `text` block `checking the build` followed by a `tool_result` block
+- **THEN** the record produces one chunk whose text (`checking the build`, a newline, `⟨tool_result ok⟩`), span and anchor equal those produced before this requirement existed
 
 ##### Example: which records produce a chunk
 
@@ -82,6 +84,7 @@ Both counters SHALL be part of the scan's skip tally, included in its total and 
 | block array: whitespace-only `text` block and one `tool_result` | none | `toolResultOnly` |
 | block array: `thinking` block and one `tool_result` | none | `toolResultOnly` |
 | block array: `image` block and one `tool_result` | none | `toolResultOnly` |
+| block array: a block without `type` and one `tool_result` | none | `toolResultOnly` |
 | block array: `tool_use` named `TodoWrite` with no metadata field | `⟨tool TodoWrite⟩` | — |
 | block array: `tool_use` with no metadata field and one `tool_result` | `⟨tool TodoWrite⟩` and the marker, on two lines | — |
 | block array: `tool_use` named `Read` with `file_path` set | `⟨tool Read file_path=…⟩` | — |

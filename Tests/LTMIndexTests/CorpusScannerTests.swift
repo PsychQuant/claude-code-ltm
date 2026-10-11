@@ -211,7 +211,9 @@ func toolPayloadFieldsAreNotIndexed() {
 
 @Test("tool_result 只記成敗，不記內容")
 func toolResultRecordsOutcomeNotContent() {
-    // 丟掉的 65.7% 就是這一項。收成敗讓「那次跑掛了嗎」搜得到，而不把輸出收進來。
+    // 丟掉的 65.7% 就是這一項。收成敗而不把輸出收進來。#67 之後，整則只有 tool_result 的紀錄不產出 chunk
+    // （Claude Code 把每個 tool_result 寫成獨立紀錄，所以多數成敗標記不再進索引）；標記只在跟其他內容同一筆
+    // 紀錄時才進得去。這條只看 `indexableText` 怎麼寫標記，不代表「那次跑掛了嗎」搜得到。
     let ok: [String: Any] = ["type": "tool_result", "content": "SENTINEL-命令輸出"]
     let bad: [String: Any] = [
         "type": "tool_result", "is_error": true, "content": "SENTINEL-錯誤訊息",
@@ -981,9 +983,30 @@ func aNonTextBlockNextToAToolResultIsResultOnly() throws {
     ])
 }
 
+@Test("沒有 type 的 block 加一個 tool_result：仍算只有 tool_result")
+func aTypelessBlockNextToAToolResultIsResultOnly() throws {
+    // design 的 Implementation Contract：沒有 `type` 的 block 照 `indexableText` 的方式跳過。#67 verify R2：
+    // 這一支先前沒有測試，把它改成「不成立」全套照樣綠。
+    try expectSkippedAsResultOnly([
+        ["content": "沒有 type"],
+        ["type": "tool_result", "content": "x"],
+    ])
+}
+
+@Test("isToolResultOnly 本身：沒有 tool_result 就不成立")
+func resultOnlyNeedsAToolResult() {
+    // 走 `chunk(from:)` 時這一點由檢查順序保證（沒有 tool_result、其餘 block 都沒有文字的紀錄先被算進
+    // noIndexableText），所以把 `sawResult` 改成 `true` 經由 scan 的測試都不會紅（#67 verify R2：等價變異）。
+    // 這裡直接釘函式本身，讓它單獨讀時的意思有人守。
+    #expect(!CorpusScanner.isToolResultOnly([["type": "thinking", "thinking": "x"]]))
+    #expect(!CorpusScanner.isToolResultOnly([["type": "text", "text": "  "]]))
+    #expect(!CorpusScanner.isToolResultOnly([[String: Any]]()))
+    #expect(CorpusScanner.isToolResultOnly([["type": "tool_result", "content": "x"]]))
+}
+
 @Test("沒有 metadata 欄位的 tool_use 照常產出 chunk（#67 R1：整類保留）")
 func aMetadataLessToolUseIsKept() throws {
-    // 少見的工具名用它查正好找得到那一兩個 turn（#67 Decision `issuecomment-6109083299`）。
+    // 少見的工具名在語料裡只出現一兩次，可能是那個 turn 唯一的線索（#67 Decision `issuecomment-6109083299`）。
     try expectKept(blockTurnLine(uuid: traceUUID, role: "assistant", blocks: [
         ["type": "tool_use", "name": "TodoWrite", "input": ["todos": ["寫測試"]]],
     ]), as: "⟨tool TodoWrite⟩")
@@ -1040,11 +1063,12 @@ func aMixedTurnKeepsItsTextAndAnchor() throws {
         in: root, project: "proj-one", file: "session.jsonl",
         lines: [blockTurnLine(uuid: traceUUID, role: "assistant", blocks: [
             ["type": "text", "text": "checking the build"],
-            ["type": "tool_use", "name": "TodoWrite", "input": ["todos": ["x"]]],
+            ["type": "tool_result", "content": "x"],
         ])])
+    // 例子帶 `tool_result`：新規則看得到它、而它必須照舊（#67 verify R2：先前的例子沒有 tool_result，規則碰不到）。
     let result = try CorpusScanner(corpusRoot: root, anchorKey: .forTesting).scan()
     let chunk = try #require(result.chunks.first?.chunk)
-    let expectedText = "checking the build\n⟨tool TodoWrite⟩"
+    let expectedText = "checking the build\n⟨tool_result ok⟩"
     #expect(chunk.text == expectedText)
     let timestamp = try #require(CorpusScanner.parseTimestamp("2026-08-17T06:00:00.000Z"))
     let expected = Anchor(

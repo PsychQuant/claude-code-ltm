@@ -200,8 +200,9 @@ func buildReportsToolResultOnlySkipsSeparately() throws {
     let result = try runCLI(["build"], environment: workspace.environment)
 
     #expect(result.code == 0)
-    #expect(result.out.contains("只有 tool_result 1"), "跳過明細要另列只有 tool_result 的 turn：\(result.out)")
-    #expect(result.out.contains("無可索引文字 0"))
+    // 連分隔符一起比對：前綴比對分不出 1 與 11（#67 verify R2：把計數乘 11 照樣綠）。
+    #expect(result.out.contains("只有 tool_result 1、"), "跳過明細要另列只有 tool_result 的 turn：\(result.out)")
+    #expect(result.out.contains("無可索引文字 0、"))
 }
 
 // MARK: - 進度輸出（#45）

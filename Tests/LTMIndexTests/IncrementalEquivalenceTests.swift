@@ -131,7 +131,9 @@ private struct TurnSpec {
 ///
 /// 每種各自打到 `SkipTally` 的不同欄位——**分類本身也要在增量與全量之間相同**，
 /// 否則「跳過的理由」會靜默漂移。`toolResultOnly`（#67）是一則指標欄位齊全、只因內容被跳過的
-/// turn：它走的是游標照常前進、卻不產出 chunk 的那條路（#67 verify R1-13：先前這裡沒有它）。
+/// turn（#67 verify R1-13：先前這裡沒有它）。它守的是全量重建的分類計數，不是等價：判定是單筆紀錄的
+/// 純函式，增量與全量在構造上相同。它放在檔頭、後面跟著會產出 chunk 的 turn，所以也不涵蓋「檔尾的紀錄
+/// 不產出 chunk」時的游標路徑——那條由 `ChunkCursorTests` 以別種跳過行涵蓋（#67 verify R2 更正）。
 private enum SkipLine: CaseIterable {
     case notATurn
     case missingPointerField

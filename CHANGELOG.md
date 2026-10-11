@@ -55,11 +55,11 @@
 - **只有 tool_result 的 turn 不再產出 chunk；索引 layout 6 → 7（#67）**：Claude Code 把每個 `tool_result` 寫成
   獨立紀錄，先前每一筆都變成一個文字只有 `⟨tool_result ok|error⟩` 的 chunk——幾十萬筆、兩種文字、沒有內容線索
   （#67 diagnosis）；同一個向量在跟它相近的查詢裡可能佔滿向量通道的候選段。現在整則只有 tool_result 的 turn
-  不產出 chunk；其他 turn 照舊，文字與 anchor 都不變——包括只有工具名、沒有 metadata 欄位的 `tool_use`（少見的
-  工具名用它查找得到那一兩個 turn）。`ltm build` 的跳過明細多一項「只有 tool_result」，各命令併入時印的
+  不產出 chunk；其他 turn 照舊，文字與 anchor 都不變——包括只有工具名、沒有 metadata 欄位的 `tool_use`（不少工具名
+  在語料裡只出現一兩次，可能是那個 turn 唯一的線索）。`ltm build` 的跳過明細多一項「只有 tool_result」，各命令併入時印的
   「⚠ 併入時跳過 N 筆紀錄」也把它們算進 N。layout 7 與 #61 的 layout 6 同屬這次發版：從 layout 5 升上來的索引
-  只會從零重建一次。這裡不寫任何效果數字；列數、索引體積、build 時間與 #62 兩組查詢的前三名在 #84 量，
-  端到端延遲歸 #75、#79。
+  只會從零重建一次。這裡不寫任何效果數字；列數、索引體積、build 時間、查詢延遲與 #62 兩組查詢的前三名在 #84
+  量（同一份語料上比 #67 前後）。
 - **閘改讀結構計數；索引 layout 5 → 6，升版後要從零重建一次（#61）**：每次 build（因此每次 `ltm query` 的
   併入）都跑的 #44 閘，兩個全稱命題——每個 chunk 至少一個來源、每個持有 chunk 的來源都有游標——先前每次都走完
   `chunk_sources`。現在改讀由 SQLite trigger 在同一交易裡維護的兩份衍生計數：`chunks.source_count`（加上

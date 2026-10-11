@@ -3443,3 +3443,53 @@ func aLayoutFiveIndexIsRebuilt() throws {
     #expect(try database.stamps().layoutVersion == 7)
     #expect(try database.auditDerivedCounts().isClean)
 }
+
+/// #67：用未發版 build 建過的 layout 6 索引，還留著 #67 之前的規則產出的「只有 tool_result」chunk。升到 7 時
+/// 整份重建，那些 chunk 消失、其他 turn 留著、稽核通過（#67 verify R2，codex：先前只測了 layout 5）。
+@Test("layout 6 的索引：下一次 build 整份重建到 layout 7，只有 tool_result 的 chunk 消失、其他 turn 留著")
+func aLayoutSixIndexDropsResultOnlyChunks() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    let normal = turnLine(uuid: "00000000-aaaa-bbbb-cccc-dddddddddddd", session: session, role: "user", text: "第一段內容")
+    let resultOnlyUUID = "00000001-aaaa-bbbb-cccc-dddddddddddd"
+    let resultOnly = blockTurnLine(uuid: resultOnlyUUID, role: "user", blocks: [["type": "tool_result", "content": "x"]])
+    _ = try writeSession(in: corpus, project: "proj-one", file: "session.jsonl", lines: [normal, resultOnly])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    func texts() throws -> [String] {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        var found: [String] = []
+        try database.query("SELECT text FROM chunks ORDER BY uuid") { found.append(columnText($0, 0)) }
+        return found
+    }
+    // 模擬 layout 6：把 #67 之前的規則會為那則紀錄產出的 chunk 直接寫進索引，再把版本戳改回 6。
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        let marker = "⟨tool_result ok⟩"
+        let when = try #require(CorpusScanner.parseTimestamp("2026-08-17T06:00:00.000Z"))
+        let turn = Turn(id: resultOnlyUUID, role: "user", timestamp: when, text: marker)
+        let chunk = CorpusChunk(
+            sourceKey: "proj-one/session.jsonl", project: "proj-one", sessionID: session, uuid: resultOnlyUUID,
+            timestamp: when, role: "user", text: marker,
+            anchor: Anchor(source: ProjectFingerprint.of("proj-one"), turn: turn,
+                           span: 0..<marker.unicodeScalars.count, key: .forTesting))
+        _ = try database.insert(chunks: [chunk], sourceKey: "proj-one/session.jsonl")
+        try database.setMeta("layout_version", "6")
+    }
+    #expect(try texts() == ["第一段內容", "⟨tool_result ok⟩"], "前提：layout 6 的索引留著那個 chunk")
+    let report = try builder.build()
+    #expect(report.wasFullRebuild)
+    #expect(report.skipped.toolResultOnly == 1)
+    #expect(try texts() == ["第一段內容"])
+    let database = try IndexDatabase(path: derived.databaseURL.path)
+    defer { database.close() }
+    #expect(try database.stamps().layoutVersion == 7)
+    #expect(try database.auditDerivedCounts().isClean)
+}

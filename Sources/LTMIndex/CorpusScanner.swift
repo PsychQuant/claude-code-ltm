@@ -125,8 +125,8 @@ public struct SkipTally: Sendable, Equatable {
     public var malformedIdentifier = 0
     /// 正規化之後沒有文字可綁（空的，或只有空白）。
     public var noIndexableText = 0
-    /// 只有 tool_result：content 是 block 陣列、至少一個 `tool_result`，其餘每個 block 都不產出
-    /// 正規化後非空的文字（#67；判定見 `CorpusScanner.isToolResultOnly`）。與 `noIndexableText` 分開記：
+    /// 只有 tool_result：content 是 block 陣列、至少一個 `tool_result`，`tool_result` 以外的每個 block 都不
+    /// 產出正規化後非空的文字（#67；判定見 `CorpusScanner.isToolResultOnly`）。與 `noIndexableText` 分開記：
     /// 這一類預期有幾十萬筆，混在一起會讓真正有文字的紀錄變空的異常看不出來。
     public var toolResultOnly = 0
     /// 這一行不是合法 JSON。
@@ -921,8 +921,9 @@ public struct CorpusScanner: Sendable {
     ///
     /// **但整則只有 tool_result 的 turn 不產出 chunk（#67）**：這個函式照樣為它產出標記文字，
     /// `chunk(from:)` 再用 `isToolResultOnly` 判定、計入 `SkipTally.toolResultOnly`。其他 turn 照舊，
-    /// 文字與 anchor 都不變——包括只有工具名的 `tool_use`（`⟨tool NAME⟩`）：少見的工具名用它查正好
-    /// 找得到那一兩個 turn，所以整類保留（#67 Decision `issuecomment-6109083299`）。
+    /// 文字與 anchor 都不變——包括只有工具名的 `tool_use`（`⟨tool NAME⟩`）：少見的工具名在語料裡只出現
+    /// 一兩次，可能是那個 turn 唯一的線索，所以整類保留（#67 Decision `issuecomment-6109083299`；量的是頻率，
+    /// 沒量過檢索）。
     /// 理由：Claude Code 把每個 `tool_result` 寫成獨立紀錄，於是它們的 chunk 只有兩種文字、幾十萬筆，
     /// 沒有內容線索（#67 diagnosis 的計數與查法）。
     ///
@@ -960,10 +961,10 @@ public struct CorpusScanner: Sendable {
 
     /// 這則 content 是不是**只有 tool_result**（#67）。
     ///
-    /// 成立的條件：content 是 block 陣列；至少有一個 `tool_result` block；其餘每個 block 都不在
-    /// `indexableText` 裡產出正規化後非空的文字——也就是：沒有 `tool_use`（不論有沒有 metadata 欄位，
+    /// 成立的條件：content 是 block 陣列；至少有一個 `tool_result` block；`tool_result` 以外的每個 block 都
+    /// 不在 `indexableText` 裡產出正規化後非空的文字——也就是：沒有 `tool_use`（不論有沒有 metadata 欄位，
     /// 它都產出 `⟨tool NAME…⟩`），`text` block 正規化後是空的，其他型別（`thinking`、`image`、
-    /// `document` 等）本來就不產出文字。純字串 content 永遠不成立：判定看結構，不比對文字，使用者
+    /// `document` 等）與沒有 `type` 的 block 本來就不產出文字。純字串 content 永遠不成立：判定看結構，不比對文字，使用者
     /// 自己打出標記字樣的 prompt 照常索引。
     static func isToolResultOnly(_ content: Any?) -> Bool {
         guard let blocks = content as? [[String: Any]] else { return false }

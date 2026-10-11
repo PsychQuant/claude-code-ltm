@@ -101,7 +101,7 @@ chunk 算向量，在這個規模上超過兩分鐘的預算；而涵蓋率是�
 上面那張表的 83.0% 把**只有 tool_result 的 turn** 也算成「進得了索引」：Claude Code 把每個 `tool_result`
 寫成獨立的一筆紀錄，它的 chunk 文字只有 `⟨tool_result ok⟩` 或 `⟨tool_result error⟩` 兩種，單獨存在時說不出
 是哪一次工具呼叫的結果。「那次跑 benchmark 的對話在哪」搜得到，靠的是帶 metadata 的 `tool_use` chunk，
-不是這一類。#67 之後這一類不再產出 chunk；只有工具名、沒有 metadata 欄位的 `tool_use` 照舊產出（少見的工具名用它查找得到那一兩個 turn）。
+不是這一類。#67 之後這一類不再產出 chunk；只有工具名、沒有 metadata 欄位的 `tool_use` 照舊產出（不少工具名在語料裡只出現一兩次，可能是那個 turn 唯一的線索）。
 
 表上的數字照原樣保留：它們量的是當時的規則。涵蓋率這個指標在這一點上量錯了東西——「產出了 chunk」
 不等於「搜得到」。
