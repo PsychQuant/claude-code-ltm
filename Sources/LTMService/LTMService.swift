@@ -456,10 +456,10 @@ public struct LTMService {
     /// banner——batch verify S1 實測過端到端）。消毒在**單一來源**做：兩個門面
     /// 都吃這裡的輸出，不在各自的 render 複製判定。
     private static func flattenedForDisplay(_ raw: String) -> String {
-        // 所有換行字元都壓平，不只 `\n`／`\r`：U+2028、U+2029、U+0085、VT、FF 在模型讀者眼中一樣是換行
-        // （#71 verify R1 security）。長度以 Unicode scalar 計：以字元計時，一個字母後面接一千個組合字元仍只算一個。
+        // `CharacterSet.newlines` 的換行都壓平（CR、LF、VT、FF、NEL、LS、PS），不只 `\n`／`\r`（#71 verify R1
+        // security）。長度以 Unicode scalar 計：以字元計時，一個字母後面接一千個組合字元仍只算一個。
         let flat = String(String.UnicodeScalarView(raw.unicodeScalars.map {
-            CharacterSet.newlines.contains($0) || $0 == "\u{0B}" || $0 == "\u{0C}" ? "␤" : $0
+            CharacterSet.newlines.contains($0) ? "␤" : $0
         }))
         guard flat.unicodeScalars.count > 80 else { return flat }
         return String(String.UnicodeScalarView(flat.unicodeScalars.prefix(80))) + "…"

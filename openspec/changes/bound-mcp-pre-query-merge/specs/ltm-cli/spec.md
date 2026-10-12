@@ -10,24 +10,24 @@ Whenever the refresh report's `unmergedSources` is greater than zero, the MCP re
 
 The bound is not an upper bound on the call: the deadline is checked only at the start of each batch, so the work before the first check, the batch in progress at the deadline and the work after the last batch run to completion whatever the bound is (examples of those stages are given in "ltm query can bound the pre-query merge and reports the shortfall"), and retrieval runs afterwards; building the service for the call (reading the anchor key, loading the embedding model, opening the index) happens before the clock starts. No response, document or log line SHALL state that a call finished within the bound.
 
-Unless `LTM_BUILD_BATCH_CHUNKS` is set to a non-empty value, the server SHALL merge in batches of 200 chunks, the size the recall hook uses; a value the user set SHALL be used as is.
+Unless `LTM_BUILD_BATCH_CHUNKS` is set to a non-empty value, the server SHALL merge in batches of 200 chunks, the size the recall hook uses; a value the user set SHALL be passed on as is, so a value that is not a positive integer is rejected by the build's own parsing, which falls back to its default of 2,000 chunks and reports the rejection — the same as on the hook path.
 
-A bounded merge skips rewritten sources whatever the bound is, so through MCP a rewritten source stays unmerged — its old text searchable and the lag line present — until `ltm build` runs.
+A bounded merge skips rewritten sources whatever the bound is, so through MCP a rewritten source stays unmerged — its old text still searchable and the lag line present — until an unbounded merge runs (`ltm build`, or `ltm query` without `--max-refresh-seconds`).
 
 #### Scenario: A large backlog is cut at a batch boundary and reported
 
 - **WHEN** the corpus has grown by more sources than can be merged within the bound and an MCP `ltm_query` call is made
-- **THEN** the call commits only whole batches, answers from the index as it stands, and its response includes the lag line with an unmerged count greater than zero
+- **THEN** the call commits only whole batches, starts no batch after the deadline, answers from the index as it stands, and whenever sources remain unmerged its response includes the lag line with their count (when the last batch started before the deadline it runs to completion, so the count can be zero)
 
 #### Scenario: A small backlog changes nothing
 
-- **WHEN** the backlog merges before the deadline
+- **WHEN** the backlog consists of new content only (no rewritten source) and merges before the deadline
 - **THEN** the response has no lag line and its hits are identical to an unbounded call on the same corpus
 
 #### Scenario: An invalid override is ignored with a warning
 
 - **WHEN** the server starts with `LTM_MCP_REFRESH_SECONDS=abc` and an `ltm_query` call is made
-- **THEN** the call succeeds, the merge is bounded at 20 seconds, and the response carries a warning naming `LTM_MCP_REFRESH_SECONDS` and `abc`
+- **THEN** the call succeeds, the merge uses the 20-second bound, and the response carries a warning naming `LTM_MCP_REFRESH_SECONDS` and `abc`
 
 ##### Example: resolving the bound
 
@@ -47,11 +47,11 @@ A bounded merge skips rewritten sources whatever the bound is, so through MCP a 
 #### Scenario: Large backlog is truncated at a batch boundary
 
 - **WHEN** the corpus has grown by more sources than can be merged in N seconds and `ltm query <text> --max-refresh-seconds N` runs
-- **THEN** the index contains only whole committed batches, no batch was started after the deadline, and the report names the unmerged source count greater than zero
+- **THEN** the index contains only whole committed batches, no batch was started after the deadline, and the report names the number of sources left unmerged (it can be zero when the last batch started before the deadline and ran to completion)
 
 #### Scenario: Small backlog merges fully within the budget
 
-- **WHEN** the backlog merges in less than N seconds
+- **WHEN** the backlog consists of new content only (no rewritten source) and merges in less than N seconds
 - **THEN** the report shows zero unmerged sources and `budgetExhausted` false, stderr carries no shortfall line, and stdout is identical to a run without the flag
 
 #### Scenario: The next merge completes the truncated one

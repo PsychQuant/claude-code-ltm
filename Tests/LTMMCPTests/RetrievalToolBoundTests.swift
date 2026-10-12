@@ -51,9 +51,14 @@ private struct Fixture {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-mcp-bound-\(UUID().uuidString)")
         let corpus = base.appendingPathComponent("corpus")
         try FileManager.default.createDirectory(at: corpus, withIntermediateDirectories: true)
-        return Fixture(
-            base: base, corpus: corpus,
-            derived: try DerivedLocation(root: base.appendingPathComponent("derived"), policy: AllowAll()))
+        do {
+            return Fixture(
+                base: base, corpus: corpus,
+                derived: try DerivedLocation(root: base.appendingPathComponent("derived"), policy: AllowAll()))
+        } catch {
+            try? FileManager.default.removeItem(at: base)
+            throw error
+        }
     }
 
     func write(file: String, first: Int, texts: [String]) throws {

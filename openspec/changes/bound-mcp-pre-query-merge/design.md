@@ -8,13 +8,13 @@ The #71 handoff note from #76 (`issuecomment-6106998187`) adds two constraints: 
 
 **Goals:**
 
-- Every MCP `ltm_query` call runs a bounded pre-query merge unless the operator overrides the bound.
+- Every MCP `ltm_query` call runs a bounded pre-query merge; the operator can change the bound but not remove it.
 - A call that leaves sources unmerged says so in its response, in the same words as the CLI and the recall format.
 - The analogy file stops describing query-time merging as seamless.
 
 **Non-Goals:**
 
-- Cancellation and progress notifications (#78). A bound does not cap the work an abandoned call leaves running: the deadline is checked only at the start of each batch, so the work before the first check (the lock, the structural gate, the scan, a delete-only transaction — the query path never runs an owed full audit, because it passes `honorPendingAudit: false`), the batch in progress at the deadline, and the work after the last batch (the cursor transaction, the chunk count) run to completion whatever the bound is (#76 handoff note `issuecomment-6106998187`, point 2). It is not cancellable.
+- Cancellation and progress notifications (#78). A bound does not cap the work an abandoned call leaves running: the deadline is checked only at the start of each batch, so the work before the first check (for example the lock, the structural gate, the scan, a delete-only transaction — the query path never runs an owed full audit, because it passes `honorPendingAudit: false`), the batch in progress at the deadline, and the work after the last batch (the cursor transaction, the chunk count) run to completion whatever the bound is (#76 handoff note `issuecomment-6106998187`, point 2). It is not cancellable. The stages named here are examples, not a complete list; the MODIFIED requirement gives more.
 - Making the bound precise: the scan before the first batch boundary and a long batch can overrun it (#69).
 - A per-call argument on the tool. The agent cannot judge the trade-off better than the operator's setting, and a new tool argument is a contract to maintain.
 - Any claim that MCP calls now finish within 30 seconds or any other latency claim. Measurement belongs to #79 and #75 under the comparison rule in `docs/latency-budget.md`.
@@ -27,7 +27,7 @@ The end-to-end budget is 30 seconds. Retrieval time on today's index has not bee
 
 ### Batches of 200 chunks, as the hook uses
 
-The bound is checked only at the start of each batch. `docs/measurements/2026-09-04-proactive-recall.md` §2 recorded about 25 seconds for one batch of the default 2,000 chunks — longer than the bound — which is why the hook sets 200. With 2,000, any call that starts a batch runs it whole, so 15, 20 and 25 seconds would merge the same amount and take about as long (verify R1, inferred from that record, not measured again). `MCPCommand` therefore sets `LTM_BUILD_BATCH_CHUNKS=200` in its own environment at start when the variable is unset or empty, the same rule as the hook's `${LTM_BUILD_BATCH_CHUNKS:-200}`; a value the user set is used as is (user decision `issuecomment-6111570876`).
+The bound is checked only at the start of each batch. `docs/measurements/2026-09-04-proactive-recall.md` §2 derived about 25 seconds for one batch of the default 2,000 chunks from a build's throughput (about 78 chunks per second; not a timed batch) — longer than the bound — which is why the hook sets 200. With 2,000, any call that starts a batch runs it whole, so 15, 20 and 25 seconds would merge the same amount and take about as long (verify R1, inferred from that record, not measured again). `MCPCommand` therefore sets `LTM_BUILD_BATCH_CHUNKS=200` in its own environment at start when the variable is unset or empty, the same rule as the hook's `${LTM_BUILD_BATCH_CHUNKS:-200}`; a value the user set is passed on as is (user decision `issuecomment-6111570876`); a value that is not a positive integer is rejected by `BuildTuning`, which falls back to 2,000 and reports the rejection — the same as on the hook path.
 
 ### Override through `LTM_MCP_REFRESH_SECONDS`, parsed once at server start
 

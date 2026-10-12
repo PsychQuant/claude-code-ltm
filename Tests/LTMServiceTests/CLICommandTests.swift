@@ -1603,6 +1603,10 @@ private func runMCPQuery(_ query: String = "內容", environment extra: [String:
 /// 一個已經建好索引的工作區，再加三個各 100 則 turn 的新來源（backlog 300 個 chunk）。
 private func workspaceWithBacklog() throws -> CLIWorkspace {
     let workspace = try CLIWorkspace.make(texts: ["既有的內容"])
+    do { return try addBacklog(to: workspace) } catch { workspace.cleanup(); throw error }
+}
+
+private func addBacklog(to workspace: CLIWorkspace) throws -> CLIWorkspace {
     let built = try runCLI(["build"], environment: workspace.environment)
     #expect(built.code == 0, "前提：初始 build 成功：\(built.err)")
     for file in 1...3 {
@@ -1643,6 +1647,7 @@ func theMCPServerWiresTheBoundAndTheBatchDefault() throws {
     roomyEnvironment["LTM_TEST_CLOCK_STEP_SECONDS"] = "1"
     roomyEnvironment["LTM_BUILD_BATCH_CHUNKS"] = "2000"
     let oneBatch = try runMCPQuery(environment: roomyEnvironment)
+    #expect(!oneBatch.isError, "實得：\(oneBatch.text)")
     #expect(!oneBatch.text.contains("索引落後"), "使用者設的批次要照用：一批併完、沒有落後行，實得：\(oneBatch.text)")
 }
 

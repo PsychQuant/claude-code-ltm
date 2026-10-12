@@ -13,7 +13,7 @@
 
 ## 3. Documents
 
-- [x] 3.1 Implement design decision "Update the analogy file in the same change": in `.claude/rules/ltm-analogy.md`, the comparison table and the paragraph on reopening a SessionEnd merge say that bounded merges on the hook and MCP paths make query-time merging no longer seamless, that the lag line reaches only the model (#81), and that a SessionEnd merge would buy coverage as well as latency, with the measurement precondition unchanged. Verify: content review against the hook and MCP code paths.
+- [x] 3.1 Implement design decision "Update the analogy file in the same change": in `.claude/rules/ltm-analogy.md`, the comparison table and the paragraph on reopening a SessionEnd merge say that bounded merges on the hook and MCP paths make query-time merging no longer seamless, that the hook's lag line reaches only the model (#81) while for MCP it has not been checked (narrowed in verify R1), and that a SessionEnd merge would buy coverage as well as latency, with the measurement precondition unchanged. Verify: content review against the hook and MCP code paths.
 - [x] 3.2 Update `docs/latency-budget.md`'s MCP row ("current setting" and "gap" cells) to the new default and override, keeping the statement that the bound is not an end-to-end limit; mention `LTM_MCP_REFRESH_SECONDS` in `plugin/README.md`; add a CHANGELOG entry under Unreleased with no effect numbers. Verify: content review against the honesty rule in CLAUDE.md.
 
 - [x] 3.3 Implement design decision "Correct the CLI requirement's 'bounded by roughly N'": the spec delta's MODIFIED requirement replaces the sentence and the first scenario's outcome; no code or test change. Verify: `grep` finds no test asserting the old timing, and `spectra validate bound-mcp-pre-query-merge` passes.
@@ -33,3 +33,9 @@
 - [x] 5.5 The sanitizer for rejected values flattens every Unicode line break and caps length by Unicode scalars. Verify: `rejectionUnicodeLineBreaksAreFlattened`.
 - [x] 5.6 Documents: rewritten sources wait for `ltm build` whatever the bound (README, skills, design, analogy file, latency budget, CHANGELOG, spec); the #81 claim narrowed to the hook; the §2 citation keeps that 21.5 s was a kill time; the stage lists are marked as examples and the per-call service construction is named; the CLI `--help` line; the backlog-shrinks claim qualified; no value of the override restores the old behavior. #86 tracks small rewrites inside the bound. Verify: content review; `PluginShellTests` and `BaselineQueryFileTests` pass.
 
+## 6. Verify R2 additions
+
+- [x] 6.1 Documents say that a rewritten source keeps its old text searchable through a bounded merge until an unbounded merge (`ltm build`, or `ltm query` without the flag) runs: `ltm-recall`, `ltm-setup`, plugin README, CHANGELOG, spec, analogy file. Verify: content review.
+- [x] 6.2 Spec scenarios match `IndexBuilder.build`: the unmerged count can be zero when the last batch started before the deadline; the small-backlog scenarios cover new content only; the invalid-override scenario says the merge uses the 20-second bound. Verify: `spectra validate bound-mcp-pre-query-merge`.
+- [x] 6.3 An invalid `LTM_BUILD_BATCH_CHUNKS` falls back to 2,000 with a reported rejection, as on the hook path; written in the spec, design, README and the budget doc (no code change: the user decision passes a set value on as is).
+- [x] 6.4 Test helpers clean up when setup throws (`workspaceWithBacklog`, `Fixture.make`); the 2,000-batch half of the subprocess test checks `isError`. Verify: the tests pass.

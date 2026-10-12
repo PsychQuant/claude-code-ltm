@@ -27,12 +27,12 @@ public enum RetrievalTool {
 
     /// MCP 查詢前併入的預設上限（秒，#71）。**這是起始值，不是量測值**：#76 定的 MCP 端到端預算是 30 秒，
     /// 要扣掉檢索本身的時間，而那段在今天的索引規模上沒有量過——20 秒留給併入、約 10 秒留給檢索是猜的。
-    /// 上限只在批次開頭檢查，所以它不是端到端的上界。要改它，先照 `docs/latency-budget.md` 量。
+    /// 上限只在每一批開頭檢查，所以併入本身也可能超過它，它更不是端到端的上界。要改它，先照 `docs/latency-budget.md` 量。
     public static let defaultRefreshBudgetSeconds = 20
 
     /// MCP 查詢前併入的批次大小預設（chunk 數，#71 verify R1）。與 recall hook 相同：
-    /// `docs/measurements/2026-09-04-proactive-recall.md` §2 記錄 2,000 一批約 25 秒，比上限還長——
-    /// 上限只在批次開頭檢查，批次大於上限時，有 backlog 的呼叫每次都至少跑完一整批。
+    /// `docs/measurements/2026-09-04-proactive-recall.md` §2 由一次 build 的吞吐量（約 78 chunk/s）推得 2,000 一批
+    /// 約 25 秒，比上限還長——上限只在每一批開頭檢查，開跑了一批的呼叫至少跑完那一批。
     public static let defaultBatchChunks = 200
 
     /// `LTM_BUILD_BATCH_CHUNKS` 沒設或是空字串時，MCP server 要設成的值；使用者設了就回 `nil`（照用，
