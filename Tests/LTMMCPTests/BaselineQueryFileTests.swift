@@ -39,13 +39,26 @@ private func nonCommentLines(_ text: String) -> [String] {
         .filter { !$0.isEmpty && !startsWithHash($0) }
 }
 
+/// `root` 是否在一個 git work tree 裡（任何一層的 `.git` 都算，含 linked／sparse worktree 的 `.git` 檔），而且環境 PATH 上有可執行的
+/// `git`。用 `git -C <root> rev-parse --is-inside-work-tree`：git 不在 PATH 上時 `env` 以 127 離開、不在 work tree 裡時 git 非 0——兩種都回
+/// `false`，由呼叫端具名地紅在環境那一側（R48 codex：先前只看 `.git` 是否直接在 `root`）。子行程是**環境 PATH 上的 `git`**，輸出不受本 repo
+/// 控制——走共用的 `runDraining`（兩條 pipe 同時排空）。
+private func insideGitWorkTree(_ root: URL) -> Bool {
+    guard FileManager.default.isExecutableFile(atPath: "/usr/bin/env") else { return false }
+    let probe = Process()
+    probe.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    probe.arguments = ["git", "-C", root.path, "rev-parse", "--is-inside-work-tree"]
+    guard let r = try? runDraining(probe), r.status == 0 else { return false }
+    return String(decoding: r.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "true"
+}
+
 /// 「以 `#` 開頭」看**第一個純量**，不看第一個 Character（R44 logic）：`String.hasPrefix` 比的是 grapheme，`#` 後面接 U+FE0F、
 /// U+20E3、U+0301 這類組合字元時整個叢集不等於 `#`，而 bash 的 `\#*`、python 的 `startswith('#')`、`grep '^#'` 都看第一個
 /// 純量或位元組。實測（對 R43 版）：終止符之後一行 `#` 加 U+FE0F 再接查詢，Swift 數成一條查詢、檔頭結構全綠，腳本與指紋數
 /// 不到它、`grep '^#' | cat` 把它印出來。查詢檔的行定義一律走這一支；R45 起剝 `#` 的 `commentBody` 也是（R46 regression：R45 版這裡還寫它是例外）。
 private func startsWithHash(_ s: String) -> Bool { s.unicodeScalars.first == "#" }
 
-/// 包含比對：兩邊都先取 `matchSkeleton`（NFKD、再去掉組合字元），再比 **UTF-8 bytes**。
+/// 包含比對：兩邊都先取 `matchSkeleton`（NFKD、再去掉組合字元與所有 ccc≠0 的純量），再比 **UTF-8 bytes**。
 /// - bytes（R45 DA）：Swift 的 `String.contains` 以 grapheme 比，一條舊查詢後面接一個組合字元（U+0301、U+FE0F、U+20E3——Mn／Me，
 ///   不在 `isForbiddenScalar` 裡）就判不包含，而 judge 的 Python `in`、ltm 的 trigram 與 `grep '^#' | cat` 印出來的純量都照樣連續。
 ///   UTF-8 自同步，所以 bytes 子字串只會在純量邊界命中——等於以純量比。
@@ -57,18 +70,21 @@ private func startsWithHash(_ s: String) -> Bool { s.unicodeScalars.first == "#"
 ///   R46 的註解寫「組合字元仍在純量邊界上、比 judge 寬」，對這一形不成立。去掉之後與順序無關；ltm 的 unicode61 通道預設
 ///   `remove_diacritics=1`，去掉重音的寫法它也會命中，這裡一併涵蓋。
 /// - 相容分解（R47 DA）：NFKD 把 U+017F ſ、U+FB06 ﬆ、U+FB02 ﬂ、U+00B5 µ 摺成 s、st、fl、μ——與 judge 的 casefold 一致。
-/// 合起來是 judge 命中的**超集**：judge 以純量逐字比，而逐字包含在逐純量的分解與去組合字元之下保持（重排只動組合字元、組合字元
-/// 又被去掉），所以方向 fail-closed。代價：`cafe` 會命中 `café`、`cafe` 也會被 `café` 命中。
+/// - 連 ccc≠0 一起去掉（R48 requirements／logic／security／regression）：R47 只去 Mn／Me，而 NFKD 重排的是**所有** ccc≠0 的純量，
+///   其中二十幾個是 Mc（U+302E、U+1B44、U+1D165…）——它們留下、重排仍把 needle 拆開，與 R47-1 同一個形狀。
+/// 合起來是 judge 命中的**超集**：骨架是逐純量的同態——NFKD 對單一純量的分解是固定的，重排只動 ccc≠0 的純量，而它們全被
+/// 去掉——所以逐純量的包含在骨架上保持，方向 fail-closed。代價（都是多拒）：`cafe` 與 `café` 互相命中；韓文音節被拆成字母
+/// （하 ⊂ 한）；相容摺疊（全形、上標、圈號數字、CJK 相容表意字）；去掉的符號裡有帶語意的（濁點、母音點、聲調符號——R48 logic）。
 /// `headerFormerQueries` 與 `retiredOffenders` 的每一個包含判斷都走這一支。
 private func containsScalars(_ haystack: String, _ needle: String) -> Bool {
     byteOccurrences(of: matchSkeleton(needle), in: [matchSkeleton(haystack)]) > 0
 }
 
-/// NFKD、再去掉一般類別是 Mn／Me 的純量。見 `containsScalars`。
+/// NFKD、再去掉一般類別是 Mn／Me、或 ccc 不是 0 的純量。見 `containsScalars`。
 private func matchSkeleton(_ s: String) -> String {
     let kept = s.decomposedStringWithCompatibilityMapping.unicodeScalars.filter { scalar in
         let c = scalar.properties.generalCategory
-        return c != .nonspacingMark && c != .enclosingMark
+        return c != .nonspacingMark && c != .enclosingMark && scalar.properties.canonicalCombiningClass == .notReordered
     }
     return String(String.UnicodeScalarView(kept))
 }
@@ -129,8 +145,8 @@ private struct NotUTF8: Error {}
 ///    `ß`/`SS`、`ς`/`σ`、`ﬁle`(U+FB01)/`file` —— judge 的 `norm()` 判相等，這裡判不等。
 /// 2. **比對本身比 judge 寬**：`Set` 走 Swift String 的**正則等價**，而這個函式從不做 NFC/NFD 正規化。（包含比對不在這裡：
 ///    `retiredOffenders` 與 `headerFormerQueries` 走 `containsScalars`——R45 起以 bytes 比、R46 起先分解、R47 起 NFKD 並去掉組合
-///    字元，所以同樣對正則等價不敏感、是 judge 命中的超集，fail-closed（R46 版寫「NFD、比 judge 寬」，NFD 的重排讓少數形狀比 judge
-///    窄——R47）。R45 版這裡寫「不做正則等價、與 judge 同、這一條現在只剩 `duplicateCount`」，
+///    字元、R48 起連所有 ccc≠0 的純量一起去掉，所以同樣對正則等價不敏感、是 judge 命中的超集，fail-closed（R46 版寫「NFD、比 judge
+///    寬」，NFD 的重排讓少數形狀比 judge 窄——R47；R47 版只去 Mn／Me，ccc≠0 的 Mc 仍被重排——R48）。R45 版這裡寫「不做正則等價、與 judge 同、這一條現在只剩 `duplicateCount`」，
 ///    漏了 `formerQueries` 這類 `Set` 的去重同樣走正則等價、只留一種形式，只比 bytes 時那是 fail-open——R46 logic。）
 ///    查法：`e`+U+0301 與 U+00E9 —— Swift `==` 為真、judge `norm()` 為假。**這一軸與 fold 函式無關**：改寫成手工
 ///    case fold 碰不到它（R25，security）。方向是 fail-closed（假紅、不是漏放）。
@@ -139,8 +155,9 @@ private struct NotUTF8: Error {}
 /// `retiredOffenders`」，方向錯了）：fail-open 發生在**新查詢**含有 casefold 的來源字元時——U+017F ſ→s、U+FB06 ﬆ→st、
 /// U+FB02 ﬂ→fl、U+00B5 µ→μ——要的前提是退役條目不含 casefold 之後的**目標序列**，而今天六條裡至少兩條含（只數、不印）。
 /// 所以一條把某段 `st`／`fl` 寫成連字的新查詢，judge 判它與那條退役查詢相等、`retiredOffenders` 放行；ﬁ／ﬂ 連字常從 PDF
-/// 貼上而來。**R47 起包含比對以 NFKD 比，這四個字元在退役與檔頭兩條約束上都關了**（R47 DA）；仍開的是 NFKD 不處理、只有
-/// case folding 處理的 ß／ς——那一半與 `duplicateCount` 同一個已揭露缺口，但 `foldGap` 的三條輸入只驅動 `duplicateCount`，
+/// 貼上而來。**R47 起包含比對以 NFKD 比，這四個字元在退役與檔頭兩條約束上都關了**（R47 DA）；仍開的是 casefold 與「NFKD 再去組合
+/// 字元」結果不同的字元——例如 ß、ς、U+0345 與帶 iota 下標的希臘字母、古斯拉夫變體字母（R48 logic：R47 版寫「ß／ς」，讀起來是封閉清單；
+/// 查法是對每個 casefold(c)≠c 的碼位比較兩邊的骨架，只數）——那一半與 `duplicateCount` 同一個已揭露缺口，但 `foldGap` 的三條輸入只驅動 `duplicateCount`，
 /// 退役與檔頭那一側沒有 known-issue 臂（R47 requirements）。修法同一個（完整的 Unicode default case folding）。臂：`foldLikeJudge` 摺成**什麼**由 `queryFileChecksAreDrivenByTheirOwnFixture`
 /// 的分隔符那一條釘住（R25：R24 版的兩條 fixture 只驅動「有沒有摺疊」，把分隔符改成 `""` 全綠）。
 private func foldLikeJudge(_ s: String) -> String { s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").lowercased() }
@@ -265,9 +282,10 @@ private let protectedTestWitness: [@Sendable () throws -> Void] = [baselineQuery
 ///      README「取不到歷史時真檔測試具名紅」安靜地變假；(B) 抽成區域變數卻忘了傳（`let former = …; let r = try checkQueryFile(data)`）：
 ///      真檔的 `headerFormerQueries` 恆空（會有 unused 警告）。`wiringGaps` 的 doc 同樣記著。第三個接線點 (C) 是 R45 加的
 ///      `retiredQueries`：R45 版給它預設值 `= retired`，真檔測試靠預設拿到退役清單，把預設改成 `[]` 0 條紅（R46 requirements／
-///      regression）；R46 拿掉預設、真檔測試明傳 `retired`，真檔測試從此不靠預設拿到退役清單。會安靜出錯的只剩「補回預設」加「刪掉明寫引數」
-///      兩步一起做，或把明寫的引數改成 `[]`——都是刻意那一側（R47 requirements 更正 R46 的「那種重構從此編不過」：現在已經沒有
-///      預設可改，補一個 `= []` 照樣編得過，而且因為呼叫點都明寫，那一步本身無害）。（R37 regression：R36 版把這一段插在
+///      regression）；R46 拿掉預設、真檔測試明傳 `retired`，真檔測試從此不靠預設拿到退役清單。會安靜出錯的是**預設值變成 `[]`**：先補回
+///      一個預設並刪掉明寫的引數（補回 `= retired` 時行為不變、無害），再把預設對齊同一行 `formerQueries: Set<String> = []`——兩步都
+///      不刻意（R48 requirements 更正 R47 的「都是刻意那一側」，那與 R46-2 判「不小心就寫得出來」的前提矛盾）；把明寫的引數直接改成
+///      `[]` 也全綠（R47 requirements 更正 R46 的「那種重構從此編不過」：現在已經沒有預設可改，補一個 `= []` 照樣編得過）。（R37 regression：R36 版把這一段插在
 ///      上面「擋住的」清單裡，一個沒人守的項目落在「擋住的」底下，也把 R27 那句註擠到它後面、讀起來像在註解接線缺口。）
 ///      **構造過而擋不住的**（R34；每一點標實測層級）：
 ///      - 本體裡 `try Test.cancel()`（DA，拋棄式包 swift test：`was cancelled`、run passed、RC 0）。**注意**：它與 `guard … return`
@@ -623,6 +641,24 @@ private func historicalQueryFolds(root: URL, relativePath: String) throws -> Set
 private struct GitFailed: Error { let subcommand: String; let status: Int32 }
 private struct UndecodableHistory: Error { let hash: String }
 
+/// `insideGitWorkTree` 由 git 自己判（R48 codex）：外層 repo 的子目錄沒有自己的 `.git`，仍在 work tree 裡；不在任何 repo 裡的目錄不算。
+/// 先前的閘是「`.git` 直接在套件根」，子目錄那一臂在它之下為假——那正是 codex 指出的誤紅。
+@Test("insideGitWorkTree：外層 repo 的子目錄算在 work tree 裡，非 repo 不算")
+func insideGitWorkTreeAsksGit() throws {
+    let dir = try tempDir(), outside = try tempDir()
+    defer { try? FileManager.default.removeItem(at: dir); try? FileManager.default.removeItem(at: outside) }
+    let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/env"); p.currentDirectoryURL = dir
+    p.arguments = ["git", "init", "-q", "-b", "main"]
+    let inherited = ProcessInfo.processInfo.environment   // 同 historicalQueryFolds 的 fixture：不讓呼叫端的 GIT_DIR 把 init 寫進別處
+    p.environment = ["PATH": inherited["PATH"] ?? "/usr/bin:/bin", "HOME": inherited["HOME"] ?? "/",
+                     "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"]
+    try #require(try runDraining(p).status == 0, "git init 失敗")
+    let sub = dir.appendingPathComponent("pkg"); try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+    #expect(insideGitWorkTree(dir))
+    #expect(insideGitWorkTree(sub))        // 子目錄沒有 `.git`：舊的閘在這裡判 false
+    #expect(!insideGitWorkTree(outside))
+}
+
 /// 合成 repo（全部 `ZQXJ-*` 內容、用完即刪）：A→B→刪檔→C（main）；側支 D **併回後刪掉分支**；main 再 E；另一條**還活著**的
 /// 側支 F。期望 {A,B,C,D,E,F}——**兩個 flag 各有自己的臂**（R30 regression：R29 版只有一條活側支，D 靠 `--all` 就到、沒有 merge
 /// 所以簡化沒東西可丟，單獨拿掉 `--full-history` 全綠，而 doc 與 commit message 把它的貢獻歸給了 `--full-history`）：
@@ -814,6 +850,8 @@ func queryFileChecksAreDrivenByTheirOwnFixture() throws {
     #expect(try report("ZQXJ-A\nWQ-E\u{0301}T\n", retiredQueries: ["wq-\u{00E9}t"]).retiredOffenders == [2])   // NFC 存、NFD 寫（R46 logic）
     #expect(try report("ZQXJ-A\nWQ-CAF\u{00C9}\u{0323}\n", retiredQueries: ["wq-caf\u{00E9}"]).retiredOffenders == [2])   // 規範重排：後面接 ccc 較小的組合字元（R47 logic）
     #expect(try report("ZQXJ-A\nZQXJ-\u{FB02}OW\n", retiredQueries: ["zqxj-flow"]).retiredOffenders == [2])   // 連字 ﬂ（R47 DA）
+    #expect(try report("ZQXJ-A\nWQ-A\u{302E}\u{1B44}B\n", retiredQueries: ["wq-a\u{302E}"]).retiredOffenders == [2])   // 規範重排動到 ccc≠0 的 Mc（R48）
+    #expect(try report("ZQXJ-A\nWQ-AB\u{20DD}CE\n", retiredQueries: ["wq-abce"]).retiredOffenders == [2])   // Me 落在 needle 範圍之內（R48 DA：去 Me 的那一半先前沒有臂）
     #expect(try report("ZQXJ-A\n").missingHeaderPhrases.count == requiredHeaderPhrases.count)
     #expect(throws: NotUTF8.self) { try report(bytes: Data([0xFF, 0xFE, 0x41])) }   // 非 UTF-8：拒答不猜
     // 終止符之後不得有註解行（R26 codex 提的是「第一條查詢之後」，R27 換成終止符：把一條查詢加 `#` 退役會讓它脫離其餘
@@ -1173,18 +1211,12 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // 兩個 `Process` 都跑 `/usr/bin/env git` 且都不設 `.environment`，所以 `git` 由**環境 PATH** 解析。
     // R24→R25 刻意用這個換掉硬寫的 `/usr/bin/git`（Nix、非 FHS 佈局），理由記了、**後果沒記**——同一個檔案為
     // `python3` 寫過這種後果句（R26，security）。後果：跑測試的人 PATH 上的 `git` 決定這條斷言驗的是什麼。
-    // 量過**不可從套件內利用**：`Tests/`／`Sources/` 沒有任何 `setenv`／`putenv`，本檔所有 PATH 操作都寫進交給
-    // 單一 `Process` 的 per-child 字典，父行程環境從不被改，所以沒有測試能毒化並行的另一條測試。
-    func gitResolves() -> Bool {
-        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/env") else { return false }
-        let probe = Process()
-        probe.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        probe.arguments = ["git", "--version"]
-        // 這個子行程是**環境 PATH 上的 `git`**，輸出不受本 repo 控制——走共用的 `runDraining`（兩條 pipe 同時排空）。
-        guard let r = try? runDraining(probe) else { return false }
-        return r.status == 0
-    }
-    let gitAvailable = FileManager.default.fileExists(atPath: root.appendingPathComponent(".git").path) && gitResolves()
+    // 量過**不可從套件內利用**：`Tests/` 沒有任何 `setenv`／`putenv`；`Sources/` 唯一的一處是 #71 在 `ltm mcp` 啟動時設批次大小，
+    // 它跑在 `ltm mcp` 子行程裡、不在測試行程。本檔所有 PATH 操作都寫進交給單一 `Process` 的 per-child 字典，測試行程的環境從不
+    // 被改，所以沒有測試能毒化並行的另一條測試。
+    // R48 codex：先前要求 `.git` 直接在套件根，套件放在外層 repo 的子目錄時會誤報「不在 checkout 裡」（fail-closed 的誤紅）；
+    // 同一個檔的 fixture 測試早就處理「套件目錄不是 repo 頂層」。現在交給 git 自己判：`insideGitWorkTree`。
+    let gitAvailable = insideGitWorkTree(root)
     #expect(gitAvailable, "不在 git checkout 裡，或 PATH 上沒有可執行的 git：`.gitattributes` 的 -diff 屬性這一條沒有驗到（不是屬性錯了）")
     if gitAvailable {
     checkAttr.executableURL = URL(fileURLWithPath: "/usr/bin/env")

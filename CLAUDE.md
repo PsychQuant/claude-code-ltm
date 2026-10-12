@@ -326,8 +326,8 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 `F='<file 的絕對路徑>'; B=$(mktemp) && cp "$F" "$B" || exit 1; trap "cp '$B' '$F' && rm -f '$B' || echo 'restore or cleanup failed; backup at $B' >&2" EXIT && trap 'exit 130' INT && trap 'exit 143' TERM && trap 'exit 141' PIPE || exit 1`
 → 改 → `cmp -s "$B" "$F"; [ $? -eq 1 ] || { echo 'FAIL: 變異沒生效或 cmp 出錯'; exit 1; }` → 跑（`timeout -s INT -k 10 N /usr/bin/swift test`，
 **N＋10＋備份還原的餘裕**低於 Bash 工具的逾時）——還原與刪備份由 EXIT trap 做；紅要是某一條**具名測試**失敗，不是非零 rc（逾時 124、
-kill-after 137 也是非零）。**一個 shell 只有一個 EXIT trap**（`trap … EXIT` 是取代）：**一個 call 只用一次這一行**——直接用第二次，
-檔案會停在第一次的變異、原檔只剩在第一次的備份裡（#63 R38）。要迴圈，每一輪包進 subshell `( … )`；要同時保護兩個檔，用巢狀
+kill-after 137 也是非零）。**一個 shell 只有一個 EXIT trap**（`trap … EXIT` 是取代）：**這一行在同一個 shell 裡至多執行一次**——第二次執行（不論來自迴圈、函式呼叫、`source`
+或 `eval`），檔案會停在第一次的變異、原檔只剩在第一次的備份裡（#63 R38；R48 logic：R47 版只寫迴圈，函式呼叫兩次照字面合格）。要做第二次，每一次包進 subshell `( … )`；要同時保護兩個檔，用巢狀
 `( 配方 f1; 改 f1; cmp f1; ( 配方 f2; 改 f2; cmp f2; 測試 ) )`（每個檔在自己的配方之後改、之後 `cmp`——#63 R40）——平鋪用兩次，第一個檔會
 安靜地停在變異。**凡是用 subshell（迴圈與巢狀都算），call 開頭都先放 `trap 'exit 130' INT; trap 'exit 143' TERM`，而且放在跑迴圈的那一個
 shell（巢狀就是最外層）**（子 shell 裡的訊號 trap 保護不到外層：沒有它，bash 收到 INT 迴圈會繼續、TERM 會讓外層先死、子 shell 變成孤兒才還原——#63 R39；
@@ -342,11 +342,13 @@ bash 在 `( … )` 裡會重設已設的 trap，把迴圈再包一層就失效�
 bash 5.3 在配方放在頂層或 `{ … }` 群組、stderr 併進管線時反而因它停在變異（#63 R42）——所以只 pipe 測試命令。worktree 配方的清除 trap 也有 PIPE，
 而且它的 EXIT trap **不得帶任何重導**、以 `git -C` 執行、`R`／`W` 用雙引號在設定當下綁定、不跑 `worktree prune`（它作用於整個 repo——#63 R44）——帶重導時 zsh 下清除會死鎖、永遠卡住（#63 R42：R41 版就是這樣；R42 版的群組重導
 在 bash 5.3 還會留樹，#63 R43）；bash 5.3 把 stderr 併進管線、在頂層或 `{ … }` 群組裡跑時仍會留樹，bash 3.2 的 `{ … } | …` 也會。收尾要查卡死的行程：
-**只處理自己記下的**——worktree 區塊第一行印出自己的 PID 與啟動時間（在 `( … )` 裡 `$$` 是外層 shell），收尾時在同一個 call 裡核對那一行仍一致，
-**先收集整棵子孫**、送 TERM、等 2 秒、還活著的才 `kill -9`（先殺父行程，子行程會被 PID 1 收養而漏掉；PID 會被重用；卡住的對 TERM 不反應；命令在
-README 規則 1，三種 shell 驗過——#63 R47）；沒記下的一律不殺，只用 `ps -axo pid=,ppid=,lstart=,ucomm=` 列出回報——cwd、父行程、啟動時間都分不出
+**只處理自己記下的**——worktree 區塊與自己的探針第一行都印出自己的 PID 與啟動時間（`LC_ALL=C`；在 `( … )` 裡 `$$` 是外層 shell），收尾時在同一個 call 裡逐筆核對
+那一行仍一致（不符的跳過、繼續下一筆），**先收集整棵子孫連同各自的啟動時間**、送 TERM、等 2 秒、**再收集一次**（TERM 觸發的 EXIT trap 會生出新的子行程）、
+只對啟動時間沒變的 `kill -9`、最後再查一次（先殺父行程，子行程會被 PID 1 收養而漏掉；PID 會被重用；卡住的對 TERM 不反應；命令在 README 規則 1，三種 shell
+驗過——#63 R47、R48）。記下的 shell 被外層 `timeout -k` 殺掉之後，它忽略 TERM 的子行程會成為 PPID 1 的孤兒（GNU timeout 只在直接子行程撐過 TERM 時才送 KILL——
+#63 R48）：那種孤兒沒有記下，只能列出回報；沒記下的一律不殺，只用 `ps -axo pid=,ppid=,lstart=,ucomm=` 列出回報——cwd、父行程、啟動時間都分不出
 並行 session 的活 shell（每個 harness shell 都掛在 `claude bg-spare` 底下、cwd 都被重設成 repo 根）；**不印 argv**（`ps … command`、`pgrep -fl` 會印出全機 argv，含跑中的
-查詢；`comm` 只印 argv[0]，但它可被 `exec -a` 改寫——#63 R47 更正 R46 的說法）。#63 R43：R42 reviewer 留下的兩個掛了 23 小時，`pgrep -f` 比字串看不到腳本檔跑的區塊、也會比到別的 reviewer 正在跑的區塊（harness 把每個 Bash call 跑成 `zsh -c '<全文>'`）；
+查詢；`comm` 只印 argv[0]，但它可被 `exec -a` 改寫——#63 R47 更正 R46 的說法）。#63 R43：R42 reviewer 留下的兩個掛了 23 小時；R43 版的 `pgrep -f` 比字串看不到腳本檔跑的區塊（R44 requirements）、也會比到別的 reviewer 正在跑的區塊（harness 把每個 Bash call 跑成 `zsh -c '<全文>'`——R44 security）；
 R44 把時間方向寫反；R45 以 cwd 判歸屬擋不住同一個 repo 的並行 session（R46）。**verify 的 worktree 裡不用這一行**：照抄 `F='…'` 只寫得出共用樹的路徑，變異會打在共用樹上、
 worktree 的測試看不到（#63 R39），那裡用 `git -C "${W:?}" checkout HEAD -- <指名路徑>` 還原測試檔；替身只能重跑替身那一行與它的閘（它讀 `$R`、寫 `$W`，不要重算 `R`；#63 R45：R44 版漏了閘），兩個查詢檔不得出現在
 任何 checkout／restore 裡（任何 rev、任何旗標——#63 R40）。**這一行照抄、不要手打**：zsh 對單一參數的 `trap`（收尾引號放到 `EXIT` 後面）回 0 卻什麼都沒裝，`&&`
