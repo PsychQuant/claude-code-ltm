@@ -13,7 +13,7 @@
 #   暖態四輪（兩臂都先暖過；每輪輪換兩臂的先後，各先兩次——三輪平衡不了，R2-19）、冷態每臂一個樣本；那是 #61 量測紀錄的 A/B。
 #   GATE_MATRIX_SECTIONS 選要跑的段（沒設是 ABCD；#61 的 6.1 只要 D：GATE_MATRIX_SECTIONS=D）。設成空字串會拒跑——
 #   先前空字串會被當成沒設、跑完全部 11 次 purge（R2-19）。
-#   layout 的檢查（四張表都在、meta 的 layout_version 是 6 或 7——#67 的 layout 7 只改哪些 turn 產出 chunk，表結構與 6 相同，
+#   layout 的檢查（四張表都在、meta 的 layout_version 是 6 或 7——#67 的 layout 7 只改哪些 turn 產出 chunk，表結構與 6 相同（#67 對 IndexDatabase.swift 只改了版本常數，沒有 DDL 改動），
 #   而兩者同一次發版，線上索引會是 7）在 sudo 之前做——GATE_MATRIX_DB，或不跑 A 段時；預設路徑又要跑 A 段時不做，
 #   因為它會讀索引的第 1 頁，A 段第一個樣本就不再是自然冷；那時 layout 5 的索引要到 sudo 之後的第一次 warmup 才停。
 # 用法：在自己的終端機執行  zsh scripts/probes/gate-matrix.sh

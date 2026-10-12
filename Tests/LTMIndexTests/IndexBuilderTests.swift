@@ -3438,14 +3438,72 @@ func aLayoutFiveIndexIsRebuilt() throws {
     #expect(report.audits.map(\.moment) == [.afterBuild])
     let database = try IndexDatabase(path: derived.databaseURL.path)
     defer { database.close() }
-    // 字面值，不是 `IndexDatabase.layoutVersion`：builder 蓋的就是那個常數，拿它比永遠成立。這裡是 #67 的
-    // 6 → 7 唯一的釘子——改回 6 時要紅（#67 verify R1-3：只比常數時全套照樣綠）。
+    // 字面值，不是 `IndexDatabase.layoutVersion`：builder 蓋的就是那個常數，拿它比永遠成立。這裡與
+    // `aLayoutSixIndexDropsResultOnlyChunks` 釘住 #67 的 6 → 7——改回 6 時要紅（#67 verify R1-3：只比常數時全套照樣綠）。
     #expect(try database.stamps().layoutVersion == 7)
     #expect(try database.auditDerivedCounts().isClean)
 }
 
 /// #67：用未發版 build 建過的 layout 6 索引，還留著 #67 之前的規則產出的「只有 tool_result」chunk。升到 7 時
 /// 整份重建，那些 chunk 消失、其他 turn 留著、稽核通過（#67 verify R2，codex：先前只測了 layout 5）。
+/// #67 verify R3（codex）：已索引的檔案只追加 result-only 紀錄時，那段尾巴不產出 chunk，但游標仍要前進到檔尾
+/// ——否則下一次增量會重讀或卡在那段尾巴。
+@Test("只追加 result-only 紀錄：增量 build 的游標前進到檔尾、計入 toolResultOnly，下一次不重讀，與全量重建相同")
+func appendingOnlyResultOnlyRecordsAdvancesTheCursor() throws {
+    let (corpus, derived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: corpus)
+        try? FileManager.default.removeItem(at: derived.root)
+    }
+    let normal = turnLine(uuid: "00000000-aaaa-bbbb-cccc-dddddddddddd", session: session, role: "user", text: "第一段內容")
+    let file = try writeSession(in: corpus, project: "proj-one", file: "session.jsonl", lines: [normal])
+    let builder = IndexBuilder(
+        location: derived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A"))
+    _ = try builder.build()
+    let tail = [1, 2].map {
+        blockTurnLine(uuid: String(format: "%08x-aaaa-bbbb-cccc-dddddddddddd", $0), role: "user",
+                      blocks: [["type": "tool_result", "content": "x"]])
+    }
+    let handle = try FileHandle(forWritingTo: file)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((tail.joined(separator: "\n") + "\n").utf8))
+    try handle.close()
+
+    let appended = try builder.build()
+    #expect(appended.skipped.toolResultOnly == 2)
+    let size = try #require(try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int)
+    do {
+        let database = try IndexDatabase(path: derived.databaseURL.path)
+        defer { database.close() }
+        var processed = -1
+        try database.query("SELECT processed_bytes FROM scan_state WHERE source_key = 'proj-one/session.jsonl'") {
+            processed = Int(columnText($0, 0)) ?? -1
+        }
+        #expect(processed == size, "游標要前進到檔尾：processed \(processed)，檔案 \(size) bytes")
+    }
+    let again = try builder.build()
+    #expect(again.skipped.toolResultOnly == 0, "尾巴已經讀過，下一次增量不該重讀")
+    func texts(_ location: DerivedLocation) throws -> [String] {
+        let database = try IndexDatabase(path: location.databaseURL.path)
+        defer { database.close() }
+        var found: [String] = []
+        try database.query("SELECT text FROM chunks ORDER BY uuid") { found.append(columnText($0, 0)) }
+        return found
+    }
+    let (unusedCorpus, fullDerived) = try makeWorkspace()
+    defer {
+        try? FileManager.default.removeItem(at: unusedCorpus)
+        try? FileManager.default.removeItem(at: fullDerived.root)
+    }
+    _ = try IndexBuilder(
+        location: fullDerived, scanner: CorpusScanner(corpusRoot: corpus, anchorKey: .forTesting),
+        embedder: StubEmbedder(revision: "rev-A")
+    ).build()
+    #expect(try texts(derived) == ["第一段內容"])
+    #expect(try texts(derived) == texts(fullDerived))
+}
+
 @Test("layout 6 的索引：下一次 build 整份重建到 layout 7，只有 tool_result 的 chunk 消失、其他 turn 留著")
 func aLayoutSixIndexDropsResultOnlyChunks() throws {
     let (corpus, derived) = try makeWorkspace()
