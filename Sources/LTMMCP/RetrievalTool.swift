@@ -30,6 +30,18 @@ public enum RetrievalTool {
     /// 上限只在批次開頭檢查，所以它不是端到端的上界。要改它，先照 `docs/latency-budget.md` 量。
     public static let defaultRefreshBudgetSeconds = 20
 
+    /// MCP 查詢前併入的批次大小預設（chunk 數，#71 verify R1）。與 recall hook 相同：
+    /// `docs/measurements/2026-09-04-proactive-recall.md` §2 記錄 2,000 一批約 25 秒，比上限還長——
+    /// 上限只在批次開頭檢查，批次大於上限時，有 backlog 的呼叫每次都至少跑完一整批。
+    public static let defaultBatchChunks = 200
+
+    /// `LTM_BUILD_BATCH_CHUNKS` 沒設或是空字串時，MCP server 要設成的值；使用者設了就回 `nil`（照用，
+    /// 無效值由 `BuildTuning` 拒絕並在回應裡說）。與 hook 的 `${LTM_BUILD_BATCH_CHUNKS:-200}` 同一個語意。
+    public static func batchChunksDefault(environment: [String: String]) -> String? {
+        if let raw = environment["LTM_BUILD_BATCH_CHUNKS"], !raw.isEmpty { return nil }
+        return String(defaultBatchChunks)
+    }
+
     /// 由環境決定 MCP 查詢前併入的上限（server 啟動時讀一次，#71）。
     ///
     /// `LTM_MCP_REFRESH_SECONDS` 是正整數就用它；沒設用預設；其他值（含空字串、0）也用預設，並回傳一則
@@ -52,12 +64,26 @@ public enum RetrievalTool {
     /// - Parameters:
     ///   - refreshBudget: 查詢前併入的上限（秒）。**刻意沒有預設值**：先前這一層呼叫 `service.query` 時根本
     ///     沒傳上限，每次查詢都要併完整段落後的語料才回答（#71 的根因）。`nil` 是「不設限」，要明寫。
-    ///   - rejections: server 啟動時解析上限被拒絕的說明，每個回應都帶。
+    ///   - rejections: server 啟動時解析上限被拒絕的說明，每個回應都帶——成功的回應放在警告行，錯誤的回應
+    ///     附在錯誤訊息之後。同樣刻意沒有預設值：漏傳時要編不過（#71 verify R1）。
     public static func make(
         service: @escaping @Sendable () throws -> LTMService, refreshBudget: TimeInterval?,
-        rejections: [String] = []
+        rejections: [String]
     ) -> MCPTool {
-        MCPTool(
+        let answer: @Sendable ([String: Any]) throws -> String = { arguments in
+            guard let query = arguments["query"] as? String, !query.isEmpty else {
+                throw ToolError.missingQuery
+            }
+            let limit = (arguments["limit"] as? Int) ?? 10
+            let allProjects = (arguments["all_projects"] as? Bool) ?? false
+
+            let service = try service()
+            let scope: RetrievalEngine.Scope =
+                allProjects ? .allProjects : try currentProjectScope()
+            let outcome = try service.query(text: query, limit: limit, scope: scope, refreshBudget: refreshBudget)
+            return render(outcome, startupRejections: rejections)
+        }
+        return MCPTool(
             name: "ltm_query",
             description: """
                 查詢這台機器上過去的 Claude Code 對話。回傳帶 (project, sessions, \
@@ -83,18 +109,20 @@ public enum RetrievalTool {
                 "required": ["query"],
             ]
         ) { arguments in
-            guard let query = arguments["query"] as? String, !query.isEmpty else {
-                throw ToolError.missingQuery
+            do {
+                return try answer(arguments)
+            } catch where !rejections.isEmpty {
+                // 錯誤的回應也帶啟動時的拒絕（spec：每個回應都帶）。MCPProtocol 以 `\(error)` 印錯誤。
+                throw AnnotatedError(base: error, notes: rejections)
             }
-            let limit = (arguments["limit"] as? Int) ?? 10
-            let allProjects = (arguments["all_projects"] as? Bool) ?? false
-
-            let service = try service()
-            let scope: RetrievalEngine.Scope =
-                allProjects ? .allProjects : try currentProjectScope()
-            let outcome = try service.query(text: query, limit: limit, scope: scope, refreshBudget: refreshBudget)
-            return render(outcome, startupRejections: rejections)
         }
+    }
+
+    /// 錯誤之後附上幾行說明（#71：啟動時被拒絕的 `LTM_MCP_REFRESH_SECONDS`）。
+    struct AnnotatedError: Error, CustomStringConvertible {
+        let base: any Error
+        let notes: [String]
+        var description: String { (["\(base)"] + notes.map { "⚠ \($0)" }).joined(separator: "\n") }
     }
 
     /// 由工作目錄推導 project（#4：預設只搜當前 project）。

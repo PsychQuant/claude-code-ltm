@@ -529,7 +529,8 @@ enum QueryCommand {
           --compare            兩個策略交錯呈現並記錄（隱含 --record，與 --strategy 互斥）
           --json               輸出 JSON
           --format recall      給 hook 注入用的標記區塊（與 --json 互斥）
-          --max-refresh-seconds <N>  查詢前併入的牆鐘預算；預算到就用已提交的索引作答並報落後
+          --max-refresh-seconds <N>  查詢前併入的牆鐘預算，只在每一批開頭檢查（不是併入的上界）；
+                                     過了期限就用已提交的索引作答並報落後；有預算時不併入改寫過的來源
           --exclude-session <id>     丟掉只屬於該 session 的命中（resume 副本保留）
           -h, --help
 

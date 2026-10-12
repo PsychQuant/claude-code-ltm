@@ -14,14 +14,14 @@ import LTMCore
 
 private func outcome(
     deferred: Bool, rejections: [String] = [], unreadable: [String] = [],
-    hits: [QueryHit] = [], unmerged: Int = 0
+    hits: [QueryHit] = [], unmerged: Int = 0, exhausted: Bool? = nil
 ) -> QueryOutcome {
     QueryOutcome(
         hits: hits, strategyID: "archival",
         refresh: RefreshReport(
             sourcesRefreshed: 0, sourcesUnreadable: unreadable, sourcesInvalidated: 0,
             skipped: SkipTally(), mergeDeferredForConcurrentBuild: deferred,
-            tuningRejections: rejections, unmergedSources: unmerged, budgetExhausted: unmerged > 0),
+            tuningRejections: rejections, unmergedSources: unmerged, budgetExhausted: exhausted ?? (unmerged > 0)),
         eventsRecorded: 0, unattributableResults: 0)
 }
 
@@ -61,6 +61,40 @@ func theLagLineAppearsWheneverSourcesAreUnmerged() {
     #expect(withHits.contains("內容片段"))
     let merged = RetrievalTool.render(outcome(deferred: false, hits: [sampleHit()], unmerged: 0))
     #expect(!merged.contains("索引落後"), "沒有未併入的來源時不該有落後行，實得：\(merged)")
+}
+
+@Test("落後行的觸發是 unmergedSources，不是 budgetExhausted：跳過改寫來源而期限沒到時也要說（#71 verify R1）")
+func theLagLineFollowsUnmergedSourcesNotTheExhaustedFlag() {
+    // 有界模式跳過改寫過的來源時，期限可能還沒到（exhausted = false）而 unmerged > 0——這正是 MCP 上會一直
+    // 持續的落後（改寫來源只有 `ltm build` 會併入）。觸發條件若退成 budgetExhausted，這種落後就沒人說。
+    let skippedRewrite = RetrievalTool.render(outcome(deferred: false, unmerged: 1, exhausted: false))
+    #expect(skippedRewrite.contains(ShortfallMessage.line(unmergedSources: 1)), "實得：\(skippedRewrite)")
+    let exhaustedButMerged = RetrievalTool.render(outcome(deferred: false, unmerged: 0, exhausted: true))
+    #expect(!exhaustedButMerged.contains("索引落後"), "實得：\(exhaustedButMerged)")
+}
+
+@Test("錯誤的回應也帶啟動時的拒絕（#71 verify R1）")
+func aStartupRejectionAlsoRidesOnErrors() throws {
+    let rejection = "LTM_MCP_REFRESH_SECONDS=abc 不是正整數，已忽略"
+    let tool = RetrievalTool.make(
+        service: { throw RetrievalTool.ToolError.missingQuery }, refreshBudget: 1, rejections: [rejection])
+    do {
+        _ = try tool.run([:])
+        Issue.record("缺 query 時應該丟錯")
+    } catch {
+        let text = "\(error)"
+        #expect(text.contains("缺少 query"), "原本的錯誤要在：\(text)")
+        #expect(text.contains("⚠ " + rejection), "拒絕要附在錯誤之後：\(text)")
+    }
+}
+
+@Test("MCP 的批次預設：LTM_BUILD_BATCH_CHUNKS 沒設或空字串時是 200，設了就照用（#71 verify R1）")
+func theMCPBatchDefaultFollowsTheHook() {
+    #expect(RetrievalTool.defaultBatchChunks == 200)
+    #expect(RetrievalTool.batchChunksDefault(environment: [:]) == "200")
+    #expect(RetrievalTool.batchChunksDefault(environment: ["LTM_BUILD_BATCH_CHUNKS": ""]) == "200")
+    #expect(RetrievalTool.batchChunksDefault(environment: ["LTM_BUILD_BATCH_CHUNKS": "2000"]) == nil)
+    #expect(RetrievalTool.batchChunksDefault(environment: ["LTM_BUILD_BATCH_CHUNKS": "abc"]) == nil)
 }
 
 @Test("啟動時被拒絕的 LTM_MCP_REFRESH_SECONDS 以警告行出現在回應裡（#71）")
@@ -143,6 +177,19 @@ func rejectionNewlinesAreFlattenedAtTheSource() {
         .notAPositiveInteger(variable: "LTM_BUILD_BATCH_CHUNKS", value: injected))
     #expect(!text.contains("\n"), "換行必須被壓平，實得：\(text)")
     #expect(text.count < 200, "超長值必須截斷，實得長度 \(text.count)")
+}
+
+@Test("消毒也壓平 Unicode 換行字元，長度以 scalar 計（#71 verify R1 security）")
+func rejectionUnicodeLineBreaksAreFlattened() {
+    for separator in ["\u{2028}", "\u{2029}", "\u{85}", "\u{0B}", "\u{0C}", "\r\n"] {
+        let text = LTMService.describeForTesting(
+            .notAPositiveInteger(variable: "LTM_MCP_REFRESH_SECONDS", value: "9" + separator + "偽造的一行"))
+        #expect(!text.unicodeScalars.contains { CharacterSet.newlines.contains($0) }, "\(Array(separator.unicodeScalars))：\(text)")
+    }
+    // 一個字母後面接一千個組合字元：以字元計只有一個，以 scalar 計要被截斷。
+    let stacked = String(repeating: "a" + String(repeating: "\u{0301}", count: 1_000), count: 5)
+    let text = LTMService.describeForTesting(.notAPositiveInteger(variable: "LTM_MCP_REFRESH_SECONDS", value: stacked))
+    #expect(text.unicodeScalars.count < 200, "以 scalar 計要截斷，實得 \(text.unicodeScalars.count) 個 scalar")
 }
 
 /// #54：`sourcesUnreadable` 也要進 MCP 回應——「沒有命中」可能因為來源根本讀不到，

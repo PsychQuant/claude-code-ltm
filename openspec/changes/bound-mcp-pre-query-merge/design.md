@@ -23,7 +23,11 @@ The #71 handoff note from #76 (`issuecomment-6106998187`) adds two constraints: 
 
 ### Default bound of 20 seconds, labelled as a starting value
 
-The end-to-end budget is 30 seconds. Retrieval time on today's index has not been measured, so the split is a guess: 20 seconds for the merge leaves about 10 for retrieval and rendering. Alternatives were 15 seconds (catches up the backlog more slowly) and 25 seconds (leaves about 5 for retrieval). The value is a named constant with a comment saying it is not measured and pointing at `docs/latency-budget.md`.
+The end-to-end budget is 30 seconds. Retrieval time on today's index has not been measured, so the split is a guess: 20 seconds for the merge leaves about 10 for retrieval and rendering. Alternatives were 15 seconds and 25 seconds (leaves about 5 for retrieval). The value is a named constant with a comment saying it is not measured and pointing at `docs/latency-budget.md`.
+
+### Batches of 200 chunks, as the hook uses
+
+The bound is checked only at the start of each batch. `docs/measurements/2026-09-04-proactive-recall.md` §2 recorded about 25 seconds for one batch of the default 2,000 chunks — longer than the bound — which is why the hook sets 200. With 2,000, any call that starts a batch runs it whole, so 15, 20 and 25 seconds would merge the same amount and take about as long (verify R1, inferred from that record, not measured again). `MCPCommand` therefore sets `LTM_BUILD_BATCH_CHUNKS=200` in its own environment at start when the variable is unset or empty, the same rule as the hook's `${LTM_BUILD_BATCH_CHUNKS:-200}`; a value the user set is used as is (user decision `issuecomment-6111570876`).
 
 ### Override through `LTM_MCP_REFRESH_SECONDS`, parsed once at server start
 
@@ -43,31 +47,33 @@ The ltm-cli requirement "ltm query can bound the pre-query merge and reports the
 
 ### Update the analogy file in the same change
 
-`.claude/rules/ltm-analogy.md` argues against a SessionEnd merge because query-time merging is seamless and fails loudly. With bounded merges on both the hook path (#64) and MCP, an answer can come from a lagging index and the lag line reaches only the model. The table and the "premise for reopening" paragraph are updated to say that a SessionEnd merge would now buy coverage as well as latency, and that the measurement precondition still holds.
+`.claude/rules/ltm-analogy.md` argues against a SessionEnd merge because query-time merging is seamless and fails loudly. With bounded merges on both the hook path (#64) and MCP, an answer can come from a lagging index; the hook's lag line reaches only the model (#81), and whether a user sees it in an MCP response has not been checked. The table and the "premise for reopening" paragraph are updated to say that a SessionEnd merge would now buy coverage as well as latency, and that the measurement precondition still holds.
 
 ## Implementation Contract
 
-- **Observable behavior**: an MCP `ltm_query` call with a backlog larger than the bound commits whole batches up to the first batch boundary after the deadline, answers from that index, and its response begins with the lag line naming the unmerged source count; with a small backlog the response is identical to today's.
+- **Observable behavior**: an MCP `ltm_query` call with a backlog larger than the bound commits whole batches up to the first batch boundary after the deadline, answers from that index, and its response begins with the lag line naming the unmerged source count; with a small backlog of new content only, the response is identical to today's. Rewritten sources are never merged by a bounded call, whatever the bound is (`IndexBuilder.build` skips them whenever a budget is passed), so a backlog that contains one always yields the lag line until `ltm build` runs — before this change the unbounded MCP call merged them.
 - **Interface**: `RetrievalTool.make(service:refreshBudget:rejections:)`, where `refreshBudget` is seconds as `TimeInterval` and `rejections` are the startup parse rejections; a default-bound constant; a shared lag-line function in `LTMService`.
-- **Configuration**: `LTM_MCP_REFRESH_SECONDS`, a positive integer; unset means 20; invalid means 20 plus a warning line on every response.
+- **Configuration**: `LTM_MCP_REFRESH_SECONDS`, a positive integer; unset means 20; invalid means 20 plus a warning line on every response (successful responses carry it among the warnings, error responses after the error text). `LTM_BUILD_BATCH_CHUNKS` unset or empty means 200 for the MCP server.
 - **Failure modes**: unchanged. `lockHeld` still yields the merge-deferred warning; `lockUnavailable` still fails the call.
 - **Acceptance**:
   - `RetrievalToolRenderTests`: lag line present with hits and with zero hits when `unmergedSources > 0`, absent when 0; a startup rejection appears as a warning.
   - A tool-level test runs `RetrievalTool` against a fixture backlog with a stepping clock and a 1-second bound and finds the lag line; the same backlog with a large bound produces no lag line and identical hits.
   - The CLI and recall-format wording tests still pass against the shared function.
   - Removing the budget argument from the tool's `service.query` call turns the tool-level test red (mutation, CLAUDE.md recipe).
+  - Subprocess tests of `ltm mcp` pin the server's wiring: passing `nil` as the budget, dropping the batch default, or dropping the rejections each turns a named test red (verify R1 found that none of them did).
   - The full suite passes.
-- **Scope boundaries**: in scope — the MCP tool, `MCPCommand` startup parsing, the shared lag line, the wording of the ltm-cli bounded-merge requirement (no behavior change), the measurement script's environment whitelist (one name added, required by the whitelist sync test), the analogy file, `docs/latency-budget.md`'s MCP row, `plugin/README.md`, CHANGELOG. Out of scope — the CLI flag's behavior, the hook, `IndexBuilder`, cancellation, progress.
+- **Scope boundaries**: in scope — the MCP tool, `MCPCommand` startup parsing and its batch default and test clock seam, the shared lag line, the sanitizer of rejected values (`LTMService.describe`), the `ltm query --help` line for `--max-refresh-seconds`, the two plugin skills that describe query-time merging, the wording of the ltm-cli bounded-merge requirement (no behavior change), the measurement script's environment whitelist (one name added, required by the whitelist sync test), the analogy file, `docs/latency-budget.md`'s MCP row, `plugin/README.md`, CHANGELOG. Out of scope — the CLI flag's behavior, the hook, `IndexBuilder`, cancellation, progress.
 
 ## Risks / Trade-offs
 
-- [Answers from a lagging index] → the lag line says how many sources are missing; it reaches only the model, as recorded in #81.
-- [The backlog never catches up when queries are rare] → each call commits whole batches, so the backlog shrinks across calls; whether it keeps up is not established, and `ltm build` remains the catch-up path (#71 Residue).
+- [Answers from a lagging index] → the lag line says how many sources are missing. On the hook it reaches only the model (#81); whether a user sees it in an MCP response has not been checked.
+- [Rewritten sources wait for `ltm build`] → a bounded merge cannot stop between deleting and re-inserting a rewritten source, so it skips them; until `ltm build` runs, the old text of a rewritten transcript (for example one where a pasted secret was deleted) stays searchable through MCP and the hook, and every response carries the lag line. The user kept the bound and asked for a follow-up that lets small rewrites happen inside the bound (`issuecomment-6111570876`; #86).
+- [The backlog never catches up when queries are rare] → a call commits whole batches when the work before the first batch check (the scan of all new bytes among it) finishes inside the bound; when that work alone exceeds the bound, the call commits nothing and the next call re-scans the same backlog. Whether the backlog keeps up is not established, and `ltm build` remains the catch-up path (#71 Residue).
 - [20 seconds may be wrong] → it is a labelled starting value; #79 and #75 measurements are the place to revise it.
 
 ## Migration Plan
 
-No data migration. Operators who prefer the old unbounded behavior can set `LTM_MCP_REFRESH_SECONDS` to a large value.
+No data migration. No value of `LTM_MCP_REFRESH_SECONDS` restores the old unbounded behavior: any bound makes the merge skip rewritten sources. A large value only makes the deadline unreachable for new content.
 
 ## Open Questions
 

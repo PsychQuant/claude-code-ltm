@@ -1553,3 +1553,107 @@ func theCLIDescribesAnOwedAuditWhileTheLockIsHeld() throws {
     #expect(!result.err.contains(AuditMessage.owedLine(mergeDeferred: false)))
 }
 
+
+// MARK: - #71：MCP server 的接線（上限、批次、啟動時的拒絕）
+
+/// 起一個 `ltm mcp`，送 initialize 與一次 `ltm_query`（跨 project），關掉 stdin，回傳那次查詢的回應文字。
+///
+/// 存在的理由（#71 verify R1）：工具層的測試建構 `RetrievalTool` 時自己傳上限，所以 `MCPCommand` 改傳
+/// `refreshBudget: nil`（#71 的根因）或拿掉 `rejections`，全套照樣綠——生產入口那一行沒有人守。
+/// 環境先拿掉 `LTM_BUILD_BATCH_CHUNKS` 與 `LTM_MCP_REFRESH_SECONDS`，再套 `extra`：跑測試的人的環境不得
+/// 影響結果。
+private func runMCPQuery(_ query: String = "內容", environment extra: [String: String]) throws -> (text: String, isError: Bool) {
+    let process = Process()
+    process.executableURL = try ltmExecutable()
+    process.arguments = ["mcp"]
+    var environment = ProcessInfo.processInfo.environment
+    environment["LTM_ANCHOR_KEY"] = String(repeating: "2a", count: 32)
+    environment["LTM_BUILD_BATCH_CHUNKS"] = nil
+    environment["LTM_MCP_REFRESH_SECONDS"] = nil
+    for (key, value) in extra { environment[key] = value }
+    process.environment = environment
+    let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
+    process.standardInput = stdin
+    process.standardOutput = stdout
+    process.standardError = stderr
+    try process.run()
+    _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+    let call: [String: Any] = [
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": ["name": "ltm_query", "arguments": ["query": query, "all_projects": true]],
+    ]
+    let callLine = String(data: try JSONSerialization.data(withJSONObject: call), encoding: .utf8)!
+    try stdin.fileHandleForWriting.write(contentsOf: Data((
+        #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"# + "\n" + callLine + "\n").utf8))
+    try stdin.fileHandleForWriting.close()
+    let out = stdout.fileHandleForReading.readDataToEndOfFile()
+    _ = stderr.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    for line in String(decoding: out, as: UTF8.self).split(separator: "\n") {
+        guard let object = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+            (object["id"] as? Int) == 2, let result = object["result"] as? [String: Any],
+            let content = result["content"] as? [[String: Any]], let text = content.first?["text"] as? String
+        else { continue }
+        return (text, (result["isError"] as? Bool) ?? false)
+    }
+    struct NoQueryResponse: Error {}
+    throw NoQueryResponse()
+}
+
+/// 一個已經建好索引的工作區，再加三個各 100 則 turn 的新來源（backlog 300 個 chunk）。
+private func workspaceWithBacklog() throws -> CLIWorkspace {
+    let workspace = try CLIWorkspace.make(texts: ["既有的內容"])
+    let built = try runCLI(["build"], environment: workspace.environment)
+    #expect(built.code == 0, "前提：初始 build 成功：\(built.err)")
+    for file in 1...3 {
+        let lines = (0..<100).map { index -> String in
+            let object: [String: Any] = [
+                "type": "user",
+                "uuid": String(format: "%08x-bbbb-bbbb-cccc-dddddddddddd", file * 1_000 + index),
+                "sessionId": "11111111-2222-3333-4444-555555555555",
+                "timestamp": "2026-08-17T06:00:00.000Z",
+                "message": ["role": "user", "content": "新的內容 \(file)-\(index)"],
+            ]
+            return String(data: try! JSONSerialization.data(withJSONObject: object), encoding: .utf8)!
+        }
+        try (lines.joined(separator: "\n") + "\n").write(
+            to: workspace.corpus.appendingPathComponent("proj-demo/t\(file).jsonl"), atomically: true, encoding: .utf8)
+    }
+    return workspace
+}
+
+@Test("ltm mcp 把上限接到查詢、批次預設 200：上限 2 秒加步進時鐘時只併第一批，回應帶落後行（#71 verify R1）")
+func theMCPServerWiresTheBoundAndTheBatchDefault() throws {
+    // IndexBuilder 只在三處讀時鐘：算期限、每一批開頭、結尾。步進 1 秒、上限 2 秒時，第一批開頭放行、
+    // 第二批開頭過期——所以恰好併一批。批次 200 時 300 個 chunk 分兩批，第三個來源沒併到；
+    // 批次 2,000 時一批就併完、沒有落後行。
+    let workspace = try workspaceWithBacklog()
+    defer { workspace.cleanup() }
+    var environment = workspace.environment
+    environment["LTM_MCP_REFRESH_SECONDS"] = "2"
+    environment["LTM_TEST_CLOCK_STEP_SECONDS"] = "1"
+    let response = try runMCPQuery(environment: environment)
+    #expect(!response.isError, "實得：\(response.text)")
+    #expect(response.text.contains(ShortfallMessage.line(unmergedSources: 1)), "批次 200 時第三個來源沒併到，實得：\(response.text)")
+
+    let roomy = try workspaceWithBacklog()
+    defer { roomy.cleanup() }
+    var roomyEnvironment = roomy.environment
+    roomyEnvironment["LTM_MCP_REFRESH_SECONDS"] = "2"
+    roomyEnvironment["LTM_TEST_CLOCK_STEP_SECONDS"] = "1"
+    roomyEnvironment["LTM_BUILD_BATCH_CHUNKS"] = "2000"
+    let oneBatch = try runMCPQuery(environment: roomyEnvironment)
+    #expect(!oneBatch.text.contains("索引落後"), "使用者設的批次要照用：一批併完、沒有落後行，實得：\(oneBatch.text)")
+}
+
+@Test("ltm mcp 帶壞的 LTM_MCP_REFRESH_SECONDS：呼叫照樣成功，回應帶指名變數與值的警告（#71 verify R1）")
+func theMCPServerReportsAnInvalidOverride() throws {
+    let workspace = try CLIWorkspace.make(texts: ["既有的內容"])
+    defer { workspace.cleanup() }
+    _ = try runCLI(["build"], environment: workspace.environment)
+    var environment = workspace.environment
+    environment["LTM_MCP_REFRESH_SECONDS"] = "abc"
+    let response = try runMCPQuery(environment: environment)
+    #expect(!response.isError, "實得：\(response.text)")
+    #expect(response.text.contains("LTM_MCP_REFRESH_SECONDS=abc"), "實得：\(response.text)")
+}

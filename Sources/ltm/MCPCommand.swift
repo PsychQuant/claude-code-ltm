@@ -45,8 +45,9 @@ enum MCPCommand {
 
         查詢前要先有索引：`ltm build`。
 
-        每次查詢前會先併入新內容，上限預設 20 秒（只在批次開頭檢查，所以不是查詢的總時間上限）；
-        環境變數 LTM_MCP_REFRESH_SECONDS 可改（正整數秒）。沒併完時回應會帶一行「索引落後 N 個來源」。
+        每次查詢前會先併入新內容。上限預設 20 秒，環境變數 LTM_MCP_REFRESH_SECONDS 可改（正整數秒）；
+        它只在每一批的開頭檢查，所以併入本身也可能超過它。批次預設 200 個 chunk（LTM_BUILD_BATCH_CHUNKS 可改）。
+        沒併完時回應會帶一行「索引落後 N 個來源」；改寫過的來源有上限時一律不併入，要跑 ltm build。
 
         選項：
           -h, --help    顯示本說明
@@ -64,7 +65,8 @@ enum MCPCommand {
         return try LTMService.make(
             corpusRoot: corpusRoot, derivedRoot: derivedRoot,
             embedder: try ContextualEmbeddingProvider(), eventStore: nil,
-            anchorKey: try AnchorKeyStore.loadOrCreate(), memoryRoot: nil)
+            anchorKey: try AnchorKeyStore.loadOrCreate(), memoryRoot: nil,
+            clock: CommandSupport.serviceClock())
     }
 
     static func run(arguments: [String]) -> Int32 {
@@ -79,8 +81,14 @@ enum MCPCommand {
             return LTMCommandLine.ExitCode.usageError.rawValue
         }
 
-        // 查詢前併入的上限在啟動時讀一次（#71）；設錯的值用預設、在每個回應裡說出來，不讓工具失敗。
-        let budget = RetrievalTool.resolveRefreshBudget(environment: ProcessInfo.processInfo.environment)
+        // 查詢前併入的上限與批次大小在啟動時定一次（#71）。批次比照 recall hook：沒設 `LTM_BUILD_BATCH_CHUNKS`
+        // 時用 200——`LTMService` 每次建立時從環境讀調校參數，所以在這裡設進行程環境。
+        // 設錯的上限用預設、在每個回應裡說出來，不讓工具失敗。
+        let environment = ProcessInfo.processInfo.environment
+        if let batch = RetrievalTool.batchChunksDefault(environment: environment) {
+            setenv("LTM_BUILD_BATCH_CHUNKS", batch, 1)
+        }
+        let budget = RetrievalTool.resolveRefreshBudget(environment: environment)
         let tools = [
             RetrievalTool.make(
                 service: makeService, refreshBudget: TimeInterval(budget.seconds), rejections: budget.rejections)

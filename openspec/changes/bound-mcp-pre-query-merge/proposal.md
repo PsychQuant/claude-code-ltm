@@ -25,4 +25,4 @@ An MCP `ltm_query` call merges the whole corpus backlog before it answers: `Retr
 
 - Affected specs: ltm-cli
 - Affected code:
-  - Modified: Sources/LTMMCP/RetrievalTool.swift, Sources/ltm/MCPCommand.swift, Sources/LTMService/RecallBlock.swift, Sources/LTMService/AuditMessage.swift, Sources/ltm/Commands.swift, Tests/LTMMCPTests/RetrievalToolRenderTests.swift, .claude/rules/ltm-analogy.md, docs/latency-budget.md, plugin/README.md, CHANGELOG.md
+  - Modified: Sources/LTMMCP/RetrievalTool.swift, Sources/ltm/MCPCommand.swift, Sources/LTMService/RecallBlock.swift, Sources/LTMService/AuditMessage.swift, Sources/ltm/Commands.swift, Tests/LTMMCPTests/RetrievalToolRenderTests.swift, Tests/LTMMCPTests/RetrievalToolBoundTests.swift, Tests/LTMServiceTests/CLICommandTests.swift, Sources/LTMService/LTMService.swift, Sources/LTMService/ShortfallMessage.swift, plugin/skills/ltm-setup/SKILL.md, plugin/skills/ltm-recall/SKILL.md, scripts/measure-baseline.sh, .claude/rules/ltm-analogy.md, docs/latency-budget.md, plugin/README.md, CHANGELOG.md

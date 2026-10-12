@@ -23,3 +23,13 @@
 ## 4. Whole suite
 
 - [x] 4.1 Run the full `swift test`. Verify: everything passes except the known issue in `BaselineQueryFileTests` that predates this change; record the counts and delete the `ltm-*` directories the run leaves in `TMPDIR`.
+
+## 5. Verify R1 additions
+
+- [x] 5.1 Implement the user decision "batches of 200, as the hook uses" (`issuecomment-6111570876`): `RetrievalTool.batchChunksDefault(environment:)` returns `200` when `LTM_BUILD_BATCH_CHUNKS` is unset or empty and `nil` otherwise; `MCPCommand` sets it into its environment at start. Verify: `theMCPBatchDefaultFollowsTheHook`.
+- [x] 5.2 Pin `MCPCommand`'s wiring with subprocess tests of `ltm mcp` (`theMCPServerWiresTheBoundAndTheBatchDefault`, `theMCPServerReportsAnInvalidOverride`); `MCPCommand` passes the test clock seam (`CommandSupport.serviceClock`) to the service; `rejections` loses its default value. Verify: passing `nil` as the budget, dropping the batch default, and dropping the rejections each turn a named test red (mutations recorded against `3ef60bb77b08067420c4ed54a6d264aaf7896ebc`).
+- [x] 5.3 Error responses carry the startup rejection too (`RetrievalTool.AnnotatedError`). Verify: `aStartupRejectionAlsoRidesOnErrors`.
+- [x] 5.4 Pin the lag-line trigger on `unmergedSources`, not `budgetExhausted` (`theLagLineFollowsUnmergedSourcesNotTheExhaustedFlag`). Verify: changing the trigger to `budgetExhausted` turns it red (recorded against `2530d17619657486e040b26b60c19eb27de582fd`).
+- [x] 5.5 The sanitizer for rejected values flattens every Unicode line break and caps length by Unicode scalars. Verify: `rejectionUnicodeLineBreaksAreFlattened`.
+- [x] 5.6 Documents: rewritten sources wait for `ltm build` whatever the bound (README, skills, design, analogy file, latency budget, CHANGELOG, spec); the #81 claim narrowed to the hook; the §2 citation keeps that 21.5 s was a kill time; the stage lists are marked as examples and the per-call service construction is named; the CLI `--help` line; the backlog-shrinks claim qualified; no value of the override restores the old behavior. #86 tracks small rewrites inside the bound. Verify: content review; `PluginShellTests` and `BaselineQueryFileTests` pass.
+

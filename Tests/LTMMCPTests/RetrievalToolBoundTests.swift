@@ -85,13 +85,12 @@ private struct Fixture {
     }
 
     /// 建好初始索引，再在語料裡加一批還沒併入的來源。
-    func withBacklog() throws -> Fixture {
+    func addBacklog() throws {
         try write(file: "s0.jsonl", first: 0, texts: ["第一段 記憶", "第二段 記憶", "第三段 記憶"])
         try service()().build()
         for index in 1...4 {
             try write(file: "s\(index).jsonl", first: index * 10, texts: ["新來源 \(index) 記憶", "新來源 \(index) 續 記憶"])
         }
-        return self
     }
 
     func cleanup() { try? FileManager.default.removeItem(at: base) }
@@ -101,26 +100,33 @@ private func queryArguments() -> [String: Any] { ["query": "記憶", "all_projec
 
 @Test("MCP 工具帶上限：大 backlog 在批次邊界停下、回應帶落後行（#71）")
 func theToolBoundsItsPreQueryMerge() throws {
-    let fixture = try Fixture.make().withBacklog()
+    let fixture = try Fixture.make()
     defer { fixture.cleanup() }
+    try fixture.addBacklog()
     // 步進時鐘每讀一次前進 1 秒、上限 1 秒：第一個批次邊界就已經過了期限。
-    let tool = RetrievalTool.make(service: fixture.service(clock: SteppingClock(step: 1)), refreshBudget: 1)
+    let tool = RetrievalTool.make(
+        service: fixture.service(clock: SteppingClock(step: 1)), refreshBudget: 1, rejections: [])
     let text = try tool.run(queryArguments())
     let lagLine = try #require(
         text.split(separator: "\n").first { $0.contains("索引落後") }, "回應要帶落後行，實得：\(text)")
     let count = try #require(
         lagLine.firstMatch(of: /索引落後 (\d+) 個來源/).flatMap { Int($0.1) }, "落後行要帶來源數：\(lagLine)")
     #expect(count > 0)
+    // 「從既有索引作答」：初始的 turn 在，backlog 的 turn 不在（一批都沒併入）。
+    #expect(text.contains("第一段"), "既有索引的命中要在：\(text)")
+    #expect(!text.contains("新來源"), "沒併入的 backlog 不該出現在命中裡：\(text)")
 }
 
 @Test("MCP 工具的上限夠大時：沒有落後行，回應與不設上限的查詢相同（#71）")
 func aRoomyBoundChangesNothing() throws {
-    let roomy = try Fixture.make().withBacklog()
+    let roomy = try Fixture.make()
     defer { roomy.cleanup() }
-    let reference = try Fixture.make().withBacklog()
+    try roomy.addBacklog()
+    let reference = try Fixture.make()
     defer { reference.cleanup() }
+    try reference.addBacklog()
     let bounded = try RetrievalTool.make(
-        service: roomy.service(clock: SteppingClock(step: 1)), refreshBudget: 3_600
+        service: roomy.service(clock: SteppingClock(step: 1)), refreshBudget: 3_600, rejections: []
     ).run(queryArguments())
     let unbounded = RetrievalTool.render(
         try reference.service()().query(text: "記憶", limit: 10, scope: .allProjects))
