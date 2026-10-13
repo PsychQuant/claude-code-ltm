@@ -326,13 +326,14 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 `F='<file 的絕對路徑>'; B=$(mktemp) && cp "$F" "$B" || exit 1; trap "cp '$B' '$F' && rm -f '$B' || echo 'restore or cleanup failed; backup at $B' >&2" EXIT && trap 'exit 130' INT && trap 'exit 143' TERM && trap 'exit 141' PIPE || exit 1`
 → 改 → `cmp -s "$B" "$F"; [ $? -eq 1 ] || { echo 'FAIL: 變異沒生效或 cmp 出錯'; exit 1; }` → 跑（`timeout -s INT -k 10 N /usr/bin/swift test`，
 **N＋10＋備份還原的餘裕**低於 Bash 工具的逾時）——還原與刪備份由 EXIT trap 做；紅要是某一條**具名測試**失敗，不是非零 rc（逾時 124、
-kill-after 137 也是非零）。**一個 shell 只有一個 EXIT trap**（`trap … EXIT` 是取代）：**這一行在同一個 shell 裡至多執行一次**——第二次執行（不論來自迴圈、函式呼叫、`source`
-或 `eval`），檔案會停在第一次的變異、原檔只剩在第一次的備份裡（#63 R38；R48 logic：R47 版只寫迴圈，函式呼叫兩次照字面合格）。要做第二次，每一次包進 subshell `( … )`；要同時保護兩個檔，用巢狀
+kill-after 137 也是非零）。**一個 shell 只有一個 EXIT trap**（`trap … EXIT` 是取代）：**這一行設的 EXIT trap 必須是那個 shell 最後設下的、shell 以 exit 結束**——所以這一行在同一個 shell 裡至多執行一次（第二次不論來自迴圈、
+函式呼叫、`source` 或 `eval`），之後不再設或清除任何 EXIT trap（`trap … EXIT`、`trap - EXIT`），也不 `exec`；違反時檔案會停在變異、原檔只剩在備份裡（#63 R38；
+R48 logic：R47 版只寫迴圈；R49 logic：R48 版只寫「至多一次」，那是必要不是充分）。worktree 區塊的清除 trap 適用同一條（#63 R49 DA）。要做第二次，每一次包進 subshell `( … )`；要同時保護兩個檔，用巢狀
 `( 配方 f1; 改 f1; cmp f1; ( 配方 f2; 改 f2; cmp f2; 測試 ) )`（每個檔在自己的配方之後改、之後 `cmp`——#63 R40）——平鋪用兩次，第一個檔會
 安靜地停在變異。**凡是用 subshell（迴圈與巢狀都算），call 開頭都先放 `trap 'exit 130' INT; trap 'exit 143' TERM`，而且放在跑迴圈的那一個
 shell（巢狀就是最外層）**（子 shell 裡的訊號 trap 保護不到外層：沒有它，bash 收到 INT 迴圈會繼續、TERM 會讓外層先死、子 shell 變成孤兒才還原——#63 R39；
 bash 在 `( … )` 裡會重設已設的 trap，把迴圈再包一層就失效——#63 R40）；逾時預算算整個 call，超過就拆成多個 call。**不要把配方的子 shell、
-群組或迴圈接進 `| head` 這類提早結束的讀者**，只 pipe 測試命令本身；**配方外面最近一層會 fork 的外殼必須是明寫的 `( … )`、`$( … )` 或頂層本身，不放背景，也不直接放在迴圈體裡**（一個 shell 只有一個 EXIT trap——#63 R47）——包進其他會 fork 的
+群組或迴圈接進 `| head` 這類提早結束的讀者**，只 pipe 測試命令本身；**配方外面最近一層會 fork 的外殼必須是明寫的 `( … )`、`$( … )` 或頂層本身，不放背景**（同一個 shell 至多一次見上——#63 R47、R49）——包進其他會 fork 的
 複合命令（管線元素、`&`、`<( … )`）時，bash 3.2 對 `{ … } | cat`、bash 3.2／5.3 對 `if`／`case`／`while … | cat`、harness 的 zsh 對 `while … | cat` 都不跑
 裡面設的 EXIT trap，檔案停在變異（#63 R44 實作者自測群組、R45 logic／DA 量到其餘；R44 版只寫「群組」；R46：`( … ) &` 的還原落在 call 回來之後）；要看判定就導到檔案，再用 `LC_ALL=C command grep -aE 'failed|recorded an issue' <檔>`
 找失敗行，或把測試命令接進同一條（不帶 `-q`／`-l`／`-m`；harness 的 `grep` 是 ugrep 的 `-I` 函式，經管線時輸入含 NUL、當檔案引數時含無效 UTF-8
@@ -343,10 +344,12 @@ bash 5.3 在配方放在頂層或 `{ … }` 群組、stderr 併進管線時反�
 而且它的 EXIT trap **不得帶任何重導**、以 `git -C` 執行、`R`／`W` 用雙引號在設定當下綁定、不跑 `worktree prune`（它作用於整個 repo——#63 R44）——帶重導時 zsh 下清除會死鎖、永遠卡住（#63 R42：R41 版就是這樣；R42 版的群組重導
 在 bash 5.3 還會留樹，#63 R43）；bash 5.3 把 stderr 併進管線、在頂層或 `{ … }` 群組裡跑時仍會留樹，bash 3.2 的 `{ … } | …` 也會。收尾要查卡死的行程：
 **只處理自己記下的**——worktree 區塊與自己的探針第一行都印出自己的 PID 與啟動時間（`LC_ALL=C`；在 `( … )` 裡 `$$` 是外層 shell），收尾時在同一個 call 裡逐筆核對
-那一行仍一致（不符的跳過、繼續下一筆），**先收集整棵子孫連同各自的啟動時間**、送 TERM、等 2 秒、**再收集一次**（TERM 觸發的 EXIT trap 會生出新的子行程）、
-只對啟動時間沒變的 `kill -9`、最後再查一次（先殺父行程，子行程會被 PID 1 收養而漏掉；PID 會被重用；卡住的對 TERM 不反應；命令在 README 規則 1，三種 shell
-驗過——#63 R47、R48）。記下的 shell 被外層 `timeout -k` 殺掉之後，它忽略 TERM 的子行程會成為 PPID 1 的孤兒（GNU timeout 只在直接子行程撐過 TERM 時才送 KILL——
-#63 R48）：那種孤兒沒有記下，只能列出回報；沒記下的一律不殺，只用 `ps -axo pid=,ppid=,lstart=,ucomm=` 列出回報——cwd、父行程、啟動時間都分不出
+那一行仍一致（不符的跳過、繼續下一筆），**先收集整棵子孫連同各自的啟動時間**（取到空的啟動時間就不收），對身分仍相同的送 TERM、等 2 秒，然後**先收葉子、留寬限**：
+最多 10 輪，每輪只 KILL 身分仍相同、沒有子行程的成員再等 1 秒——父行程被延後的 TERM trap 與 EXIT trap 因此跑得完；到上限仍在的，列出不在清單裡的子行程、
+再 KILL，最後再查一次（先殺父行程，子行程會被 PID 1 收養而漏掉；PID 會被重用；卡住的對 TERM 不反應；核對與 `kill` 之間仍有競態，不是完整的身分保證；命令在
+README 規則 1，三種 shell 驗過——#63 R47、R48、R49）。外層 `timeout -k` 只在記下的 shell 死在第一個訊號上時才留下 PPID 1 的孤兒（GNU timeout 只在直接子行程
+撐過第一個訊號時才送 KILL——#63 R48）；帶 `trap 'exit 143' TERM` 的配方與 worktree 區塊等前景子行程時會撐過它，整個 group 被 KILL、不留孤兒（#63 R49 DA）。
+孤兒沒有記下，只能列出回報；沒記下的一律不殺，只用 `ps -axo pid=,ppid=,lstart=,ucomm=` 列出回報——cwd、父行程、啟動時間都分不出
 並行 session 的活 shell（每個 harness shell 都掛在 `claude bg-spare` 底下、cwd 都被重設成 repo 根）；**不印 argv**（`ps … command`、`pgrep -fl` 會印出全機 argv，含跑中的
 查詢；`comm` 只印 argv[0]，但它可被 `exec -a` 改寫——#63 R47 更正 R46 的說法）。#63 R43：R42 reviewer 留下的兩個掛了 23 小時；R43 版的 `pgrep -f` 比字串看不到腳本檔跑的區塊（R44 requirements）、也會比到別的 reviewer 正在跑的區塊（harness 把每個 Bash call 跑成 `zsh -c '<全文>'`——R44 security）；
 R44 把時間方向寫反；R45 以 cwd 判歸屬擋不住同一個 repo 的並行 session（R46）。**verify 的 worktree 裡不用這一行**：照抄 `F='…'` 只寫得出共用樹的路徑，變異會打在共用樹上、
