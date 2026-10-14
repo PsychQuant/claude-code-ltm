@@ -327,7 +327,7 @@ query 算出、原文隨即丟棄，與「LLM 提取只能用於 routing」是�
 → 改 → `cmp -s "$B" "$F"; [ $? -eq 1 ] || { echo 'FAIL: 變異沒生效或 cmp 出錯'; exit 1; }` → 跑（`timeout -s INT -k 10 N /usr/bin/swift test`，
 **N＋10＋備份還原的餘裕**低於 Bash 工具的逾時）——還原與刪備份由 EXIT trap 做；紅要是某一條**具名測試**失敗，不是非零 rc（逾時 124、
 kill-after 137 也是非零）。**一個 shell 只有一個 EXIT trap**（`trap … EXIT` 是取代）：**這一行設的 EXIT trap 必須是那個 shell 最後設下的、shell 以 exit 結束**——所以這一行在同一個 shell 裡至多執行一次（第二次不論來自迴圈、
-函式呼叫、`source` 或 `eval`），之後不再設或清除任何 EXIT trap（`trap … EXIT`、`trap - EXIT`）、不重設 INT／TERM／PIPE trap（`trap - TERM` 之後 TERM 直接殺掉 shell、不跑 EXIT trap），
+函式呼叫、`source` 或 `eval`），之後不再設或清除任何 EXIT trap（`trap … EXIT`、`trap - EXIT`）、不重設 INT／TERM／PIPE trap（`trap - TERM` 之後 TERM 直接殺掉 zsh、不跑 EXIT trap；bash 的 EXIT trap 照跑——#63 R51），
 也不以 `exec` 換掉 shell（只做重導的 `exec 3>…` 不算——#63 R50 logic）；違反時檔案會停在變異、原檔只剩在備份裡（#63 R38；
 R48 logic：R47 版只寫迴圈；R49 logic：R48 版只寫「至多一次」，那是必要不是充分）。worktree 區塊的清除 trap 適用同一條（#63 R49 DA）。要做第二次，每一次包進 subshell `( … )`；要同時保護兩個檔，用巢狀
 `( 配方 f1; 改 f1; cmp f1; ( 配方 f2; 改 f2; cmp f2; 測試 ) )`（每個檔在自己的配方之後改、之後 `cmp`——#63 R40）——平鋪用兩次，第一個檔會
@@ -344,9 +344,9 @@ bash 在 `( … )` 裡會重設已設的 trap，把迴圈再包一層就失效�
 bash 5.3 在配方放在頂層或 `{ … }` 群組、stderr 併進管線時反而因它停在變異（#63 R42）——所以只 pipe 測試命令。worktree 配方的清除 trap 也有 PIPE，
 而且它的 EXIT trap **不得帶任何重導**、以 `git -C` 執行、`R`／`W` 用雙引號在設定當下綁定、不跑 `worktree prune`（它作用於整個 repo——#63 R44）——帶重導時 zsh 下清除會死鎖、永遠卡住（#63 R42：R41 版就是這樣；R42 版的群組重導
 在 bash 5.3 還會留樹，#63 R43）；bash 5.3 把 stderr 併進管線、在頂層或 `{ … }` 群組裡跑時仍會留樹，bash 3.2 的 `{ … } | …` 也會。收尾要查卡死的行程：
-**只列出、不自動殺**（#63 R50 使用者決定）——worktree 區塊與自己的探針第一行都印出自己的 PID 與啟動時間（`LC_ALL=C`；在 `( … )` 裡 `$$` 是外層 shell），
-收尾時在**另一個** call 裡跑 README 規則 1 的列出命令：逐筆核對記下的那一行、列出仍活著的整棵樹（pid、ppid、lstart、ucomm）、PPID 1 的可疑行程與 `worktree list`，
-要不要收、收哪幾個由人看過之後決定，reviewer 只回報。R47–R49 的三版自動 KILL 各被找到新破法（先殺父行程漏子孫；TERM 打斷正在跑的清除；在 EXIT trap 兩個命令
+**只列出、不自動殺**（#63 R50 使用者決定）——worktree 區塊與自己的探針第一行都印出自己的 PID 與啟動時間（`LC_ALL=C TZ=UTC0`；在 `( … )` 裡 `$$` 是外層 shell），
+收尾時在**另一個** call 裡跑 README 規則 1 的列出命令：跳過自己與祖先、逐筆核對記下的那一行、列出仍活著的整棵樹（pid、ppid、lstart、ucomm）、記下那一刻之後才啟動的 PPID 1 行程連同子孫與
+`worktree list`，要不要收、收哪幾個由人看過之後決定，reviewer 只回報；人親手收之前要對每個 PID 重新核對啟動時間、先收子行程（#63 R51）。R46–R49 的四版自動 KILL 各被找到新破法（先殺父行程漏子孫；TERM 打斷正在跑的清除；在 EXIT trap 兩個命令
 之間 KILL 父行程；空的啟動時間被報成仍在；重新收集沒有上界——#63 R47–R50）：自動化分不出卡住與正在收尾。外層 `timeout -k` 可能留下 PPID 1 的孤兒（已知兩種
 形狀與機制見 README；#63 R49 版寫的「帶 TERM trap 的 shell 不留孤兒」被 R50 推翻），記下的 shell 被 KILL 時 EXIT trap 不跑；孤兒沒有記下，只能列出回報；沒記下的一律不殺，只用 `ps -axo pid=,ppid=,lstart=,ucomm=` 列出回報——cwd、父行程、啟動時間都分不出
 並行 session 的活 shell（每個 harness shell 都掛在 `claude bg-spare` 底下、cwd 都被重設成 repo 根）；**不印 argv**（`ps … command`、`pgrep -fl` 會印出全機 argv，含跑中的

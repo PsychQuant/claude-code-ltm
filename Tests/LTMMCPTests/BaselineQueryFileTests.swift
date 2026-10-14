@@ -76,15 +76,16 @@ private func startsWithHash(_ s: String) -> Bool { s.unicodeScalars.first == "#"
 /// - 相容分解（R47 DA）：NFKD 把 U+017F ſ、U+FB06 ﬆ、U+FB02 ﬂ、U+00B5 µ 摺成 s、st、fl、μ——與 judge 的 casefold 一致。
 /// - 連 ccc≠0 一起去掉（R48 requirements／logic／security／regression）：R47 只去 Mn／Me，而 NFKD 重排的是**所有** ccc≠0 的純量，
 ///   其中二十幾個是 Mc（U+302E、U+1B44、U+1D165…）——它們留下、重排仍把 needle 拆開，與 R47-1 同一個形狀。
-/// 合起來是 judge 命中的**超集**，有三個範圍限定（R50 logic：R49 版寫兩個，第三個被當成只屬於空骨架那一支）：(1) needle 的骨架非空——骨架是逐純量的同態（NFKD 對單一純量的分解是固定的，
-/// 重排只動 ccc≠0 的純量，而它們全被去掉），所以逐純量的包含在骨架上保持；骨架為空（needle 只由被去掉的純量組成）時 `byteOccurrences`
-/// 對空針回 0，R47 起 Mn／Me、R48 起連 Mc 的這種 needle 都判「不包含」——漏放（R49 codex，regression 重現）。所以這一支**退回原文 bytes**，
-/// 等同 judge 的 `in`（不做分解，對 NFC／NFD 敏感——只在這個不自然的形狀上）；(2) 只在 `foldLikeJudge` 與 judge 的 casefold 一致的字元上
-/// ——不一致的見 `foldLikeJudge` 的說明（R49 logic）；(3) 空白以純量切的結果與以 Character 切相同時——`foldLikeJudge` 與檔頭的 `squash`
-/// 以 Character 判空白，而一個空白後面接上會延伸叢集的純量（組合字元、ccc 0 的 Mc 如 U+0903、emoji modifier、部分 Lo）整個叢集算空白
-/// （實測 `Character(" \u{302E}").isWhitespace` 為真），那個純量跟著空白被丟掉；Prepend 字母後接兩個空白，兩個空白也不會被摺成一個。
-/// judge 以純量切，兩種都留著。**兩支都受影響**（R50 logic 以獨立副本對真的 Python 實測：骨架非空的 needle 一樣漏，這種純量有 420 個）；
-/// 今天零曝露（退役條目都是 CJK 或 ASCII）。方向 fail-closed 只在這三個範圍內成立。代價（都是多拒）：`cafe` 與 `café` 互相命中；韓文音節被拆成字母
+/// 合起來是 judge 命中的**超集**，確切條件如下（R51 logic：R50 版寫成三個「範圍限定」，第一個其實不是限制、第二個在空骨架那一支用錯了層）。
+/// 骨架是逐純量的同態（NFKD 對單一純量的分解是固定的，重排只動 ccc≠0 的純量，而它們全被去掉），所以骨架非空時逐純量的包含在骨架上保持；骨架為空
+/// （needle 只由被去掉的純量組成）時 `byteOccurrences` 對空針回 0，R47 起 Mn／Me、R48 起連 Mc 的這種 needle 都判「不包含」——漏放（R49 codex，regression
+/// 重現）。所以這一支**退回原文 bytes**，與 judge 的 `in` 相等（不做分解，對 NFC／NFD 敏感——只在這個不自然的形狀上），仍是超集；骨架非空與否只決定
+/// 下面 casefold 那個條件要用哪一層。**casefold**：骨架非空時要 skel(lowercased(c)) = skel(lowercased(casefold(c)))（不成立的 76 個見 `foldLikeJudge`）；
+/// 骨架為空時要原文層 lowercased(c) = casefold(c)，另有 23 個純量不成立（例如 U+01F0、U+0390、U+1E96——R51 logic）。**空白**：兩邊的空白集合不同（Python
+/// `isspace` 29 個、Swift `Character.isWhitespace` 25 個），而且 `foldLikeJudge` 與檔頭的 `squash` 以 Character 判空白——一個空白後面接上會延伸叢集的純量
+/// （組合字元、ccc 0 的 Mc 如 U+0903、emoji modifier、部分 Lo）整個叢集算空白（實測 `Character(" \u{302E}").isWhitespace` 為真），那個純量跟著空白被丟掉；
+/// Prepend 字母後接兩個空白，兩個空白也不會被摺成一個。judge 以純量切，兩種都留著。兩支都受影響（R50 logic 以獨立副本對真的 Python 實測）。這些都是不自然的
+/// 形狀；R50 logic 查過今天的退役條目零曝露。方向 fail-closed 只在這些條件成立時成立。代價（都是多拒）：`cafe` 與 `café` 互相命中；韓文音節被拆成字母
 /// （하 ⊂ 한）；相容摺疊（全形、上標、圈號數字、CJK 相容表意字）；去掉的符號裡有帶語意的（濁點、母音點、聲調符號——R48 logic）。
 /// `headerFormerQueries` 與 `retiredOffenders` 的每一個包含判斷都走這一支。
 private func containsScalars(_ haystack: String, _ needle: String) -> Bool {

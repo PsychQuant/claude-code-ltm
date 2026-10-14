@@ -491,10 +491,14 @@
    **逐純量的同態**：NFKD 對單一純量的分解是固定的，重排只動 ccc≠0 的純量，而它們全被去掉——所以 needle 的骨架非空時，逐純量包含在骨架上保持，是
    judge 逐純量命中的超集，fail-closed。**骨架為空**（needle 只由被去掉的純量組成）時，比對對空針回 0，R47 起只含 Mn／Me、R48 起連只含 Mc 的 needle 都判
    「不包含」——漏放（R49 codex，regression 以獨立副本重現；真實查詢不會是這個形狀）；R49 起這一支退回原文 bytes，等同 judge 的 `in`。
-   「超集」另外有兩個範圍限定：只在 `foldLikeJudge` 與 casefold 一致的字元上成立——不一致的見下面「不得重複」那段（R49 logic）；只在空白以純量切與以
-   Character 切結果相同時成立——`foldLikeJudge` 與檔頭的 squash 以 Character 判空白，一個空白後面接上會延伸叢集的純量（組合字元、ccc 0 的 Mc 如 U+0903、
-   emoji modifier、部分 Lo）整個叢集算空白而被丟掉，Prepend 字母後接兩個空白也不會被摺成一個，judge 以純量切兩種都留著。**兩支都受影響**（R50 logic 以
-   獨立副本對真的 Python 實測，骨架非空的 needle 一樣漏，這種純量有 420 個；R49 版把這一條寫成只屬於空骨架那一支）；今天零曝露。也涵蓋 ltm 的 unicode61 預設 `remove_diacritics=1`（去掉重音的寫法它也命中）；NFKD 另把 ſ、ﬆ、ﬂ、µ 摺成 s、st、fl、μ（R47 DA）。
+   「超集」成立的確切條件（R51 logic：R50 版寫成三個「範圍限定」，第一個其實不是限制、第二個在空骨架那一支用錯了層）：骨架為空時退回原文 bytes，那一支與
+   judge 的 `in` 相等，仍是超集——骨架非空與否只決定下一個條件要用哪一層。**casefold**：骨架非空時要 skel(lowercased(c)) = skel(lowercased(casefold(c)))
+   ——不成立的 76 個碼位見下面「不得重複」那段（R49 logic）；骨架為空時要原文層 lowercased(c) = casefold(c)，另外還有 23 個純量不成立（例如 U+01F0、U+0390、
+   U+1E96；R51 logic）。**空白**：兩邊的空白集合不同（Python `isspace` 29 個、Swift `Character.isWhitespace` 25 個；U+001C–U+001F 由 `isForbiddenScalar` 擋在
+   查詢檔外），而且 `foldLikeJudge` 與檔頭的 squash 以 Character 判空白——一個空白後面接上會延伸叢集的純量（組合字元、ccc 0 的 Mc 如 U+0903、emoji modifier、
+   部分 Lo）整個叢集算空白而被丟掉（實作者實測 `Character(" \u{302E}").isWhitespace` 為真），Prepend 字母後接兩個空白也不會被摺成一個，judge 以純量切兩種都留著
+   ——兩支都受影響（R50 logic 以獨立副本對真的 Python 實測；R50 版寫的「420 個」沒有寫查法、換一個同樣合理的判準數得出 422 或 518–520，拿掉——R51
+   requirements）。這些都是不自然的形狀；R50 logic 查過今天的退役條目零曝露。也涵蓋 ltm 的 unicode61 預設 `remove_diacritics=1`（去掉重音的寫法它也命中）；NFKD 另把 ſ、ﬆ、ﬂ、µ 摺成 s、st、fl、μ（R47 DA）。
    代價是比 judge 與 ltm 都寬的命中（fail-closed）：`cafe` 與 `café` 互相命中；NFKD 把韓文音節拆成字母，沒有收尾子音的音節會命中有收尾的（하 ⊂ 한）；
    相容摺疊（全形 → ASCII、² → 2、① → 1、CJK 相容表意字 → 統一表意字）；去掉的符號裡有帶語意的（濁點、希伯來文與阿拉伯文的母音點、天城文與泰文的母音
    與聲調符號、越南文聲調）——unicode61 的 `remove_diacritics` 只處理拉丁字母，所以「涵蓋 unicode61」只說明了其中一部分（R48 logic）。
@@ -602,9 +606,11 @@
    任一沒指名，兩個照做的人就得到不同答案**。這把鍵找到的是**談這個檔的文字**（diff、測試、報告）也找到副本，兩者都要逐檔判。
    **有限根目錄證不出「零副本」，有限時間也證不出**——掃描是對一棵會動的樹的一個時間點陳述（R29 security：
    第一輪掃描回零份，十分鐘後定向重掃才抓到一棵掃描期間才建立的 reviewer worktree），報告要寫掃描時間，並在最後一個
-   讀者收工後補掃一次；只證得出「這幾棵樹在那個時刻零份」——報告要寫後者。內容鍵比的是原始 bytes，**看不到壓縮或封存的副本**（git 的 zlib 物件與 pack、
-   gzip／zip／zst／tar、`.mcpb`）；git 物件那一側另有查法：對查詢檔每一個歷史 blob 的雜湊，在每個 repo 跑 `git cat-file --batch-check`（設 `GIT_NO_LAZY_FETCH=1`）
-   ——R50 security 對根底下 5,622 個可查的 repo 查過 0 份；封存檔沒查。**verify 的 worktree 指示本身會製造副本**
+   讀者收工後補掃一次；只證得出「這幾棵樹在那個時刻零份」——報告要寫後者。內容鍵比的是原始 bytes，**看不到壓縮過的副本**（git 的 zlib 物件與 pack、
+   gzip／zip／zst、`.mcpb`；`tar` 不壓縮，內容鍵看得到——R51 logic）。git 物件那一側的雜湊查法——對 `baseline-queries.txt` 每一個歷史 blob 的雜湊，在每個 repo 跑
+   `git cat-file --batch-check`（設 `GIT_NO_LAZY_FETCH=1`）——**只查得到與某個歷史版本逐 byte 相同的 blob**；變異或部分的副本在 git 物件裡一樣看不到，要看到
+   就得把物件解壓再餵進內容鍵（R51 logic）。R50 security 用它對根底下 5,622 個可查的 repo 查過，`baseline-queries.txt` 的 blob 0 份；`rrf-tie-queries.txt` 的 blob
+   在已接受的 marketplace clone 裡（R51 security／regression：R50 版寫「查詢檔」，涵蓋不到兩個檔）。壓縮檔沒查。**verify 的 worktree 指示本身會製造副本**
    （`git worktree add` 依建構把兩個查詢檔 checkout 到 repo 之外，R3／R16／R29 三次同形）。要建 worktree 就**三步**，
    **且不得在主 checkout 執行**（R30 regression：`sparse-checkout set` 是對「既有的 worktree」操作，照 R29 那句在主
    checkout 跑會把兩個查詢檔從**使用者的工作樹**移除，無警告）：
@@ -614,7 +620,7 @@
    # 第二個 call 進去時樹已經被刪（fail-safe，但不寫出來會被當成配方壞了——R32 regression 實測）。fail-safe 只對變異那一步成立：
    # 第二個 call 裡 `W` 沒設，`git -C "$W"` 就是 `git -C ""`、等於在 cwd 執行，而 harness 每個 call 把 cwd 重設回共用樹——還原那一步會
    # 安靜地作用在共用樹上，所以下面的還原寫成 `git -C "${W:?}"`（`W` 沒設就失敗；R45 DA）。
-   LC_ALL=C ps -o pid=,lstart= -p $$   # 記下這個 shell 的身分（只有 PID 與啟動時間）：收尾只認自己記下的、只列出不殺（R46 security／logic、R50；見下方「收尾要查行程」）
+   LC_ALL=C TZ=UTC0 ps -o pid=,lstart= -p $$   # 記下這個 shell 的身分（只有 PID 與啟動時間）：收尾只認自己記下的、只列出不殺（R46 security／logic、R50；見下方「收尾要查行程」）
    R=$(git rev-parse --show-toplevel) || exit 1   # repo 根：trap 以 `git -C "$R"` 執行，shell 之後 `cd` 到哪裡都清得掉（R43 security）
    W=$(mktemp -d) || exit 1
    trap "git -C '$R' worktree remove --force '$W'; rm -rf '$W'" EXIT   # **第一件事**：後面任何一步失敗都還清得掉；兩個命令都要——
@@ -698,46 +704,66 @@
    這一段**只描述機制、不預測**某個區塊會不會留下孤兒——R49 版寫「帶 `trap 'exit 143' TERM` 的 shell 撐過第一個訊號、整個 group 被 KILL、不留孤兒」，
    R50 四個 lens 各自找到反例。已知會留下 PPID 1 孤兒的形狀有兩種：(1) 直接子行程（或它在等的前景子行程）死在第一個訊號上、底下忽略那個訊號的子孫活下來
    ——shell 在 `-k` 到期前就以 exit 結束，KILL 不送（R48 requirements；R50 requirements 在帶 TERM trap 的 shell 上以 GNU 與 macOS timeout × 三種 shell 重現 6/6）；
-   (2) 內層 `timeout`（規則 1 的配方裡那一個）會 setpgid（見上面 `-s INT` 那段），`swift test` 子樹在它自己的 group 裡，外層 KILL 記下的 shell 時碰不到它
-   ——那一種由內層 timeout 在它的 N＋10 內收掉（R50 regression 重現、DA 量到收掉的時間）。兩種之外沒有量過，所以這不是完整清單。記下的 shell 被 KILL 時它的
+   (2) 規則 1 的配方裡還有一層內層 `timeout`，它會 setpgid（見上面 `-s INT` 那段）：外層 KILL 記下的 shell 時，內層 timeout 與它底下的行程都可能成為 PPID 1
+   （R50 regression 重現）。內層 timeout 到 N 時對自己的 group 送 INT、`swift test` 還活著才在 N＋10 送 KILL；`swiftpm-testing-helper` 在自己的 process group、
+   兩個訊號都到不了它，而 swift 死在 INT 上時內層 timeout 立刻結束、不送 KILL，形狀 (1) 在內層也成立（R51 logic 以 GNU 與 macOS timeout 重現）。R50 版在這裡寫
+   「由內層 timeout 在它的 N＋10 內收掉」，那是一句預測，而且與 `-s INT` 那段矛盾——R51 logic。兩種之外沒有量過，所以這不是完整清單。記下的 shell 被 KILL 時它的
    EXIT trap 不跑（見 (c)）。（歷史：R43 版寫「`timeout -k` 碰不到卡死的孫行程」、R47 版改成「GNU timeout 對整個 process group 送訊號，同一個 group 的孫行程
    收得到」，R48 判兩版「各對一半」；R47 regression 記下的那次實測——`timeout -k 1 1 zsh -c '( trap "" TERM INT HUP; /bin/sleep 20 ); :'` 回 124、孫行程與父 zsh
    都不在——R49 regression 以同一個形狀重跑得到相反結果：孫行程活著、PPID 1。）
-   **只列出、不自動殺**（R50 使用者決定，issuecomment-6163243068）：
-   - **記下**：worktree 區塊第一行印出 `LC_ALL=C ps -o pid=,lstart= -p $$`；自己的探針也印同一行（R46 版只寫「先印 `$$`」，沒有啟動時間可核對——R47 requirements；
-     `LC_ALL=C` 是 R48 加的：locale 不同時同一個行程的 lstart 印法不同，照字面貼回會判不相符——R48 security）。
+   **只列出、不自動殺**（R50 使用者決定，issuecomment-6163243068；R51 補三處，issuecomment-6164944949）：
+   - **記下**：worktree 區塊第一行印出 `LC_ALL=C TZ=UTC0 ps -o pid=,lstart= -p $$`；自己的探針也印同一行（R46 版只寫「先印 `$$`」，沒有啟動時間可核對——R47 requirements；
+     `LC_ALL=C` 是 R48 加的：locale 不同時同一個行程的 lstart 印法不同，照字面貼回會判不相符——R48 security；`TZ=UTC0` 是 R51 加的：lstart 以本地時區印出，
+     記下與收尾的時區不同時活著的樹會被判成「已結束」、整棵不列——R51 DA 在三種 shell 重現）。
      `$$` 在 `( … )`／`$( … )` 裡是**外層** shell（三種 shell 都是，R47 requirements／logic）；`$( … )` 裡那一行的輸出會被吞進變數，要自己印出來。
-   - **列出**：在**另一個** call 裡跑下面這段（在記下的 shell 自己裡面跑，它會把自己判成「正在跑這段的 shell」而跳過——R50 security：R49 版在那種情形下先
-     TERM 自己、沒有任何輸出就結束），記下的每一行都放進 `recs`。它逐筆核對記下的那一行仍與現況相同（兩邊都壓掉行首、行尾與重複的空白——harness 會剪掉
-     輸出最後一行的行尾空白，R48 logic／security；不符的印一行、繼續下一筆——R48 logic），對仍活著的列出整棵樹（pid、ppid、lstart、ucomm），再列出 PPID 1、
-     名字像 shell／timeout／git／swift 的行程與 `worktree list`。**它不送任何訊號**：要不要收、收哪幾個，由人看過列表之後決定，reviewer 只回報。
-     **為什麼不自動殺**：自動化分不出「卡住」與「正在收尾」，R47 起四版各被找到新的破法——先殺父行程，子行程立刻被 PID 1 收養、`pgrep -P` 回空，卡住的常是
-     一對、父行程在等子行程（R46 logic；R47 requirements／logic／security 各自實測）；TERM 觸發的 EXIT trap 會生出新的子行程，只收一次時它在根被 KILL 後成了
-     孤兒（R48 DA）；KILL 前不核對啟動時間會打到被重新配發的 PID（R48 logic／security）；TERM 前不核對身分、空的啟動時間被報成「仍在」（R49 codex、requirements、
-     logic、security）；「TERM 之後重新收集到沒有新成員」沒有上界（R49 logic／security，bash 3.2 實測 60 秒 32 輪）；先 KILL 根讓等著不理 TERM 的前景子行程的
-     shell 跑不到 EXIT trap（R49 DA）；R49 的「先收葉子」在 EXIT trap 的兩個命令之間 KILL 父行程（R50 requirements／logic，12 個 shell 裡 8 個），TERM 打斷已經在跑
-     的 `git worktree remove`，留下登記與目錄（R50 DA）。R48 的實作者紀錄（三種 shell「收掉 3 個，含 trap 生出的那個」）與 R49 的（七種合成情形全收）都只涵蓋
-     當時列出的情形。PID 會被重用：macOS 的 PID 上限 99,999，R46 security 量到每秒約配發 570 個（10 秒內 19919→25630），約 175 秒繞一圈（99,999 ÷ 570；R47 三個
-     lens 各自量到每秒 350–867 個；R46 版寫「約 5 分鐘」，算錯——R47 regression／requirements／logic）——只列出時那只影響「核對記下的那一行」的判讀，不會打錯人。
-     實作者在 zsh 5.9.1、bash 3.2.57、bash 5.3.15 各跑過（R50 修正時）：一筆已結束的 PID（印「已結束」、繼續）、一棵活的兩層樹（列出 2 個、都沒被殺）、
-     記下的是自己（跳過）；rc 0。名字的篩選只為縮短輸出——macOS 上幾乎每個常駐行程的 PPID 都是 1——不是判準，要完整就拿掉 `awk` 的名稱條件。
+   - **列出**：在**另一個** call 裡跑下面這段，記下的每一行都放進 `recs`。它做四件事，**不送任何訊號**：
+     1. 記下的 PID 若是跑這段的 shell **或它的任何祖先**，印一行並跳過（R50 security：R49 版在那種情形下先 TERM 自己；R51 DA：R50 版只比 `$$`，命令跑在子行程裡
+        ——`zsh -c`、`timeout … zsh -c`——時記下的 shell 被列成「還活著」，而 macOS 的 `pgrep` 預設排除祖先，跑命令的那一串被安靜地拿掉）。
+     2. 逐筆核對記下的那一行仍與現況相同（兩邊都壓掉行首、行尾與重複的空白——harness 會剪掉輸出最後一行的行尾空白，R48 logic／security；不符的印一行、繼續下一筆
+        ——R47 版的 `exit 0` 讓第一個已結束的 PID 把後面的都跳過，R48 logic），對仍活著的列出整棵樹（pid、ppid、lstart、ucomm）。
+     3. 列出 **PPID 1、在記下的最早那一刻之後才啟動的行程，連同它們的子孫**（R51 logic／security：R50 版用名字篩，形狀 (1) 留下的 `sleep` 這類非 shell 孤兒篩不到，
+        而孤兒的子孫 PPID 不是 1，拿掉名字條件也看不到）。啟動時間以 `ps` 的 `etime` 換算；同一段時間裡系統自己起的常駐行程（例如 `mdworker_shared`）也會出現，
+        判讀交給人。
+     4. `worktree list`。
+     要不要收、收哪幾個，由人看過列表之後決定，reviewer 只回報。**人親手收的時候**：送訊號前對每個 PID 重新跑 `LC_ALL=C TZ=UTC0 ps -o lstart= -p <pid>`、與列表
+     比對一致才送——列表與 kill 之間 PID 可能被重新配發（下面的配發率），走樹時也沒有逐一核對身分（R51 logic）；先收子行程、再收父行程——先殺父行程，子行程立刻
+     被 PID 1 收養、`pgrep -P` 回空（R46 logic；R47 requirements／logic／security 各自實測）；卡在鎖上的對 TERM、INT、HUP 都不反應，只有 KILL 收得掉（R44 DA 實測；
+     R43 版寫「有就 `kill`」）——R42 那一對就是父行程在等一個等鎖的子行程；KILL 之後再查一次，收不掉的是卡在核心裡的行程（R44 加的這一步 R47 版漏了——R48 regression）。
+     PID 會被重用：macOS 的 PID 上限 99,999，R46 security 量到每秒約配發 570 個（10 秒內 19919→25630），約 175 秒繞一圈（99,999 ÷ 570；R47 三個 lens 各自量到
+     每秒 350–867 個；R46 版寫「約 5 分鐘」，算錯——R47 regression／requirements／logic）。（R51 regression：R50 改寫時把這幾條實測事實都拿掉了，又寫「只列出時
+     不會打錯人」——命令本身不會，但 kill 交給人之後，風險移到了人那一步。）
+     **為什麼不自動殺**：自動化分不出「卡住」與「正在收尾」，R46–R49 四版各被找到新的破法——R46 版（「核對一致才 `kill -9` 它與子孫」）先殺父行程漏子孫（R47）；
+     R47 版只收一次子孫，TERM 觸發的 EXIT trap 生出的子行程在根被 KILL 後成了孤兒（R48 DA 三種 shell 重現），KILL 前也不核對啟動時間、會打到被重新配發的 PID
+     （R48 logic／security）；R48 版 TERM 前不核對身分、空的啟動時間被報成「仍在」（R49 codex、requirements、logic、security），「TERM 之後重新收集到沒有新成員」
+     沒有上界（R49 logic／security：bash 3.2 實測 60 秒 32 輪、106 個成員仍在長；zsh 45 秒無輸出），先 KILL 根讓等著不理 TERM 的前景子行程的 shell 跑不到 EXIT trap
+     （R49 DA 三種 shell 實測）；R49 版的「先收葉子」在 EXIT trap 的兩個命令之間 KILL 父行程（R50 requirements／logic，12 個 shell 裡 8 個）、TERM 打斷已經在跑的
+     `git worktree remove`（R50 DA），在記下的 shell 自己裡面跑會先 TERM 自己（R50 security）。R48 的實作者紀錄（三種 shell「收掉 3 個，含 trap 生出的那個」）與
+     R49 的（九種合成情形、七筆紀錄；其中啟動時間不符的活行程沒被碰、trap 的子行程沒被殺——R51 regression：R50 版寫成「七種合成情形全收」）都只涵蓋當時列出的情形。
+     實作者在 zsh 5.9.1、bash 3.2.57、bash 5.3.15 各跑過（R51 修正時，每輪約 5 秒）：一筆已結束的 PID（印「已結束」）、一棵活的兩層樹在收尾時 `TZ=America/New_York`
+     （列出 2 個、都沒被殺）、PPID 1 的孤兒 `sh` 連同它的 `sleep`（兩個都列出）、命令跑在記下的 shell 的子行程裡（跳過）；rc 0。
 
      ```bash
-     recs=('<PID>|<那一行 LC_ALL=C ps -o pid=,lstart= 印出的整行>')   # 記下幾行就放幾個元素
+     recs=('<PID>|<那一行 LC_ALL=C TZ=UTC0 ps -o pid=,lstart= 印出的整行>')   # 記下幾行就放幾個元素
      norm() { tr -s ' ' | sed 's/^ //; s/ $//'; }
+     st() { LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" | norm; }
+     epoch() { TZ=UTC0 date -j -f '%a %b %d %T %Y' "$1" +%s 2>/dev/null; }
+     walk() { lvl=("$1"); while [ ${#lvl[@]} -gt 0 ]; do nxt=(); for x in "${lvl[@]}"; do LC_ALL=C TZ=UTC0 ps -o pid=,ppid=,lstart=,ucomm= -p "$x"; for c in $(pgrep -P "$x"); do nxt+=("$c"); done; done; lvl=("${nxt[@]}"); done; }
+     anc=" "; x=$$; while [ -n "$x" ] && [ "$x" -gt 1 ]; do anc="$anc$x "; x=$(ps -o ppid= -p "$x" | tr -d ' '); done
+     since=
      for r in "${recs[@]}"; do
        p=${r%%|*}; want=$(printf '%s' "${r#*|}" | norm); want=${want#"$p "}
-       [ "$p" = "$$" ] && { echo "PID $p 是正在跑這段的 shell 自己——換一個 call 再跑"; continue; }
-       [ -n "$want" ] && [ "$(LC_ALL=C ps -o lstart= -p "$p" | norm)" = "$want" ] || { echo "PID $p 已結束（或已不是記下的那個行程）"; continue; }
-       echo "PID $p 還活著。它的整棵樹（只列、不殺）："
-       lvl=("$p")
-       while [ ${#lvl[@]} -gt 0 ]; do
-         nxt=(); for x in "${lvl[@]}"; do LC_ALL=C ps -o pid=,ppid=,lstart=,ucomm= -p "$x"; for c in $(pgrep -P "$x"); do nxt+=("$c"); done; done
-         lvl=("${nxt[@]}")
-       done
+       t=$(epoch "$want") && { [ -z "$since" ] || [ "$t" -lt "$since" ]; } && since=$t
+       case "$anc" in *" $p "*) echo "PID $p 是跑這段的 shell 或它的祖先——換一個 call 再跑"; continue ;; esac
+       [ -n "$want" ] && [ "$(st "$p")" = "$want" ] || { echo "PID $p 已結束（或已不是記下的那個行程）"; continue; }
+       echo "PID $p 還活著。它的整棵樹（只列、不殺）："; walk "$p"
      done
-     echo "PPID 1、名字像 shell／timeout／git／swift 的行程（篩選只為縮短輸出，不是判準；只列、不殺）："
-     LC_ALL=C ps -axo pid=,ppid=,lstart=,ucomm= | awk '$2 == 1 && $NF ~ /^(zsh|bash|sh|timeout|gtimeout|git|swift.*)$/'
+     if [ -n "$since" ]; then
+       echo "PPID 1、在記下的最早那一刻之後才啟動的行程，連同子孫（只列、不殺）："
+       lim=$(( $(date +%s) - since + 1 ))
+       for o in $(LC_ALL=C ps -axo pid=,ppid=,etime= | awk -v lim="$lim" '$2 == 1 { n = split($3, a, /[-:]/); s = (n == 4) ? a[1]*86400 + a[2]*3600 + a[3]*60 + a[4] : (n == 3) ? a[1]*3600 + a[2]*60 + a[3] : a[1]*60 + a[2]; if (s <= lim) print $1 }'); do walk "$o"; done
+     else
+       echo "沒有一筆紀錄的啟動時間讀得懂，PPID 1 那一份不列"
+     fi
      git -C '<repo 根>' worktree list
      ```
    - **沒記下的一律不殺**。cwd、父行程、啟動時間都分不出別人的活 shell：每個 harness shell 的父行程都是 `claude bg-spare`——前景 call 也是——而 harness
@@ -898,7 +924,7 @@
   讀進一個變數再餵給多個 process substitution，每條查詢各起一次 python 與一次 `ltm`，所以那三個「沒有上限」的後果是
   記憶體與子行程數無界（R26，codex；此檔只由作者撰寫、不接受外部輸入，所以記錄而不修）。「不得重複」與「退役比對」（兩個方向都查：含退役查詢、或是退役查詢的一段——後者舊 turn 也逐字含它、**可能**被評判成 `self`（judge 只在前 k 名的 snippet
   含它時判 self，這是預測）；R44 codex：R43 版只查前者。擋錯的：短或常見的查詢恰好是某條退役查詢的一段就被拒，那未必會 self，方向 fail-closed——R45 logic；
-  R45 起退役比對以純量為單位——R45 DA；R46 起比對前兩邊先分解——R46 logic；R47 起 NFKD 並去掉組合字元、R48 起連所有 ccc≠0 的純量一起去掉，在上面那段寫的三個範圍內是 judge 命中的超集——R47、R48、R50 requirements／logic（R49 版
+  R45 起退役比對以純量為單位——R45 DA；R46 起比對前兩邊先分解——R46 logic；R47 起 NFKD 並去掉組合字元、R48 起連所有 ccc≠0 的純量一起去掉，在上面那段寫的條件下是 judge 命中的超集——R47、R48、R50 requirements／logic（R49 版
   這裡仍寫無條件的超集）；R46 版寫「NFD、比 judge 寬」，NFD 的重排讓
   少數形狀比 judge 窄，R47 版只去 Mn／Me，ccc≠0 的 Mc 仍被重排——R48）
   共用一個正規化（空白摺疊成單一空白＋小寫，R24——R23 版只比逐位元相等），它**不與 judge 的 `norm()` 同形**，兩個
