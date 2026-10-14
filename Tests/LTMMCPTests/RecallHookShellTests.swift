@@ -144,7 +144,7 @@ func systemReminderSpansDoNotTriggerAndArgumentsAreWired() throws {
     #expect(args[dd + 1] == "上次 flock" && dd + 2 >= args.count - 1)
 }
 
-@Test("降級可見：逾時／非零結束／binary 缺席／不支援 --format，各印一行通知、exit 0")
+@Test("降級對模型可見：逾時／非零結束／binary 缺席／不支援 --format，各印一行通知、exit 0")
 func degradationIsOneVisibleLineAndNeverBlocks() throws {
     for (kind, reason) in [("sleep", "逾時"), ("exit2", "結束碼 2"), ("nofmt", "版本過舊")] {
         let run = try runHook("ltm-recall-gate.sh", prompt: "上次 flock", session: "sess-\(kind)-\(UUID().uuidString)", stub: kind, guard: kind == "sleep" ? "2" : "8")
@@ -261,7 +261,7 @@ func pythonAbsentIsSilentMissNotAPerTurnNotice() throws {
     #expect(miss.code == 0 && miss.out.isEmpty, Comment(rawValue: "out=[\(miss.out)]"))
 }
 
-@Test("查詢 exit 0 但輸出不是區塊：通知，不靜默 cat 空檔（N7）")
+@Test("查詢 exit 0 但輸出不是區塊：對模型通知，不靜默 cat 空檔（N7）")
 func emptyQueryOutputStillDegradesVisibly() throws {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ltm-hook-empty-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

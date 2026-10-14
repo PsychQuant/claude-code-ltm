@@ -4,9 +4,9 @@
 # 薄：閘門、絕對 deadline、把區塊原樣印出。重的東西（有界併入、session 排除、標記）
 # 都在 ltm query 裡，CLI 與 MCP 共用。規格：openspec specs/proactive-recall-hook。
 #
-# 三條硬規則：永不 exit 2（那會擋掉使用者的 prompt）；閘門放行後**對模型絕不靜默**
+# 三條硬規則：永不 exit 2（那會擋掉使用者的 prompt）；閘門放行後**對模型不靜默**（版本過舊在同一個 session 的第二輪起例外）
 # （失敗一律印一行通知——Claude Code 會取消逾時的 hook、丟掉它的輸出，transcript 的通知
-# 寫 hook 名、逾時值與輸出被丟棄，不帶我們的失敗原因；所以要在那之前自己說話。這行通知走 stdout，只有模型看得到）；閘門未命中、off 模式、系統產生的 prompt 才是空輸出。
+# 寫 hook 名、逾時值與輸出被丟棄，不帶我們的失敗原因；所以要在那之前自己說話。這行通知走 stdout，進模型的 context、對話畫面不顯示——代價是使用者看不到 Claude Code 自己的逾時提示，#81）；閘門未命中、off 模式、系統產生的 prompt 才是空輸出。
 #
 # 閘門形狀（verify R3 codex）：python **直接**解碼 hook JSON（~22 ms），閘門比對**解碼後的**
 # prompt。先前為省 python 而先對原始 JSON bytes 做 raw grep——被 codex 推翻為不可靠的過近似
@@ -171,7 +171,7 @@ run_bounded "$TMP/out" "$TMP/err" "$LTM" "$@"; RC=$?
 [ "$RC" -eq 0 ] || notice "ltm query 結束碼 ${RC}"
 # 驗證輸出真的是**完整**區塊（verify R2 N7／R3 codex #4）：第一行必須**正好**是開標記、
 # 最後一行必須**正好**是閉標記。先前只查「第一行含開標記子字串」，會放行未閉合或首行帶垃圾的
-# 輸出——而缺閉標記正好破壞這個區塊要給模型的資料邊界。exit 0 但輸出不合格 → 對模型可見的降級，不靜默（使用者看不到那一行，#81）。
+# 輸出——而缺閉標記正好破壞這個區塊要給模型的資料邊界。exit 0 但輸出不合格 → 對模型可見的降級，不靜默（對話畫面不顯示那一行，#81）。
 if [ ! -s "$TMP/out" ] \
     || [ "$(head -1 "$TMP/out")" != "$RECALL_OPEN" ] \
     || [ "$(tail -1 "$TMP/out")" != "$RECALL_CLOSE" ]; then

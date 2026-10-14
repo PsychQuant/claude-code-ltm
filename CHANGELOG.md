@@ -52,6 +52,11 @@
 
 ### Changed
 
+- **recall hook 的通知寫明對誰可見（#81）**：0.5.0 寫的「可見降級」與「不會靜默」指的是模型——那一行進模型的
+  context，對話畫面不顯示，使用者平常看不到；它仍會留在 debug log、hook 事件的 stream、session jsonl 與 stats 檔的
+  `notice` 標籤。spec、plugin README、ltm-recall skill、hook 註解與兩個測試名稱改成這樣寫，並寫明搶在 28 秒逾時之前
+  收尾的取捨（使用者因此看不到 Claude Code 自己的逾時提示）。行為不變。
+
 - **MCP `ltm_query` 的查詢前併入有上限，沒併完會說（#71）**：先前 MCP 工具呼叫 `service.query` 時沒有傳上限，
   每次查詢都要併完整段落後的語料才回答；#71 記錄的兩次呼叫都在 1,800 秒沒有回應或 progress 時被 client 中止。
   現在預設上限 20 秒（起始值，不是量測值；從 `docs/latency-budget.md` 的 MCP 30 秒預算扣掉檢索的時間猜的），

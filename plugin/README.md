@@ -74,17 +74,20 @@ ltm build
   說法提過去的輸入不會觸發；漏的代價是沒有自動回想，跟沒裝 hook 一樣，可手動呼叫
   `ltm_query`。要擴充直接加一行；要換整份設 `LTM_RECALL_CUES=<路徑>`。
 - **模式** `LTM_RECALL_MODE=cued`（預設）｜`always`（每輪都查）｜`off`。
-- **對模型不會靜默，對你是安靜的**：閘門放行後若逾時（整支腳本 20 s，`LTM_RECALL_GUARD_SECONDS` 可調）、`ltm` 不在、
+- **對模型不會靜默；對話畫面上你看不到**：閘門放行後若逾時（整支腳本 20 s，`LTM_RECALL_GUARD_SECONDS` 可調）、`ltm` 不在、
   版本過舊（每 session 提醒一次）、`cwd` 進不去、查詢失敗，注入的是一行
-  `ltm：本輪回想未完成（原因）；可手動呼叫 ltm_query`，prompt 永遠不會被擋。這一行走 hook 的 stdout，
-  **只交給模型**、你的 transcript 看不到（官方 `hooks.md` 的 `UserPromptSubmit` 一節）；要知道回想失敗，
-  得靠模型轉述（#81）。`LTM_BIN` 若要自訂
+  `ltm：本輪回想未完成（原因）；可手動呼叫 ltm_query`，prompt 永遠不會被擋。這一行走 hook 的 stdout，進的是模型的
+  context，**對話畫面不顯示**（官方 `hooks.md` 的 `UserPromptSubmit` 一節）；平常要知道回想失敗，得靠模型轉述。
+  它仍會留在對話之外：debug log、hook 事件的 stream（`--include-hook-events`、SDK 的 `hook_response`）、session jsonl
+  的 `attachment` 紀錄，以及下面 stats 檔的 `notice` 標籤（只有標籤、沒有文字）（#81）。腳本搶在 Claude Code 的 28 秒
+  逾時之前自己收尾，換來的是模型拿得到原因，代價是你看不到 Claude Code 自己的逾時提示；腳本若仍拖過 28 秒，
+  就反過來——你看到提示、模型什麼都沒有（#85）。`LTM_BIN` 若要自訂
   必須是絕對路徑。設 `LTM_RECALL_STATS_FILE=<路徑>` 會逐輪記一個結果標籤（`off|synthetic|miss|hit|notice`，
   不記文字），拿來量實際放行率。
 - **成本**（本機量測，`docs/measurements/2026-09-04-proactive-recall.md`）：未命中線索的
   輪次約 70 ms；命中的輪次約 1 s。
 - **第一次要按一次鑰匙圈的「永遠允許」**：hook 用 `~/bin/ltm` 讀 anchor 密鑰；沒允許的話
-  每輪都會跳密碼視窗，script 自己的 20 s deadline 先到、印一行逾時通知——那一行只交給模型，你看到的只有密碼視窗。
+  每輪都會跳密碼視窗，script 自己的 20 s deadline 先到、印一行逾時通知——那一行對話畫面不顯示，你看到的只有密碼視窗。
 - 注入的區塊帶 `<!-- ltm:recall v1 -->` 標記給模型看邊界；它不會變成下一次查詢的命中，因為
   Claude Code 把 hook 注入存成 `attachment` 紀錄、索引本來就不把它當 turn（驗證過，不是新機制）。
 
