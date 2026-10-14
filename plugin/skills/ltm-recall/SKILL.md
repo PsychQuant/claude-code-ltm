@@ -64,6 +64,7 @@ description: Use when the user refers to something from a past Claude Code conve
   或不排除自己時，自己呼叫 `ltm_query`（`all_projects: true`，先想清楚範圍）。
 - 看到 `ltm：本輪回想未完成（…）` 一行 → hook 放行了但沒查成（逾時／binary／版本／工作目錄）；
   要回想就自己呼叫 `ltm_query`。版本過舊的那一行每個 session 只出現一次，之後同樣原因會靜默。
+  **使用者看不到這一行**（hook 的 stdout 只進你的 context）——回想沒查成，使用者只能從你這裡知道。
 - 線索表會漏。使用者明顯在指過去而沒有區塊出現，照常呼叫 `ltm_query`。
 - 回應（hook 的區塊或 `ltm_query`）帶「索引落後 N 個來源」一行 → 答案來自還沒併完的索引：最近的內容可能
   不在裡面（「沒有命中」也可能是因為這個）；**改寫過的對話檔，索引裡可能還是改寫之前的版本**——使用者已經
