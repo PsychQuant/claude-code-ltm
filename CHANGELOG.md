@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+（無）
+
+## [0.6.0] - 2026-10-14
+
 ### Added
 
 - **量測紀錄：no-op build 閘的第一次觸碰（#60）**：`docs/measurements/2026-09-07-gate-first-touch.md`
