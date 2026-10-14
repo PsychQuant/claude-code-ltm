@@ -76,13 +76,15 @@ private func startsWithHash(_ s: String) -> Bool { s.unicodeScalars.first == "#"
 /// - 相容分解（R47 DA）：NFKD 把 U+017F ſ、U+FB06 ﬆ、U+FB02 ﬂ、U+00B5 µ 摺成 s、st、fl、μ——與 judge 的 casefold 一致。
 /// - 連 ccc≠0 一起去掉（R48 requirements／logic／security／regression）：R47 只去 Mn／Me，而 NFKD 重排的是**所有** ccc≠0 的純量，
 ///   其中二十幾個是 Mc（U+302E、U+1B44、U+1D165…）——它們留下、重排仍把 needle 拆開，與 R47-1 同一個形狀。
-/// 合起來是 judge 命中的**超集**，有兩個範圍限定：(1) needle 的骨架非空——骨架是逐純量的同態（NFKD 對單一純量的分解是固定的，
+/// 合起來是 judge 命中的**超集**，有三個範圍限定（R50 logic：R49 版寫兩個，第三個被當成只屬於空骨架那一支）：(1) needle 的骨架非空——骨架是逐純量的同態（NFKD 對單一純量的分解是固定的，
 /// 重排只動 ccc≠0 的純量，而它們全被去掉），所以逐純量的包含在骨架上保持；骨架為空（needle 只由被去掉的純量組成）時 `byteOccurrences`
 /// 對空針回 0，R47 起 Mn／Me、R48 起連 Mc 的這種 needle 都判「不包含」——漏放（R49 codex，regression 重現）。所以這一支**退回原文 bytes**，
-/// 等同 judge 的 `in`（不做分解，對 NFC／NFD 敏感——只在這個不自然的形狀上）。這一支仍看不到**接在空白後面**的記號：`foldLikeJudge` 與
-/// 檔頭的 `squash` 以 Character 判空白，而「空白＋組合字元」整個叢集是空白（實測 `Character(" \u{302E}").isWhitespace` 為真），記號
-/// 跟著空白一起被丟掉；judge 以純量切，會留下它；(2) 只在 `foldLikeJudge` 與 judge 的 casefold 一致的字元上
-/// ——不一致的見 `foldLikeJudge` 的說明（R49 logic）。方向 fail-closed。代價（都是多拒）：`cafe` 與 `café` 互相命中；韓文音節被拆成字母
+/// 等同 judge 的 `in`（不做分解，對 NFC／NFD 敏感——只在這個不自然的形狀上）；(2) 只在 `foldLikeJudge` 與 judge 的 casefold 一致的字元上
+/// ——不一致的見 `foldLikeJudge` 的說明（R49 logic）；(3) 空白以純量切的結果與以 Character 切相同時——`foldLikeJudge` 與檔頭的 `squash`
+/// 以 Character 判空白，而一個空白後面接上會延伸叢集的純量（組合字元、ccc 0 的 Mc 如 U+0903、emoji modifier、部分 Lo）整個叢集算空白
+/// （實測 `Character(" \u{302E}").isWhitespace` 為真），那個純量跟著空白被丟掉；Prepend 字母後接兩個空白，兩個空白也不會被摺成一個。
+/// judge 以純量切，兩種都留著。**兩支都受影響**（R50 logic 以獨立副本對真的 Python 實測：骨架非空的 needle 一樣漏，這種純量有 420 個）；
+/// 今天零曝露（退役條目都是 CJK 或 ASCII）。方向 fail-closed 只在這三個範圍內成立。代價（都是多拒）：`cafe` 與 `café` 互相命中；韓文音節被拆成字母
 /// （하 ⊂ 한）；相容摺疊（全形、上標、圈號數字、CJK 相容表意字）；去掉的符號裡有帶語意的（濁點、母音點、聲調符號——R48 logic）。
 /// `headerFormerQueries` 與 `retiredOffenders` 的每一個包含判斷都走這一支。
 private func containsScalars(_ haystack: String, _ needle: String) -> Bool {
@@ -156,7 +158,8 @@ private struct NotUTF8: Error {}
 ///    `ß`/`SS`、`ς`/`σ`、`ﬁle`(U+FB01)/`file` —— judge 的 `norm()` 判相等，這裡判不等。
 /// 2. **比對本身比 judge 寬**：`Set` 走 Swift String 的**正則等價**，而這個函式從不做 NFC/NFD 正規化。（包含比對不在這裡：
 ///    `retiredOffenders` 與 `headerFormerQueries` 走 `containsScalars`——R45 起以 bytes 比、R46 起先分解、R47 起 NFKD 並去掉組合
-///    字元、R48 起連所有 ccc≠0 的純量一起去掉，所以同樣對正則等價不敏感、是 judge 命中的超集，fail-closed（R46 版寫「NFD、比 judge
+///    字元、R48 起連所有 ccc≠0 的純量一起去掉，所以骨架非空時對正則等價不敏感、在 `containsScalars` 寫的三個範圍內是 judge 命中的超集，fail-closed（骨架為空時退回原文 bytes、
+///    對 NFC／NFD 敏感——R50 requirements／logic：R49 版這裡仍寫無條件的超集；R46 版寫「NFD、比 judge
 ///    寬」，NFD 的重排讓少數形狀比 judge 窄——R47；R47 版只去 Mn／Me，ccc≠0 的 Mc 仍被重排——R48）。R45 版這裡寫「不做正則等價、與 judge 同、這一條現在只剩 `duplicateCount`」，
 ///    漏了 `formerQueries` 這類 `Set` 的去重同樣走正則等價、只留一種形式，只比 bytes 時那是 fail-open——R46 logic。）
 ///    查法：`e`+U+0301 與 U+00E9 —— Swift `==` 為真、judge `norm()` 為假。**這一軸與 fold 函式無關**：改寫成手工
@@ -168,7 +171,7 @@ private struct NotUTF8: Error {}
 /// 所以一條把某段 `st`／`fl` 寫成連字的新查詢，judge 判它與那條退役查詢相等、`retiredOffenders` 放行；ﬁ／ﬂ 連字常從 PDF
 /// 貼上而來。**R47 起包含比對以 NFKD 比，這四個字元在退役與檔頭兩條約束上都關了**（R47 DA）；仍開的是兩邊摺疊之後骨架不同的字元：
 /// **判準是 skel(lowercased(c)) ≠ skel(lowercased(casefold(c)))**，skel 是 `matchSkeleton`——Swift 這一側先 `lowercased()` 才取骨架，
-/// judge 那一側等於先 casefold（R49 logic：R48 版寫「casefold 與『NFKD 再去組合字元』結果不同」，照字面讀幾乎涵蓋所有大寫字母；把查法讀成
+/// judge 那一側等於先 casefold（R48 logic：R47 版寫「ß／ς」，讀起來是封閉清單；R49 logic：R48 版寫「casefold 與『NFKD 再去組合字元』結果不同」，照字面讀幾乎涵蓋所有大寫字母；把查法讀成
 /// skel(casefold(c)) 對 skel(lowercased(c)) 又會多算 86 個 Cherokee，那些沒開——兩邊在大小寫對上都是雙射）。照這個判準數到 76 個碼位：
 /// ß、ẞ、ς、U+0345、63 個帶 iota 下標的希臘字母、9 個 Cyrillic Extended-C（U+1C80–1C88；只數）——那一半與 `duplicateCount` 同一個已揭露缺口，但 `foldGap` 的三條輸入只驅動 `duplicateCount`，
 /// 退役與檔頭那一側沒有 known-issue 臂（R47 requirements）。修法同一個（完整的 Unicode default case folding）。臂：`foldLikeJudge` 摺成**什麼**由 `queryFileChecksAreDrivenByTheirOwnFixture`
@@ -287,8 +290,9 @@ private let protectedTestWitness: [@Sendable () throws -> Void] = [baselineQuery
 ///      「Known issue was not recorded」而紅，只有 intermittent 或已紅時才包上去才安靜）；本體裡的 `Test.cancel()`。R35 版把 `#if DEBUG`
 ///      也列成安靜——**錯**：SwiftPM 的 debug 組態定義 DEBUG，同步測試照樣編譯執行，它自己的 `#if` 禁令看到那兩行而紅（R36
 ///      requirements／regression，拋棄式包實測；只在 `-c release` 下才安靜）；預設的 `withKnownIssue` 同樣說寬了。
-///      R35 依「停止加鍵」不補；替代方案是讓 `conditionalCompilationLines` 也在真檔測試裡跑，只擋得住 `#if` 那一種。R35–R47 版在這裡另寫
-///      「`skippingControlFlow` 套不上它的本體：巢狀 helper `gitResolves` 有 `guard`／`return`」——R48 把那個 helper 拿掉之後這個理由不成立：
+///      R35 依「停止加鍵」不補；替代方案是讓 `conditionalCompilationLines` 也在真檔測試裡跑，只擋得住 `#if` 那一種。R35–R48 版在這裡另寫
+///      `skippingControlFlow` 套不上同步測試的本體，理由是巢狀 helper `gitResolves` 有 `guard`／`return`（轉述）——R48 把那個 helper 拿掉之後這個理由不成立
+///      （R50 regression：R49 版寫「R35–R47」、並把轉述加了引號）：
 ///      今天對同步測試本體跑 `skippingControlFlow` 回空集合（R49 requirements 實測），套上去不再有成本；**不套是使用者「不加鍵」的決定**，不是套不上。
 ///      **真檔測試的接線沒守全**（R36 DA，helper 層；使用者決定寫進清單、不加鍵）：`wiringGaps` 只看兩個子字串有沒有出現在 smoke
 ///      本體的程式碼裡，不看資料有沒有真的傳進 `checkQueryFile`。兩種自然的重構讓所有 pin 照綠——(A) 把 `historicalQueryFolds` 的
@@ -300,7 +304,7 @@ private let protectedTestWitness: [@Sendable () throws -> Void] = [baselineQuery
 ///      R46 的「那種重構從此編不過」），而因為呼叫點都明寫，補預設那一步本身無害（R47-13）。會安靜出錯的是**預設值變成 `[]`**：先補回
 ///      一個預設並刪掉明寫的引數（補回 `= retired` 時行為不變、無害），再把預設對齊同一行 `formerQueries: Set<String> = []`——兩步都
 ///      不刻意（R48 requirements 更正 R47 的「都是刻意那一側」，那與 R46-2 判它是「自然的重構」的前提矛盾）。把明寫的引數直接改成 `[]`
-///      也全綠——那一步是刻意那一側（R46-2、R47 DA）。（R37 regression：R36 版把這一段插在
+///      也全綠——那一步是刻意那一側（R46-2；R50 regression：R49 版把它也歸給 R47 DA，R47 DA 沒做這個判定）。（R37 regression：R36 版把這一段插在
 ///      上面「擋住的」清單裡，一個沒人守的項目落在「擋住的」底下，也把 R27 那句註擠到它後面、讀起來像在註解接線缺口。）
 ///      **構造過而擋不住的**（R34；每一點標實測層級）：
 ///      - 本體裡 `try Test.cancel()`（DA，拋棄式包 swift test：`was cancelled`、run passed、RC 0）。**注意**：它與 `guard … return`
@@ -869,9 +873,9 @@ func queryFileChecksAreDrivenByTheirOwnFixture() throws {
     #expect(try report("ZQXJ-A\nWQ-CAF\u{00C9}\u{0323}\n", retiredQueries: ["wq-caf\u{00E9}"]).retiredOffenders == [2])   // 規範重排：後面接 ccc 較小的組合字元（R47 logic）
     #expect(try report("ZQXJ-A\nZQXJ-\u{FB02}OW\n", retiredQueries: ["zqxj-flow"]).retiredOffenders == [2])   // 連字 ﬂ（R47 DA）
     #expect(try report("ZQXJ-A\nWQ-A\u{302E}\u{1B44}B\n", retiredQueries: ["wq-a\u{302E}"]).retiredOffenders == [2])   // 規範重排動到 ccc≠0 的 Mc（R48）
-    #expect(try report("ZQXJ-A\nWQ-AB\u{20DD}CE\n", retiredQueries: ["wq-abce"]).retiredOffenders == [2])
+    #expect(try report("ZQXJ-A\nWQ-AB\u{20DD}CE\n", retiredQueries: ["wq-abce"]).retiredOffenders == [2])   // Me 落在 needle 範圍之內（R48 DA：去 Me 的那一半先前沒有臂）
     #expect(try report("ZQXJ-A\nWQ-AB\u{FE0F}CE\n", retiredQueries: ["wq-abce"]).retiredOffenders == [2])   // ccc=0 的 Mn 落在 needle 之內（R49 logic：ccc 條件加上之後，去 Mn 那一半原有的臂都靠 ccc 就過）
-    #expect(try report("ZQXJ-A\nWQ\u{302E}X\n", retiredQueries: ["\u{302E}"]).retiredOffenders == [2])   // 骨架為空的 needle 退回原文 bytes（R49 codex）   // Me 落在 needle 範圍之內（R48 DA：去 Me 的那一半先前沒有臂）
+    #expect(try report("ZQXJ-A\nWQ\u{302E}X\n", retiredQueries: ["\u{302E}"]).retiredOffenders == [2])   // 骨架為空的 needle 退回原文 bytes（R49 codex；R50：R49 插入這兩行時把上一行 Me 臂的註解接到了這一行）
     #expect(try report("ZQXJ-A\n").missingHeaderPhrases.count == requiredHeaderPhrases.count)
     #expect(try report(header.replacingOccurrences(of: "不得在", with: "\u{F967}得在") + "ZQXJ-A\n").missingHeaderPhrases == ["不得在 Claude Code session 內顯示"])   // 相容表意字：正則等價、bytes 不同（R49 DA）
     #expect(throws: NotUTF8.self) { try report(bytes: Data([0xFF, 0xFE, 0x41])) }   // 非 UTF-8：拒答不猜
@@ -1256,7 +1260,7 @@ func verdictAlphabetIsStatedIdenticallyEverywhere() throws {
     // 「pathspec 不合法」這一類。**無臂**：
     // 套件裡沒有任何世界讓 `check-attr` 非 0 離開。
     #expect(attrRun.status == 0, Comment(rawValue: "`env git check-attr` 以 \(attrRun.status) 離開——是環境（pathspec 不合法…），不是兩個查詢檔的 diff 屬性錯了"))
-    #expect(attrLines == ["scripts/baseline-queries.txt: diff: unset", "scripts/rrf-tie-queries.txt: diff: unset"], Comment(rawValue: "git check-attr（有效屬性：.gitattributes＋info/attributes＋core.attributesFile）：\(attrLines)"))
+    #expect(attrLines == ["scripts/baseline-queries.txt: diff: unset", "scripts/rrf-tie-queries.txt: diff: unset"], Comment(rawValue: "git check-attr（有效屬性：git 合併所有屬性來源之後的結果，不只 .gitattributes）：\(attrLines)"))
     }
     #expect(Set(forList) == proseNames, Comment(rawValue: "白名單：for 清單 \(forList.sorted()) ≠ 檔頭散文 \(proseNames.sorted())"))
     #expect(!sourceNames.isEmpty && sourceNames.isSubset(of: Set(forList)), Comment(rawValue: "Sources 讀的環境變數沒全部轉發：缺 \(sourceNames.subtracting(forList).sorted())"))
